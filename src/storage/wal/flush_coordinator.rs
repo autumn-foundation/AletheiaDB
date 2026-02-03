@@ -196,6 +196,8 @@ pub struct FlushStats {
 pub struct FlushCoordinator {
     /// Configuration.
     config: FlushCoordinatorConfig,
+    /// Whether to fsync after each flush (can be changed at runtime).
+    sync_on_flush: AtomicBool,
     /// Current segment ID.
     current_segment_id: AtomicU64,
     /// Current segment size.
@@ -229,8 +231,10 @@ impl FlushCoordinator {
             )))
         })?;
 
+        let sync_on_flush = AtomicBool::new(config.sync_on_flush);
         let coordinator = Self {
             config,
+            sync_on_flush,
             current_segment_id: AtomicU64::new(0),
             current_segment_size: AtomicU64::new(0),
             writer: Mutex::new(None),
@@ -406,7 +410,7 @@ impl FlushCoordinator {
             }
 
             // Sync before closing
-            if self.config.sync_on_flush {
+            if self.sync_on_flush.load(Ordering::Relaxed) {
                 let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref sync_file) = *sync_guard {
                     sync_file.sync_data().map_err(|e| {
@@ -650,7 +654,7 @@ impl FlushCoordinator {
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
 
         // Sync to disk if requested
-        if sync && self.config.sync_on_flush {
+        if sync && self.sync_on_flush.load(Ordering::Relaxed) {
             let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref sync_file) = *sync_guard {
                 sync_file.sync_data().map_err(|e| {
@@ -719,6 +723,16 @@ impl FlushCoordinator {
     /// Get the WAL directory.
     pub fn wal_dir(&self) -> &Path {
         &self.config.wal_dir
+    }
+
+    /// Update the sync-on-flush setting at runtime.
+    pub fn set_sync_on_flush(&self, sync: bool) {
+        self.sync_on_flush.store(sync, Ordering::Relaxed);
+    }
+
+    /// Get the current sync-on-flush setting.
+    pub fn sync_on_flush(&self) -> bool {
+        self.sync_on_flush.load(Ordering::Relaxed)
     }
 }
 

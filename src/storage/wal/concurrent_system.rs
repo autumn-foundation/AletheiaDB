@@ -342,6 +342,10 @@ impl ConcurrentWalSystem {
             return Ok(());
         }
 
+        // Update coordinator's sync setting based on new mode
+        let sync_enabled = !matches!(mode, DurabilityMode::Async { .. });
+        self.coordinator.set_sync_on_flush(sync_enabled);
+
         // 1. Graceful transition: Wait for pending GroupCommit epochs to flush.
         // This ensures that transactions that were told they are in GroupCommit
         // actually get the durability they expected before we switch modes.
@@ -404,13 +408,8 @@ impl ConcurrentWalSystem {
             let group_commit_clone = state.group_commit.clone();
             let error_counter_clone = Arc::clone(&self.consecutive_flush_errors);
             let flush_interval = mode.flush_interval().unwrap_or(Duration::from_millis(10));
-            // Match the sync logic from new() - only GroupCommit and Synchronous sync on every flush.
-            // (Synchronous mode doesn't normally use a background thread, but if it were to
-            // be used here, we would want it to fsync on every flush for ACID durability).
-            let sync_on_flush = matches!(
-                mode,
-                DurabilityMode::Synchronous | DurabilityMode::GroupCommit { .. }
-            );
+            // fsync on every flush for all modes except basic Async mode.
+            let sync_on_flush = !matches!(mode, DurabilityMode::Async { .. });
 
             Some(thread::spawn(move || {
                 Self::flush_loop(
@@ -448,10 +447,7 @@ impl ConcurrentWalSystem {
             segment_size: config.segment_size,
             segments_to_retain: config.segments_to_retain,
             flush_interval_ms: config.flush_interval_ms,
-            sync_on_flush: matches!(
-                config.durability_mode,
-                DurabilityMode::Synchronous | DurabilityMode::GroupCommit { .. }
-            ),
+            sync_on_flush: !matches!(config.durability_mode, DurabilityMode::Async { .. }),
             write_buffer_size: config.write_buffer_size,
         };
 
@@ -499,8 +495,7 @@ impl ConcurrentWalSystem {
             let group_commit_clone = group_commit.clone();
             let error_counter_clone = Arc::clone(&consecutive_flush_errors);
             let flush_interval = Duration::from_millis(config.flush_interval_ms);
-            let sync_on_flush =
-                matches!(config.durability_mode, DurabilityMode::GroupCommit { .. });
+            let sync_on_flush = !matches!(config.durability_mode, DurabilityMode::Async { .. });
 
             Some(thread::spawn(move || {
                 Self::flush_loop(

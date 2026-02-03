@@ -54,10 +54,10 @@ fn test_snapshot_creation_with_transaction_interval() -> Result<()> {
     assert_eq!(index.snapshot_count(), 0);
 
     // Trigger snapshot (transaction interval = 2)
-    index.on_transaction()?;
+    index.on_transaction_at(2000.into())?;
     assert_eq!(index.snapshot_count(), 0); // Not yet
 
-    index.on_transaction()?;
+    index.on_transaction_at(2000.into())?;
     assert_eq!(index.snapshot_count(), 1); // Now created
 
     Ok(())
@@ -76,9 +76,9 @@ fn test_point_in_time_vector_query() -> Result<()> {
     index.add(node1, &[1.0, 0.0, 0.0, 0.0], timestamp1)?;
     index.add(node2, &[0.9, 0.1, 0.0, 0.0], timestamp1)?;
 
-    // Create snapshot
-    index.on_transaction()?;
-    index.on_transaction()?;
+    // Create snapshot with deterministic timestamp
+    index.on_transaction_at(timestamp1)?;
+    index.on_transaction_at(timestamp1)?;
     assert_eq!(index.snapshot_count(), 1);
 
     // Add more vectors after snapshot
@@ -90,6 +90,7 @@ fn test_point_in_time_vector_query() -> Result<()> {
     let results = index.find_similar_as_of(&query, 10, timestamp1)?;
 
     // Should only find nodes from the snapshot
+    assert!(!results.is_empty()); // Ensure we actually found something
     assert!(results.len() <= 2);
     assert!(results.iter().all(|(id, _)| *id == node1 || *id == node2));
 
@@ -108,8 +109,9 @@ fn test_time_range_vector_query() -> Result<()> {
         let timestamp = ((i as i64 * 1000) + base_time.wallclock()).into();
         index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
 
-        index.on_transaction()?;
-        index.on_transaction()?;
+        // Use deterministic timestamps to avoid CI flakiness
+        index.on_transaction_at(timestamp)?;
+        index.on_transaction_at(timestamp)?;
     }
 
     assert!(index.snapshot_count() >= 2);
@@ -146,12 +148,9 @@ fn test_snapshot_pruning_with_keep_n() -> Result<()> {
     // Create 5 snapshots
     for i in 0..5 {
         let node_id = NodeId::new(i).unwrap();
-        index.add(
-            node_id,
-            &[i as f32, 0.0, 0.0, 0.0],
-            ((i * 1000) as i64).into(),
-        )?;
-        index.on_transaction()?;
+        let timestamp = ((i * 1000) as i64).into();
+        index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
+        index.on_transaction_at(timestamp)?;
     }
 
     assert_eq!(index.snapshot_count(), 5);
@@ -177,14 +176,12 @@ fn test_snapshot_pruning_with_keep_duration() -> Result<()> {
     let index = TemporalVectorIndex::new(config)?;
 
     // Create snapshots (all recent)
+    let now = time::now();
     for i in 0..3 {
         let node_id = NodeId::new(i).unwrap();
-        index.add(
-            node_id,
-            &[i as f32, 0.0, 0.0, 0.0],
-            ((i * 1000) as i64).into(),
-        )?;
-        index.on_transaction()?;
+        let timestamp = (now.wallclock() + (i * 1000) as i64).into();
+        index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
+        index.on_transaction_at(timestamp)?;
     }
 
     let count_before = index.snapshot_count();
@@ -202,9 +199,10 @@ fn test_snapshot_info_retrieval() -> Result<()> {
     let index = create_test_index()?;
 
     // Create a snapshot
-    index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t = 1000.into();
+    index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], t)?;
+    index.on_transaction_at(t)?;
+    index.on_transaction_at(t)?;
 
     let info = index.get_snapshot_info()?;
     assert_eq!(info.len(), 1);
@@ -323,8 +321,9 @@ fn test_concurrent_snapshot_creation() -> Result<()> {
     }
 
     // Trigger snapshots
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let now = time::now();
+    index.on_transaction_at(now)?;
+    index.on_transaction_at(now)?;
 
     // Should have created at least one snapshot
     assert!(index.snapshot_count() > 0);
@@ -368,8 +367,8 @@ fn test_semantic_evolution_end_to_end() -> Result<()> {
     for (i, vector) in vectors.iter().enumerate() {
         let timestamp = ((i as i64 * 1000) + base_time.wallclock()).into();
         index.add(node_id, vector, timestamp)?;
-        index.on_transaction()?;
-        index.on_transaction()?; // Trigger snapshot with interval=2
+        index.on_transaction_at(timestamp)?;
+        index.on_transaction_at(timestamp)?; // Trigger snapshot with interval=2
     }
 
     // Get semantic evolution
@@ -401,32 +400,23 @@ fn test_track_semantic_drift_over_time() -> Result<()> {
 
     // Create vectors that progressively drift from [1,0,0,0]
     index.add(node_id, &[1.0, 0.0, 0.0, 0.0], base_time)?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    index.on_transaction_at(base_time)?;
+    index.on_transaction_at(base_time)?;
 
-    index.add(
-        node_id,
-        &[0.8, 0.2, 0.0, 0.0],
-        (1000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t1 = (1000 + base_time.wallclock()).into();
+    index.add(node_id, &[0.8, 0.2, 0.0, 0.0], t1)?;
+    index.on_transaction_at(t1)?;
+    index.on_transaction_at(t1)?;
 
-    index.add(
-        node_id,
-        &[0.5, 0.5, 0.0, 0.0],
-        (2000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t2 = (2000 + base_time.wallclock()).into();
+    index.add(node_id, &[0.5, 0.5, 0.0, 0.0], t2)?;
+    index.on_transaction_at(t2)?;
+    index.on_transaction_at(t2)?;
 
-    index.add(
-        node_id,
-        &[0.0, 1.0, 0.0, 0.0],
-        (3000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t3 = (3000 + base_time.wallclock()).into();
+    index.add(node_id, &[0.0, 1.0, 0.0, 0.0], t3)?;
+    index.on_transaction_at(t3)?;
+    index.on_transaction_at(t3)?;
 
     // Track drift from original vector
     let reference = vec![1.0, 0.0, 0.0, 0.0];
@@ -463,8 +453,8 @@ fn test_calculate_consecutive_drift_end_to_end() -> Result<()> {
     for (i, vector) in vectors.iter().enumerate() {
         let timestamp = ((i as i64 * 1000) + base_time.wallclock()).into();
         index.add(node_id, vector, timestamp)?;
-        index.on_transaction()?;
-        index.on_transaction()?;
+        index.on_transaction_at(timestamp)?;
+        index.on_transaction_at(timestamp)?;
     }
 
     // Calculate consecutive drift
@@ -497,26 +487,20 @@ fn test_semantic_evolution_with_gaps() -> Result<()> {
 
     // Add node1 at times 1000 and 3000
     index.add(node1, &[1.0, 0.0, 0.0, 0.0], base_time)?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    index.on_transaction_at(base_time)?;
+    index.on_transaction_at(base_time)?;
 
     // Add node2 at time 2000 (different node)
-    index.add(
-        node2,
-        &[0.0, 1.0, 0.0, 0.0],
-        (1000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t1 = (1000 + base_time.wallclock()).into();
+    index.add(node2, &[0.0, 1.0, 0.0, 0.0], t1)?;
+    index.on_transaction_at(t1)?;
+    index.on_transaction_at(t1)?;
 
     // Add node1 again at time 3000
-    index.add(
-        node1,
-        &[0.0, 0.0, 1.0, 0.0],
-        (2000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t2 = (2000 + base_time.wallclock()).into();
+    index.add(node1, &[0.0, 0.0, 1.0, 0.0], t2)?;
+    index.on_transaction_at(t2)?;
+    index.on_transaction_at(t2)?;
 
     // Get evolution for node1
     // Use wide time range to capture all snapshots
@@ -543,8 +527,8 @@ fn test_empty_evolution_for_nonexistent_node() -> Result<()> {
 
     // Add some other node
     index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time)?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    index.on_transaction_at(base_time)?;
+    index.on_transaction_at(base_time)?;
 
     // Query for non-existent node
     let nonexistent = NodeId::new(999).unwrap();
@@ -572,16 +556,18 @@ fn test_drift_calculation_with_normalized_vectors() -> Result<()> {
     let v3 = normalize(&[0.0, 1.0, 0.0, 0.0]); // 90 degrees
 
     index.add(node_id, &v1, base_time)?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    index.on_transaction_at(base_time)?;
+    index.on_transaction_at(base_time)?;
 
-    index.add(node_id, &v2, (1000 + base_time.wallclock()).into())?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t1 = (1000 + base_time.wallclock()).into();
+    index.add(node_id, &v2, t1)?;
+    index.on_transaction_at(t1)?;
+    index.on_transaction_at(t1)?;
 
-    index.add(node_id, &v3, (2000 + base_time.wallclock()).into())?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t2 = (2000 + base_time.wallclock()).into();
+    index.add(node_id, &v3, t2)?;
+    index.on_transaction_at(t2)?;
+    index.on_transaction_at(t2)?;
 
     // Calculate consecutive drift
     // Use wide time range to capture all snapshots
