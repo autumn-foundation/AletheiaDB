@@ -1,13 +1,14 @@
 //! HTTP request handlers.
 
-use crate::core::NodeId;
+use crate::GallifreyDB;
+use crate::core::{Node, NodeId, PropertyMap};
 use crate::http::converters::{interned_to_string, json_to_property_map, property_map_to_json};
 use crate::http::state::AppState;
 use crate::query::QueryBuilder;
 use crate::query::ir::{Predicate, PredicateValue};
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 /// Health check response structure.
@@ -100,6 +101,166 @@ fn json_to_predicate_value(v: &serde_json::Value) -> Option<PredicateValue> {
     }
 }
 
+/// Helper to convert a Node to JSON.
+fn node_to_json(node: &Node) -> Result<Value, HttpResponse> {
+    let props_json = property_map_to_json(&node.properties)
+        .map_err(|e| HttpResponse::InternalServerError().json(ApiResponse::error(e)))?;
+
+    Ok(json!({
+        "id": node.id.as_u64(),
+        "label": interned_to_string(node.label),
+        "properties": props_json
+    }))
+}
+
+fn handle_create_node(
+    db: &GallifreyDB,
+    label: String,
+    properties: Option<HashMap<String, Value>>,
+) -> HttpResponse {
+    let props = match properties {
+        Some(p) => match json_to_property_map(&p) {
+            Ok(map) => map,
+            Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e)),
+        },
+        None => PropertyMap::new(),
+    };
+
+    let node_id = match db.create_node(&label, props) {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
+    };
+
+    let node = match db.get_node(node_id) {
+        Ok(n) => n,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()));
+        }
+    };
+
+    match node_to_json(&node) {
+        Ok(json) => HttpResponse::Ok().json(ApiResponse::success(json)),
+        Err(resp) => resp,
+    }
+}
+
+fn handle_get_node(db: &GallifreyDB, node_id: u64) -> HttpResponse {
+    let nid = match NodeId::new(node_id) {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
+    };
+
+    let node = match db.get_node(nid) {
+        Ok(n) => n,
+        // Issue 1: Return 404 for node not found
+        Err(_) => {
+            return HttpResponse::NotFound()
+                .json(ApiResponse::error(format!("Node {} not found", node_id)));
+        }
+    };
+
+    match node_to_json(&node) {
+        Ok(json) => HttpResponse::Ok().json(ApiResponse::success(json)),
+        Err(resp) => resp,
+    }
+}
+
+fn handle_find_node(
+    db: &GallifreyDB,
+    label: Option<String>,
+    properties: Option<HashMap<String, Value>>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> HttpResponse {
+    let mut builder = if let Some(lbl) = label {
+        QueryBuilder::new().scan_label(&lbl)
+    } else {
+        QueryBuilder::new().scan(None)
+    };
+
+    if let Some(props) = properties {
+        for (key, value) in props {
+            if let Some(pred_value) = json_to_predicate_value(&value) {
+                builder = builder.filter(Predicate::eq(key, pred_value));
+            }
+        }
+    }
+
+    // Issue 4: Pagination
+    if let Some(skip) = offset {
+        builder = builder.skip(skip);
+    }
+
+    let limit_val = limit.unwrap_or(100);
+    let results = match builder.limit(limit_val).execute(db) {
+        Ok(res) => res,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()));
+        }
+    };
+
+    let mut nodes = Vec::new();
+    for row in results.flatten() {
+        if let crate::query::executor::EntityResult::Node(node) = row.entity {
+            match node_to_json(&node) {
+                Ok(json) => nodes.push(json),
+                Err(resp) => return resp,
+            }
+        }
+    }
+    HttpResponse::Ok().json(ApiResponse::success(json!(nodes)))
+}
+
+fn handle_find_neighbors(db: &GallifreyDB, node_id: u64) -> HttpResponse {
+    let nid = match NodeId::new(node_id) {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
+    };
+
+    // Issue 2: Deduplication
+    // Use a HashSet to track seen node IDs
+    let mut seen_ids = HashSet::new();
+    let mut neighbors = Vec::new();
+
+    // Helper closure to process edges
+    let mut process_edge = |node_result: crate::utils::Result<Node>| -> Result<(), HttpResponse> {
+        if let Ok(node) = node_result {
+            let id = node.id.as_u64();
+            if seen_ids.insert(id) {
+                match node_to_json(&node) {
+                    Ok(json) => {
+                        neighbors.push(json);
+                    }
+                    Err(resp) => return Err(resp),
+                }
+            }
+        }
+        Ok(())
+    };
+
+    // Outgoing
+    for edge_id in db.get_outgoing_edges(nid) {
+        let node_res = db
+            .get_edge_target(edge_id)
+            .and_then(|target| db.get_node(target));
+        if let Err(resp) = process_edge(node_res) {
+            return resp;
+        }
+    }
+
+    // Incoming
+    for edge_id in db.get_incoming_edges(nid) {
+        let node_res = db
+            .get_edge_source(edge_id)
+            .and_then(|source| db.get_node(source));
+        if let Err(resp) = process_edge(node_res) {
+            return resp;
+        }
+    }
+
+    HttpResponse::Ok().json(ApiResponse::success(json!(neighbors)))
+}
+
 /// Query endpoint handler.
 pub async fn handle_query(
     state: web::Data<AppState>,
@@ -108,181 +269,15 @@ pub async fn handle_query(
     let db = state.db();
 
     match req.into_inner() {
-        QueryRequest::CreateNode { label, properties } => {
-            let props = match properties {
-                Some(p) => match json_to_property_map(&p) {
-                    Ok(map) => map,
-                    Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e)),
-                },
-                None => crate::core::PropertyMap::new(),
-            };
-
-            match db.create_node(&label, props) {
-                Ok(node_id) => {
-                    match db.get_node(node_id) {
-                        Ok(node) => {
-                            let props_json = match property_map_to_json(&node.properties) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    return HttpResponse::InternalServerError()
-                                        .json(ApiResponse::error(e));
-                                }
-                            };
-                            let node_json = json!({
-                                "id": node.id.as_u64(),
-                                "label": interned_to_string(node.label),
-                                "properties": props_json
-                            });
-                            // Issue 5: Return single object, not array
-                            HttpResponse::Ok().json(ApiResponse::success(node_json))
-                        }
-                        Err(e) => HttpResponse::InternalServerError()
-                            .json(ApiResponse::error(e.to_string())),
-                    }
-                }
-                Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
-            }
-        }
-        QueryRequest::GetNode { node_id } => {
-            match NodeId::new(node_id) {
-                Ok(nid) => match db.get_node(nid) {
-                    Ok(node) => {
-                        let props_json = match property_map_to_json(&node.properties) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                return HttpResponse::InternalServerError()
-                                    .json(ApiResponse::error(e));
-                            }
-                        };
-                        let node_json = json!({
-                            "id": node.id.as_u64(),
-                            "label": interned_to_string(node.label),
-                            "properties": props_json
-                        });
-                        HttpResponse::Ok().json(ApiResponse::success(node_json))
-                    }
-                    // Issue 1: Return 404 for node not found
-                    Err(_) => HttpResponse::NotFound()
-                        .json(ApiResponse::error(format!("Node {} not found", node_id))),
-                },
-                Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
-            }
-        }
+        QueryRequest::CreateNode { label, properties } => handle_create_node(db, label, properties),
+        QueryRequest::GetNode { node_id } => handle_get_node(db, node_id),
         QueryRequest::FindNode {
             label,
             properties,
             limit,
             offset,
-        } => {
-            let mut builder = if let Some(lbl) = label {
-                QueryBuilder::new().scan_label(&lbl)
-            } else {
-                QueryBuilder::new().scan(None)
-            };
-
-            if let Some(props) = properties {
-                for (key, value) in props {
-                    if let Some(pred_value) = json_to_predicate_value(&value) {
-                        builder = builder.filter(Predicate::eq(key, pred_value));
-                    }
-                }
-            }
-
-            // Issue 4: Pagination
-            if let Some(skip) = offset {
-                builder = builder.skip(skip);
-            }
-
-            let limit_val = limit.unwrap_or(100);
-            match builder.limit(limit_val).execute(db) {
-                Ok(results) => {
-                    let mut nodes = Vec::new();
-                    for row in results.flatten() {
-                        if let crate::query::executor::EntityResult::Node(node) = row.entity {
-                            let props_json = match property_map_to_json(&node.properties) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    return HttpResponse::InternalServerError()
-                                        .json(ApiResponse::error(e));
-                                }
-                            };
-                            nodes.push(json!({
-                                "id": node.id.as_u64(),
-                                "label": interned_to_string(node.label),
-                                "properties": props_json
-                            }));
-                        }
-                    }
-                    HttpResponse::Ok().json(ApiResponse::success(json!(nodes)))
-                }
-                Err(e) => {
-                    HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
-                }
-            }
-        }
-        QueryRequest::FindNeighbors { node_id } => {
-            match NodeId::new(node_id) {
-                Ok(nid) => {
-                    // Issue 2: Deduplication
-                    // Use a HashSet to track seen node IDs
-                    let mut seen_ids = HashSet::new();
-                    let mut neighbors = Vec::new();
-
-                    // Outgoing
-                    let outgoing = db.get_outgoing_edges(nid);
-                    for edge_id in outgoing {
-                        if let Ok(node) = db
-                            .get_edge_target(edge_id)
-                            .and_then(|target| db.get_node(target))
-                        {
-                            let id = node.id.as_u64();
-                            if seen_ids.insert(id) {
-                                let props_json = match property_map_to_json(&node.properties) {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        return HttpResponse::InternalServerError()
-                                            .json(ApiResponse::error(e));
-                                    }
-                                };
-                                neighbors.push(json!({
-                                    "id": id,
-                                    "label": interned_to_string(node.label),
-                                    "properties": props_json
-                                }));
-                            }
-                        }
-                    }
-
-                    // Incoming
-                    let incoming = db.get_incoming_edges(nid);
-                    for edge_id in incoming {
-                        if let Ok(node) = db
-                            .get_edge_source(edge_id)
-                            .and_then(|source| db.get_node(source))
-                        {
-                            let id = node.id.as_u64();
-                            if seen_ids.insert(id) {
-                                let props_json = match property_map_to_json(&node.properties) {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        return HttpResponse::InternalServerError()
-                                            .json(ApiResponse::error(e));
-                                    }
-                                };
-                                neighbors.push(json!({
-                                    "id": id,
-                                    "label": interned_to_string(node.label),
-                                    "properties": props_json
-                                }));
-                            }
-                        }
-                    }
-
-                    HttpResponse::Ok().json(ApiResponse::success(json!(neighbors)))
-                }
-                Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
-            }
-        }
+        } => handle_find_node(db, label, properties, limit, offset),
+        QueryRequest::FindNeighbors { node_id } => handle_find_neighbors(db, node_id),
     }
 }
 
