@@ -593,8 +593,9 @@ pub(crate) fn load_indexes_startup(
                 // Restore nodes with explicit error tracking
                 for persisted_node in &graph_data.nodes {
                     // Validate label exists in string interner
-                    let label_str = match GLOBAL_INTERNER.resolve(
+                    let label_str = match GLOBAL_INTERNER.resolve_with(
                         crate::core::InternedString::from_raw(persisted_node.label_idx),
+                        |s| s.to_string(),
                     ) {
                         Some(s) => s,
                         None => {
@@ -651,8 +652,9 @@ pub(crate) fn load_indexes_startup(
                 // Restore edges with explicit error tracking
                 for persisted_edge in &graph_data.edges {
                     // Validate label exists in string interner
-                    let label_str = match GLOBAL_INTERNER.resolve(
+                    let label_str = match GLOBAL_INTERNER.resolve_with(
                         crate::core::InternedString::from_raw(persisted_edge.label_idx),
+                        |s| s.to_string(),
                     ) {
                         Some(s) => s,
                         None => {

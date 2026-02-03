@@ -2057,8 +2057,7 @@ impl HistoricalStorage {
                     temporal: version.temporal,
                     properties,
                     label: GLOBAL_INTERNER
-                        .resolve(version.label)
-                        .map(|s| s.to_string())
+                        .resolve_with(version.label, |s| s.to_string())
                         .unwrap_or_else(|| version.label.to_string()),
                 });
             }
@@ -2204,8 +2203,7 @@ impl HistoricalStorage {
                     temporal: version.temporal,
                     properties,
                     label: GLOBAL_INTERNER
-                        .resolve(version.label)
-                        .map(|s| s.to_string())
+                        .resolve_with(version.label, |s| s.to_string())
                         .unwrap_or_else(|| version.label.to_string()),
                 });
             }

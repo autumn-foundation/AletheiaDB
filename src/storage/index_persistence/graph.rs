@@ -69,6 +69,10 @@ pub fn restore_property_value(persisted: &PersistedPropertyValue) -> Result<Prop
         PersistedPropertyValue::Int(i) => PropertyValue::Int(*i),
         PersistedPropertyValue::Float(f) => PropertyValue::Float(*f),
         PersistedPropertyValue::String(idx) => {
+            // Note: Use resolve() instead of resolve_with() here because PropertyValue::String
+            // requires an owned Arc<str>. Cloning the existing Arc is more efficient
+            // than allocating a new one from a &str.
+            #[allow(deprecated)]
             let s = GLOBAL_INTERNER
                 .resolve(crate::core::InternedString::from_raw(*idx))
                 .ok_or_else(|| {
@@ -122,14 +126,16 @@ pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<Property
     let mut builder = PropertyMapBuilder::new();
     for (key_idx, value) in &persisted.entries {
         let key_id = crate::core::InternedString::from_raw(*key_idx);
-        let key_arc = GLOBAL_INTERNER.resolve(key_id).ok_or_else(|| {
-            IndexPersistenceError::Serialization(format!(
-                "Failed to resolve interned property key with ID: {}. \
+        let val = restore_property_value(value)?;
+        builder = GLOBAL_INTERNER
+            .resolve_with(key_id, |key_str| builder.insert(key_str, val))
+            .ok_or_else(|| {
+                IndexPersistenceError::Serialization(format!(
+                    "Failed to resolve interned property key with ID: {}. \
                  This likely indicates data corruption.",
-                key_idx
-            ))
-        })?;
-        builder = builder.insert(key_arc.as_ref(), restore_property_value(value)?);
+                    key_idx
+                ))
+            })?;
     }
     Ok(builder.build())
 }

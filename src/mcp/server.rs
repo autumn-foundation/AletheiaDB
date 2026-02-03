@@ -249,8 +249,7 @@ impl GallifreyMcpServer {
 
     fn interned_to_string(&self, interned: crate::core::InternedString) -> String {
         GLOBAL_INTERNER
-            .resolve(interned)
-            .map(|s| s.to_string())
+            .resolve_with(interned, |s| s.to_string())
             .unwrap_or_else(|| format!("<unknown:{}>", interned.as_u32()))
     }
 
@@ -387,7 +386,7 @@ impl GallifreyMcpServer {
 
     fn matches_label(&self, interned: crate::core::InternedString, label: &str) -> bool {
         GLOBAL_INTERNER
-            .with_str(interned, |s| s == label)
+            .resolve_with(interned, |s| s == label)
             .unwrap_or(false)
     }
 
@@ -1406,8 +1405,7 @@ impl GallifreyMcpServer {
             .iter()
             .map(|(key, old_val, new_val)| {
                 let key_str = GLOBAL_INTERNER
-                    .resolve(*key)
-                    .map(|s| s.as_ref().to_string())
+                    .resolve_with(*key, |s| s.to_string())
                     .unwrap_or_else(|| format!("{:?}", key));
 
                 json!({
