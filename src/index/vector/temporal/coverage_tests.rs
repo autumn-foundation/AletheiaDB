@@ -111,6 +111,37 @@ fn test_delta_search_with_filter_coverage() -> Result<()> {
 }
 
 #[test]
+fn test_find_similar_node_as_of_coverage() -> Result<()> {
+    let config = TemporalVectorConfig {
+        snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+        full_snapshot_interval: 10,
+        hnsw_config: Some(HnswConfig::new(2, DistanceMetric::Cosine)),
+        ..TemporalVectorConfig::default_temporal_only()
+    };
+    let index = TemporalVectorIndex::new(config)?;
+    let id = NodeId::new(1).unwrap();
+    index.add(id, &[1.0, 0.0], 100.into())?;
+    index.on_transaction_at(100.into())?;
+
+    // This should return Not Implemented error when a snapshot exists
+    let result = index.find_similar_node_as_of(id, 10, 100.into());
+    assert!(result.is_err());
+    match result {
+        Err(crate::utils::Error::NotImplemented { feature, .. }) => {
+            assert_eq!(feature, "Historical node vector retrieval");
+        }
+        _ => panic!("Expected NotImplemented error"),
+    }
+
+    // This should return empty when no snapshot exists
+    let result = index.find_similar_node_as_of(id, 10, 50.into());
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn test_max_delta_chain_depth_error() {
     use super::config::MAX_DELTA_CHAIN_DEPTH;
     use super::snapshot::VectorSnapshot;
