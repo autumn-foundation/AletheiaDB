@@ -4,9 +4,13 @@
 //! version information, and version diffs.
 
 use crate::core::id::VersionId;
-use crate::core::interning::InternedString;
+use crate::core::interning::{InternedString, GLOBAL_INTERNER};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
+use comfy_table::modifiers::UTF8_ROUND_CORNERS;
+use comfy_table::presets::UTF8_FULL;
+use comfy_table::{Attribute, Cell, Color, Table};
+use std::fmt;
 
 /// Information about a specific version of an entity (node or edge).
 ///
@@ -169,6 +173,207 @@ impl VersionSummary {
     #[must_use]
     pub fn change_count(&self) -> usize {
         self.properties_added + self.properties_removed + self.properties_modified
+    }
+}
+
+// ==================== Display Implementations ====================
+
+impl fmt::Display for VersionInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .apply_modifier(UTF8_ROUND_CORNERS)
+            .set_header(vec![
+                Cell::new("Version Info").add_attribute(Attribute::Bold),
+                Cell::new(format!("Version #{}", self.version_number)),
+            ]);
+
+        table.add_row(vec![
+            Cell::new("Version ID"),
+            Cell::new(format!("{:?}", self.version_id)),
+        ]);
+        table.add_row(vec![Cell::new("Label"), Cell::new(&self.label)]);
+        table.add_row(vec![
+            Cell::new("Valid Time"),
+            Cell::new(format!("{}", self.temporal.valid_time())),
+        ]);
+        table.add_row(vec![
+            Cell::new("Transaction Time"),
+            Cell::new(format!("{}", self.temporal.transaction_time())),
+        ]);
+
+        // Properties Section
+        if !self.properties.is_empty() {
+            let mut prop_table = Table::new();
+            prop_table.set_header(vec!["Key", "Value"]);
+
+            // Sort keys for consistent display
+            let mut keys: Vec<_> = self.properties.keys().collect();
+            keys.sort_by_key(|k| k.as_u32());
+
+            for key in keys {
+                let key_str = GLOBAL_INTERNER
+                    .resolve(*key)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("UnknownKey({})", key.as_u32()));
+
+                let value = self.properties.get_by_interned_key(key).unwrap();
+                let value_cell = format_property_value_cell(value);
+
+                prop_table.add_row(vec![Cell::new(key_str), value_cell]);
+            }
+            table.add_row(vec![Cell::new("Properties"), Cell::new(prop_table)]);
+        } else {
+            table.add_row(vec![Cell::new("Properties"), Cell::new("None")]);
+        }
+
+        write!(f, "{}", table)
+    }
+}
+
+impl fmt::Display for EntityHistory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.versions.is_empty() {
+            return write!(f, "No history available.");
+        }
+
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .apply_modifier(UTF8_ROUND_CORNERS)
+            .set_header(vec![
+                Cell::new("Ver").add_attribute(Attribute::Bold),
+                Cell::new("Valid Time").add_attribute(Attribute::Bold),
+                Cell::new("Tx Time").add_attribute(Attribute::Bold),
+                Cell::new("Label").add_attribute(Attribute::Bold),
+                Cell::new("Properties").add_attribute(Attribute::Bold),
+            ]);
+
+        for version in &self.versions {
+            let valid_time = format!("{}", version.temporal.valid_time());
+            let tx_time = format!("{}", version.temporal.transaction_time());
+
+            // Summarize properties
+            let props_summary = if version.properties.is_empty() {
+                String::from("-")
+            } else {
+                let mut parts = Vec::new();
+                let mut keys: Vec<_> = version.properties.keys().collect();
+                keys.sort_by_key(|k| k.as_u32()); // Consistent ordering
+
+                for key in keys.iter().take(3) {
+                    let key_str = GLOBAL_INTERNER
+                        .resolve(**key)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    let val = version.properties.get_by_interned_key(key).unwrap();
+                    parts.push(format!("{}: {}", key_str, val));
+                }
+
+                if version.properties.len() > 3 {
+                    format!("{}, ... (+{})", parts.join(", "), version.properties.len() - 3)
+                } else {
+                    parts.join(", ")
+                }
+            };
+
+            table.add_row(vec![
+                Cell::new(version.version_number),
+                Cell::new(valid_time),
+                Cell::new(tx_time),
+                Cell::new(&version.label),
+                Cell::new(props_summary),
+            ]);
+        }
+
+        write!(f, "{}", table)
+    }
+}
+
+impl fmt::Display for VersionDiff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .apply_modifier(UTF8_ROUND_CORNERS)
+            .set_header(vec![
+                Cell::new("Change").add_attribute(Attribute::Bold),
+                Cell::new("Key").add_attribute(Attribute::Bold),
+                Cell::new("Old Value").add_attribute(Attribute::Bold),
+                Cell::new("New Value").add_attribute(Attribute::Bold),
+            ]);
+
+        // Added properties
+        for (key, val) in self.added.iter() {
+            let key_str = GLOBAL_INTERNER
+                .resolve(*key)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            table.add_row(vec![
+                Cell::new("ADDED").fg(Color::Green),
+                Cell::new(key_str),
+                Cell::new("-"),
+                format_property_value_cell(val),
+            ]);
+        }
+
+        // Modified properties
+        for (key, old_val, new_val) in &self.modified {
+            let key_str = GLOBAL_INTERNER
+                .resolve(*key)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            table.add_row(vec![
+                Cell::new("MODIFIED").fg(Color::Yellow),
+                Cell::new(key_str),
+                format_property_value_cell(old_val),
+                format_property_value_cell(new_val),
+            ]);
+        }
+
+        // Removed properties
+        for (key, val) in self.removed.iter() {
+            let key_str = GLOBAL_INTERNER
+                .resolve(*key)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            table.add_row(vec![
+                Cell::new("REMOVED").fg(Color::Red),
+                Cell::new(key_str),
+                format_property_value_cell(val),
+                Cell::new("-"),
+            ]);
+        }
+
+        if !self.has_changes() {
+            return write!(f, "No changes between versions.");
+        }
+
+        write!(f, "{}", table)
+    }
+}
+
+impl fmt::Display for VersionSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Version #{}: +{} added, -{} removed, ~{} modified",
+            self.version_number,
+            self.properties_added,
+            self.properties_removed,
+            self.properties_modified
+        )
+    }
+}
+
+/// Helper to format property values with colors
+fn format_property_value_cell(value: &PropertyValue) -> Cell {
+    match value {
+        PropertyValue::Bool(true) => Cell::new("true").fg(Color::Green),
+        PropertyValue::Bool(false) => Cell::new("false").fg(Color::Red),
+        PropertyValue::Null => Cell::new("null").fg(Color::DarkGrey),
+        _ => Cell::new(value.to_string()),
     }
 }
 
