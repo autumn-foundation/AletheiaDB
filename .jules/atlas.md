@@ -46,3 +46,13 @@
    - `query.rs`: Query builder and executor integration.
    - `admin.rs`: Maintenance, statistics, and persistence.
    - `tests.rs`: Unit tests.
+
+## 2026-02-16 - Splitting WriteTransaction God Struct
+**Tangle:** `src/api/transaction/write_tx.rs` was a 5000-line "God Struct" handling validation, conflict detection, WAL logging, storage application, and extensive tests.
+**Blueprint:** Refactored into `src/api/transaction/write/` directory.
+1. `mod.rs`: Defines `WriteTransaction` struct and public API.
+2. `validation.rs`: Extracted validation logic.
+3. `conflict.rs`: Extracted MVCC conflict detection.
+4. `apply.rs`: Extracted storage application logic.
+5. `wal.rs`: Extracted WAL logging logic.
+6. `tests.rs`: Moved all tests (~4000 lines) to a separate file.
