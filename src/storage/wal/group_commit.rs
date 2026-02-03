@@ -90,10 +90,10 @@ impl Default for GroupCommitConfig {
         Self {
             max_delay_ms: 10,
             max_batch_size: 200,
-            timeout_multiplier: 10,
-            timeout_base_ms: 200,
-            timeout_min_ms: 500,
-            timeout_max_ms: 5000,
+            timeout_multiplier: 50,
+            timeout_base_ms: 5000,
+            timeout_min_ms: 10000,
+            timeout_max_ms: 60000,
         }
     }
 }
@@ -196,9 +196,9 @@ impl GroupCommitCoordinator {
         let mut state = self.state.lock_or_err()?;
 
         // Deadlock detection timeout (NOT a performance SLA)
-        let base_timeout = Duration::from_millis(
-            self.config.max_delay_ms * self.config.timeout_multiplier as u64,
-        ) + Duration::from_millis(self.config.timeout_base_ms);
+        let base_timeout =
+            Duration::from_millis(self.config.max_delay_ms * self.config.timeout_multiplier as u64)
+                + Duration::from_millis(self.config.timeout_base_ms);
         let timeout = base_timeout
             .max(Duration::from_millis(self.config.timeout_min_ms))
             .min(Duration::from_millis(self.config.timeout_max_ms));
