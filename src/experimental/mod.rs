@@ -10,11 +10,17 @@ pub mod cartographer;
 /// Digital Garden simulation ("Memetic Garden").
 pub mod digital_garden;
 #[cfg(feature = "nova")]
+/// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
+pub mod echo;
+#[cfg(feature = "nova")]
 /// Associative retrieval ("Fishing") module.
 pub mod fishing;
 #[cfg(feature = "nova")]
 /// Graph context exporter for LLM integration.
 pub mod graph_context;
+#[cfg(feature = "nova")]
+/// Semantic Navigator for vector-guided pathfinding.
+pub mod semantic_navigator;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;

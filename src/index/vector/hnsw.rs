@@ -609,6 +609,16 @@ pub struct HnswIndex {
     is_mmap: bool,
 }
 
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║ LOCK ORDERING INVARIANT (Deadlock Prevention - PR #751)                  ║
+// ╠═══════════════════════════════════════════════════════════════════════════╣
+// ║ ALL operations MUST acquire locks in this order:                         ║
+// ║   1. inner (RwLock<Index>)           - FIRST                             ║
+// ║   2. id_mapping/reverse_mapping (DashMap) - SECOND                       ║
+// ║                                                                           ║
+// ║ NEVER hold DashMap shard locks while acquiring inner lock.               ║
+// ║ Violating this order causes deadlock between add() and save().           ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         // Check if index is read-only (memory-mapped)
@@ -639,7 +649,7 @@ impl VectorIndex for HnswIndex {
                 let existing_key = *entry.get();
 
                 // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
-                // where multiple threads try to update the same node concurrently (issue #567).
+                // where multiple threads try to update the same node concurrently (PR #575).
                 // Without this, thread A could remove, thread B could remove (fail), then both try to add,
                 // causing "Duplicate keys not allowed" error.
                 let index = self.inner.write();
@@ -988,6 +998,34 @@ impl HnswIndex {
     /// and its mappings. It is separated from `save()` to allow the latter to use
     /// `tokio::task::block_in_place` when running within a Tokio runtime.
     fn save_internal(&self, path: &Path) -> Result<()> {
+        // DEADLOCK FIX (PR #751): Collect mappings BEFORE acquiring any locks
+        // This prevents lock ordering deadlock with add() which holds DashMap → inner lock order
+        //
+        // Lock Ordering Invariant:
+        //   1. inner (RwLock<Index>) - FIRST
+        //   2. id_mapping (DashMap) - SECOND
+        //
+        // Previous implementation violated this by:
+        //   1. Acquiring inner.read() first (line 991)
+        //   2. Then iterating id_mapping (line 1032), acquiring DashMap shard locks
+        //
+        // Meanwhile, add() (Occupied path) acquires locks in reverse order:
+        //   1. DashMap shard lock via entry() (line 634)
+        //   2. Then inner.write() (line 645)
+        //
+        // Result: Classic lock inversion deadlock.
+        //
+        // Solution: Collect all mappings into Vec with no locks held, sacrificing
+        // the "⚡ Bolt Optimization" streaming approach for correctness.
+        // Memory cost: O(N) allocation (~16MB for 1M nodes), acceptable for infrequent save operation.
+        let mappings: Vec<(NodeId, u64)> = self
+            .id_mapping
+            .iter()
+            .map(|e| (*e.key(), *e.value()))
+            .collect();
+        let count = mappings.len();
+
+        // Now acquire inner.read() with no other locks held
         let index = self.inner.read();
         index
             .save(path.to_str().ok_or_else(|| {
@@ -1001,15 +1039,12 @@ impl HnswIndex {
                     e
                 )))
             })?;
+        // Explicit drop to release lock before I/O
+        drop(index);
 
         // Save mappings to companion file with integrity checks
         // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
         let mappings_path = path.with_extension("usearch.mappings");
-
-        // Streaming implementation: Iterate directly over id_mapping to avoid large allocations
-        // ⚡ Bolt Optimization: Removed intermediate Vec<mappings> (O(N) allocation)
-        // Also improves concurrency by interleaving DashMap shard locks with I/O
-        let count = self.id_mapping.len();
 
         // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
         // Use checked arithmetic to prevent overflow
@@ -1029,8 +1064,8 @@ impl HnswIndex {
         })?;
         let mut writer = BufWriter::new(file);
 
-        let mappings_iter = self.id_mapping.iter().map(|e| (*e.key(), *e.value()));
-        Self::write_mappings_to_writer(&mut writer, mappings_iter, count)
+        // Use Vec iterator instead of DashMap iterator
+        Self::write_mappings_to_writer(&mut writer, mappings.into_iter(), count)
     }
 
     /// Helper method to stream mappings to a writer with CRC calculation.

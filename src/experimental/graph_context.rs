@@ -42,8 +42,7 @@ impl<'a> GraphContextBuilder<'a> {
 
     fn resolve(s: InternedString) -> String {
         GLOBAL_INTERNER
-            .resolve(s)
-            .map(|x| x.to_string())
+            .resolve_with(s, |s| s.to_string())
             .unwrap_or_else(|| format!("<interned:{}>", s.as_u32()))
     }
 
