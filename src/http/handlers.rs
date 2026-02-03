@@ -239,7 +239,7 @@ pub async fn handle_query(
                     let offset_val = offset.unwrap_or(0);
 
                     // Prevent deep pagination attacks (CPU DoS)
-                    if offset_val.saturating_add(limit_val) > max_deep_pagination {
+                    if offset_val + limit_val > max_deep_pagination {
                         return HttpResponse::BadRequest().json(ApiResponse::error(format!(
                             "Pagination limit exceeded: offset + limit must be <= {}",
                             max_deep_pagination
