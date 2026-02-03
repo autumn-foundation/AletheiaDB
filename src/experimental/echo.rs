@@ -35,10 +35,16 @@ impl TemporalFingerprint {
         if self.bins.len() != other.bins.len() {
             // In a real system we might handle this gracefully, but for Nova we expect
             // the Resonator to produce consistent fingerprints.
-            panic!("Fingerprint length mismatch: {} vs {}", self.bins.len(), other.bins.len());
+            panic!(
+                "Fingerprint length mismatch: {} vs {}",
+                self.bins.len(),
+                other.bins.len()
+            );
         }
 
-        let dot_product: f32 = self.bins.iter()
+        let dot_product: f32 = self
+            .bins
+            .iter()
             .zip(other.bins.iter())
             .map(|(a, b)| a * b)
             .sum();
@@ -176,10 +182,10 @@ impl<'a> EchoChamber<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::{Timestamp, time};
     use crate::api::transaction::WriteOps;
     use crate::core::hlc::HybridTimestamp;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::{Timestamp, time};
 
     #[test]
     fn test_temporal_fingerprint_similarity() {
@@ -226,10 +232,13 @@ mod tests {
         let create_node_with_history = |timestamps: Vec<Timestamp>| -> NodeId {
             let mut tx = db.write_transaction().unwrap();
             // Create at first timestamp
-            let id = tx.create_node_with_valid_time("Node", props.clone(), Some(timestamps[0])).unwrap();
+            let id = tx
+                .create_node_with_valid_time("Node", props.clone(), Some(timestamps[0]))
+                .unwrap();
             // Update at subsequent timestamps
             for &ts in &timestamps[1..] {
-                tx.update_node_with_valid_time(id, props.clone(), Some(ts)).unwrap();
+                tx.update_node_with_valid_time(id, props.clone(), Some(ts))
+                    .unwrap();
             }
             tx.commit().unwrap();
             id
@@ -258,12 +267,20 @@ mod tests {
 
         let (id, score) = echoes[0];
         assert_eq!(id, node_b);
-        assert!(score > 0.9, "Node B should resonate strongly (score: {})", score);
+        assert!(
+            score > 0.9,
+            "Node B should resonate strongly (score: {})",
+            score
+        );
 
         // Verify C is not in results or very low
         let c_score = echoes.iter().find(|(id, _)| *id == node_c);
         if let Some((_, score)) = c_score {
-            assert!(*score < 0.1, "Node C should not resonate (score: {})", score);
+            assert!(
+                *score < 0.1,
+                "Node C should not resonate (score: {})",
+                score
+            );
         }
     }
 }
