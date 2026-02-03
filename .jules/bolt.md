@@ -9,7 +9,3 @@
 ## 2026-06-25 - Sort-based vs HashMap-based grouping
 **Learning:** Building CSR structures using `HashMap<NodeId, Vec<Entry>>` introduces massive overhead (allocations per node + hashing) compared to sorting the edge list and iterating linearly.
 **Action:** For bulk construction of grouped data (like CSR), prefer sorting the flat list by group key (`edges.sort_by_key`) and iterating once, rather than inserting into a grouping HashMap.
-
-## 2026-07-15 - Read-only Interning on Property Map
-**Learning:** `PropertyMap::get(key)` called `intern(key)`, which acquires a write lock and allocates memory even for non-existent keys. This turned simple read operations into write operations on the global interner, creating a DoS vector and memory leak for random/non-existent keys.
-**Action:** Use `get_id(key)` for read operations (`get`, `contains_key`, `remove`) to check if the key is interned without creating it. Only use `intern()` when inserting new data.

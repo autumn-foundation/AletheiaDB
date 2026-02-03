@@ -325,19 +325,20 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
 
-            // Commit with configured durability mode
-            // For Sync: drains and flushes immediately
-            // For Async: returns immediately
-            // For GroupCommit: registers and returns (epoch, coordinator) tuple
-            let wait_info = self.wal.commit()?;
+            // Commit with configured durability mode.
+            //
+            // We MUST use the coordinator that we registered with in wal.commit().
+            // Returning the coordinator from commit() prevents a race where
+            // set_durability_mode() replaces the global coordinator between
+            // commit() and group_commit_coordinator() calls.
+            let commit_info = self.wal.commit()?;
 
             #[cfg(feature = "observability")]
             let wal_commit_completed = std::time::Instant::now();
 
             // For GroupCommit mode, wait for the epoch to be flushed.
             // AsyncBatched mode returns an epoch but does NOT wait.
-            // Use the coordinator from the atomic capture to prevent TOCTOU race.
-            if let Some((epoch, gc)) = wait_info
+            if let Some((epoch, gc)) = commit_info
                 && self.durability_mode.waits_for_durability()
             {
                 gc.wait_for_flush(epoch)?;

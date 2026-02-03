@@ -28,7 +28,8 @@ const MAX_JSON_RECURSION_DEPTH: usize = 100;
 /// the interned string cannot be found (which should not happen in normal operation).
 pub fn interned_to_string(interned: crate::core::InternedString) -> String {
     GLOBAL_INTERNER
-        .resolve_with(interned, |s| s.to_string())
+        .resolve(interned)
+        .map(|s| s.to_string())
         .unwrap_or_else(|| format!("<unknown:{}>", interned.as_u32()))
 }
 

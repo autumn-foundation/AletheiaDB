@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Benchmarks for storage layer primitives (fast path)
 //!
 //! This file covers:
@@ -359,7 +358,7 @@ fn bench_id_full_lifecycle(c: &mut Criterion) {
 // String Interning Benchmarks
 // ============================================================================
 
-/// Benchmark single string access using resolve() vs resolve_with().
+/// Benchmark single string access using resolve() vs with_str().
 fn bench_string_single_access(c: &mut Criterion) {
     let mut group = c.benchmark_group("string_access_single");
 
@@ -373,8 +372,8 @@ fn bench_string_single_access(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("resolve_with", |b| {
-        b.iter(|| interner.resolve_with(id, |s| black_box(s.len())));
+    group.bench_function("with_str", |b| {
+        b.iter(|| interner.with_str(id, |s| black_box(s.len())));
     });
 
     group.finish();
@@ -396,8 +395,8 @@ fn bench_string_length(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("resolve_with", |b| {
-        b.iter(|| interner.resolve_with(id, |s| black_box(s.len())));
+    group.bench_function("with_str", |b| {
+        b.iter(|| interner.with_str(id, |s| black_box(s.len())));
     });
 
     group.finish();
@@ -417,8 +416,8 @@ fn bench_string_comparison(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("resolve_with", |b| {
-        b.iter(|| interner.resolve_with(id, |s| black_box(s == "Person")));
+    group.bench_function("with_str", |b| {
+        b.iter(|| interner.with_str(id, |s| black_box(s == "Person")));
     });
 
     group.finish();
@@ -442,10 +441,10 @@ fn bench_string_multiple_accesses(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("resolve_with_100", |b| {
+    group.bench_function("with_str_100", |b| {
         b.iter(|| {
             for &id in &ids {
-                interner.resolve_with(id, |s| black_box(s.len()));
+                interner.with_str(id, |s| black_box(s.len()));
             }
         });
     });
@@ -479,12 +478,12 @@ fn bench_string_serialization(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("resolve_with", |b| {
+    group.bench_function("with_str", |b| {
         b.iter(|| {
             let mut total_len = 0;
             for _ in 0..1000 {
                 for &key_id in &property_keys {
-                    interner.resolve_with(key_id, |key| {
+                    interner.with_str(key_id, |key| {
                         // Simulate serialization by computing length and hashing
                         total_len += key.len();
                         black_box(key);
@@ -517,7 +516,7 @@ fn bench_string_arc_overhead(c: &mut Criterion) {
     // Measure direct access without Arc clone
     group.bench_function("direct_access", |b| {
         b.iter(|| {
-            interner.resolve_with(id, |s| {
+            interner.with_str(id, |s| {
                 black_box(s);
             });
         });
@@ -548,12 +547,12 @@ fn bench_string_hot_path(c: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new("resolve_with", iterations),
+            BenchmarkId::new("with_str", iterations),
             &iterations,
             |b, &iterations| {
                 b.iter(|| {
                     for _ in 0..iterations {
-                        interner.resolve_with(id, |s| black_box(s.len()));
+                        interner.with_str(id, |s| black_box(s.len()));
                     }
                 });
             },

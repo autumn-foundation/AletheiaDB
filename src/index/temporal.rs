@@ -45,26 +45,6 @@ use dashmap::DashMap;
 /// and pre-allocate less capacity (typically return 1-2 versions).
 const POINT_QUERY_THRESHOLD_TICKS: i64 = 1000;
 
-/// Policy for handling duplicate versions during batch insertion.
-///
-/// Duplicate versions are identified by their `VersionId`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DeduplicationPolicy {
-    /// Keep the first occurrence after sorting by start time (default).
-    /// This corresponds to the version with the earliest start time.
-    /// Correct for idempotent WAL replay.
-    #[default]
-    FirstOccurrence,
-
-    /// Keep the last occurrence after sorting by start time.
-    /// Use when later data should override earlier data with same version ID.
-    LastOccurrence,
-
-    /// Reject duplicates with an error.
-    /// Use when duplicates indicate a bug or data corruption.
-    Reject,
-}
-
 /// Configuration for temporal indexes.
 #[derive(Debug, Clone)]
 pub struct TemporalIndexConfig {
@@ -262,86 +242,39 @@ impl EntityTimeline {
     /// - Deduplication prevents memory leaks from duplicate metadata indices
     /// - Pre-allocates capacity to avoid multiple reallocations during append
     ///
-    /// # Deduplication Policy
+    /// # Deduplication Policy for Recovery
     ///
     /// After merging and sorting by `start` time, consecutive entries with duplicate
-    /// `metadata_idx` are handled according to the provided `policy`.
+    /// `metadata_idx` are removed. The **first occurrence in the sorted vector** is kept,
+    /// which corresponds to the version with the earliest `start` time.
     ///
-    /// | Policy | Behavior | Use Case |
-    /// |--------|----------|----------|
-    /// | `FirstOccurrence` | Keeps the earliest `start` time | WAL replay, idempotent recovery |
-    /// | `LastOccurrence` | Keeps the latest `start` time | Corrections, "latest wins" updates |
-    /// | `Reject` | Returns an error if duplicates found | Data integrity validation |
-    ///
-    /// **Default Behavior**: `FirstOccurrence` is the default policy, which is correct
-    /// for idempotent WAL replay.
+    /// **Rationale**: This is correct for idempotent WAL replay. If a version is
+    /// replayed multiple times, all replayed entries have identical start times, so
+    /// keeping the first occurrence (arbitrary among identical entries) is safe.
     ///
     /// **Important**: This method assumes duplicate `metadata_idx` values represent
     /// the same logical version being inserted multiple times. If duplicates represent
     /// different versions (corrections), callers MUST use unique metadata indices or
     /// deduplicate before calling this method.
-    fn insert_batch(
-        &mut self,
-        mut entries: Vec<TimelineEntry>,
-        policy: DeduplicationPolicy,
-    ) -> Result<()> {
+    ///
+    /// **Future**: If use cases emerge requiring "latest-wins" semantics, we may add
+    /// a `DeduplicationPolicy` enum. See `docs/DEDUPLICATION_POLICY.md` for analysis.
+    fn insert_batch(&mut self, mut entries: Vec<TimelineEntry>) {
         if entries.is_empty() {
-            return Ok(());
+            return;
         }
-
-        if policy == DeduplicationPolicy::Reject {
-            // Check for duplicates within the incoming batch (atomic check before mutation)
-            let mut seen_in_batch = std::collections::HashSet::with_capacity(entries.len());
-            for entry in &entries {
-                if !seen_in_batch.insert(entry.metadata_idx) {
-                    return Err(StorageError::DuplicateId {
-                        id: format!("metadata_idx:{}", entry.metadata_idx),
-                        kind: "version (duplicate in batch)".to_string(),
-                    }
-                    .into());
-                }
-            }
-
-            // Check for duplicates against existing versions (atomic check before mutation)
-            for entry in &entries {
-                if self.metadata_to_position.contains_key(&entry.metadata_idx) {
-                    return Err(StorageError::DuplicateId {
-                        id: format!("metadata_idx:{}", entry.metadata_idx),
-                        kind: "version (already exists in timeline)".to_string(),
-                    }
-                    .into());
-                }
-            }
-        }
-
         // Pre-allocate capacity for single reallocation during append.
         // Critical for bulk recovery/migration (10K+ versions per entity).
         self.versions.reserve(entries.len());
         self.versions.append(&mut entries);
         // Sort by start time. Timsort exploits existing order in the timeline.
         self.versions.sort_by_key(|e| e.start);
-
-        match policy {
-            DeduplicationPolicy::FirstOccurrence => {
-                // Deduplicate by metadata_idx to prevent memory leaks during recovery or bulk updates.
-                // Keeps the first occurrence when duplicates exist.
-                self.versions.dedup_by_key(|e| e.metadata_idx);
-            }
-            DeduplicationPolicy::LastOccurrence => {
-                // Reverse, dedup, reverse back to keep the last occurrence (latest start time)
-                self.versions.reverse();
-                self.versions.dedup_by_key(|e| e.metadata_idx);
-                self.versions.reverse();
-            }
-            DeduplicationPolicy::Reject => {
-                // Already checked above, no further deduplication needed.
-            }
-        }
+        // Deduplicate by metadata_idx to prevent memory leaks during recovery or bulk updates.
+        // Keeps the first occurrence when duplicates exist.
+        self.versions.dedup_by_key(|e| e.metadata_idx);
 
         // Rebuild position map after bulk operations (Issue #209)
         self.rebuild_position_map();
-
-        Ok(())
     }
 
     /// Find all metadata indices in this timeline that overlap with the given time range.
@@ -751,53 +684,23 @@ impl TemporalIndexes {
     /// Insert multiple node versions into the temporal indexes efficiently.
     ///
     /// Returns an error if the entity exceeds the configured version limit.
-    /// Uses the default `DeduplicationPolicy::FirstOccurrence`.
     pub fn insert_node_versions_batch(
         &self,
         node_id: NodeId,
         versions: Vec<(VersionId, BiTemporalInterval)>,
     ) -> Result<()> {
-        self.insert_node_versions_batch_with_policy(
-            node_id,
-            versions,
-            DeduplicationPolicy::default(),
-        )
-    }
-
-    /// Insert multiple node versions into the temporal indexes with a specific deduplication policy.
-    pub fn insert_node_versions_batch_with_policy(
-        &self,
-        node_id: NodeId,
-        versions: Vec<(VersionId, BiTemporalInterval)>,
-        policy: DeduplicationPolicy,
-    ) -> Result<()> {
-        self.insert_versions_batch(EntityId::Node(node_id), versions, policy)
+        self.insert_versions_batch(EntityId::Node(node_id), versions)
     }
 
     /// Insert multiple edge versions into the temporal indexes efficiently.
     ///
     /// Returns an error if the entity exceeds the configured version limit.
-    /// Uses the default `DeduplicationPolicy::FirstOccurrence`.
     pub fn insert_edge_versions_batch(
         &self,
         edge_id: EdgeId,
         versions: Vec<(VersionId, BiTemporalInterval)>,
     ) -> Result<()> {
-        self.insert_edge_versions_batch_with_policy(
-            edge_id,
-            versions,
-            DeduplicationPolicy::default(),
-        )
-    }
-
-    /// Insert multiple edge versions into the temporal indexes with a specific deduplication policy.
-    pub fn insert_edge_versions_batch_with_policy(
-        &self,
-        edge_id: EdgeId,
-        versions: Vec<(VersionId, BiTemporalInterval)>,
-        policy: DeduplicationPolicy,
-    ) -> Result<()> {
-        self.insert_versions_batch(EntityId::Edge(edge_id), versions, policy)
+        self.insert_versions_batch(EntityId::Edge(edge_id), versions)
     }
 
     /// Insert a version into both temporal indexes.
@@ -844,15 +747,10 @@ impl TemporalIndexes {
     ///
     /// Version metadata is stored once in the consolidated storage, and both
     /// valid-time and transaction-time indexes reference it via index.
-    ///
-    /// This method ensures that if multiple entries in the batch (or existing entries
-    /// in the index) have the same `VersionId`, they share the same metadata index
-    /// and are deduplicated according to the specified `policy`.
     fn insert_versions_batch(
         &self,
         entity_id: EntityId,
         versions: Vec<(VersionId, BiTemporalInterval)>,
-        policy: DeduplicationPolicy,
     ) -> Result<()> {
         if versions.is_empty() {
             return Ok(());
@@ -879,23 +777,10 @@ impl TemporalIndexes {
         let mut valid_entries = Vec::with_capacity(versions.len());
         let mut tx_entries = Vec::with_capacity(versions.len());
 
-        // Temporary map to reuse metadata indices within the same batch.
-        // This ensures that deduplication in EntityTimeline works for the same VersionId.
-        let mut v_id_to_idx = std::collections::HashMap::with_capacity(versions.len());
-
         for (v_id, temporal) in versions {
-            // Store version metadata once in consolidated storage or reuse existing one
-            let metadata_idx = if let Some(&idx) = v_id_to_idx.get(&v_id) {
-                idx
-            } else if let Some(idx) = timelines.find_metadata_index(v_id) {
-                v_id_to_idx.insert(v_id, idx);
-                idx
-            } else {
-                let metadata = VersionMetadata::new(v_id);
-                let idx = timelines.add_version_metadata(metadata)?;
-                v_id_to_idx.insert(v_id, idx);
-                idx
-            };
+            // Store version metadata once in consolidated storage
+            let metadata = VersionMetadata::new(v_id);
+            let metadata_idx = timelines.add_version_metadata(metadata)?;
 
             let valid = temporal.valid_time();
             let tx = temporal.transaction_time();
@@ -913,8 +798,8 @@ impl TemporalIndexes {
             });
         }
 
-        timelines.valid.insert_batch(valid_entries, policy)?;
-        timelines.tx.insert_batch(tx_entries, policy)?;
+        timelines.valid.insert_batch(valid_entries);
+        timelines.tx.insert_batch(tx_entries);
 
         Ok(())
     }
@@ -1756,10 +1641,7 @@ mod tests {
                 metadata_idx: new_metadata_idx,
             },
         ];
-        timelines
-            .valid
-            .insert_batch(duplicate_entries, DeduplicationPolicy::default())
-            .unwrap();
+        timelines.valid.insert_batch(duplicate_entries);
 
         // Verify deduplication worked - should have 3 unique entries, not 4
         assert_eq!(
@@ -3499,177 +3381,5 @@ mod tests {
                 assert_eq!(results[0], VersionId::new(i + 1).unwrap());
             }
         }
-    }
-
-    #[test]
-    fn test_deduplication_policy_variants() {
-        let indexes = TemporalIndexes::new();
-        let node_id = NodeId::new(1).unwrap();
-        let v1 = VersionId::new(100).unwrap();
-
-        // 1. Test FirstOccurrence (Default)
-        let batch_first = vec![
-            (
-                v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(1000.into(), 2000.into()).unwrap(), // Later start
-                    TimeRange::from(0.into()),
-                ),
-            ),
-            (
-                v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(500.into(), 1500.into()).unwrap(), // Earlier start
-                    TimeRange::from(0.into()),
-                ),
-            ),
-        ];
-        indexes
-            .insert_node_versions_batch_with_policy(
-                node_id,
-                batch_first,
-                DeduplicationPolicy::FirstOccurrence,
-            )
-            .unwrap();
-
-        let results = indexes.find_node_versions_in_valid_time_range(
-            node_id,
-            TimeRange::new(0.into(), 5000.into()).unwrap(),
-        );
-        assert_eq!(results.len(), 1);
-        // Verify earliest-start wins: point query at 600 should match
-        assert_eq!(
-            indexes
-                .find_node_versions_in_valid_time_range(node_id, TimeRange::at(600.into()))
-                .len(),
-            1
-        );
-        // point query at 1800 should NOT match
-        assert_eq!(
-            indexes
-                .find_node_versions_in_valid_time_range(node_id, TimeRange::at(1800.into()))
-                .len(),
-            0
-        );
-
-        // 2. Test LastOccurrence
-        indexes.clear();
-        let batch_last = vec![
-            (
-                v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(1000.into(), 2000.into()).unwrap(), // Later start
-                    TimeRange::from(0.into()),
-                ),
-            ),
-            (
-                v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(500.into(), 1500.into()).unwrap(), // Earlier start
-                    TimeRange::from(0.into()),
-                ),
-            ),
-        ];
-        indexes
-            .insert_node_versions_batch_with_policy(
-                node_id,
-                batch_last,
-                DeduplicationPolicy::LastOccurrence,
-            )
-            .unwrap();
-
-        let results = indexes.find_node_versions_in_valid_time_range(
-            node_id,
-            TimeRange::new(0.into(), 5000.into()).unwrap(),
-        );
-        assert_eq!(results.len(), 1);
-        // Verify latest-start wins: point query at 1800 should match
-        assert_eq!(
-            indexes
-                .find_node_versions_in_valid_time_range(node_id, TimeRange::at(1800.into()))
-                .len(),
-            1
-        );
-        // point query at 600 should NOT match
-        assert_eq!(
-            indexes
-                .find_node_versions_in_valid_time_range(node_id, TimeRange::at(600.into()))
-                .len(),
-            0
-        );
-
-        // 3. Test Reject
-        indexes.clear();
-        let batch_reject = vec![
-            (
-                v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                    TimeRange::from(0.into()),
-                ),
-            ),
-            (
-                v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(500.into(), 1500.into()).unwrap(),
-                    TimeRange::from(0.into()),
-                ),
-            ),
-        ];
-        let result = indexes.insert_node_versions_batch_with_policy(
-            node_id,
-            batch_reject,
-            DeduplicationPolicy::Reject,
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Duplicate"));
-    }
-
-    #[test]
-    fn test_metadata_index_reuse_across_batches() {
-        let indexes = TemporalIndexes::new();
-        let node_id = NodeId::new(1).unwrap();
-        let v1 = VersionId::new(100).unwrap();
-
-        // First batch: insert v1
-        indexes
-            .insert_node_versions_batch(
-                node_id,
-                vec![(
-                    v1,
-                    BiTemporalInterval::new(
-                        TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                        TimeRange::from(0.into()),
-                    ),
-                )],
-            )
-            .unwrap();
-
-        // Second batch: insert v1 again with different time
-        // It should reuse the metadata index and then deduplicate
-        indexes
-            .insert_node_versions_batch(
-                node_id,
-                vec![(
-                    v1,
-                    BiTemporalInterval::new(
-                        TimeRange::new(500.into(), 1500.into()).unwrap(),
-                        TimeRange::from(0.into()),
-                    ),
-                )],
-            )
-            .unwrap();
-
-        let timelines = indexes.index.get(&EntityId::Node(node_id)).unwrap();
-        assert_eq!(
-            timelines.version_metadata_count(),
-            1,
-            "Metadata should be reused"
-        );
-        assert_eq!(
-            timelines.valid.versions.len(),
-            1,
-            "Duplicate should be removed by insert_batch"
-        );
     }
 }

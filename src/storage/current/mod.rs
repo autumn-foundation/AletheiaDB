@@ -446,13 +446,15 @@ impl CurrentStorage {
         let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
-        // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
-        // we have not modified any graph state, so we can safely return error without rollback.
-        // This also avoids unnecessary clones of Node and PropertyMap.
-        self.try_index_vector(node_id, &properties)?;
+        let node = Node::new(node_id, label_interned, properties.clone(), version_id);
+        self.indexes.insert_node(node.clone());
 
-        let node = Node::new(node_id, label_interned, properties, version_id);
-        self.indexes.insert_node(node);
+        // Try to index vector property if enabled
+        if let Err(e) = self.try_index_vector(node_id, &properties) {
+            // Rollback: remove node from indexes
+            self.indexes.remove_node(node_id);
+            return Err(e);
+        }
 
         Ok(node_id)
     }
@@ -652,20 +654,23 @@ impl CurrentStorage {
 
     /// Update a node directly (used by WriteTransaction).
     pub fn update_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
-        // Save old node for vector index update
+        // Save old node for potential rollback
         let old_node = self.indexes.get_node(node.id);
 
-        // Update vector index BEFORE updating node in main indexes.
-        // If vector indexing fails, we haven't modified any state yet.
-        if let Some(ref old) = old_node {
-            self.update_vector_index(node.id, &node.properties, &old.properties)?;
+        // Update node
+        self.indexes.insert_node(node.clone());
+
+        // Update vector index
+        if let Some(ref old) = old_node
+            && let Err(e) = self.update_vector_index(node.id, &node.properties, &old.properties)
+        {
+            // Rollback: restore the original node
+            self.indexes.insert_node(old.clone());
+            return Err(e);
         }
 
         // Update temporal vector index if enabled
         self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
-
-        // Finally, insert node into main indexes. This avoids node.clone().
-        self.indexes.insert_node(node);
 
         Ok(())
     }
@@ -786,12 +791,12 @@ impl CurrentStorage {
                 .collect();
         }
 
-        // SLOW PATH: Use merged guard when delta/tombstones exist.
-        // Pre-allocate using capacity hint to avoid multiple reallocations.
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.edge_id));
-        result
+        // SLOW PATH: Use merged guard when delta/tombstones exist
+        self.indexes
+            .get_outgoing(source)
+            .iter()
+            .map(|entry| entry.edge_id)
+            .collect()
     }
 
     /// Get all incoming edges to a node.
@@ -808,12 +813,12 @@ impl CurrentStorage {
                 .collect();
         }
 
-        // SLOW PATH: Use merged guard when delta/tombstones exist.
-        // Pre-allocate using capacity hint to avoid multiple reallocations.
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.edge_id));
-        result
+        // SLOW PATH: Use merged guard when delta/tombstones exist
+        self.indexes
+            .get_incoming(target)
+            .iter()
+            .map(|entry| entry.edge_id)
+            .collect()
     }
 
     /// Get outgoing edges with a specific label.
@@ -824,16 +829,11 @@ impl CurrentStorage {
             None => return Vec::new(), // Label doesn't exist
         };
 
-        // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.edge_id),
-        );
-        result
+        self.indexes
+            .get_outgoing_with_label(source, label_id)
+            .into_iter()
+            .map(|entry| entry.edge_id)
+            .collect()
     }
 
     /// Get incoming edges with a specific label.
@@ -844,16 +844,11 @@ impl CurrentStorage {
             None => return Vec::new(),
         };
 
-        // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.edge_id),
-        );
-        result
+        self.indexes
+            .get_incoming_with_label(target, label_id)
+            .into_iter()
+            .map(|entry| entry.edge_id)
+            .collect()
     }
 
     /// Get all outgoing edges from a node as an iterator.
@@ -1815,10 +1810,11 @@ impl CurrentStorage {
     ///
     /// Returns the target node IDs of all outgoing edges from the source node.
     pub fn get_outgoing_targets(&self, source: NodeId) -> Vec<NodeId> {
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.target));
-        result
+        self.indexes
+            .get_outgoing(source)
+            .iter()
+            .map(|entry| entry.target)
+            .collect()
     }
 
     /// Get target node IDs from outgoing edges with a specific label.
@@ -1827,16 +1823,11 @@ impl CurrentStorage {
             Some(id) => id,
             None => return Vec::new(),
         };
-        // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.target),
-        );
-        result
+        self.indexes
+            .get_outgoing_with_label(source, label_id)
+            .into_iter()
+            .map(|entry| entry.target)
+            .collect()
     }
 
     /// Get source node IDs from incoming edges (used for traversal iterators).
@@ -1845,10 +1836,11 @@ impl CurrentStorage {
     /// Note: For incoming edges, the "target" field in AdjacencyEntry represents
     /// the source node (the node the edge is coming from).
     pub fn get_incoming_sources(&self, target: NodeId) -> Vec<NodeId> {
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.target));
-        result
+        self.indexes
+            .get_incoming(target)
+            .iter()
+            .map(|entry| entry.target) // target field stores the source for incoming edges
+            .collect()
     }
 
     /// Get source node IDs from incoming edges with a specific label.
@@ -1857,16 +1849,11 @@ impl CurrentStorage {
             Some(id) => id,
             None => return Vec::new(),
         };
-        // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.target),
-        );
-        result
+        self.indexes
+            .get_incoming_with_label(target, label_id)
+            .into_iter()
+            .map(|entry| entry.target) // target field stores the source for incoming edges
+            .collect()
     }
 
     /// Get the number of vectors in the HNSW index.
@@ -2039,10 +2026,9 @@ impl CurrentStorage {
             let (candidates, stats) = self.calculate_adaptive_candidates(k, label);
 
             let mut results = index.search_with_filter(query, candidates, |node_id| {
-                // HOT PATH: Use zero-copy label lookup to avoid cloning entire Node
                 self.indexes
-                    .get_node_label(*node_id)
-                    .map(|l| l == label_id)
+                    .get_node(*node_id)
+                    .map(|n| n.label == label_id)
                     .unwrap_or(false)
             })?;
 

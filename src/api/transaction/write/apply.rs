@@ -1,23 +1,3 @@
-//! Apply buffered writes to storage.
-//!
-//! This module handles the "Apply" phase of the commit protocol:
-//! 1.  Update current state (fast path)
-//! 2.  Archive previous state to historical storage (temporal path)
-//! 3.  Update temporal indexes (time travel path)
-//!
-//! # Atomicity
-//!
-//! Operations in this module are executed after validation and conflict detection
-//! have passed. They must be applied atomically (all or nothing). Since we are
-//! in the commit phase, we assume success unless a catastrophic storage failure
-//! occurs.
-//!
-//! # Temporal Semantics
-//!
-//! - **Valid Time**: Controlled by the user (or defaults to commit time).
-//! - **Transaction Time**: Controlled by the system (always commit time).
-//! - **Tombstones**: Deletions create "tombstone" versions that close the valid time interval.
-
 use super::WriteTransaction;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
@@ -30,10 +10,6 @@ use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 
 /// Helper function to create a bi-temporal interval with proper closing logic.
-///
-/// For standard versions, the interval is open-ended `[start, infinity)`.
-/// For tombstones (deletions), the valid-time interval is closed immediately `[start, start)`,
-/// representing that the entity is no longer valid from that point onward.
 #[inline]
 pub(crate) fn create_temporal_interval(
     valid_from: Timestamp,
@@ -47,15 +23,6 @@ pub(crate) fn create_temporal_interval(
     temporal
 }
 
-/// Apply a node creation or update to storage.
-///
-/// This performs three actions:
-/// 1.  Updates `CurrentStorage` with the new node state.
-/// 2.  Adds a new version to `HistoricalStorage`.
-/// 3.  Updates `TemporalIndexes` for time-travel queries.
-///
-/// If this is an update, it also closes the transaction time of the previous version
-/// in historical storage to maintain history continuity.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_node_write(
     tx: &WriteTransaction,
@@ -102,16 +69,6 @@ pub(crate) fn apply_node_write(
     Ok(())
 }
 
-/// Apply an edge creation or update to storage.
-///
-/// Similar to `apply_node_write`, this updates current storage, historical storage,
-/// and temporal indexes.
-///
-/// # Referential Integrity
-///
-/// This function assumes that `source` and `target` nodes exist. Referential integrity
-/// checks should be performed during the validation phase (see `validation::validate`),
-/// not during application.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_edge_write(
     tx: &WriteTransaction,
@@ -170,18 +127,6 @@ pub(crate) fn apply_edge_write(
     Ok(())
 }
 
-/// Apply a node deletion.
-///
-/// Deletion involves:
-/// 1.  Closing the current version in historical storage.
-/// 2.  Creating a "tombstone" version in historical storage to mark the end of validity.
-/// 3.  Removing the node from current storage.
-///
-/// # Tombstones
-///
-/// A tombstone is a version with `is_tombstone = true`. Its valid-time interval
-/// is effectively empty `[valid_from, valid_from)`, indicating that the entity
-/// ceases to exist at that point.
 pub(crate) fn apply_node_delete(
     tx: &WriteTransaction,
     node_id: NodeId,
@@ -222,9 +167,6 @@ pub(crate) fn apply_node_delete(
     Ok(())
 }
 
-/// Apply an edge deletion.
-///
-/// Similar to `apply_node_delete`, creates a tombstone and removes from current storage.
 pub(crate) fn apply_edge_delete(
     tx: &WriteTransaction,
     edge_id: EdgeId,
@@ -267,14 +209,6 @@ pub(crate) fn apply_edge_delete(
     Ok(())
 }
 
-/// Apply a single buffered write operation.
-///
-/// Dispatches to the appropriate `apply_*` function based on the operation type.
-///
-/// # Arguments
-///
-/// * `tombstone_ids` - Iterator of pre-generated Version IDs for tombstones. This optimization
-///   avoids acquiring the ID generator lock for every delete operation.
 pub(crate) fn apply_single_write(
     tx: &WriteTransaction,
     write: &crate::api::transaction::BufferedWrite,
@@ -418,22 +352,6 @@ pub(crate) fn apply_single_write(
     Ok(())
 }
 
-/// Apply all buffered changes in the transaction.
-///
-/// This is the main entry point for the "Apply" phase. It iterates through the
-/// write buffer and applies each operation to the storage engine.
-///
-/// # Locking Strategy
-///
-/// This function acquires the write lock on `HistoricalStorage` *once* and holds it
-/// for the duration of all operations. This avoids lock thrashing (acquiring/releasing
-/// for every single write) and ensures atomicity of the historical updates.
-///
-/// # Performance
-///
-/// - **Locking**: Single lock acquisition for historical storage.
-/// - **ID Generation**: Tombstone IDs are pre-generated in a batch to minimize lock contention.
-/// - **Adjacency**: Adjacency indexes are compacted *once* after all edge operations are complete.
 pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) -> Result<()> {
     // Create temporal interval for all operations in this transaction.
     let _temporal = BiTemporalInterval::current(commit_timestamp);

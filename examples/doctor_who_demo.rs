@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Doctor Who Demo - A fun exploration of GallifreyDB's bi-temporal capabilities
 //!
 //! This demo creates a knowledge graph about the Doctor Who universe,

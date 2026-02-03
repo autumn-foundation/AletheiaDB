@@ -369,6 +369,9 @@ impl ConcurrentWalSystem {
             // Release lock during join to avoid any deadlock potential
             drop(state);
             if let Err(e) = handle.join() {
+                #[cfg(feature = "observability")]
+                tracing::error!("WAL flush thread panicked during transition: {:?}", e);
+                #[cfg(not(feature = "observability"))]
                 eprintln!("WAL flush thread panicked during transition: {:?}", e);
             }
             state = self.state.write();
@@ -699,27 +702,20 @@ impl ConcurrentWalSystem {
     /// ```ignore
     /// wal.append_async(op1)?;
     /// wal.append_async(op2)?;
-    /// let wait_info = wal.commit()?;  // Register for durability
-    /// if let Some((epoch, coordinator)) = wait_info {
-    ///     coordinator.wait_for_flush(epoch)?;
+    /// let epoch = wal.commit()?;  // Register for durability
+    /// if let Some(epoch) = epoch {
+    ///     wal.group_commit_coordinator().unwrap().wait_for_flush(epoch)?;
     /// }
     /// ```
     ///
     /// # Returns
     ///
-    /// Returns `Some((epoch, coordinator))` for GroupCommit/AsyncBatched modes.
-    /// The caller should wait on the epoch using `coordinator.wait_for_flush(epoch)`.
+    /// Returns an epoch number for GroupCommit/AsyncBatched modes that the
+    /// caller should wait on using `group_commit_coordinator().wait_for_flush(epoch)`.
     ///
     /// For other modes, returns `None`:
     /// - Synchronous: Data is already durable when this returns
     /// - Async: No waiting needed (fire-and-forget)
-    ///
-    /// # TOCTOU Race Prevention
-    ///
-    /// This method returns BOTH the epoch and coordinator atomically to prevent
-    /// TOCTOU races during durability mode switches. The coordinator reference
-    /// keeps the GroupCommitCoordinator alive even if the mode is switched,
-    /// ensuring transactions can complete their durability wait safely.
     ///
     /// # Race Condition Handling
     ///
@@ -732,14 +728,19 @@ impl ConcurrentWalSystem {
     /// are notified. The data durability is guaranteed because entries
     /// must be in the ring buffer before this method is called.
     pub fn commit(&self) -> Result<Option<(u64, Arc<GroupCommitCoordinator>)>> {
-        // Capture both mode and coordinator atomically to avoid TOCTOU race
-        let (mode, group_commit) = {
-            let state = self.state.read();
-            (state.durability_mode, state.group_commit.clone())
-        };
+        // Capture both mode and coordinator atomically under a read lock.
+        // We hold the lock until after registration to prevent a TOCTOU race
+        // where set_durability_mode() might replace the coordinator and stop
+        // the flush thread before we've registered, leaving us with an
+        // unreachable epoch.
+        let state = self.state.read();
+        let mode = state.durability_mode;
+        let group_commit = state.group_commit.clone();
 
         match mode {
             DurabilityMode::Synchronous => {
+                // Release lock before I/O to maximize concurrency
+                drop(state);
                 // Drain and flush immediately with fsync
                 let entries = self.wal.drain_all();
                 if !entries.is_empty() {
@@ -752,16 +753,21 @@ impl ConcurrentWalSystem {
                 Ok(None)
             }
             DurabilityMode::GroupCommit { .. } | DurabilityMode::AsyncBatched { .. } => {
-                // Register with coordinator and return both epoch and coordinator
-                if let Some(gc) = group_commit {
+                // Register with coordinator and return epoch to wait for
+                if let Some(ref gc) = group_commit {
                     let (epoch, should_trigger) = gc.register_transaction()?;
+                    let gc_clone = Arc::clone(gc);
+                    // Safe to release lock now that we've joined an epoch.
+                    // Any concurrent set_durability_mode() will now see our
+                    // batch contribution and wait for it.
+                    drop(state);
 
                     // If batch is full, signal flush thread to wake up immediately
                     if should_trigger {
                         self.flush_notifier.notify();
                     }
 
-                    Ok(Some((epoch, gc)))
+                    Ok(Some((epoch, gc_clone)))
                 } else {
                     // Fallback to sync if no coordinator (can happen during mode switch)
                     #[cfg(feature = "observability")]
@@ -772,6 +778,9 @@ impl ConcurrentWalSystem {
                     eprintln!(
                         "GroupCommit coordinator missing during commit, falling back to synchronous flush"
                     );
+
+                    // Must drop lock before I/O
+                    drop(state);
 
                     let entries = self.wal.drain_all();
                     if !entries.is_empty() {
@@ -860,6 +869,9 @@ impl ConcurrentWalSystem {
             // Release lock during join to avoid any deadlock potential
             drop(state);
             if let Err(e) = handle.join() {
+                #[cfg(feature = "observability")]
+                tracing::error!("WAL flush thread panicked during shutdown: {:?}", e);
+                #[cfg(not(feature = "observability"))]
                 eprintln!("WAL flush thread panicked during shutdown: {:?}", e);
             }
             // Re-acquire lock to finish shutdown

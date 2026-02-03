@@ -1411,11 +1411,11 @@ impl PropertyMap {
 
     /// Get a property value by key.
     ///
-    /// The key is looked up in the interner for efficient comparison.
-    /// Returns None if the key hasn't been interned (and thus cannot be in the map).
+    /// The key is automatically interned before lookup for efficient comparison.
+    /// Returns None if the key is not found or if interning fails.
     #[inline]
     pub fn get(&self, key: &str) -> Option<&PropertyValue> {
-        let interned_key = GLOBAL_INTERNER.get_id(key)?;
+        let interned_key = GLOBAL_INTERNER.intern(key).ok()?;
         self.get_by_interned_key(&interned_key)
     }
 
@@ -1430,11 +1430,11 @@ impl PropertyMap {
 
     /// Check if a property exists.
     ///
-    /// The key is looked up in the interner for efficient comparison.
-    /// Returns false if the key hasn't been interned (and thus cannot be in the map).
+    /// The key is automatically interned before lookup for efficient comparison.
+    /// Returns false if interning fails (key cannot exist if it can't be interned).
     #[inline]
     pub fn contains_key(&self, key: &str) -> bool {
-        let Some(interned_key) = GLOBAL_INTERNER.get_id(key) else {
+        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
             return false;
         };
         self.contains_interned_key(&interned_key)
@@ -1545,7 +1545,7 @@ impl PropertyMap {
             // Serialize key: resolve InternedString to actual string
             // Use with_str to avoid Arc cloning overhead
             GLOBAL_INTERNER
-                .resolve_with(*key, |key_str| {
+                .with_str(*key, |key_str| {
                     let key_bytes = key_str.as_bytes();
                     buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
                     buffer.extend_from_slice(key_bytes);
@@ -1715,9 +1715,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
 
         for (key, value) in iter {
             // Need key size for serialization
-            let key_len = GLOBAL_INTERNER
-                .resolve_with(key, |s| s.len())
-                .unwrap_or(256);
+            let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or(256);
             let key_size = 4 + key_len;
             let val_size = value
                 .serialized_size()
@@ -1829,7 +1827,7 @@ impl PropertyMapBuilder {
             // This is a tradeoff: we pay lookup cost for new keys, but
             // avoid it for updates and for subsequent serialization size checks.
             let key_len = GLOBAL_INTERNER
-                .resolve_with(key, |s| s.len())
+                .with_str(key, |s| s.len())
                 .unwrap_or_else(|| {
                     // This should be unreachable if the PropertyKey is valid (which it should be).
                     // In debug builds, we panic to catch this state corruption.
@@ -1888,7 +1886,7 @@ impl PropertyMapBuilder {
 
     /// Remove a property (fallible).
     pub fn try_remove(self, key: &str) -> Result<Self> {
-        let Some(interned_key) = GLOBAL_INTERNER.get_id(key) else {
+        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
             return Ok(self);
         };
         self.try_remove_by_key(&interned_key)
@@ -1906,9 +1904,7 @@ impl PropertyMapBuilder {
     pub fn try_remove_by_key(mut self, key: &PropertyKey) -> Result<Self> {
         let old_val = self.map.remove(key);
         if let Some(old_val) = old_val {
-            let key_len = GLOBAL_INTERNER
-                .resolve_with(*key, |s| s.len())
-                .unwrap_or(256);
+            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
             let key_size = 4 + key_len;
             self.current_size = self
                 .current_size
@@ -3008,7 +3004,8 @@ mod tests {
         for key_str in &expected_keys {
             let exists = first_keys.iter().any(|key| {
                 GLOBAL_INTERNER
-                    .resolve_with(*key, |s| s == *key_str)
+                    .resolve(*key)
+                    .map(|s| s.as_ref() == *key_str)
                     .unwrap_or(false)
             });
             assert!(

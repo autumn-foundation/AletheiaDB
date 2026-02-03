@@ -80,43 +80,6 @@ fn test_graph_traversal() {
 }
 
 #[test]
-fn test_iterator_access() {
-    let db = GallifreyDB::new().unwrap();
-
-    let n0 = db
-        .create_node("Person", PropertyMapBuilder::new().build())
-        .unwrap();
-    let n1 = db
-        .create_node("Person", PropertyMapBuilder::new().build())
-        .unwrap();
-    let n2 = db
-        .create_node("Person", PropertyMapBuilder::new().build())
-        .unwrap();
-
-    let e1 = db
-        .create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build())
-        .unwrap();
-    let e2 = db
-        .create_edge(n0, n2, "KNOWS", PropertyMapBuilder::new().build())
-        .unwrap();
-
-    // Test outgoing iterators
-    let outgoing: Vec<_> = db.get_outgoing_edges_iter(n0).collect();
-    assert_eq!(outgoing.len(), 2);
-    assert!(outgoing.contains(&e1));
-    assert!(outgoing.contains(&e2));
-
-    // Test incoming iterators
-    let incoming1: Vec<_> = db.get_incoming_edges_iter(n1).collect();
-    assert_eq!(incoming1.len(), 1);
-    assert_eq!(incoming1[0], e1);
-
-    let incoming2: Vec<_> = db.get_incoming_edges_iter(n2).collect();
-    assert_eq!(incoming2.len(), 1);
-    assert_eq!(incoming2[0], e2);
-}
-
-#[test]
 fn test_historical_stats() {
     let db = GallifreyDB::new().unwrap();
 

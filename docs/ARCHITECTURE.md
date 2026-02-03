@@ -99,28 +99,6 @@ classDiagram
 - **Current**: All non-temporal queries, latest state access
 - **Historical**: Time-travel, audit trails, temporal analysis, LLM reasoning
 
-### Semantic Clustering ("The Cartographer")
-
-```mermaid
-classDiagram
-    class Cartographer {
-        +analyze(property, k)
-        +reify(result)
-    }
-    class Region {
-        +centroid: Vec<f32>
-        +cluster_id: i64
-    }
-    class Node {
-        +vector: Vec<f32>
-    }
-
-    Cartographer ..> Region : Creates (Reification)
-    Node --> Region : LOCATED_IN
-```
-
-**Pattern:** Reifying implicit vector similarity into explicit graph structure to enable high-level topological analysis.
-
 ### Temporal Query Processing
 
 **Query Types:**

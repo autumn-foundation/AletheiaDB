@@ -8,7 +8,8 @@
 //! - Snapshot pruning with retention policies
 
 use gallifreydb::core::id::NodeId;
-use gallifreydb::core::temporal::{TimeRange, time};
+use gallifreydb::core::temporal::{TimeRange, Timestamp};
+use gallifreydb::core::temporal::time;
 use gallifreydb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
@@ -16,8 +17,9 @@ use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
 use gallifreydb::utils::Result;
 use std::time::Duration;
 
-/// Helper to create a test temporal vector index with default config
+/// Helper to create a test temporal vector index with default config and fixed base time
 fn create_test_index() -> Result<TemporalVectorIndex> {
+    let base_time: Timestamp = 1_000_000.into();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
     let config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(2),
@@ -26,7 +28,7 @@ fn create_test_index() -> Result<TemporalVectorIndex> {
         full_snapshot_interval: 10,
         hnsw_config: Some(hnsw_config),
     };
-    TemporalVectorIndex::new(config)
+    TemporalVectorIndex::new_at(config, base_time)
 }
 
 #[test]
@@ -72,7 +74,7 @@ fn test_point_in_time_vector_query() -> Result<()> {
     let node2 = NodeId::new(2).unwrap();
     let node3 = NodeId::new(3).unwrap();
 
-    let timestamp1 = time::now();
+    let timestamp1: Timestamp = 1_000_000.into();
     index.add(node1, &[1.0, 0.0, 0.0, 0.0], timestamp1)?;
     index.add(node2, &[0.9, 0.1, 0.0, 0.0], timestamp1)?;
 
@@ -101,7 +103,7 @@ fn test_point_in_time_vector_query() -> Result<()> {
 fn test_time_range_vector_query() -> Result<()> {
     let index = create_test_index()?;
 
-    let base_time = time::now();
+    let base_time: Timestamp = 1_000_000.into();
 
     // Create multiple snapshots with vectors
     for i in 0..3 {
@@ -283,7 +285,7 @@ fn test_empty_index_queries() -> Result<()> {
 
     // Query on empty index should return empty results or error gracefully
     let query = vec![1.0, 0.0, 0.0, 0.0];
-    let timestamp = time::now();
+    let timestamp: Timestamp = 1_000_000.into();
 
     // No snapshot exists, so should return error or empty
     let result = index.find_similar_as_of(&query, 10, timestamp);
@@ -321,7 +323,7 @@ fn test_concurrent_snapshot_creation() -> Result<()> {
     }
 
     // Trigger snapshots
-    let now = time::now();
+    let now: Timestamp = 1_000_000.into();
     index.on_transaction_at(now)?;
     index.on_transaction_at(now)?;
 
@@ -354,7 +356,7 @@ fn test_semantic_evolution_end_to_end() -> Result<()> {
     let index = create_test_index()?;
 
     let node_id = NodeId::new(100).unwrap();
-    let base_time = time::now();
+    let base_time: Timestamp = 1_000_000.into();
 
     // Create a timeline of vector changes
     let vectors = [
@@ -396,7 +398,7 @@ fn test_track_semantic_drift_over_time() -> Result<()> {
     let index = create_test_index()?;
 
     let node_id = NodeId::new(200).unwrap();
-    let base_time = time::now();
+    let base_time: Timestamp = 1_000_000.into();
 
     // Create vectors that progressively drift from [1,0,0,0]
     index.add(node_id, &[1.0, 0.0, 0.0, 0.0], base_time)?;
@@ -440,7 +442,7 @@ fn test_calculate_consecutive_drift_end_to_end() -> Result<()> {
     let index = create_test_index()?;
 
     let node_id = NodeId::new(300).unwrap();
-    let base_time = time::now();
+    let base_time: Timestamp = 1_000_000.into();
 
     // Create a timeline: stable -> change -> stable -> big change
     let vectors = [
@@ -483,7 +485,7 @@ fn test_semantic_evolution_with_gaps() -> Result<()> {
 
     let node1 = NodeId::new(400).unwrap();
     let node2 = NodeId::new(401).unwrap();
-    let base_time = time::now();
+    let base_time: Timestamp = 1_000_000.into();
 
     // Add node1 at times 1000 and 3000
     index.add(node1, &[1.0, 0.0, 0.0, 0.0], base_time)?;
@@ -523,7 +525,7 @@ fn test_semantic_evolution_with_gaps() -> Result<()> {
 fn test_empty_evolution_for_nonexistent_node() -> Result<()> {
     let index = create_test_index()?;
 
-    let base_time = time::now();
+    let base_time: Timestamp = 1_000_000.into();
 
     // Add some other node
     index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time)?;
@@ -548,7 +550,7 @@ fn test_drift_calculation_with_normalized_vectors() -> Result<()> {
     let index = create_test_index()?;
 
     let node_id = NodeId::new(500).unwrap();
-    let base_time = time::now();
+    let base_time: Timestamp = 1_000_000.into();
 
     // Use normalized vectors for more predictable cosine similarity
     let v1 = normalize(&[1.0, 0.0, 0.0, 0.0]);

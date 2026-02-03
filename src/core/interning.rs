@@ -188,18 +188,6 @@ impl StringInterner {
     /// Resolve an interned string ID back to the original string.
     ///
     /// Returns None if the ID is not valid (was never interned).
-    ///
-    /// # Performance Note
-    ///
-    /// This method clones the underlying `Arc<str>`, which involves atomic reference
-    /// counting operations.
-    ///
-    /// - **For read-only access**: Use [`resolve_with`](Self::resolve_with) to avoid Arc cloning.
-    /// - **When an owned Arc is needed**: Use this method (`resolve`).
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use resolve_with() for read-only access; use resolve() only when an owned Arc<str> is strictly required"
-    )]
     pub fn resolve(&self, id: InternedString) -> Option<Arc<str>> {
         self.id_to_string
             .get(&id)
@@ -210,7 +198,7 @@ impl StringInterner {
     ///
     /// This is useful when you just need to read the string temporarily.
     ///
-    /// **Note:** For read-only access, prefer [`resolve_with`](Self::resolve_with) to avoid Arc cloning overhead.
+    /// **Note:** For read-only access, prefer [`with_str`](Self::with_str) to avoid Arc cloning overhead.
     /// This method still clones the Arc internally.
     pub fn get(&self, id: InternedString) -> Option<impl AsRef<str> + '_> {
         self.id_to_string.get(&id).map(|entry| {
@@ -240,7 +228,7 @@ impl StringInterner {
     /// serializer.serialize_str(key_str.as_ref())?; // Arc clone overhead
     ///
     /// // Use:
-    /// interner.resolve_with(key_id, |s| serializer.serialize_str(s))?;
+    /// interner.with_str(key_id, |s| serializer.serialize_str(s))?;
     /// ```
     ///
     /// # Examples
@@ -252,29 +240,20 @@ impl StringInterner {
     /// let id = interner.intern("hello").unwrap();
     ///
     /// // Efficient: no Arc clone
-    /// let len = interner.resolve_with(id, |s| s.len()).unwrap();
+    /// let len = interner.with_str(id, |s| s.len()).unwrap();
     /// assert_eq!(len, 5);
     ///
     /// // Can return any type from the callback
-    /// let uppercase = interner.resolve_with(id, |s| s.to_uppercase()).unwrap();
+    /// let uppercase = interner.with_str(id, |s| s.to_uppercase()).unwrap();
     /// assert_eq!(uppercase, "HELLO");
     /// ```
-    pub fn resolve_with<F, R>(&self, id: InternedString, f: F) -> Option<R>
+    pub fn with_str<F, R>(&self, id: InternedString, f: F) -> Option<R>
     where
         F: FnOnce(&str) -> R,
     {
         self.id_to_string
             .get(&id)
             .map(|entry| f(entry.value().as_ref()))
-    }
-
-    /// Access the interned string via a callback (deprecated - use [`resolve_with`](Self::resolve_with)).
-    #[deprecated(since = "0.1.0", note = "Use resolve_with() instead")]
-    pub fn with_str<F, R>(&self, id: InternedString, f: F) -> Option<R>
-    where
-        F: FnOnce(&str) -> R,
-    {
-        self.resolve_with(id, f)
     }
 
     /// Check if a string has been interned.
@@ -450,7 +429,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_resolve() {
         let interner = StringInterner::new();
 
@@ -461,7 +439,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_resolve_invalid_id() {
         let interner = StringInterner::new();
 
@@ -508,7 +485,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_clear() {
         let interner = StringInterner::new();
 
@@ -569,7 +545,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_global_interner() {
         let id1 = GLOBAL_INTERNER.intern("global").unwrap();
         let id2 = GLOBAL_INTERNER.intern("global").unwrap();
@@ -581,12 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_with_basic() {
+    fn test_with_str_basic() {
         let interner = StringInterner::new();
         let id = interner.intern("hello").unwrap();
 
         // Test basic access
-        let result = interner.resolve_with(id, |s| {
+        let result = interner.with_str(id, |s| {
             assert_eq!(s, "hello");
             s.len()
         });
@@ -595,34 +570,34 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_with_invalid_id() {
+    fn test_with_str_invalid_id() {
         let interner = StringInterner::new();
         let invalid_id = InternedString::from_raw(999);
 
-        let result = interner.resolve_with(invalid_id, |s| s.len());
+        let result = interner.with_str(invalid_id, |s| s.len());
         assert_eq!(result, None);
     }
 
     #[test]
-    fn test_resolve_with_return_types() {
+    fn test_with_str_return_types() {
         let interner = StringInterner::new();
         let id = interner.intern("test string").unwrap();
 
         // Return usize
-        let len = interner.resolve_with(id, |s| s.len()).unwrap();
+        let len = interner.with_str(id, |s| s.len()).unwrap();
         assert_eq!(len, 11);
 
         // Return String
-        let uppercase = interner.resolve_with(id, |s| s.to_uppercase()).unwrap();
+        let uppercase = interner.with_str(id, |s| s.to_uppercase()).unwrap();
         assert_eq!(uppercase, "TEST STRING");
 
         // Return bool
-        let contains = interner.resolve_with(id, |s| s.contains("test")).unwrap();
+        let contains = interner.with_str(id, |s| s.contains("test")).unwrap();
         assert!(contains);
 
         // Return Vec (must own the data since it outlives the callback)
         let words: Vec<String> = interner
-            .resolve_with(id, |s| {
+            .with_str(id, |s| {
                 s.split_whitespace().map(|w| w.to_string()).collect()
             })
             .unwrap();
@@ -630,8 +605,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn test_resolve_with_no_arc_clone() {
+    fn test_with_str_no_arc_clone() {
         let interner = StringInterner::new();
         let id = interner.intern("performance test").unwrap();
 
@@ -640,9 +614,9 @@ mod tests {
         let s_arc = interner.resolve(id).unwrap();
         let baseline_count = Arc::strong_count(&s_arc);
 
-        // This test verifies that resolve_with works without cloning by checking the refcount.
+        // This test verifies that with_str works without cloning by checking the refcount.
         let mut call_count = 0;
-        let result = interner.resolve_with(id, |s| {
+        let result = interner.with_str(id, |s| {
             call_count += 1;
             // The count should not increase during the callback.
             assert_eq!(Arc::strong_count(&s_arc), baseline_count);
@@ -656,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_with_concurrent() {
+    fn test_with_str_concurrent() {
         use std::thread;
 
         let interner = Arc::new(StringInterner::new());
@@ -669,7 +643,7 @@ mod tests {
                 let interner_clone = Arc::clone(&interner);
                 handles.push(s.spawn(move || {
                     interner_clone
-                        .resolve_with(id, |s| {
+                        .with_str(id, |s| {
                             assert_eq!(s, "concurrent");
                             format!("{}-{}", s, i)
                         })
@@ -686,42 +660,41 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn test_resolve_with_vs_resolve_equivalence() {
+    fn test_with_str_vs_resolve_equivalence() {
         let interner = StringInterner::new();
         let id = interner.intern("equivalence test").unwrap();
 
         // Both methods should give the same string content
-        let via_resolve_with = interner.resolve_with(id, |s| s.to_string()).unwrap();
+        let via_with_str = interner.with_str(id, |s| s.to_string()).unwrap();
         let via_resolve = interner.resolve(id).unwrap();
 
-        assert_eq!(via_resolve_with, via_resolve.as_ref());
+        assert_eq!(via_with_str, via_resolve.as_ref());
     }
 
     #[test]
-    fn test_resolve_with_empty_string() {
+    fn test_with_str_empty_string() {
         let interner = StringInterner::new();
         let id = interner.intern("").unwrap();
 
-        let len = interner.resolve_with(id, |s| s.len()).unwrap();
+        let len = interner.with_str(id, |s| s.len()).unwrap();
         assert_eq!(len, 0);
 
-        let is_empty = interner.resolve_with(id, |s| s.is_empty()).unwrap();
+        let is_empty = interner.with_str(id, |s| s.is_empty()).unwrap();
         assert!(is_empty);
     }
 
     #[test]
-    fn test_resolve_with_panic_safety() {
+    fn test_with_str_panic_safety() {
         let interner = StringInterner::new();
         let id = interner.intern("panic test").unwrap();
 
         // Verify the interner works before panic
-        let before = interner.resolve_with(id, |s| s.to_string()).unwrap();
+        let before = interner.with_str(id, |s| s.to_string()).unwrap();
         assert_eq!(before, "panic test");
 
         // Cause a panic in the callback
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interner.resolve_with(id, |_s| {
+            interner.with_str(id, |_s| {
                 panic!("intentional panic in callback");
             })
         }));
@@ -731,12 +704,12 @@ mod tests {
 
         // Verify the interner is still usable after the panic
         // The DashMap entry guard should have been properly dropped
-        let after = interner.resolve_with(id, |s| s.to_string()).unwrap();
+        let after = interner.with_str(id, |s| s.to_string()).unwrap();
         assert_eq!(after, "panic test");
 
         // Verify we can still intern new strings
         let new_id = interner.intern("after panic").unwrap();
-        let new_str = interner.resolve_with(new_id, |s| s.to_string()).unwrap();
+        let new_str = interner.with_str(new_id, |s| s.to_string()).unwrap();
         assert_eq!(new_str, "after panic");
     }
 
@@ -946,7 +919,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_warm_common_strings_with_existing_data() {
         let interner = StringInterner::new();
 

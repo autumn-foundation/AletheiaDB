@@ -124,14 +124,3 @@ Enforced strict capacity limits during deserialization:
 Added `tests/warden_dos_repro.rs` which simulates malicious payloads with excessive counts.
 - Before fix: Code attempted allocation (and failed with "Buffer too short" or potentially OOM).
 - After fix: Code immediately returns `StorageError::CorruptedData` citing the capacity limit, protecting memory resources.
-
-## 2026-02-17 - API DoS Hardening
-
-**Threat:** Unbounded Allocation in FindNeighbors
-The `FindNeighbors` endpoint allocated a `Vec` containing all neighbor nodes before serializing them. For highly connected nodes (supernodes), this could cause OOM crashes or massive latency (DoS). It also lacked pagination support.
-
-**Defense:** Pagination & Zero-Allocation Iterators
-- Enforced strict pagination in `QueryRequest::FindNeighbors` with `limit` (default 100, max 1000) and `offset`.
-- Exposed zero-allocation iterators (`get_outgoing_edges_iter`) in `GallifreyDB` to traverse edges without intermediate allocations.
-- Implemented streaming deduplication and pagination pipeline.
-- Added safety check for deep pagination (`offset + limit <= 10,000`) to prevent CPU DoS.

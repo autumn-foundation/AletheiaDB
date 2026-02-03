@@ -250,10 +250,8 @@ mod tests {
         assert!(diff.removed.is_empty());
         assert_eq!(diff.modified.len(), 1);
         use crate::core::GLOBAL_INTERNER;
-        let key_str = GLOBAL_INTERNER
-            .resolve_with(diff.modified[0].0, |s| s.to_string())
-            .unwrap();
-        assert_eq!(key_str, "name");
+        let key_str = GLOBAL_INTERNER.resolve(diff.modified[0].0).unwrap();
+        assert_eq!(key_str.as_ref(), "name");
     }
 
     #[test]
@@ -285,10 +283,8 @@ mod tests {
         assert!(diff.removed.contains_key("status"));
 
         assert_eq!(diff.modified.len(), 1);
-        let key_str = GLOBAL_INTERNER
-            .resolve_with(diff.modified[0].0, |s| s.to_string())
-            .unwrap();
-        assert_eq!(key_str, "age");
+        let key_str = GLOBAL_INTERNER.resolve(diff.modified[0].0).unwrap();
+        assert_eq!(key_str.as_ref(), "age");
     }
 
     #[test]

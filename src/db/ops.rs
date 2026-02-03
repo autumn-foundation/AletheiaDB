@@ -3,7 +3,6 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyMap;
 use crate::db::GallifreyDB;
-use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
 use crate::utils::error::Result;
 
 impl GallifreyDB {
@@ -98,23 +97,9 @@ impl GallifreyDB {
         self.current.get_outgoing_edges(node_id)
     }
 
-    /// Get outgoing edges from a node as an iterator (current state).
-    ///
-    /// This provides zero-allocation traversal.
-    pub fn get_outgoing_edges_iter(&self, node_id: NodeId) -> OutgoingEdgesIter<'_> {
-        self.current.get_outgoing_edges_iter(node_id)
-    }
-
     /// Get incoming edges to a node (current state).
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_incoming_edges(node_id)
-    }
-
-    /// Get incoming edges to a node as an iterator (current state).
-    ///
-    /// This provides zero-allocation traversal.
-    pub fn get_incoming_edges_iter(&self, node_id: NodeId) -> IncomingEdgesIter<'_> {
-        self.current.get_incoming_edges_iter(node_id)
     }
 
     /// Get outgoing edges with a specific label (current state).

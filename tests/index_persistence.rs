@@ -1,5 +1,4 @@
 #![cfg(test)]
-#![allow(deprecated)]
 
 use gallifreydb::PropertyMapBuilder;
 use gallifreydb::core::GLOBAL_INTERNER;
