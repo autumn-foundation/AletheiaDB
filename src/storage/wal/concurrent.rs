@@ -854,4 +854,16 @@ mod tests {
         assert_eq!(lsn4, LSN(4));
         assert_eq!(wal.total_appends(), 4);
     }
+
+    #[test]
+    fn test_concurrent_wal_accessors() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalConfig::new(dir.path());
+        let wal = ConcurrentWal::new(config.clone()).unwrap();
+
+        assert_eq!(wal.wal_dir(), dir.path());
+        assert_eq!(wal.config().num_stripes, config.num_stripes);
+        assert!(wal.stripe(0).is_some());
+        assert!(wal.stripe(1000).is_none());
+    }
 }
