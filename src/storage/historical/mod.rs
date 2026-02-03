@@ -572,8 +572,13 @@ impl HistoricalStorage {
             if versions_since_anchor >= self.config.anchor_interval as usize {
                 // Create anchor with link to previous version
                 // Use properties.clone() here as we need original for caching later
-                let mut anchor =
-                    NodeVersion::new_anchor(version_id, node_id, temporal, label, properties.clone());
+                let mut anchor = NodeVersion::new_anchor(
+                    version_id,
+                    node_id,
+                    temporal,
+                    label,
+                    properties.clone(),
+                );
                 anchor.prev_version = Some(prev_id);
                 // Reset counter to 0 after creating anchor
                 self.node_versions_since_anchor.insert(node_id, 0);
