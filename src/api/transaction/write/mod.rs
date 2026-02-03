@@ -97,36 +97,6 @@ pub struct WriteTransaction {
 }
 
 impl WriteTransaction {
-    /// Create a new write transaction with default durability mode (Synchronous).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        tx_id: TxId,
-        snapshot: TransactionSnapshot,
-        current: Arc<CurrentStorage>,
-        historical: Arc<RwLock<HistoricalStorage>>,
-        temporal_indexes: Arc<TemporalIndexes>,
-        wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
-        visibility_manager: Arc<TxVisibilityManager>,
-        node_id_gen: Arc<Mutex<IdGenerator>>,
-        edge_id_gen: Arc<Mutex<IdGenerator>>,
-        version_id_gen: Arc<Mutex<IdGenerator>>,
-    ) -> Self {
-        Self::new_with_durability(
-            tx_id,
-            snapshot,
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            DurabilityMode::Synchronous,
-        )
-    }
 
     /// Create a new write transaction with a specific durability mode.
     #[allow(clippy::too_many_arguments)]

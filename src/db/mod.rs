@@ -114,7 +114,7 @@ pub struct GallifreyDB {
     pub(crate) edge_id_gen: Arc<Mutex<IdGenerator>>,
     pub(crate) version_id_gen: Arc<Mutex<IdGenerator>>,
     /// Default durability mode for write transactions
-    pub(crate) default_durability: DurabilityMode,
+    pub(crate) default_durability: RwLock<DurabilityMode>,
     /// Query optimization statistics - cached across queries for effective cost-based optimization
     pub(crate) stats: Arc<Statistics>,
     /// Index persistence configuration (stored for potential future use)

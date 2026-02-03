@@ -149,7 +149,7 @@ impl GallifreyDB {
             node_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             edge_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
-            default_durability: durability_mode,
+            default_durability: RwLock::new(durability_mode),
             stats: Arc::new(Statistics::new()),
             persistence_config: config.persistence.clone(),
             persistence_manager: persistence_manager.clone(),
@@ -252,7 +252,7 @@ impl GallifreyDB {
             node_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             edge_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
-            default_durability: durability_mode,
+            default_durability: RwLock::new(durability_mode),
             stats: Arc::new(Statistics::new()),
             persistence_config: crate::storage::index_persistence::PersistenceConfig::default(),
             persistence_manager: None,
@@ -281,7 +281,37 @@ impl GallifreyDB {
 
     /// Get the default durability mode for this database.
     pub fn default_durability(&self) -> DurabilityMode {
-        self.default_durability
+        *self.default_durability.read()
+    }
+
+    /// Change the default durability mode at runtime.
+    ///
+    /// This updates both the database's default mode for new transactions
+    /// and the underlying WAL system's behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transition fails (e.g., background thread cannot be started).
+    pub fn set_durability_mode(&self, mode: DurabilityMode) -> Result<()> {
+        // Hold the write lock throughout the transition to ensure atomicity
+        // for new transactions.
+        let mut default_durability = self.default_durability.write();
+
+        // 1. Update WAL system
+        self.wal.set_durability_mode(mode)?;
+
+        // 2. Update database default
+        *default_durability = mode;
+
+        Ok(())
+    }
+
+    /// Change the default durability mode at runtime with validated parameters.
+    ///
+    /// This is a convenience method that takes a `Result<DurabilityMode>` (e.g., from
+    /// `DurabilityMode::group_commit_validated()`) and applies it if successful.
+    pub fn set_durability_mode_validated(&self, mode: Result<DurabilityMode>) -> Result<()> {
+        self.set_durability_mode(mode?)
     }
 
     /// Open an existing database from a checkpoint.

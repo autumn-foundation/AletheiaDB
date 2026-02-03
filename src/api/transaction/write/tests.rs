@@ -27,7 +27,7 @@ mod tombstone_tests {
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
 
-        let tx = WriteTransaction::new(
+        let tx = WriteTransaction::new_with_durability(
             tx_id_gen.next(),
             snapshot,
             current,
@@ -39,6 +39,7 @@ mod tombstone_tests {
             node_id_gen,
             edge_id_gen,
             version_id_gen,
+            DurabilityMode::Synchronous,
         );
 
         (tx, temp_dir)
@@ -106,7 +107,7 @@ mod general_tests {
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
 
-        let tx = WriteTransaction::new(
+        let tx = WriteTransaction::new_with_durability(
             tx_id_gen.next(),
             snapshot,
             current,
@@ -118,6 +119,7 @@ mod general_tests {
             node_id_gen,
             edge_id_gen,
             version_id_gen,
+            DurabilityMode::Synchronous,
         );
 
         (tx, temp_dir)
@@ -997,7 +999,7 @@ mod general_tests {
             snapshot_timestamp: time::now(),
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
-        let mut tx1 = WriteTransaction::new(
+        let mut tx1 = WriteTransaction::new_with_durability(
             tx_id_gen.next(),
             snapshot1,
             current.clone(),
@@ -1009,6 +1011,7 @@ mod general_tests {
             node_id_gen.clone(),
             edge_id_gen.clone(),
             version_id_gen.clone(),
+            DurabilityMode::Synchronous,
         );
 
         let props = PropertyMapBuilder::new().build();
@@ -1029,7 +1032,7 @@ mod general_tests {
             snapshot_timestamp: time::now(),
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
-        let mut tx2 = WriteTransaction::new(
+        let mut tx2 = WriteTransaction::new_with_durability(
             tx_id_gen.next(),
             snapshot2,
             current.clone(),
@@ -1041,6 +1044,7 @@ mod general_tests {
             node_id_gen.clone(),
             edge_id_gen.clone(),
             version_id_gen.clone(),
+            DurabilityMode::Synchronous,
         );
 
         // 1. Create new edge
@@ -1214,7 +1218,7 @@ mod general_tests {
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
 
-        let tx = WriteTransaction::new(
+        let tx = WriteTransaction::new_with_durability(
             tx_id_gen.next(),
             snapshot,
             current,
@@ -1226,6 +1230,7 @@ mod general_tests {
             node_id_gen,
             edge_id_gen,
             version_id_gen,
+            DurabilityMode::Synchronous,
         );
 
         (tx, temp_dir)
@@ -1546,7 +1551,7 @@ mod general_tests {
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
 
-        let tx = WriteTransaction::new(
+        let tx = WriteTransaction::new_with_durability(
             tx_id_gen.next(),
             snapshot,
             current,
@@ -1558,6 +1563,7 @@ mod general_tests {
             node_id_gen,
             edge_id_gen,
             version_id_gen,
+            DurabilityMode::Synchronous,
         );
 
         (tx, temp_dir)
@@ -1629,7 +1635,7 @@ mod conflict_detection_tests {
                 active_transactions: Arc::new(std::collections::HashSet::new()),
             };
 
-            WriteTransaction::new(
+            WriteTransaction::new_with_durability(
                 self.tx_id_gen.next(),
                 snapshot,
                 self.current.clone(),
@@ -1641,6 +1647,7 @@ mod conflict_detection_tests {
                 self.node_id_gen.clone(),
                 self.edge_id_gen.clone(),
                 self.version_id_gen.clone(),
+                DurabilityMode::Synchronous,
             )
         }
     }
@@ -2537,7 +2544,7 @@ mod clock_skew_tests {
             let snapshot_ts = *self.current_timestamp.lock().unwrap();
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
-            WriteTransaction::new(
+            WriteTransaction::new_with_durability(
                 self.tx_id_gen.next(),
                 snapshot,
                 self.current.clone(),
@@ -2549,6 +2556,7 @@ mod clock_skew_tests {
                 self.node_id_gen.clone(),
                 self.edge_id_gen.clone(),
                 self.version_id_gen.clone(),
+                DurabilityMode::Synchronous,
             )
         }
     }
@@ -2678,7 +2686,7 @@ mod timestamp_ordering_tests {
                 active_transactions: Arc::new(std::collections::HashSet::new()),
             };
 
-            WriteTransaction::new(
+            WriteTransaction::new_with_durability(
                 self.tx_id_gen.next(),
                 snapshot,
                 self.current.clone(),
@@ -2690,6 +2698,7 @@ mod timestamp_ordering_tests {
                 self.node_id_gen.clone(),
                 self.edge_id_gen.clone(),
                 self.version_id_gen.clone(),
+                DurabilityMode::Synchronous,
             )
         }
     }
@@ -2935,7 +2944,7 @@ mod bitemporal_validation_tests {
             let snapshot_ts = *self.current_timestamp.lock_or_err().unwrap();
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
-            WriteTransaction::new(
+            WriteTransaction::new_with_durability(
                 tx_id,
                 snapshot,
                 self.current.clone(),
@@ -2947,6 +2956,7 @@ mod bitemporal_validation_tests {
                 self.node_id_gen.clone(),
                 self.edge_id_gen.clone(),
                 self.version_id_gen.clone(),
+                DurabilityMode::Synchronous,
             )
         }
     }

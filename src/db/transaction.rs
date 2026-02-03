@@ -103,7 +103,10 @@ impl GallifreyDB {
         // Capture snapshot
         let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-        Ok(WriteTransaction::new(
+        // Use the current default durability mode
+        let durability = *self.default_durability.read();
+
+        Ok(WriteTransaction::new_with_durability(
             tx_id,
             snapshot,
             Arc::clone(&self.current),
@@ -115,6 +118,7 @@ impl GallifreyDB {
             Arc::clone(&self.node_id_gen),
             Arc::clone(&self.edge_id_gen),
             Arc::clone(&self.version_id_gen),
+            durability,
         ))
     }
 
@@ -296,7 +300,7 @@ impl GallifreyDB {
         let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
         // Determine effective durability mode
-        let durability = options.effective_durability(self.default_durability);
+        let durability = options.effective_durability(*self.default_durability.read());
 
         Ok(WriteTransaction::new_with_durability(
             tx_id,

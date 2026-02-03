@@ -1288,7 +1288,7 @@ fn test_recovery_after_concurrent_writes() {
             .with_num_stripes(16)
             .with_flush_interval_ms(1);
 
-        let mut wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
+        let wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
         let barrier = Barrier::new(num_threads);
 
         // Use scoped threads
@@ -1426,7 +1426,7 @@ fn test_recovery_partial_flush_ordering() {
             })
             .with_flush_interval_ms(5);
 
-        let mut wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
+        let wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
         let barrier = Barrier::new(num_threads);
 
         // Use scoped threads to safely reference wal without Arc

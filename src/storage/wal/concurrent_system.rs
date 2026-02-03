@@ -42,6 +42,7 @@
 //! wal.shutdown();
 //! ```
 
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -261,6 +262,18 @@ impl BackgroundFlusher {
     }
 }
 
+/// Internal state for the concurrent WAL system.
+struct WalState {
+    /// Durability mode.
+    durability_mode: DurabilityMode,
+    /// Group commit coordinator for epoch-based waiting (GroupCommit mode only).
+    group_commit: Option<Arc<GroupCommitCoordinator>>,
+    /// Handle to the background flush thread.
+    flush_thread: Option<JoinHandle<()>>,
+    /// Signal to stop the flush thread.
+    shutdown_signal: Arc<AtomicBool>,
+}
+
 /// Unified concurrent WAL system.
 ///
 /// This combines the striped concurrent WAL with the flush coordinator
@@ -270,21 +283,123 @@ pub struct ConcurrentWalSystem {
     wal: Arc<ConcurrentWal>,
     /// The flush coordinator for segment management.
     coordinator: Arc<FlushCoordinator>,
-    /// Handle to the background flush thread.
-    flush_thread: Option<JoinHandle<()>>,
-    /// Signal to stop the flush thread.
-    shutdown_signal: Arc<AtomicBool>,
     /// Signal to wake up flush thread immediately (batch full).
     flush_notifier: Arc<FlushNotifier>,
-    /// Durability mode.
-    durability_mode: DurabilityMode,
-    /// Group commit coordinator for epoch-based waiting (GroupCommit mode only).
-    group_commit: Option<Arc<GroupCommitCoordinator>>,
     /// Counter for consecutive flush errors (for health monitoring).
     consecutive_flush_errors: Arc<AtomicU64>,
+    /// Protected mutable state.
+    state: RwLock<WalState>,
 }
 
 impl ConcurrentWalSystem {
+    /// Change the durability mode at runtime.
+    ///
+    /// # Graceful Transition
+    ///
+    /// This method ensures a safe transition between durability modes by:
+    /// 1. Waiting for any pending GroupCommit batches to be flushed.
+    /// 2. Stopping the old background flush thread (if any).
+    /// 3. Initializing the new mode's coordinator and background thread.
+    ///
+    /// # Thread Safety
+    ///
+    /// This operation acquires an exclusive write lock on the WAL state. While this
+    /// prevents concurrent mode changes, it does not block concurrent `append()` calls,
+    /// which only require a read lock.
+    pub fn set_durability_mode(&self, mode: DurabilityMode) -> Result<()> {
+        let mut state = self.state.write();
+
+        // Skip if mode is unchanged
+        if state.durability_mode == mode {
+            return Ok(());
+        }
+
+        // 1. Graceful transition: Wait for pending GroupCommit epochs to flush.
+        // This ensures that transactions that were told they are in GroupCommit
+        // actually get the durability they expected before we switch modes.
+        if let Some(ref gc) = state.group_commit {
+            if let Ok(current) = gc.current_epoch() {
+                if let Ok(batch_size) = gc.current_batch_size() {
+                    if batch_size > 0 {
+                        // Signal flush thread to wake up and flush current batch
+                        self.flush_notifier.notify();
+                        // Wait for it (with a timeout handled by the coordinator)
+                        let _ = gc.wait_for_flush(current);
+                    }
+                }
+            }
+        }
+
+        // 2. Stop old background thread gracefully.
+        // We hold the lock during the entire transition, including the join,
+        // to prevent any concurrent threads from using the old coordinator
+        // while the background thread is exiting. This is safe because the
+        // flush thread never attempts to acquire the state lock.
+        if let Some(handle) = state.flush_thread.take() {
+            state.shutdown_signal.store(true, Ordering::Relaxed);
+            self.flush_notifier.notify();
+            let _ = handle.join();
+        }
+
+        // 3. Update durability mode
+        state.durability_mode = mode;
+
+        // 4. Create new group commit coordinator if needed
+        state.group_commit = match mode {
+            DurabilityMode::GroupCommit {
+                max_batch_size,
+                max_delay_ms,
+            } => Some(Arc::new(GroupCommitCoordinator::new(
+                max_delay_ms,
+                max_batch_size,
+            ))),
+            DurabilityMode::AsyncBatched {
+                max_batch_size,
+                max_delay_ms,
+                ..
+            } => Some(Arc::new(GroupCommitCoordinator::new(
+                max_delay_ms,
+                max_batch_size,
+            ))),
+            _ => None,
+        };
+
+        // 5. Start new background flush thread if needed
+        state.shutdown_signal = Arc::new(AtomicBool::new(false));
+        state.flush_thread = if mode.needs_background_thread() {
+            let wal_clone = Arc::clone(&self.wal);
+            let coordinator_clone = Arc::clone(&self.coordinator);
+            let shutdown_clone = Arc::clone(&state.shutdown_signal);
+            let flush_notifier_clone = Arc::clone(&self.flush_notifier);
+            let group_commit_clone = state.group_commit.clone();
+            let error_counter_clone = Arc::clone(&self.consecutive_flush_errors);
+            let flush_interval = mode.flush_interval().unwrap_or(Duration::from_millis(10));
+            // Match the sync logic from new() - only GroupCommit and Synchronous sync on every flush.
+            // Note: Synchronous doesn't use the background thread, but we include it for consistency.
+            let sync_on_flush = matches!(
+                mode,
+                DurabilityMode::Synchronous | DurabilityMode::GroupCommit { .. }
+            );
+
+            Some(thread::spawn(move || {
+                Self::flush_loop(
+                    wal_clone,
+                    coordinator_clone,
+                    shutdown_clone,
+                    flush_notifier_clone,
+                    group_commit_clone,
+                    error_counter_clone,
+                    flush_interval,
+                    sync_on_flush,
+                );
+            }))
+        } else {
+            None
+        };
+
+        Ok(())
+    }
+
     /// Create a new concurrent WAL system.
     pub fn new(config: ConcurrentWalSystemConfig) -> Result<Self> {
         // Create ConcurrentWal config
@@ -375,12 +490,14 @@ impl ConcurrentWalSystem {
         Ok(Self {
             wal,
             coordinator,
-            flush_thread,
-            shutdown_signal,
             flush_notifier,
-            durability_mode: config.durability_mode,
-            group_commit,
             consecutive_flush_errors,
+            state: RwLock::new(WalState {
+                durability_mode: config.durability_mode,
+                group_commit,
+                flush_thread,
+                shutdown_signal,
+            }),
         })
     }
 
@@ -419,7 +536,8 @@ impl ConcurrentWalSystem {
     /// For `DurabilityMode::Synchronous`, this blocks until durable.
     /// For other modes, this returns immediately.
     pub fn append(&self, operation: WalOperation) -> Result<LSN> {
-        match self.durability_mode {
+        let mode = self.state.read().durability_mode;
+        match mode {
             DurabilityMode::Synchronous => self.append_sync(operation),
             DurabilityMode::Async { .. }
             | DurabilityMode::GroupCommit { .. }
@@ -505,7 +623,8 @@ impl ConcurrentWalSystem {
         }
 
         // Use the underlying WAL's batch append for async modes
-        match self.durability_mode {
+        let mode = self.state.read().durability_mode;
+        match mode {
             DurabilityMode::Synchronous => {
                 // For synchronous mode, append batch then flush all
                 let lsns = self.wal.append_batch(operations)?;
@@ -538,7 +657,8 @@ impl ConcurrentWalSystem {
             return Ok(FlushStats::default());
         }
 
-        let should_sync = !matches!(self.durability_mode, DurabilityMode::Async { .. });
+        let mode = self.state.read().durability_mode;
+        let should_sync = !matches!(mode, DurabilityMode::Async { .. });
         self.coordinator.flush(entries, should_sync)
     }
 
@@ -578,7 +698,8 @@ impl ConcurrentWalSystem {
     /// are notified. The data durability is guaranteed because entries
     /// must be in the ring buffer before this method is called.
     pub fn commit(&self) -> Result<Option<u64>> {
-        match self.durability_mode {
+        let state = self.state.read();
+        match state.durability_mode {
             DurabilityMode::Synchronous => {
                 // Drain and flush immediately with fsync
                 let entries = self.wal.drain_all();
@@ -593,7 +714,7 @@ impl ConcurrentWalSystem {
             }
             DurabilityMode::GroupCommit { .. } | DurabilityMode::AsyncBatched { .. } => {
                 // Register with coordinator and return epoch to wait for
-                if let Some(ref gc) = self.group_commit {
+                if let Some(ref gc) = state.group_commit {
                     let (epoch, should_trigger) = gc.register_transaction()?;
 
                     // If batch is full, signal flush thread to wake up immediately
@@ -617,8 +738,8 @@ impl ConcurrentWalSystem {
     /// Get the group commit coordinator for waiting on epochs.
     ///
     /// Returns `None` for modes that don't use group commit.
-    pub fn group_commit_coordinator(&self) -> Option<&Arc<GroupCommitCoordinator>> {
-        self.group_commit.as_ref()
+    pub fn group_commit_coordinator(&self) -> Option<Arc<GroupCommitCoordinator>> {
+        self.state.read().group_commit.clone()
     }
 
     /// Get the current (next to be allocated) LSN.
@@ -638,7 +759,7 @@ impl ConcurrentWalSystem {
 
     /// Get the durability mode.
     pub fn durability_mode(&self) -> DurabilityMode {
-        self.durability_mode
+        self.state.read().durability_mode
     }
 
     /// Get the number of consecutive flush errors.
@@ -677,15 +798,17 @@ impl ConcurrentWalSystem {
     ///
     /// This signals the background thread to stop, waits for it to finish,
     /// and performs a final flush of all pending entries.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&self) {
+        let mut state = self.state.write();
+
         // Signal shutdown
-        self.shutdown_signal.store(true, Ordering::Relaxed);
+        state.shutdown_signal.store(true, Ordering::Relaxed);
 
         // Wake up flush thread so it can see the shutdown signal
         self.flush_notifier.notify();
 
         // Wait for flush thread to finish
-        if let Some(handle) = self.flush_thread.take() {
+        if let Some(handle) = state.flush_thread.take() {
             let _ = handle.join();
         }
 
@@ -748,7 +871,7 @@ mod tests {
             .with_durability_mode(DurabilityMode::Async {
                 flush_interval_ms: 10_000,
             });
-        let mut wal = ConcurrentWalSystem::new(config).unwrap();
+        let wal = ConcurrentWalSystem::new(config).unwrap();
 
         // Append several entries
         for i in 1..=10 {
@@ -823,7 +946,7 @@ mod tests {
         // Use Synchronous mode to avoid background flush thread interference
         let config = ConcurrentWalSystemConfig::new(dir.path())
             .with_durability_mode(DurabilityMode::Synchronous);
-        let mut wal = ConcurrentWalSystem::new(config).unwrap();
+        let wal = ConcurrentWalSystem::new(config).unwrap();
 
         // Append entries (append_async in Sync mode still buffers)
         for i in 1..=5 {
@@ -849,7 +972,7 @@ mod tests {
                 max_delay_ms: 10,
             })
             .with_flush_interval_ms(5);
-        let mut wal = ConcurrentWalSystem::new(config).unwrap();
+        let wal = ConcurrentWalSystem::new(config).unwrap();
 
         // Append entries
         for i in 1..=5 {
@@ -887,7 +1010,7 @@ mod tests {
                 flush_interval_ms: 100,
             },
         );
-        let mut wal = ConcurrentWalSystem::new(config).unwrap();
+        let wal = ConcurrentWalSystem::new(config).unwrap();
 
         // Append entries without explicit flush
         for i in 1..=5 {
