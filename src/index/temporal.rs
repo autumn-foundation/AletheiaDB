@@ -757,7 +757,11 @@ impl TemporalIndexes {
         node_id: NodeId,
         versions: Vec<(VersionId, BiTemporalInterval)>,
     ) -> Result<()> {
-        self.insert_node_versions_batch_with_policy(node_id, versions, DeduplicationPolicy::default())
+        self.insert_node_versions_batch_with_policy(
+            node_id,
+            versions,
+            DeduplicationPolicy::default(),
+        )
     }
 
     /// Insert multiple node versions into the temporal indexes with a specific deduplication policy.
@@ -779,7 +783,11 @@ impl TemporalIndexes {
         edge_id: EdgeId,
         versions: Vec<(VersionId, BiTemporalInterval)>,
     ) -> Result<()> {
-        self.insert_edge_versions_batch_with_policy(edge_id, versions, DeduplicationPolicy::default())
+        self.insert_edge_versions_batch_with_policy(
+            edge_id,
+            versions,
+            DeduplicationPolicy::default(),
+        )
     }
 
     /// Insert multiple edge versions into the temporal indexes with a specific deduplication policy.
