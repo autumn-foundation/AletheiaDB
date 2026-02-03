@@ -516,12 +516,12 @@ impl FrozenAdjacencyView {
 /// excluding tombstones. The guard holds references to the frozen CSR and delta
 /// buffer, ensuring they remain valid during iteration.
 pub struct MergedAdjacencyGuard<'a> {
-    node: NodeId,
-    frozen: Guard<Arc<AdjacencyIndex>>,
-    delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
-    tombstones: &'a DashMap<EdgeId, Tombstone>,
+    pub(crate) node: NodeId,
+    pub(crate) frozen: Guard<Arc<AdjacencyIndex>>,
+    pub(crate) delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
+    pub(crate) tombstones: &'a DashMap<EdgeId, Tombstone>,
     /// Fast path flag: if true, skip per-edge tombstone checks (delta & tombstones are empty)
-    fast_path: bool,
+    pub(crate) fast_path: bool,
 }
 
 impl<'a> MergedAdjacencyGuard<'a> {
@@ -568,9 +568,37 @@ impl<'a> MergedAdjacencyGuard<'a> {
     }
 
     /// Get entry at index (for compatibility with slice-like indexing).
+    ///
+    /// # Warning
+    ///
+    /// This method is O(n) as it must iterate through the combined frozen and
+    /// delta layers. For high-degree nodes, prefer using `iter()` directly.
     #[inline]
     pub fn get(&self, index: usize) -> Option<&AdjacencyEntry> {
         self.iter().nth(index)
+    }
+
+    /// Get an upper bound on the number of entries (frozen + delta).
+    ///
+    /// This is O(1) and suitable for pre-allocating vectors. The actual
+    /// number of entries may be smaller if tombstones exist.
+    #[inline]
+    pub fn capacity_hint(&self) -> usize {
+        let frozen_len = self.frozen.get_adjacency(self.node).len();
+        let delta_len = self.delta.as_ref().map(|d| d.len()).unwrap_or(0);
+        frozen_len + delta_len
+    }
+
+    /// Get the exact length if it can be determined in O(1).
+    ///
+    /// Returns `Some(len)` if in fast path (no tombstones or delta), otherwise `None`.
+    #[inline]
+    pub fn fast_len(&self) -> Option<usize> {
+        if self.fast_path {
+            Some(self.frozen.get_adjacency(self.node).len())
+        } else {
+            None
+        }
     }
 
     /// Fast path: if no delta and no tombstones, return frozen slice directly.
@@ -770,5 +798,51 @@ mod tests {
         assert_eq!(index.frozen_edge_count(), 0);
         assert_eq!(index.delta_edge_count(), 0);
         assert_eq!(index.tombstone_count(), 0);
+    }
+
+    #[test]
+    fn test_guard_capacity_hint_and_fast_len() {
+        use crate::core::interning::InternedString;
+        let index = IncrementalAdjacencyIndex::new();
+        let node = NodeId::new(1).unwrap();
+
+        {
+            let guard = index.get_adjacency(node);
+            // Empty index
+            assert_eq!(guard.capacity_hint(), 0);
+            assert_eq!(guard.fast_len(), Some(0));
+        }
+
+        // Add to delta
+        let entry = AdjacencyEntry::new(
+            NodeId::new(2).unwrap(),
+            EdgeId::new(1).unwrap(),
+            InternedString::from_raw(1),
+        );
+        index.insert(node, entry);
+
+        {
+            let guard = index.get_adjacency(node);
+            assert_eq!(guard.capacity_hint(), 1);
+            assert_eq!(guard.fast_len(), None); // Not fast path anymore because delta is not empty
+        }
+
+        // Compact
+        index.compact();
+
+        {
+            let guard = index.get_adjacency(node);
+            assert_eq!(guard.capacity_hint(), 1);
+            assert_eq!(guard.fast_len(), Some(1));
+        }
+
+        // Add tombstone
+        index.delete(EdgeId::new(1).unwrap());
+
+        {
+            let guard = index.get_adjacency(node);
+            assert_eq!(guard.capacity_hint(), 1); // capacity_hint is upper bound, doesn't account for tombstones
+            assert_eq!(guard.fast_len(), None); // Not fast path anymore because tombstones exist
+        }
     }
 }
