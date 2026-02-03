@@ -169,3 +169,39 @@ impl WalEntry {
         stored_checksum == computed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lsn() {
+        let lsn = LSN::initial();
+        assert_eq!(lsn.0, 1);
+        let next = lsn.next();
+        assert_eq!(next.0, 2);
+    }
+
+    #[test]
+    fn test_wal_entry_new() {
+        let lsn = LSN(100);
+        let op = WalOperation::Checkpoint {
+            lsn: LSN(50),
+            timestamp: time::now(),
+        };
+        let entry = WalEntry::new(lsn, op);
+        assert_eq!(entry.lsn, lsn);
+        assert_eq!(entry.checksum, 0); // Initially 0
+    }
+
+    #[test]
+    fn test_verify_checksum_short_data() {
+        let lsn = LSN(1);
+        let op = WalOperation::Checkpoint {
+            lsn: LSN(1),
+            timestamp: time::now(),
+        };
+        let entry = WalEntry::new(lsn, op);
+        assert!(!entry.verify_checksum(&[0u8; 10])); // Less than 24 bytes
+    }
+}
