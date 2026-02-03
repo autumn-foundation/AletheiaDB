@@ -307,7 +307,8 @@ impl ExactSizeIterator for HistoricalEdgeVersionIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::id::{NodeId, VersionId};
+    use crate::core::graph::Edge;
+    use crate::core::id::{EdgeId, NodeId, VersionId};
     use crate::core::interning::InternedString;
     use crate::core::property::PropertyMap;
 
@@ -353,6 +354,37 @@ mod tests {
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0].id, NodeId::new(1).unwrap());
         assert_eq!(collected[1].id, NodeId::new(2).unwrap());
+    }
+
+    #[test]
+    fn test_current_snapshot_edge_iteration() {
+        let lsn = LSN(10);
+        let edges = vec![
+            Arc::new(Edge::new(
+                EdgeId::new(1).unwrap(),
+                InternedString::from_raw(1),
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                PropertyMap::new(),
+                VersionId::new(1).unwrap(),
+            )),
+            Arc::new(Edge::new(
+                EdgeId::new(2).unwrap(),
+                InternedString::from_raw(2),
+                NodeId::new(2).unwrap(),
+                NodeId::new(3).unwrap(),
+                PropertyMap::new(),
+                VersionId::new(2).unwrap(),
+            )),
+        ];
+
+        let snapshot = CurrentStorageSnapshot::new(lsn, vec![], edges);
+
+        let collected: Vec<Edge> = snapshot.iter_edges().collect();
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].id, EdgeId::new(1).unwrap());
+        assert_eq!(collected[1].id, EdgeId::new(2).unwrap());
+        assert_eq!(snapshot.edge_count(), 2);
     }
 
     #[test]
