@@ -681,8 +681,11 @@ impl MigrationService {
             .worker_handle
             .lock()
             .expect("MigrationService worker_handle lock poisoned in stop()");
+        #[allow(clippy::collapsible_if)]
         if let Some(handle) = handle_guard.take() {
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                eprintln!("Migration worker thread panicked during shutdown: {:?}", e);
+            }
         }
     }
 
@@ -1286,11 +1289,14 @@ impl Drop for MigrationService {
         }
 
         // Try to join the thread if we have a handle
+        #[allow(clippy::collapsible_if)]
         if let Ok(mut handle_guard) = self.worker_handle.lock()
             && let Some(handle) = handle_guard.take()
         {
             // Don't block indefinitely - the thread will terminate on its own
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                eprintln!("Migration worker thread panicked during drop: {:?}", e);
+            }
         }
     }
 }

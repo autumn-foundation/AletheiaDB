@@ -1,0 +1,15 @@
+[
+  {
+    "comment_id": "3839075462",
+    "reply": "Thank you for the detailed and insightful review! I've addressed all the concerns raised:
+
+1. **Deadlock Risk**: Fixed by dropping the state write lock before joining the background flush thread in `set_durability_mode` and `shutdown`.
+2. **Hot-Path Optimization**: Implemented an `AtomicU8` mode cache (`mode_cache`) in `ConcurrentWalSystem`. Methods like `append()` and `append_batch()` now use this cache to avoid `RwLock` read-lock contention in the hot path.
+3. **Fallback Logging**: Added a warning log when `commit()` falls back to synchronous mode during transitions.
+4. **Join Errors**: Added explicit checks for `handle.join()` results and logged panics to stderr for all managed background threads (WAL flush, persistence, migration).
+5. **Clippy/Formatting**: Verified that `cargo clippy` and `cargo fmt` pass with zero warnings/errors.
+6. **Regression Tests**: Added a regression test to ensure `write_transaction()` correctly respects the global default durability mode.
+
+The performance impact on the hot path should now be negligible, and the system is safer during runtime operational changes."
+  }
+]

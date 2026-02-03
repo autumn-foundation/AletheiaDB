@@ -847,8 +847,11 @@ impl FlushThread {
         self.shutdown.store(true, Ordering::Release);
         self.flush_signal.request_flush(); // Wake up the thread
 
+        #[allow(clippy::collapsible_if)]
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                eprintln!("Flush thread panicked during shutdown: {:?}", e);
+            }
         }
     }
 }

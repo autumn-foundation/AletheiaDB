@@ -45,7 +45,7 @@
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -274,6 +274,21 @@ struct WalState {
     shutdown_signal: Arc<AtomicBool>,
 }
 
+/// Durability mode discriminants for atomic caching.
+const MODE_SYNCHRONOUS: u8 = 0;
+const MODE_ASYNC: u8 = 1;
+const MODE_GROUP_COMMIT: u8 = 2;
+const MODE_ASYNC_BATCHED: u8 = 3;
+
+fn mode_to_u8(mode: &DurabilityMode) -> u8 {
+    match mode {
+        DurabilityMode::Synchronous => MODE_SYNCHRONOUS,
+        DurabilityMode::Async { .. } => MODE_ASYNC,
+        DurabilityMode::GroupCommit { .. } => MODE_GROUP_COMMIT,
+        DurabilityMode::AsyncBatched { .. } => MODE_ASYNC_BATCHED,
+    }
+}
+
 /// Unified concurrent WAL system.
 ///
 /// This combines the striped concurrent WAL with the flush coordinator
@@ -287,6 +302,8 @@ pub struct ConcurrentWalSystem {
     flush_notifier: Arc<FlushNotifier>,
     /// Counter for consecutive flush errors (for health monitoring).
     consecutive_flush_errors: Arc<AtomicU64>,
+    /// Atomic cache of the durability mode discriminant for hot-path optimization.
+    mode_cache: AtomicU8,
     /// Protected mutable state.
     state: RwLock<WalState>,
 }
@@ -341,18 +358,21 @@ impl ConcurrentWalSystem {
         }
 
         // 2. Stop old background thread gracefully.
-        // We hold the lock during the entire transition, including the join,
-        // to prevent any concurrent threads from using the old coordinator
-        // while the background thread is exiting. This is safe because the
-        // flush thread never attempts to acquire the state lock.
         if let Some(handle) = state.flush_thread.take() {
             state.shutdown_signal.store(true, Ordering::Relaxed);
             self.flush_notifier.notify();
-            let _ = handle.join();
+
+            // Release lock during join to avoid any deadlock potential
+            drop(state);
+            if let Err(e) = handle.join() {
+                eprintln!("WAL flush thread panicked during transition: {:?}", e);
+            }
+            state = self.state.write();
         }
 
-        // 3. Update durability mode
+        // 3. Update durability mode and cache
         state.durability_mode = mode;
+        self.mode_cache.store(mode_to_u8(&mode), Ordering::Relaxed);
 
         // 4. Create new group commit coordinator if needed
         state.group_commit = match mode {
@@ -498,11 +518,14 @@ impl ConcurrentWalSystem {
             None
         };
 
+        let mode_cache = AtomicU8::new(mode_to_u8(&config.durability_mode));
+
         Ok(Self {
             wal,
             coordinator,
             flush_notifier,
             consecutive_flush_errors,
+            mode_cache,
             state: RwLock::new(WalState {
                 durability_mode: config.durability_mode,
                 group_commit,
@@ -547,13 +570,13 @@ impl ConcurrentWalSystem {
     /// For `DurabilityMode::Synchronous`, this blocks until durable.
     /// For other modes, this returns immediately.
     pub fn append(&self, operation: WalOperation) -> Result<LSN> {
-        // Capture mode atomically to avoid TOCTOU race during mode switch
-        let mode = self.state.read().durability_mode;
-        match mode {
-            DurabilityMode::Synchronous => self.append_sync(operation),
-            DurabilityMode::Async { .. }
-            | DurabilityMode::GroupCommit { .. }
-            | DurabilityMode::AsyncBatched { .. } => self.append_async(operation),
+        // Use atomic cache for hot-path to avoid lock contention
+        let mode_discriminant = self.mode_cache.load(Ordering::Relaxed);
+
+        if mode_discriminant == MODE_SYNCHRONOUS {
+            self.append_sync(operation)
+        } else {
+            self.append_async(operation)
         }
     }
 
@@ -634,31 +657,27 @@ impl ConcurrentWalSystem {
             return Ok(Vec::new());
         }
 
-        // Capture mode atomically to avoid TOCTOU race during mode switch
-        let mode = self.state.read().durability_mode;
-        match mode {
-            DurabilityMode::Synchronous => {
-                // For synchronous mode, append batch then flush all
-                let lsns = self.wal.append_batch(operations)?;
+        // Use atomic cache for hot-path to avoid lock contention
+        let mode_discriminant = self.mode_cache.load(Ordering::Relaxed);
 
-                // Drain and flush immediately for sync mode
-                let entries = self.wal.drain_all();
-                if !entries.is_empty() {
-                    self.coordinator.flush(entries, true).map_err(|e| {
-                        Error::Storage(StorageError::WalError {
-                            reason: format!("Failed to flush batch after drain: {}", e),
-                        })
-                    })?;
-                }
+        if mode_discriminant == MODE_SYNCHRONOUS {
+            // For synchronous mode, append batch then flush all
+            let lsns = self.wal.append_batch(operations)?;
 
-                Ok(lsns)
+            // Drain and flush immediately for sync mode
+            let entries = self.wal.drain_all();
+            if !entries.is_empty() {
+                self.coordinator.flush(entries, true).map_err(|e| {
+                    Error::Storage(StorageError::WalError {
+                        reason: format!("Failed to flush batch after drain: {}", e),
+                    })
+                })?;
             }
-            DurabilityMode::Async { .. }
-            | DurabilityMode::GroupCommit { .. }
-            | DurabilityMode::AsyncBatched { .. } => {
-                // For async modes, just batch append (background thread handles flush)
-                self.wal.append_batch(operations)
-            }
+
+            Ok(lsns)
+        } else {
+            // For async modes, just batch append (background thread handles flush)
+            self.wal.append_batch(operations)
         }
     }
 
@@ -669,9 +688,9 @@ impl ConcurrentWalSystem {
             return Ok(FlushStats::default());
         }
 
-        // Capture mode atomically
-        let mode = self.state.read().durability_mode;
-        let should_sync = !matches!(mode, DurabilityMode::Async { .. });
+        // Capture mode discriminant from atomic cache
+        let mode_discriminant = self.mode_cache.load(Ordering::Relaxed);
+        let should_sync = mode_discriminant != MODE_ASYNC;
         self.coordinator.flush(entries, should_sync)
     }
 
@@ -743,6 +762,15 @@ impl ConcurrentWalSystem {
                     Ok(Some(epoch))
                 } else {
                     // Fallback to sync if no coordinator (can happen during mode switch)
+                    #[cfg(feature = "observability")]
+                    tracing::warn!(
+                        "GroupCommit coordinator missing during commit, falling back to synchronous flush"
+                    );
+                    #[cfg(not(feature = "observability"))]
+                    eprintln!(
+                        "GroupCommit coordinator missing during commit, falling back to synchronous flush"
+                    );
+
                     let entries = self.wal.drain_all();
                     if !entries.is_empty() {
                         self.coordinator.flush(entries, true)?;
@@ -827,7 +855,13 @@ impl ConcurrentWalSystem {
 
         // Wait for flush thread to finish
         if let Some(handle) = state.flush_thread.take() {
-            let _ = handle.join();
+            // Release lock during join to avoid any deadlock potential
+            drop(state);
+            if let Err(e) = handle.join() {
+                eprintln!("WAL flush thread panicked during shutdown: {:?}", e);
+            }
+            // Re-acquire lock to finish shutdown
+            let _state = self.state.write();
         }
 
         // Close the WAL (prevent new appends)

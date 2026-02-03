@@ -140,8 +140,11 @@ impl Drop for GallifreyDB {
             // Wait for the background thread to fully exit and release all resources
             // This ensures the thread drops its Arc references to TieredStorage/RedbColdStorage
             // before Drop returns, preventing file locking issues when reopening Redb.
+            #[allow(clippy::collapsible_if)]
             if let Some(handle) = self.persistence_thread_handle.take() {
-                let _ = handle.join();
+                if let Err(e) = handle.join() {
+                    eprintln!("Persistence thread panicked during shutdown: {:?}", e);
+                }
             }
         }
     }
