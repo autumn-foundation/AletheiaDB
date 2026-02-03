@@ -731,7 +731,7 @@ mod tests {
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::time;
-    use crate::storage::wal::serialize_entry_into;
+    use crate::storage::wal::serialization::serialize_entry_into;
     use tempfile::TempDir;
 
     #[test]
