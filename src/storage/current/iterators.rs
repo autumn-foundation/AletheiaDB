@@ -44,22 +44,49 @@ macro_rules! impl_edge_iter {
 
             #[inline]
             fn next(&mut self) -> Option<Self::Item> {
-                let entry = self.guard.get(self.index)?;
-                self.index += 1;
-                Some(entry.edge_id)
+                // HOT PATH: Use direct slice access to avoid O(n^2) traversal.
+                // MergedAdjacencyGuard::get() is O(n), so calling it in a loop is O(n^2).
+                let frozen_slice = self.guard.frozen.get_adjacency(self.guard.node);
+                let delta_slice = self.guard.delta.as_ref().map(|d| d.as_slice()).unwrap_or(&[]);
+
+                while self.index < frozen_slice.len() + delta_slice.len() {
+                    let entry = if self.index < frozen_slice.len() {
+                        &frozen_slice[self.index]
+                    } else {
+                        &delta_slice[self.index - frozen_slice.len()]
+                    };
+
+                    self.index += 1;
+
+                    // Filter tombstones
+                    if self.guard.fast_path || !self.guard.tombstones.contains_key(&entry.edge_id) {
+                        return Some(entry.edge_id);
+                    }
+                }
+                None
             }
 
             #[inline]
             fn size_hint(&self) -> (usize, Option<usize>) {
-                let remaining = self.guard.len().saturating_sub(self.index);
-                (remaining, Some(remaining))
+                if let Some(len) = self.guard.fast_len() {
+                    let remaining = len.saturating_sub(self.index);
+                    (remaining, Some(remaining))
+                } else {
+                    let upper = self.guard.capacity_hint().saturating_sub(self.index);
+                    (0, Some(upper))
+                }
             }
         }
 
         impl<'a> ExactSizeIterator for $name<'a> {
             #[inline]
             fn len(&self) -> usize {
-                self.guard.len().saturating_sub(self.index)
+                // Note: O(n) unless in fast path.
+                if let Some(len) = self.guard.fast_len() {
+                    len.saturating_sub(self.index)
+                } else {
+                    self.guard.len().saturating_sub(self.index)
+                }
             }
         }
 
@@ -112,12 +139,25 @@ macro_rules! impl_edge_iter_with_label {
                 // Early return if label doesn't exist in interner
                 let label_id = self.label_id?;
 
-                // Linear scan with manual indexing - O(n) total complexity
-                // Avoids the O(n²) worst-case of using .position() repeatedly
-                while self.index < self.guard.len() {
-                    let entry = &self.guard[self.index];
+                // Linear scan with manual indexing - O(n) total complexity.
+                // We access frozen and delta slices directly to avoid O(n^2) indexing
+                // through the MergedAdjacencyGuard.
+                let frozen_slice = self.guard.frozen.get_adjacency(self.guard.node);
+                let delta_slice = self.guard.delta.as_ref().map(|d| d.as_slice()).unwrap_or(&[]);
+
+                while self.index < frozen_slice.len() + delta_slice.len() {
+                    let entry = if self.index < frozen_slice.len() {
+                        &frozen_slice[self.index]
+                    } else {
+                        &delta_slice[self.index - frozen_slice.len()]
+                    };
+
                     self.index += 1;
-                    if entry.label == label_id {
+
+                    // Filter by label AND tombstones
+                    if entry.label == label_id
+                        && (self.guard.fast_path || !self.guard.tombstones.contains_key(&entry.edge_id))
+                    {
                         return Some(entry.edge_id);
                     }
                 }
@@ -128,7 +168,7 @@ macro_rules! impl_edge_iter_with_label {
             fn size_hint(&self) -> (usize, Option<usize>) {
                 // Lower bound is 0 (all remaining could be filtered out)
                 // Upper bound is remaining entries
-                let remaining = self.guard.len().saturating_sub(self.index);
+                let remaining = self.guard.capacity_hint().saturating_sub(self.index);
                 (0, Some(remaining))
             }
         }

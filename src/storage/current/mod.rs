@@ -791,12 +791,12 @@ impl CurrentStorage {
                 .collect();
         }
 
-        // SLOW PATH: Use merged guard when delta/tombstones exist
-        self.indexes
-            .get_outgoing(source)
-            .iter()
-            .map(|entry| entry.edge_id)
-            .collect()
+        // SLOW PATH: Use merged guard when delta/tombstones exist.
+        // Pre-allocate using capacity hint to avoid multiple reallocations.
+        let guard = self.indexes.get_outgoing(source);
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(guard.iter().map(|entry| entry.edge_id));
+        result
     }
 
     /// Get all incoming edges to a node.
@@ -813,12 +813,12 @@ impl CurrentStorage {
                 .collect();
         }
 
-        // SLOW PATH: Use merged guard when delta/tombstones exist
-        self.indexes
-            .get_incoming(target)
-            .iter()
-            .map(|entry| entry.edge_id)
-            .collect()
+        // SLOW PATH: Use merged guard when delta/tombstones exist.
+        // Pre-allocate using capacity hint to avoid multiple reallocations.
+        let guard = self.indexes.get_incoming(target);
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(guard.iter().map(|entry| entry.edge_id));
+        result
     }
 
     /// Get outgoing edges with a specific label.
@@ -829,11 +829,16 @@ impl CurrentStorage {
             None => return Vec::new(), // Label doesn't exist
         };
 
-        self.indexes
-            .get_outgoing_with_label(source, label_id)
-            .into_iter()
-            .map(|entry| entry.edge_id)
-            .collect()
+        // Optimized to avoid intermediate Vec allocation and pre-allocate result
+        let guard = self.indexes.get_outgoing(source);
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(
+            guard
+                .iter()
+                .filter(|entry| entry.label == label_id)
+                .map(|entry| entry.edge_id),
+        );
+        result
     }
 
     /// Get incoming edges with a specific label.
@@ -844,11 +849,16 @@ impl CurrentStorage {
             None => return Vec::new(),
         };
 
-        self.indexes
-            .get_incoming_with_label(target, label_id)
-            .into_iter()
-            .map(|entry| entry.edge_id)
-            .collect()
+        // Optimized to avoid intermediate Vec allocation and pre-allocate result
+        let guard = self.indexes.get_incoming(target);
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(
+            guard
+                .iter()
+                .filter(|entry| entry.label == label_id)
+                .map(|entry| entry.edge_id),
+        );
+        result
     }
 
     /// Get all outgoing edges from a node as an iterator.
@@ -1810,11 +1820,10 @@ impl CurrentStorage {
     ///
     /// Returns the target node IDs of all outgoing edges from the source node.
     pub fn get_outgoing_targets(&self, source: NodeId) -> Vec<NodeId> {
-        self.indexes
-            .get_outgoing(source)
-            .iter()
-            .map(|entry| entry.target)
-            .collect()
+        let guard = self.indexes.get_outgoing(source);
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(guard.iter().map(|entry| entry.target));
+        result
     }
 
     /// Get target node IDs from outgoing edges with a specific label.
@@ -1823,11 +1832,16 @@ impl CurrentStorage {
             Some(id) => id,
             None => return Vec::new(),
         };
-        self.indexes
-            .get_outgoing_with_label(source, label_id)
-            .into_iter()
-            .map(|entry| entry.target)
-            .collect()
+        // Optimized to avoid intermediate Vec allocation and pre-allocate result
+        let guard = self.indexes.get_outgoing(source);
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(
+            guard
+                .iter()
+                .filter(|entry| entry.label == label_id)
+                .map(|entry| entry.target),
+        );
+        result
     }
 
     /// Get source node IDs from incoming edges (used for traversal iterators).
@@ -1836,11 +1850,10 @@ impl CurrentStorage {
     /// Note: For incoming edges, the "target" field in AdjacencyEntry represents
     /// the source node (the node the edge is coming from).
     pub fn get_incoming_sources(&self, target: NodeId) -> Vec<NodeId> {
-        self.indexes
-            .get_incoming(target)
-            .iter()
-            .map(|entry| entry.target) // target field stores the source for incoming edges
-            .collect()
+        let guard = self.indexes.get_incoming(target);
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(guard.iter().map(|entry| entry.target));
+        result
     }
 
     /// Get source node IDs from incoming edges with a specific label.
@@ -1849,11 +1862,16 @@ impl CurrentStorage {
             Some(id) => id,
             None => return Vec::new(),
         };
-        self.indexes
-            .get_incoming_with_label(target, label_id)
-            .into_iter()
-            .map(|entry| entry.target) // target field stores the source for incoming edges
-            .collect()
+        // Optimized to avoid intermediate Vec allocation and pre-allocate result
+        let guard = self.indexes.get_incoming(target);
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(
+            guard
+                .iter()
+                .filter(|entry| entry.label == label_id)
+                .map(|entry| entry.target),
+        );
+        result
     }
 
     /// Get the number of vectors in the HNSW index.

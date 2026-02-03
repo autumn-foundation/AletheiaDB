@@ -587,11 +587,9 @@ impl CurrentIndexes {
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
         let guard = self.outgoing.get_adjacency(source);
-        guard
-            .iter()
-            .filter(|entry| entry.label == label)
-            .copied()
-            .collect()
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(guard.iter().filter(|entry| entry.label == label).copied());
+        result
     }
 
     /// Get incoming edges with a specific label.
@@ -604,11 +602,9 @@ impl CurrentIndexes {
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
         let guard = self.incoming.get_adjacency(target);
-        guard
-            .iter()
-            .filter(|entry| entry.label == label)
-            .copied()
-            .collect()
+        let mut result = Vec::with_capacity(guard.capacity_hint());
+        result.extend(guard.iter().filter(|entry| entry.label == label).copied());
+        result
     }
 
     /// Get a frozen view for outgoing adjacency (read transaction hot path).
