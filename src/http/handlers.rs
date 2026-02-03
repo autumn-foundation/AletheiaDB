@@ -252,14 +252,14 @@ pub async fn handle_query(
 
                     // Use zero-allocation iterators
                     // Outgoing: edge -> target node
-                    let outgoing_iter = db.get_outgoing_edges_iter(nid).map(|edge_id| {
-                        db.get_edge_target(edge_id).ok()
-                    });
+                    let outgoing_iter = db
+                        .get_outgoing_edges_iter(nid)
+                        .map(|edge_id| db.get_edge_target(edge_id).ok());
 
                     // Incoming: edge -> source node
-                    let incoming_iter = db.get_incoming_edges_iter(nid).map(|edge_id| {
-                        db.get_edge_source(edge_id).ok()
-                    });
+                    let incoming_iter = db
+                        .get_incoming_edges_iter(nid)
+                        .map(|edge_id| db.get_edge_source(edge_id).ok());
 
                     // Chain iterators -> filter valid -> filter duplicates -> skip -> take
                     let combined_iter = outgoing_iter
