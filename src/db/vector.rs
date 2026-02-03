@@ -3,7 +3,7 @@ use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::GallifreyDB;
 use crate::index::vector::hnsw::HnswConfig;
-use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
+use crate::index::vector::temporal::TemporalVectorConfig;
 use crate::utils::error::Result;
 use std::sync::Arc;
 
@@ -147,10 +147,6 @@ impl GallifreyDB {
 
         historical.register_pre_node_anchor_hook(node_hook);
         historical.register_pre_edge_anchor_hook(edge_hook);
-
-        // Create observer and register with historical storage (for extensibility)
-        let observer = VectorIndexObserver::new(temporal_index);
-        historical.add_observer(std::sync::Arc::new(observer));
 
         Ok(())
     }

@@ -89,15 +89,12 @@ use crate::utils::{Error, Result, TemporalError, VectorError};
 // Submodules
 /// Configuration types for temporal vector indexing.
 pub mod config;
-/// Observers for reacting to storage events.
-pub mod observer;
 pub(crate) mod snapshot;
 /// Statistics and monitoring types.
 pub mod stats;
 
 // Re-exports
 pub use config::{DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig};
-pub use observer::VectorIndexObserver;
 pub use stats::{MemoryStats, SnapshotInfo};
 
 // Internal imports
