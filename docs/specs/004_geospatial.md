@@ -38,18 +38,18 @@ Currently, users must query GallifreyDB for IDs, then query PostGIS/Elasticsearc
 ### Functional Requirements
 1.  **Geo Primitives**:
     -   Support Point (Latitude, Longitude) as a first-class property type.
-    -   Support Polygon (List of Points) for boundaries.
+    -   Support Polygon (List of outer and inner rings of Points) for boundaries, compatible with GeoJSON `Polygon` and `MultiPolygon` types.
     -   Support standard serialization (GeoJSON or WKT).
 
 2.  **Spatial Indexing**:
     -   Must implement a spatial index efficient for range and k-NN queries.
     -   Index must be persistent and support standard CRUD operations.
-    -   Must support **Hybrid Indexing** (combining Spatial + Temporal if possible, or at least Spatial + filtering).
+    -   Must support **Hybrid Indexing** (combining Spatial + other property filters). Support for combined Spatial + Temporal filtering is a key goal for achieving the "Where" and "When" integration.
 
 3.  **Query API**:
     -   `WITHIN_DISTANCE(point, distance_meters)`: Circle search.
     -   `WITHIN_POLYGON(polygon)`: Boundary search.
-    -   `NEAREST(k)`: k-NN for spatial distance.
+    -   `NEAREST(point, k)`: k-NN for spatial distance from a given point.
 
 4.  **Composition (The "Killer Feature")**:
     -   Must seamlessly integrate with Graph and Vector queries.
@@ -57,7 +57,7 @@ Currently, users must query GallifreyDB for IDs, then query PostGIS/Elasticsearc
 
 ### Non-Functional Requirements
 -   **Accuracy**: Must use Geodetic distance (Haversine/Vincenty), not just Euclidean (so it works globally).
--   **Scale**: Sub-10ms queries for "Find points in radius" on 10M point dataset.
+-   **Scale**: Sub-10ms queries for "Find points in radius" on a 10M point dataset, for queries returning up to 1,000 points.
 
 ## 4. 🚫 Out of Scope (Phase 1)
 
