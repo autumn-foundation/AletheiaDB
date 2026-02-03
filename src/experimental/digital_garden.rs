@@ -134,10 +134,10 @@ impl DigitalGarden {
                 if rng.gen_bool(0.05) {
                     // 5% chance
                     let mutation_rate = 0.05;
-                    let new_x = (plant.x + rng.gen_range(-mutation_rate..mutation_rate))
-                        .clamp(0.0, 1.0);
-                    let new_y = (plant.y + rng.gen_range(-mutation_rate..mutation_rate))
-                        .clamp(0.0, 1.0);
+                    let new_x =
+                        (plant.x + rng.gen_range(-mutation_rate..mutation_rate)).clamp(0.0, 1.0);
+                    let new_y =
+                        (plant.y + rng.gen_range(-mutation_rate..mutation_rate)).clamp(0.0, 1.0);
                     let new_trait = (plant.trait_val
                         + rng.gen_range(-mutation_rate..mutation_rate))
                     .clamp(0.0, 1.0);
