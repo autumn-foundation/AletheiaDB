@@ -3,17 +3,21 @@
 | Metadata | Details |
 | :--- | :--- |
 | **ID** | SPEC-004 |
-| **Status** | 📝 Draft |
+| **Status** | 🔍 Review |
 | **Owner** | Vantage (Product) |
 | **Implementer** | Nova (Engineering) |
 | **Priority** | P1 (High) |
 | **Related Code** | `src/index/spatial.rs` (Proposed) |
 
-## 1. 👤 User Story
+## 1. 👤 User Stories
 
 > **As a** Logistics Manager or Smart City Planner,
 > **I want to** filter and find graph nodes based on their physical geographic location (Lat/Lon) and proximity to other points,
 > **So that** I can answer questions like "Which sensors within 5km of Downtown reported a failure yesterday?" without exporting data to an external GIS system.
+
+> **As a** Real Estate AI Agent,
+> **I want to** find properties similar to "Luxury Villa" (Vector) located within 2km of "Central Park" (Geo),
+> **So that** I can recommend relevant listings that match both the aesthetic and location requirements of the client.
 
 ## 2. 🧐 The "So What?" (Business Value)
 
@@ -39,12 +43,12 @@ Currently, users must query GallifreyDB for IDs, then query PostGIS/Elasticsearc
 1.  **Geo Primitives**:
     -   Support Point (Latitude, Longitude) as a first-class property type.
     -   Support Polygon (List of outer and inner rings of Points) for boundaries, compatible with GeoJSON `Polygon` and `MultiPolygon` types.
-    -   Support standard serialization (GeoJSON or WKT).
+    -   **Standard Formats**: Must support ingestion and output in WKT (Well-Known Text) and GeoJSON formats.
 
 2.  **Spatial Indexing**:
-    -   Must implement a spatial index efficient for range and k-NN queries.
+    -   Must implement a spatial index efficient for range and k-NN queries (e.g., R-Tree or Quadtree).
     -   Index must be persistent and support standard CRUD operations.
-    -   Must support **Hybrid Indexing** (combining Spatial + other property filters). Support for combined Spatial + Temporal filtering is a key goal for achieving the "Where" and "When" integration.
+    -   **Hybrid Indexing**: Must support combined Spatial + Vector + Temporal queries. The query planner should be able to optimize "Near X AND Similar to Y" by choosing the most selective index first.
 
 3.  **Query API**:
     -   `WITHIN_DISTANCE(point, distance_meters)`: Circle search.
@@ -77,7 +81,7 @@ Currently, users must query GallifreyDB for IDs, then query PostGIS/Elasticsearc
 ## 6. 📅 Execution Plan
 
 1.  **Data Types**: Add Geo Point and Polygon support to the type system.
-2.  **Storage**: Implement persistent spatial indexing infrastructure.
+2.  **Storage**: Implement persistent spatial indexing infrastructure (R-Tree recommended).
 3.  **Integration**: Ensure node creation/updates automatically update the spatial index.
 4.  **Query**: Add user-facing methods for distance and boundary checks.
 5.  **Test**: Add benchmarks demonstrating Graph + Geo + Vector performance.
