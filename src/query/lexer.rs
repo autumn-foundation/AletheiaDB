@@ -1576,4 +1576,26 @@ mod tests {
             assert_eq!(format!("{}", token), expected_display);
         }
     }
+
+    #[test]
+    fn test_lexer_error_coverage() {
+        let err = LexerError {
+            message: "test error".to_string(),
+            position: 10,
+            line: 2,
+            column: 5,
+        };
+
+        // Test Clone
+        let cloned = err.clone();
+        // Test PartialEq
+        assert_eq!(err, cloned);
+        // Test Debug
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("LexerError"));
+        assert!(debug_str.contains("test error"));
+        // Test Display
+        let display_str = format!("{}", err);
+        assert_eq!(display_str, "Lexer error at line 2, column 5: test error");
+    }
 }
