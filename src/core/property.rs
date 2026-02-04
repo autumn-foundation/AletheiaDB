@@ -181,15 +181,24 @@ impl PropertyValue {
     /// This validation ensures that vectors can be serialized without error.
     #[inline]
     pub fn vector<V: AsRef<[f32]>>(v: V) -> Self {
+        Self::try_vector(v).unwrap_or_else(|e| panic!("{}", e))
+    }
+
+    /// Create a vector property value from a slice (fallible).
+    ///
+    /// Returns `Err` if the vector dimension exceeds [`MAX_VECTOR_DIMENSIONS`].
+    #[inline]
+    pub fn try_vector<V: AsRef<[f32]>>(v: V) -> Result<Self> {
         let slice = v.as_ref();
         if slice.len() > MAX_VECTOR_DIMENSIONS {
-            panic!(
+            return Err(StorageError::CorruptedData(format!(
                 "Vector dimension {} exceeds maximum allowed {}",
                 slice.len(),
                 MAX_VECTOR_DIMENSIONS
-            );
+            ))
+            .into());
         }
-        PropertyValue::Vector(Arc::from(slice))
+        Ok(PropertyValue::Vector(Arc::from(slice)))
     }
 
     /// Returns true if this value is null.
@@ -516,7 +525,7 @@ impl PropertyValue {
                 Ok(())
             }
             PropertyValue::Vector(v) => {
-                serialize_vector_into(v, buffer);
+                try_serialize_vector_into(v, buffer)?;
                 Ok(())
             }
             PropertyValue::SparseVector(sv) => {
@@ -867,6 +876,18 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 ///
 /// This is more efficient when serializing as part of a larger structure.
 ///
+/// # Panics
+///
+/// Panics if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
+/// Use [`try_serialize_vector_into`] for a fallible version.
+pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
+    try_serialize_vector_into(v, buffer).expect("Vector dimension exceeds maximum allowed")
+}
+
+/// Serialize a vector into an existing buffer (fallible).
+///
+/// This is more efficient when serializing as part of a larger structure.
+///
 /// # Performance Optimization (Issue #203)
 ///
 /// On little-endian platforms (x86, ARM, etc.), this uses bulk byte copying
@@ -878,19 +899,18 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 /// - Deserialization: ~217ns @ 26.3 GiB/s
 /// - Round-trip: ~308ns @ 37.2 GiB/s
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
-/// This is a defensive check; vectors should be validated at construction
-/// time via [`PropertyValue::vector()`] which enforces this limit.
-pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
+/// Returns `StorageError::CorruptedData` if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
+pub fn try_serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) -> Result<()> {
     // Defensive check: vectors should be validated at construction via PropertyValue::vector()
     if v.len() > MAX_VECTOR_DIMENSIONS {
-        panic!(
+        return Err(StorageError::CorruptedData(format!(
             "Vector dimension {} exceeds maximum allowed {}",
             v.len(),
             MAX_VECTOR_DIMENSIONS
-        );
+        ))
+        .into());
     }
 
     // Pre-allocate space to avoid multiple reallocations
@@ -929,6 +949,8 @@ pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
             buffer.extend_from_slice(&value.to_le_bytes());
         }
     }
+
+    Ok(())
 }
 
 /// Deserialize a vector from bytes.
@@ -1771,6 +1793,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
 }
 
 /// Builder for creating or modifying property maps with copy-on-write semantics.
+#[derive(Debug)]
 pub struct PropertyMapBuilder {
     map: HashMap<PropertyKey, PropertyValue>,
     current_size: usize,
@@ -1808,9 +1831,7 @@ impl PropertyMapBuilder {
 
     /// Insert a property (fallible).
     pub fn try_insert<V: Into<PropertyValue>>(mut self, key: &str, value: V) -> Result<Self> {
-        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
-            return Ok(self);
-        };
+        let interned_key = GLOBAL_INTERNER.intern(key)?;
         let val = value.into();
         let val_size = val.serialized_size()?;
 
@@ -1900,7 +1921,7 @@ impl PropertyMapBuilder {
 
     /// Insert a vector property (fallible).
     pub fn try_insert_vector(self, key: &str, vector: &[f32]) -> Result<Self> {
-        self.try_insert(key, PropertyValue::vector(vector))
+        self.try_insert(key, PropertyValue::try_vector(vector)?)
     }
 
     /// Remove a property.
@@ -3870,21 +3891,43 @@ mod sentry_tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "Vector dimension")]
-    fn test_try_insert_vector_panics_on_overflow() {
-        // 💣 Risk: try_insert_vector implies fallibility but panics on large inputs.
-        // This test documents this behavior to prevent regression or unexpected changes.
+    fn test_try_insert_vector_returns_error_on_overflow() {
+        // 💣 Risk: try_insert_vector implies fallibility but previously panicked.
+        // 🛡️ Fix: Now validates and returns Result::Err.
         let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
-        let _ = PropertyMapBuilder::new().try_insert_vector("test", &large_vector);
+        let result = PropertyMapBuilder::new().try_insert_vector("test", &large_vector);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(msg.contains("Vector dimension"));
+            }
+            _ => panic!("Expected StorageError::CorruptedData, got {:?}", result),
+        }
     }
 
     #[test]
     #[should_panic(expected = "Vector dimension")]
     fn test_serialize_vector_into_panics_on_overflow() {
         // 💣 Risk: serialize_vector_into panics on large inputs instead of returning Result.
+        // This wrapper is designed to panic, so this test ensures it still does.
         let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
         let mut buffer = Vec::new();
         serialize_vector_into(&large_vector, &mut buffer);
+    }
+
+    #[test]
+    fn test_try_serialize_vector_into_returns_error_on_overflow() {
+        // 🛡️ Fix: New API returns Result::Err instead of panicking.
+        let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
+        let mut buffer = Vec::new();
+        let result = try_serialize_vector_into(&large_vector, &mut buffer);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(msg.contains("Vector dimension"));
+            }
+            _ => panic!("Expected StorageError::CorruptedData, got {:?}", result),
+        }
     }
 
     #[test]
