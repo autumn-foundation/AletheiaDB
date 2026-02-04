@@ -23,9 +23,52 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style, Stylize},
     text::Span,
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph, Widget},
     Terminal,
 };
+
+// --- Reusable Component: TensionBar ---
+// This refactors the tension logic into a reusable UI component.
+// Demonstrates "Mosaic" widget design principles.
+struct TensionBar {
+    tension: f64,
+}
+
+impl TensionBar {
+    fn new(tension: f64) -> Self {
+        Self { tension }
+    }
+}
+
+impl Widget for TensionBar {
+    fn render(self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        // Visual Hierarchy: Tension is critical info
+        let tension_percent = (self.tension * 100.0).clamp(0.0, 100.0);
+        let tension_label = Span::styled(
+            format!("{:.0}%", tension_percent),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        // Feedback Loop: Color changes with tension (Green -> Yellow -> Red)
+        let tension_color = if self.tension < 0.5 {
+            Color::Green
+        } else if self.tension < 0.8 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+
+        let gauge = Gauge::default()
+            .block(Block::default().title("Line Tension").borders(Borders::ALL))
+            .gauge_style(Style::default().fg(tension_color))
+            .ratio(self.tension.clamp(0.0, 1.0))
+            .label(tension_label);
+
+        gauge.render(area, buf);
+    }
+}
 
 struct App {
     tension: f64,
@@ -167,31 +210,8 @@ fn ui(frame: &mut ratatui::Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, chunks[0]);
 
-    // 2. Tension Bar (The requested component)
-    // Visual Hierarchy: Tension is critical info
-    let tension_percent = (app.tension * 100.0).clamp(0.0, 100.0);
-    let tension_label = Span::styled(
-        format!("{:.0}%", tension_percent),
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    // Feedback Loop: Color changes with tension (Green -> Yellow -> Red)
-    let tension_color = if app.tension < 0.5 {
-        Color::Green
-    } else if app.tension < 0.8 {
-        Color::Yellow
-    } else {
-        Color::Red
-    };
-
-    let gauge = Gauge::default()
-        .block(Block::default().title("Line Tension").borders(Borders::ALL))
-        .gauge_style(Style::default().fg(tension_color))
-        .ratio(app.tension.clamp(0.0, 1.0))
-        .label(tension_label);
-    frame.render_widget(gauge, chunks[1]);
+    // 2. Tension Bar (Reusable Component)
+    frame.render_widget(TensionBar::new(app.tension), chunks[1]);
 
     // 3. Fishing Area (Bobber Visualization)
     let area_block = Block::default()

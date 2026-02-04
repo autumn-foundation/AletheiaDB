@@ -1046,4 +1046,20 @@ mod tests {
             GLOBAL_INTERNER.len()
         );
     }
+
+    #[test]
+    fn test_display_formatting() {
+        // Test 1: Valid interned string (Some branch)
+        // Ensure the string is in the global interner
+        let id = GLOBAL_INTERNER.intern("display_test").unwrap();
+        let output = format!("{}", id);
+        assert_eq!(output, "display_test");
+
+        // Test 2: Invalid interned string (None branch)
+        // Use a very large ID that is unlikely to exist
+        // This exercises the fallback path in Display implementation
+        let invalid_id = InternedString::from_raw(999_999_999);
+        let output = format!("{}", invalid_id);
+        assert_eq!(output, "Interned(999999999)");
+    }
 }
