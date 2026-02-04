@@ -1564,16 +1564,24 @@ mod tests {
             (Token::Eof, "EOF"),
         ];
 
-        for (token, expected_display) in cases {
+        for (i, (token, expected_display)) in cases.iter().enumerate() {
             // Test Clone
             let cloned = token.clone();
-            // Test PartialEq
-            assert_eq!(token, cloned);
+            // Test PartialEq (Equality)
+            assert_eq!(token, &cloned);
+
+            // Test PartialEq (Inequality) - compare against all other tokens
+            for (j, (other_token, _)) in cases.iter().enumerate() {
+                if i != j {
+                    assert_ne!(token, other_token);
+                }
+            }
+
             // Test Debug
             let debug_str = format!("{:?}", token);
             assert!(!debug_str.is_empty());
             // Test Display
-            assert_eq!(format!("{}", token), expected_display);
+            assert_eq!(format!("{}", token), *expected_display);
         }
     }
 
