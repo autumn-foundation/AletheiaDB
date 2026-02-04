@@ -11,6 +11,7 @@
 
 use dashmap::DashMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -65,6 +66,32 @@ impl fmt::Display for InternedString {
     }
 }
 
+/// A hasher that passes through u32 values unchanged.
+/// Used for the ID -> String map where keys are already unique integers.
+/// This avoids the overhead of hashing (SipHash) for lookups.
+#[derive(Default)]
+struct IdentityHasher(u64);
+
+impl Hasher for IdentityHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        // Fallback: treat bytes as little-endian u32 if length matches
+        if let Ok(bytes) = bytes.try_into() {
+            self.0 = u32::from_le_bytes(bytes) as u64;
+        } else {
+            // Should not happen for InternedString keys
+            self.0 = bytes.len() as u64;
+        }
+    }
+
+    fn write_u32(&mut self, i: u32) {
+        self.0 = i as u64;
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 /// Thread-safe string interner.
 ///
 /// This interner maintains a bidirectional mapping between strings and IDs:
@@ -76,7 +103,8 @@ pub struct StringInterner {
     /// Maps strings to their IDs.
     string_to_id: DashMap<Arc<str>, InternedString>,
     /// Maps IDs back to strings.
-    id_to_string: DashMap<InternedString, Arc<str>>,
+    /// Uses IdentityHasher for O(1) lookups without hashing overhead.
+    id_to_string: DashMap<InternedString, Arc<str>, BuildHasherDefault<IdentityHasher>>,
     /// Next ID to assign.
     next_id: AtomicU32,
     /// Maximum number of strings to intern (DoS protection)
@@ -93,7 +121,7 @@ impl StringInterner {
     pub fn with_max_capacity(max_capacity: usize) -> Self {
         StringInterner {
             string_to_id: DashMap::new(),
-            id_to_string: DashMap::new(),
+            id_to_string: DashMap::with_hasher(BuildHasherDefault::default()),
             next_id: AtomicU32::new(0),
             max_capacity,
         }
@@ -1038,5 +1066,26 @@ mod tests {
             COMMON_STRINGS.len(),
             GLOBAL_INTERNER.len()
         );
+    }
+
+    #[test]
+    fn test_identity_hasher() {
+        use std::hash::Hasher;
+        let mut hasher = IdentityHasher::default();
+
+        // Test write_u32 (primary path)
+        hasher.write_u32(42);
+        assert_eq!(hasher.finish(), 42);
+
+        // Test write with 4 bytes (fallback success path)
+        let bytes = 12345u32.to_le_bytes();
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 12345);
+
+        // Test write with other length (fallback fail path)
+        // This covers the else branch in IdentityHasher::write
+        let bytes = [1u8, 2, 3];
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 3); // Should use len()
     }
 }

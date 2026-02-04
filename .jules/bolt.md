@@ -13,3 +13,7 @@
 ## 2026-07-15 - Read-only Interning on Property Map
 **Learning:** `PropertyMap::get(key)` called `intern(key)`, which acquires a write lock and allocates memory even for non-existent keys. This turned simple read operations into write operations on the global interner, creating a DoS vector and memory leak for random/non-existent keys.
 **Action:** Use `get_id(key)` for read operations (`get`, `contains_key`, `remove`) to check if the key is interned without creating it. Only use `intern()` when inserting new data.
+
+## 2026-10-27 - Identity Hashing for Integer Keys in DashMap
+**Learning:** `DashMap<u32, V>` uses `SipHash` by default, which is expensive for simple integer keys that are already unique (like interned IDs). In the `StringInterner::resolve_with` hot path, this hashing overhead was significant.
+**Action:** Use `BuildHasherDefault<IdentityHasher>` for maps where keys are already unique integers or IDs to skip the hashing step, improving throughput by ~2.5x.
