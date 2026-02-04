@@ -43,7 +43,6 @@ pub enum Token {
     // ========================================================================
     // Keywords - Graph Pattern Matching
     // ========================================================================
-
     /// The `MATCH` keyword, used to specify graph patterns.
     Match,
     /// The `WHERE` keyword, used to filter results based on predicates.
@@ -70,7 +69,6 @@ pub enum Token {
     // ========================================================================
     // Keywords - Logical & Predicates
     // ========================================================================
-
     /// The `AND` logical operator.
     And,
     /// The `OR` logical operator.
@@ -91,7 +89,6 @@ pub enum Token {
     // ========================================================================
     // Keywords - Vector Search
     // ========================================================================
-
     /// The `SIMILAR` keyword, used in vector similarity searches.
     Similar,
     /// The `TO` keyword, used in `SIMILAR TO`.
@@ -110,7 +107,6 @@ pub enum Token {
     // ========================================================================
     // Keywords - Temporal
     // ========================================================================
-
     /// The `AS` keyword, used in `AS OF` temporal clauses or for aliasing (`RETURN n AS name`).
     As,
     /// The `OF` keyword, used in `AS OF`.
@@ -121,7 +117,6 @@ pub enum Token {
     // ========================================================================
     // Keywords - String Predicates
     // ========================================================================
-
     /// The `EXISTS` predicate function.
     Exists,
     /// The `CONTAINS` string predicate.
@@ -136,7 +131,6 @@ pub enum Token {
     // ========================================================================
     // Keywords - Distance Metrics
     // ========================================================================
-
     /// The `COSINE` distance metric.
     Cosine,
     /// The `EUCLIDEAN` distance metric.
@@ -147,7 +141,6 @@ pub enum Token {
     // ========================================================================
     // Punctuation & Delimiters
     // ========================================================================
-
     /// Left parenthesis `(`.
     LeftParen,
     /// Right parenthesis `)`.
@@ -174,7 +167,6 @@ pub enum Token {
     // ========================================================================
     // Arrow Patterns
     // ========================================================================
-
     /// Right arrow `->` for outgoing relationships.
     Arrow,
     /// Left arrow `<-` for incoming relationships.
@@ -183,7 +175,6 @@ pub enum Token {
     // ========================================================================
     // Comparison Operators
     // ========================================================================
-
     /// Equality operator `=`.
     Eq,
     /// Inequality operator `<>` or `!=`.
@@ -200,7 +191,6 @@ pub enum Token {
     // ========================================================================
     // Literals & Identifiers
     // ========================================================================
-
     /// An identifier (variable name, label, property key).
     Identifier(String),
     /// A string literal (e.g., `'hello'`).
@@ -215,13 +205,11 @@ pub enum Token {
     // ========================================================================
     // Special
     // ========================================================================
-
     /// End of file/input marker.
     Eof,
 }
 
 impl fmt::Display for Token {
-    #[inline(never)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Token::Match => write!(f, "MATCH"),
@@ -307,7 +295,6 @@ pub struct LexerError {
 }
 
 impl fmt::Display for LexerError {
-    #[inline(never)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -843,7 +830,12 @@ impl<'a> Lexer<'a> {
 
     #[inline(never)]
     fn error(&self, message: String) -> LexerError {
-        LexerError { message, position: self.position, line: self.line, column: self.column }
+        LexerError {
+            message,
+            position: self.position,
+            line: self.line,
+            column: self.column,
+        }
     }
 }
 
@@ -1487,19 +1479,67 @@ mod tests {
     #[test]
     fn test_token_derived_traits() {
         let tokens = vec![
-            Token::Match, Token::Where, Token::Return, Token::Order, Token::By,
-            Token::Limit, Token::Skip, Token::Distinct, Token::Count, Token::Asc, Token::Desc,
-            Token::And, Token::Or, Token::Not, Token::In, Token::Is, Token::Null, Token::True, Token::False,
-            Token::Similar, Token::To, Token::Using, Token::Find, Token::Rank, Token::Similarity, Token::Top,
-            Token::As, Token::Of, Token::Between,
-            Token::Exists, Token::Contains, Token::Starts, Token::Ends, Token::With,
-            Token::Cosine, Token::Euclidean, Token::DotProduct,
-            Token::LeftParen, Token::RightParen, Token::LeftBracket, Token::RightBracket,
-            Token::LeftBrace, Token::RightBrace, Token::Colon, Token::Comma, Token::Dot, Token::Star, Token::Dash,
-            Token::Arrow, Token::LeftArrow,
-            Token::Eq, Token::Ne, Token::Lt, Token::Le, Token::Gt, Token::Ge,
-            Token::Identifier("id".to_string()), Token::StringLiteral("str".to_string()),
-            Token::IntegerLiteral(42), Token::FloatLiteral(3.14), Token::Parameter("param".to_string()),
+            Token::Match,
+            Token::Where,
+            Token::Return,
+            Token::Order,
+            Token::By,
+            Token::Limit,
+            Token::Skip,
+            Token::Distinct,
+            Token::Count,
+            Token::Asc,
+            Token::Desc,
+            Token::And,
+            Token::Or,
+            Token::Not,
+            Token::In,
+            Token::Is,
+            Token::Null,
+            Token::True,
+            Token::False,
+            Token::Similar,
+            Token::To,
+            Token::Using,
+            Token::Find,
+            Token::Rank,
+            Token::Similarity,
+            Token::Top,
+            Token::As,
+            Token::Of,
+            Token::Between,
+            Token::Exists,
+            Token::Contains,
+            Token::Starts,
+            Token::Ends,
+            Token::With,
+            Token::Cosine,
+            Token::Euclidean,
+            Token::DotProduct,
+            Token::LeftParen,
+            Token::RightParen,
+            Token::LeftBracket,
+            Token::RightBracket,
+            Token::LeftBrace,
+            Token::RightBrace,
+            Token::Colon,
+            Token::Comma,
+            Token::Dot,
+            Token::Star,
+            Token::Dash,
+            Token::Arrow,
+            Token::LeftArrow,
+            Token::Eq,
+            Token::Ne,
+            Token::Lt,
+            Token::Le,
+            Token::Gt,
+            Token::Ge,
+            Token::Identifier("id".to_string()),
+            Token::StringLiteral("str".to_string()),
+            Token::IntegerLiteral(42),
+            Token::FloatLiteral(3.14),
+            Token::Parameter("param".to_string()),
             Token::Eof,
         ];
 
