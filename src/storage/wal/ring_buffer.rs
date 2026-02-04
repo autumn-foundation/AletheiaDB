@@ -739,6 +739,11 @@ impl WalRingBuffer {
     }
 
     #[cfg(test)]
+    /// Set internal state for testing wraparound scenarios.
+    ///
+    /// This method allows manually setting `write_pos` and `read_pos` to simulate
+    /// conditions like near-overflow states without running for centuries.
+    /// It also resets the slot sequences to match the new `write_pos`.
     pub fn set_state_for_test(&self, write: u64, read: u64) {
         self.write_pos.store(write, Ordering::Relaxed);
         self.read_pos.store(read, Ordering::Relaxed);
