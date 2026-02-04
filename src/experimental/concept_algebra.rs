@@ -12,13 +12,14 @@
 //! ```rust,no_run
 //! use gallifreydb::GallifreyDB;
 //! use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
+//! use gallifreydb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = GallifreyDB::new()?;
 //! // ... (assume db is populated with nodes and vectors) ...
-//! let king = 1.into();
-//! let man = 2.into();
-//! let woman = 3.into();
+//! let king = NodeId::new(1).unwrap();
+//! let man = NodeId::new(2).unwrap();
+//! let woman = NodeId::new(3).unwrap();
 //!
 //! let algebra = ConceptAlgebra::new(&db);
 //!
@@ -104,6 +105,24 @@ impl<'a> ConceptAlgebra<'a> {
     /// This operation combines the semantic meaning of two nodes.
     /// Returns the `k` nearest neighbors to the resulting vector.
     ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use gallifreydb::core::id::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
+    /// let algebra = ConceptAlgebra::new(&db);
+    /// let concept1 = NodeId::new(1).unwrap();
+    /// let concept2 = NodeId::new(2).unwrap();
+    ///
+    /// // Combine concepts
+    /// let results = algebra.add(concept1, concept2, 5)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns an error if the nodes do not have vectors or if dimensions mismatch.
@@ -131,6 +150,24 @@ impl<'a> ConceptAlgebra<'a> {
     /// This operation removes the semantic meaning of node B from node A.
     /// Returns the `k` nearest neighbors to the resulting vector.
     ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use gallifreydb::core::id::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
+    /// let algebra = ConceptAlgebra::new(&db);
+    /// let concept = NodeId::new(1).unwrap();
+    /// let noise = NodeId::new(2).unwrap();
+    ///
+    /// // Remove noise from concept
+    /// let results = algebra.subtract(concept, noise, 5)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns an error if the nodes do not have vectors or if dimensions mismatch.
@@ -156,6 +193,25 @@ impl<'a> ConceptAlgebra<'a> {
     /// Example: "King" - "Man" + "Woman" = "Queen".
     ///
     /// Returns the `k` nearest neighbors to the resulting vector.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use gallifreydb::core::id::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
+    /// let algebra = ConceptAlgebra::new(&db);
+    /// let king = NodeId::new(1).unwrap();
+    /// let man = NodeId::new(2).unwrap();
+    /// let woman = NodeId::new(3).unwrap();
+    ///
+    /// // King - Man + Woman = Queen
+    /// let results = algebra.analogy(king, man, woman, 1)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
@@ -191,6 +247,24 @@ impl<'a> ConceptAlgebra<'a> {
     ///
     /// Finds the "center of mass" for the given nodes in vector space.
     /// Returns the `k` nearest neighbors to the centroid.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use gallifreydb::core::id::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
+    /// let algebra = ConceptAlgebra::new(&db);
+    /// let n1 = NodeId::new(1).unwrap();
+    /// let n2 = NodeId::new(2).unwrap();
+    ///
+    /// // Find centroid
+    /// let results = algebra.mean(&[n1, n2], 5)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///

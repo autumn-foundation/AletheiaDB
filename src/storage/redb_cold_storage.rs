@@ -18,30 +18,19 @@
 //! - WAL can safely truncate segments where max_lsn < flushed_lsn
 //! - Recovery replays WAL from flushed_lsn + 1
 //!
-//! # Usage
+//! # Example
 //!
-//! ```rust,no_run
-//! use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig, CompressionAlgorithm};
-//! use gallifreydb::storage::wal::LSN;
+//! ```ignore
+//! use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Configure storage
-//! let config = RedbConfig::new()
-//!     .compression(CompressionAlgorithm::Zstd)
-//!     .enable_checksums(true);
-//!
-//! // Open database
+//! let config = RedbConfig::default();
 //! let storage = RedbColdStorage::new("data/cold.redb", config)?;
 //!
-//! // Check for existing LSN to resume from
-//! if let Some(lsn) = storage.get_flushed_lsn()? {
-//!     println!("Resuming from LSN: {:?}", lsn);
-//! }
+//! // Store versions with LSN tracking
+//! storage.store_batch_with_lsn(&node_versions, &edge_versions, LSN(1000))?;
 //!
-//! // Store versions (usually done by the migration task)
-//! // storage.store_batch_with_lsn(&node_versions, &edge_versions, current_lsn)?;
-//! # Ok(())
-//! # }
+//! // Get flushed LSN for WAL truncation
+//! let flushed_lsn = storage.get_flushed_lsn()?;
 //! ```
 
 use crate::core::id::VersionId;
@@ -77,13 +66,13 @@ const FLUSHED_LSN_KEY: &str = "flushed_lsn";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 pub enum CompressionAlgorithm {
-    /// No compression (fastest, but uses more disk space).
+    /// No compression (fastest, but uses more disk space)
     None,
-    /// Zstd compression (ratio-optimized, default).
+    /// Zstd compression (ratio-optimized, default)
     #[default]
     Zstd,
-    /// LZ4-compatible fast compression using Zstd level 1.
-    /// Provides similar speed characteristics to LZ4 with better compatibility.
+    /// LZ4-compatible fast compression using Zstd level 1
+    /// Provides similar speed characteristics to LZ4 with better compatibility
     Fast,
 }
 
@@ -156,8 +145,6 @@ pub struct ColdStorageStats {
 
 impl ColdStorageStats {
     /// Calculate the compression ratio (raw/compressed).
-    ///
-    /// Returns 1.0 if no data has been written.
     pub fn compression_ratio(&self) -> f64 {
         if self.bytes_written_compressed == 0 {
             1.0
@@ -168,8 +155,6 @@ impl ColdStorageStats {
 }
 
 /// Atomic statistics tracker for cold storage.
-///
-/// Used internally to track statistics in a thread-safe manner.
 #[derive(Debug, Default)]
 pub struct AtomicColdStorageStats {
     /// Total number of node versions stored.
@@ -343,10 +328,6 @@ pub struct RedbColdStorage {
 
 impl RedbColdStorage {
     /// Create a new Redb cold storage at the given path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the directory cannot be created or the database cannot be opened.
     pub fn new<P: AsRef<Path>>(path: P, config: RedbConfig) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
@@ -436,8 +417,6 @@ impl RedbColdStorage {
     }
 
     /// Get the flushed LSN from the metadata table.
-    ///
-    /// Returns `None` if no LSN has been recorded yet.
     pub fn get_flushed_lsn(&self) -> Result<Option<LSN>> {
         let read_txn = self
             .db
@@ -510,8 +489,6 @@ impl RedbColdStorage {
     // ========================================================================
 
     /// Store a node version.
-    ///
-    /// This method encodes, compresses, and writes the version to the `node_versions` table.
     pub fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
         self.check_fail_writes()?;
 
@@ -556,8 +533,6 @@ impl RedbColdStorage {
     }
 
     /// Retrieve a node version.
-    ///
-    /// Returns `Ok(None)` if the version does not exist.
     pub fn get_node_version(&self, id: VersionId) -> Result<Option<NodeVersion>> {
         self.stats
             .node_version_reads
@@ -602,8 +577,6 @@ impl RedbColdStorage {
     }
 
     /// Store an edge version.
-    ///
-    /// This method encodes, compresses, and writes the version to the `edge_versions` table.
     pub fn store_edge_version(&self, version: &EdgeVersion) -> Result<()> {
         self.check_fail_writes()?;
 
@@ -648,8 +621,6 @@ impl RedbColdStorage {
     }
 
     /// Retrieve an edge version.
-    ///
-    /// Returns `Ok(None)` if the version does not exist.
     pub fn get_edge_version(&self, id: VersionId) -> Result<Option<EdgeVersion>> {
         self.stats
             .edge_version_reads
@@ -738,8 +709,6 @@ impl RedbColdStorage {
     }
 
     /// Delete a node version.
-    ///
-    /// Returns `true` if the version existed and was deleted.
     pub fn delete_node_version(&self, id: VersionId) -> Result<bool> {
         let write_txn = self
             .db
@@ -771,8 +740,6 @@ impl RedbColdStorage {
     }
 
     /// Delete an edge version.
-    ///
-    /// Returns `true` if the version existed and was deleted.
     pub fn delete_edge_version(&self, id: VersionId) -> Result<bool> {
         let write_txn = self
             .db
@@ -928,12 +895,6 @@ impl RedbColdStorage {
     ///
     /// This operation is atomic - either all versions are stored and the LSN is updated,
     /// or nothing is changed. This enables safe WAL truncation.
-    ///
-    /// # Arguments
-    ///
-    /// * `nodes` - Slice of node versions to store.
-    /// * `edges` - Slice of edge versions to store.
-    /// * `lsn` - The Last Sequence Number (LSN) associated with this batch.
     pub fn store_batch_with_lsn(
         &self,
         nodes: &[NodeVersion],
