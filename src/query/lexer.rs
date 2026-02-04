@@ -3,95 +3,170 @@
 //! Tokenizes GQL (Gallifrey Query Language) input strings into a stream of tokens.
 //! This is the first stage of parsing - converting raw text into structured tokens
 //! that the parser can work with.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use gallifreydb::query::lexer::{Lexer, Token};
+//!
+//! let query = "MATCH (n:Person) RETURN n";
+//! let tokens = Lexer::tokenize(query).unwrap();
+//!
+//! assert_eq!(tokens[0], Token::Match);
+//! assert_eq!(tokens[1], Token::LeftParen);
+//! assert_eq!(tokens[2], Token::Identifier("n".to_string()));
+//! // ...
+//! ```
 
 use std::fmt;
 
 /// A token in the GQL language.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum Token {
     // Keywords - Graph
+    /// `MATCH` keyword for pattern matching.
     Match,
+    /// `WHERE` keyword for filtering.
     Where,
+    /// `RETURN` keyword for projecting results.
     Return,
+    /// `ORDER` keyword for sorting.
     Order,
+    /// `BY` keyword used in `ORDER BY`.
     By,
+    /// `LIMIT` keyword for limiting results.
     Limit,
+    /// `SKIP` keyword for skipping results.
     Skip,
+    /// `DISTINCT` keyword for deduplicating results.
     Distinct,
+    /// `COUNT` aggregate function.
     Count,
+    /// `ASC` keyword for ascending sort order.
     Asc,
+    /// `DESC` keyword for descending sort order.
     Desc,
 
     // Keywords - Logical
+    /// `AND` logical operator.
     And,
+    /// `OR` logical operator.
     Or,
+    /// `NOT` logical operator.
     Not,
+    /// `IN` list membership operator.
     In,
+    /// `IS` type/null check operator.
     Is,
+    /// `NULL` literal.
     Null,
+    /// `TRUE` boolean literal.
     True,
+    /// `FALSE` boolean literal.
     False,
 
     // Keywords - Vector
+    /// `SIMILAR` keyword for vector similarity search.
     Similar,
+    /// `TO` keyword used in `SIMILAR TO`.
     To,
+    /// `USING` keyword for specifying index/metric.
     Using,
+    /// `FIND` keyword for vector search.
     Find,
+    /// `RANK` keyword for ranking results.
     Rank,
+    /// `SIMILARITY` keyword used in `RANK BY SIMILARITY`.
     Similarity,
+    /// `TOP` keyword for top-k results.
     Top,
 
     // Keywords - Temporal
+    /// `AS` keyword used in `AS OF`.
     As,
+    /// `OF` keyword used in `AS OF`.
     Of,
+    /// `BETWEEN` keyword for range queries.
     Between,
 
     // Keywords - String predicates
+    /// `EXISTS` predicate.
     Exists,
+    /// `CONTAINS` string predicate.
     Contains,
+    /// `STARTS` string predicate (used with `WITH`).
     Starts,
+    /// `ENDS` string predicate (used with `WITH`).
     Ends,
+    /// `WITH` keyword used in string predicates.
     With,
 
     // Keywords - Distance metrics
+    /// `COSINE` distance metric.
     Cosine,
+    /// `EUCLIDEAN` distance metric.
     Euclidean,
+    /// `DOT_PRODUCT` distance metric.
     DotProduct,
 
     // Punctuation
+    /// Left parenthesis `(`.
     LeftParen,
+    /// Right parenthesis `)`.
     RightParen,
+    /// Left bracket `[`.
     LeftBracket,
+    /// Right bracket `]`.
     RightBracket,
+    /// Left brace `{`.
     LeftBrace,
+    /// Right brace `}`.
     RightBrace,
+    /// Colon `:`.
     Colon,
+    /// Comma `,`.
     Comma,
+    /// Dot `.`.
     Dot,
+    /// Asterisk `*`.
     Star,
+    /// Dash `-`.
     Dash,
 
     // Arrow patterns for relationships
+    /// Right arrow `->`.
     Arrow,
+    /// Left arrow `<-`.
     LeftArrow,
 
     // Comparison operators
+    /// Equal `=`.
     Eq,
+    /// Not equal `<>`.
     Ne,
+    /// Less than `<`.
     Lt,
+    /// Less than or equal `<=`.
     Le,
+    /// Greater than `>`.
     Gt,
+    /// Greater than or equal `>=`.
     Ge,
 
     // Literals
+    /// Identifier (e.g., variable names, labels).
     Identifier(String),
+    /// String literal (single or double quoted).
     StringLiteral(String),
+    /// Integer literal.
     IntegerLiteral(i64),
+    /// Float literal.
     FloatLiteral(f64),
+    /// Parameter (starts with `$`).
     Parameter(String),
 
     // End of file
+    /// End of file marker.
     Eof,
 }
 
@@ -167,13 +242,13 @@ impl fmt::Display for Token {
 /// Error type for lexer errors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError {
-    /// Error message describing what went wrong
+    /// Error message describing what went wrong.
     pub message: String,
-    /// Byte position in the input where the error occurred
+    /// Byte position in the input where the error occurred.
     pub position: usize,
-    /// Line number (1-indexed) where the error occurred
+    /// Line number (1-indexed) where the error occurred.
     pub line: usize,
-    /// Column number (1-indexed) where the error occurred
+    /// Column number (1-indexed) where the error occurred.
     pub column: usize,
 }
 
@@ -190,6 +265,22 @@ impl fmt::Display for LexerError {
 impl std::error::Error for LexerError {}
 
 /// A lexer for the GQL query language.
+///
+/// The lexer maintains state as it consumes the input string, tracking position
+/// (line, column) for error reporting.
+///
+/// # Examples
+///
+/// ```rust
+/// use gallifreydb::query::lexer::{Lexer, Token};
+///
+/// let mut lexer = Lexer::new("MATCH (n)");
+/// assert_eq!(lexer.next_token().unwrap(), Token::Match);
+/// assert_eq!(lexer.next_token().unwrap(), Token::LeftParen);
+/// assert_eq!(lexer.next_token().unwrap(), Token::Identifier("n".to_string()));
+/// assert_eq!(lexer.next_token().unwrap(), Token::RightParen);
+/// assert_eq!(lexer.next_token().unwrap(), Token::Eof);
+/// ```
 pub struct Lexer<'a> {
     input: &'a str,
     chars: std::iter::Peekable<std::str::CharIndices<'a>>,
@@ -211,6 +302,12 @@ impl<'a> Lexer<'a> {
     }
 
     /// Tokenize the entire input and return a vector of tokens.
+    ///
+    /// This is a convenience method that creates a Lexer and consumes it until EOF.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LexerError`] if an invalid character or malformed token is encountered.
     pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
         let mut lexer = Lexer::new(input);
         let mut tokens = Vec::new();
@@ -228,6 +325,12 @@ impl<'a> Lexer<'a> {
     }
 
     /// Get the next token from the input.
+    ///
+    /// Returns `Token::Eof` when the end of input is reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LexerError`] if an invalid character or malformed token is encountered.
     pub fn next_token(&mut self) -> Result<Token, LexerError> {
         self.skip_whitespace_and_comments()?;
 

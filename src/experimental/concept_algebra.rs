@@ -6,6 +6,31 @@
 //! - Subtraction: `Concept(A) - Concept(B)` (Removal of meaning)
 //! - Analogy: `Concept(A) - Concept(B) + Concept(C)` (e.g. "King" - "Man" + "Woman" = "Queen")
 //! - Mean: Centroid of multiple concepts.
+//!
+//! # Quick Start
+//!
+//! ```rust,no_run
+//! use gallifreydb::GallifreyDB;
+//! use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = GallifreyDB::new()?;
+//! // ... (assume db is populated with nodes and vectors) ...
+//! let king = 1.into();
+//! let man = 2.into();
+//! let woman = 3.into();
+//!
+//! let algebra = ConceptAlgebra::new(&db);
+//!
+//! // Perform analogy: King - Man + Woman = ?
+//! let results = algebra.analogy(king, man, woman, 5)?;
+//!
+//! for (node_id, score) in results {
+//!     println!("Found node {} with score {}", node_id, score);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::GallifreyDB;
 use crate::core::id::NodeId;
@@ -74,8 +99,14 @@ impl<'a> ConceptAlgebra<'a> {
         }
     }
 
-    /// Perform vector addition: A + B
-    /// Returns the nearest neighbors to the resulting vector.
+    /// Perform vector addition: `A + B`.
+    ///
+    /// This operation combines the semantic meaning of two nodes.
+    /// Returns the `k` nearest neighbors to the resulting vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the nodes do not have vectors or if dimensions mismatch.
     pub fn add(&self, a: NodeId, b: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         let prop = self.get_property_name()?;
         let vec_a = self.get_vector(a, &prop)?;
@@ -95,8 +126,14 @@ impl<'a> ConceptAlgebra<'a> {
         self.db.search_vectors_in(&prop, &sum, k)
     }
 
-    /// Perform vector subtraction: A - B
-    /// Returns the nearest neighbors to the resulting vector.
+    /// Perform vector subtraction: `A - B`.
+    ///
+    /// This operation removes the semantic meaning of node B from node A.
+    /// Returns the `k` nearest neighbors to the resulting vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the nodes do not have vectors or if dimensions mismatch.
     pub fn subtract(&self, a: NodeId, b: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         let prop = self.get_property_name()?;
         let vec_a = self.get_vector(a, &prop)?;
@@ -113,8 +150,16 @@ impl<'a> ConceptAlgebra<'a> {
         self.db.search_vectors_in(&prop, &diff, k)
     }
 
-    /// Perform vector analogy: A - B + C
-    /// e.g. "King" - "Man" + "Woman" = "Queen"
+    /// Perform vector analogy: `A - B + C`.
+    ///
+    /// Solves the analogy: "A is to B as X is to C", where X is the result.
+    /// Example: "King" - "Man" + "Woman" = "Queen".
+    ///
+    /// Returns the `k` nearest neighbors to the resulting vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the nodes do not have vectors or if dimensions mismatch.
     pub fn analogy(&self, a: NodeId, b: NodeId, c: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         let prop = self.get_property_name()?;
         let vec_a = self.get_vector(a, &prop)?;
@@ -143,6 +188,13 @@ impl<'a> ConceptAlgebra<'a> {
     }
 
     /// Calculate the mean (centroid) of a set of nodes.
+    ///
+    /// Finds the "center of mass" for the given nodes in vector space.
+    /// Returns the `k` nearest neighbors to the centroid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the nodes do not have vectors or if dimensions mismatch.
     pub fn mean(&self, nodes: &[NodeId], k: usize) -> Result<Vec<(NodeId, f32)>> {
         if nodes.is_empty() {
             return Ok(Vec::new());
