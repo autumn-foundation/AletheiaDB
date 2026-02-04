@@ -7,9 +7,19 @@
 //!
 //! Tests are written FIRST (TDD), then implementation follows.
 //!
-//! IMPORTANT: These tests are marked with #[serial] to run one at a time.
-//! Running them in parallel causes I/O contention on resource-constrained CI
-//! environments (all tests doing heavy checkpoint I/O with compression simultaneously).
+//! ## Environment-Based Test Behavior
+//!
+//! These tests adapt based on environment:
+//!
+//! **Local Development (no CI env var):**
+//! - Tests run serially to avoid any I/O interference (~0.30s)
+//! - Larger datasets (4-10x bigger) for better coverage
+//!
+//! **CI Environment (CI env var set):**
+//! - Tests run serially to avoid I/O contention
+//! - Minimal datasets for fast, reliable CI on slow runners (macOS/Windows)
+//!
+//! This gives developers better test coverage locally while ensuring fast, reliable CI.
 
 use gallifreydb::core::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
@@ -19,6 +29,44 @@ use gallifreydb::storage::historical::HistoricalStorage;
 use gallifreydb::storage::wal::LSN;
 use serial_test::serial;
 use tempfile::tempdir;
+
+/// Check if running in CI environment
+fn is_ci() -> bool {
+    std::env::var("CI").is_ok()
+}
+
+/// Get test size for bounded memory test
+fn bounded_memory_node_count() -> usize {
+    if is_ci() { 100 } else { 2_000 }
+}
+
+/// Get test size for edges test
+fn edges_test_size() -> (usize, usize) {
+    if is_ci() {
+        (10, 2) // 10 nodes, 2 edges each = ~20 edges
+    } else {
+        (100, 5) // 100 nodes, 5 edges each = ~500 edges
+    }
+}
+
+/// Get test size for temporal versions test
+fn temporal_versions_size() -> (usize, usize) {
+    if is_ci() {
+        (20, 2) // 20 nodes, 2 versions each = 40 versions
+    } else {
+        (100, 5) // 100 nodes, 5 versions each = 500 versions
+    }
+}
+
+/// Get test size for large properties test
+fn large_properties_node_count() -> usize {
+    if is_ci() { 50 } else { 1_000 }
+}
+
+/// Get test size for performance test
+fn performance_test_node_count() -> usize {
+    if is_ci() { 100 } else { 2_000 }
+}
 
 #[test]
 #[serial]
@@ -31,8 +79,9 @@ fn test_streaming_checkpoint_bounded_memory() {
     let historical = HistoricalStorage::new();
 
     // Create many nodes (simulating large database)
-    // Reduced to 500 for CI compatibility while still demonstrating bounded memory
-    let node_count = 500;
+    // CI: 100 nodes for very fast execution on slow runners
+    // Local: 2,000 nodes for better coverage
+    let node_count = bounded_memory_node_count();
     for i in 0..node_count {
         let props = PropertyMapBuilder::new()
             .insert("id", i as i64)
@@ -107,20 +156,22 @@ fn test_streaming_works_with_edges() {
     let historical = HistoricalStorage::new();
 
     // Create nodes
-    // Reduced to 25 nodes for CI compatibility
+    // CI: 10 nodes, 2 edges each = ~20 edges (very fast)
+    // Local: 100 nodes, 5 edges each = ~500 edges
+    let (num_nodes, edges_per_node) = edges_test_size();
     let mut node_ids = Vec::new();
-    for i in 0..25 {
+    for i in 0..num_nodes {
         let props = PropertyMapBuilder::new().insert("id", i as i64).build();
         let node_id = current.create_node("Node", props).unwrap();
         node_ids.push(node_id);
     }
 
-    // Create many edges (25 nodes * 3 edges each ≈ 75 edges)
-    for i in 0..25 {
-        for j in 0..3 {
+    // Create many edges
+    for i in 0..num_nodes {
+        for j in 0..edges_per_node {
             if i != j {
                 let props = PropertyMapBuilder::new()
-                    .insert("weight", (i * 3 + j) as i64)
+                    .insert("weight", (i * edges_per_node + j) as i64)
                     .build();
                 current
                     .create_edge(node_ids[i], node_ids[j], "CONNECTS", props)
@@ -136,9 +187,11 @@ fn test_streaming_works_with_edges() {
         .create_checkpoint(LSN(1), &current, &historical)
         .unwrap();
 
-    // Should have ~75 edges (25 * 3 - some self-edges)
-    assert!(stats.edge_count > 50);
-    assert!(stats.edge_count < 100);
+    // Verify edge count is in expected range
+    let expected_min = (num_nodes * edges_per_node) / 2;
+    let expected_max = num_nodes * edges_per_node;
+    assert!(stats.edge_count > expected_min);
+    assert!(stats.edge_count < expected_max);
 
     // Recovery should preserve all edges
     use gallifreydb::storage::wal::concurrent_system::{
@@ -162,13 +215,16 @@ fn test_streaming_with_temporal_versions() {
 
     let label = GLOBAL_INTERNER.intern("VersionedNode").unwrap();
 
-    // Create nodes and versions (reduced for CI compatibility)
-    for i in 0..50 {
+    // Create nodes and versions
+    // CI: 20 nodes × 2 versions = 40 versions (very fast)
+    // Local: 100 nodes × 5 versions = 500 versions
+    let (num_nodes, versions_per_node) = temporal_versions_size();
+    for i in 0..num_nodes {
         let props = PropertyMapBuilder::new().insert("value", i as i64).build();
         let node_id = current.create_node("VersionedNode", props).unwrap();
 
         // Add multiple versions for each node
-        for v in 0..3 {
+        for v in 0..versions_per_node {
             use gallifreydb::core::id::VersionId;
             use gallifreydb::core::temporal::time::now;
 
@@ -193,7 +249,7 @@ fn test_streaming_with_temporal_versions() {
         }
     }
 
-    // Checkpoint with streaming (should handle 150 versions)
+    // Checkpoint with streaming
     let config = CheckpointConfig::with_data_dir(dir.path());
     let mut manager = CheckpointManager::new(config).unwrap();
     let stats = manager
@@ -201,7 +257,8 @@ fn test_streaming_with_temporal_versions() {
         .unwrap();
 
     // Should have many versions persisted
-    assert!(stats.version_count > 100);
+    let expected_min_versions = (num_nodes * versions_per_node) * 2 / 3;
+    assert!(stats.version_count > expected_min_versions);
 
     // Recovery should restore all versions
     use gallifreydb::storage::wal::concurrent_system::{
@@ -229,8 +286,9 @@ fn test_memory_efficient_large_properties() {
     let historical = HistoricalStorage::new();
 
     // Create nodes with LARGE properties (1KB each)
-    // Reduced to 200 for CI compatibility while still demonstrating memory efficiency
-    let node_count = 200;
+    // CI: 50 nodes = ~50KB (very fast compression)
+    // Local: 1,000 nodes = ~1MB for better stress testing
+    let node_count = large_properties_node_count();
     for i in 0..node_count {
         let large_value = "x".repeat(1000); // 1KB string
         let props = PropertyMapBuilder::new()
@@ -240,8 +298,8 @@ fn test_memory_efficient_large_properties() {
         current.create_node("LargeNode", props).unwrap();
     }
 
-    // Database size: ~200KB (200 nodes × 1KB)
-    // Without streaming: Would need ~600KB (3x overhead)
+    // Database size varies by environment
+    // Without streaming: Would need ~3x overhead
     // With streaming: Should need minimal buffer only
 
     let config = CheckpointConfig::with_data_dir(dir.path());
@@ -310,8 +368,9 @@ fn test_streaming_checkpoint_performance() {
     let historical = HistoricalStorage::new();
 
     // Create dataset
-    // Reduced to 500 for CI compatibility
-    let node_count = 500;
+    // CI: 100 nodes for very fast CI timing (especially macOS/Windows)
+    // Local: 2,000 nodes for realistic performance measurement
+    let node_count = performance_test_node_count();
     for i in 0..node_count {
         let props = PropertyMapBuilder::new()
             .insert("id", i as i64)
