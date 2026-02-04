@@ -6,6 +6,10 @@
 //! - 2-3x memory overhead during checkpointing
 //!
 //! Tests are written FIRST (TDD), then implementation follows.
+//!
+//! IMPORTANT: These tests are marked with #[serial] to run one at a time.
+//! Running them in parallel causes I/O contention on resource-constrained CI
+//! environments (all tests doing heavy checkpoint I/O with compression simultaneously).
 
 use gallifreydb::core::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
@@ -13,9 +17,11 @@ use gallifreydb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
 use gallifreydb::storage::current::CurrentStorage;
 use gallifreydb::storage::historical::HistoricalStorage;
 use gallifreydb::storage::wal::LSN;
+use serial_test::serial;
 use tempfile::tempdir;
 
 #[test]
+#[serial]
 fn test_streaming_checkpoint_bounded_memory() {
     // TDD Test 1: Verify that checkpointing doesn't allocate Vec of all nodes
     // Memory usage should be O(1), not O(n) where n = database size
@@ -50,6 +56,7 @@ fn test_streaming_checkpoint_bounded_memory() {
 }
 
 #[test]
+#[serial]
 fn test_streaming_checkpoint_recovery_correctness() {
     // TDD Test 2: Verify that streaming checkpoint produces correct data
     // Recovery should restore exact same state
@@ -91,6 +98,7 @@ fn test_streaming_checkpoint_recovery_correctness() {
 }
 
 #[test]
+#[serial]
 fn test_streaming_works_with_edges() {
     // TDD Test 3: Verify streaming works for edges too, not just nodes
 
@@ -144,6 +152,7 @@ fn test_streaming_works_with_edges() {
 }
 
 #[test]
+#[serial]
 fn test_streaming_with_temporal_versions() {
     // TDD Test 4: Verify streaming works for historical versions
 
@@ -210,6 +219,7 @@ fn test_streaming_with_temporal_versions() {
 }
 
 #[test]
+#[serial]
 fn test_memory_efficient_large_properties() {
     // TDD Test 5: Verify memory efficiency with large properties
     // Even with large properties, memory should stay bounded
@@ -247,6 +257,7 @@ fn test_memory_efficient_large_properties() {
 }
 
 #[test]
+#[serial]
 fn test_streaming_preserves_version_ids() {
     // TDD Test 6: Ensure streaming doesn't break version ID preservation
     // (Regression test for Issue #1)
@@ -289,6 +300,7 @@ fn test_streaming_preserves_version_ids() {
 }
 
 #[test]
+#[serial]
 fn test_streaming_checkpoint_performance() {
     // TDD Test 7: Performance test - streaming should be as fast or faster
     // than Vec allocation approach
