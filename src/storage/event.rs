@@ -133,3 +133,164 @@ pub fn notify_observers(observers: &[StorageObserver], event: &StorageEvent) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn test_storage_event_accessors() {
+        let ts_val = 1000i64;
+        let timestamp: Timestamp = ts_val.into();
+        let version_id = VersionId::new(1).unwrap();
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+
+        // Test NodeAnchorCreated
+        let node_anchor = StorageEvent::NodeAnchorCreated {
+            version_id,
+            node_id,
+            timestamp,
+        };
+        assert_eq!(node_anchor.timestamp(), timestamp);
+        assert!(node_anchor.is_anchor_event());
+
+        // Test EdgeAnchorCreated
+        let edge_anchor = StorageEvent::EdgeAnchorCreated {
+            version_id,
+            edge_id,
+            timestamp,
+        };
+        assert_eq!(edge_anchor.timestamp(), timestamp);
+        assert!(edge_anchor.is_anchor_event());
+
+        // Test NodeVersionCreated (anchor)
+        let node_ver_anchor = StorageEvent::NodeVersionCreated {
+            version_id,
+            node_id,
+            timestamp,
+            is_anchor: true,
+        };
+        assert_eq!(node_ver_anchor.timestamp(), timestamp);
+        assert!(!node_ver_anchor.is_anchor_event()); // Note: is_anchor_event() specifically checks for *AnchorCreated variants
+
+        // Test NodeVersionCreated (delta)
+        let node_ver_delta = StorageEvent::NodeVersionCreated {
+            version_id,
+            node_id,
+            timestamp,
+            is_anchor: false,
+        };
+        assert_eq!(node_ver_delta.timestamp(), timestamp);
+        assert!(!node_ver_delta.is_anchor_event());
+
+        // Test EdgeVersionCreated (anchor)
+        let edge_ver_anchor = StorageEvent::EdgeVersionCreated {
+            version_id,
+            edge_id,
+            timestamp,
+            is_anchor: true,
+        };
+        assert_eq!(edge_ver_anchor.timestamp(), timestamp);
+        assert!(!edge_ver_anchor.is_anchor_event());
+
+        // Test EdgeVersionCreated (delta)
+        let edge_ver_delta = StorageEvent::EdgeVersionCreated {
+            version_id,
+            edge_id,
+            timestamp,
+            is_anchor: false,
+        };
+        assert_eq!(edge_ver_delta.timestamp(), timestamp);
+        assert!(!edge_ver_delta.is_anchor_event());
+    }
+
+    #[test]
+    fn test_notify_observers() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+
+        let observer: StorageObserver = Arc::new(move |_| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let observers = vec![observer];
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        notify_observers(&observers, &event);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_notify_multiple_observers() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let c1 = count.clone();
+        let c2 = count.clone();
+
+        let obs1: StorageObserver = Arc::new(move |_| {
+            c1.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let obs2: StorageObserver = Arc::new(move |_| {
+            c2.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let observers = vec![obs1, obs2];
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        notify_observers(&observers, &event);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_notify_observer_error_handling() {
+        // Observer that fails
+        let failing: StorageObserver = Arc::new(|_| {
+            Err(crate::utils::error::Error::other("test error".to_string()))
+        });
+
+        // Observer that succeeds
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        let succeeding: StorageObserver = Arc::new(move |_| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let observers = vec![failing, succeeding];
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        // Should not panic, and succeeding observer should still be called
+        notify_observers(&observers, &event);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_storage_event_debug_derive() {
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(2).unwrap(),
+            timestamp: 1000.into(),
+        };
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("NodeAnchorCreated"));
+        assert!(debug_str.contains("version_id"));
+        assert!(debug_str.contains("node_id"));
+        assert!(debug_str.contains("timestamp"));
+    }
+}
