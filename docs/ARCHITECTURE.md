@@ -60,11 +60,14 @@ This document describes the core architecture principles, design patterns, and s
 C4Context
   title System Context diagram for GallifreyDB
 
-  Person(user, "Developer / LLM Agent", "Uses the database for knowledge retrieval")
+  Person(developer, "Developer", "Uses the database for building apps")
+  Person(agent, "AI Agent", "LLM (Claude/Cursor): Uses the database for reasoning")
+
   System(gallifreydb, "GallifreyDB", "Bi-temporal Graph Database")
   System_Ext(filesystem, "File System", "Stores WAL, Indexes, and Cold Data")
 
-  Rel(user, gallifreydb, "Reads/Writes", "Rust API / GQL")
+  Rel(developer, gallifreydb, "Reads/Writes", "Rust API / GQL")
+  Rel(agent, gallifreydb, "Tool Execution", "MCP (stdio)")
   Rel(gallifreydb, filesystem, "Persists", "mmap / fsync")
 ```
 
@@ -74,6 +77,12 @@ C4Context
 
 ```mermaid
 classDiagram
+    namespace Interfaces {
+        class MCPServer {
+            +serve_stdio()
+            +handle_tool_call()
+        }
+    }
     namespace Core {
         class QueryEngine
         class TemporalPlanner
@@ -87,7 +96,13 @@ classDiagram
         class HistoricalStorage
         class RedbImplementation
     }
+    namespace Observability {
+        class HoneycombClient {
+            +send_batch()
+        }
+    }
 
+    MCPServer --> QueryEngine : Uses
     QueryEngine --> StorageTrait : Uses (Trait Bound)
     %% Removed the circular dependency arrow
     RedbImplementation ..|> StorageTrait : Implements
