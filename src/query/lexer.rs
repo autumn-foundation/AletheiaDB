@@ -1606,4 +1606,14 @@ mod tests {
         let display_str = format!("{}", err);
         assert_eq!(display_str, "Lexer error at line 2, column 5: test error");
     }
+
+    #[test]
+    fn test_lexer_error_factory() {
+        let lexer = Lexer::new("abc");
+        let err = lexer.error("custom error".to_string());
+        assert_eq!(err.message, "custom error");
+        assert_eq!(err.position, 0);
+        assert_eq!(err.line, 1);
+        assert_eq!(err.column, 1);
+    }
 }
