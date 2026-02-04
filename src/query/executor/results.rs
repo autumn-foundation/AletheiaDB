@@ -1436,3 +1436,32 @@ mod tests {
         assert_eq!(versions[2], VersionId::new(0).unwrap());
     }
 }
+    #[test]
+    fn test_query_result_display_colorized_boolean() {
+        use crossterm::style::Stylize;
+        use crate::core::property::PropertyMapBuilder;
+
+        // Create a property map with boolean values
+        let props = PropertyMapBuilder::new()
+            .insert("active", true)
+            .insert("deleted", false)
+            .build();
+
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let result = QueryResult::with_nodes(nodes).with_properties(vec![props]);
+
+        let display = format!("{}", result);
+
+        // "true" should be green (ANSI escape code: \u{1b}[38;5;10m)
+        let expected_green_true = "true".green().to_string();
+        assert!(display.contains(&expected_green_true), "Display should contain green 'true'");
+
+        // "false" should be plain (no ANSI escape codes for it directly)
+        // Note: We check for "false" and verify it's NOT green if we want,
+        // but just checking it exists is enough for the `_` match arm coverage.
+        assert!(display.contains("false"), "Display should contain 'false'");
+
+        // Ensure "false" is not colorized green (just to be sure)
+        let green_false = "false".green().to_string();
+        assert!(!display.contains(&green_false), "Display should NOT contain green 'false'");
+}
