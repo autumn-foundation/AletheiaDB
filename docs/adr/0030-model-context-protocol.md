@@ -1,6 +1,6 @@
 # ADR-0030: Adopt Model Context Protocol (MCP)
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-24
 **Deciders:** GallifreyDB Core Team
 **Categories:** architecture, interface, ai-integration
