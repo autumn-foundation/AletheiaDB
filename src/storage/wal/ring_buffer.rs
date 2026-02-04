@@ -561,7 +561,8 @@ impl WalRingBuffer {
                         }
 
                         // Signal that the slot is ready for reading
-                        slot.sequence.store(expected_seq.wrapping_add(1), Ordering::Release);
+                        slot.sequence
+                            .store(expected_seq.wrapping_add(1), Ordering::Release);
 
                         return Ok(());
                     }
