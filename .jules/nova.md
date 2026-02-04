@@ -38,3 +38,11 @@
 - Combining `scan(None)` with batch processing enables powerful global graph analysis.
 - Reifying analysis results back into the graph ("Region" nodes) makes the structure queryable by other tools.
 - `QueryBuilder` provides a flexible way to harvest data for experimental algorithms.
+
+## Temporal Indexer
+**Concept:** Indexes "behavioral patterns" by generating temporal fingerprints (histograms of update activity) and storing them as vector properties, enabling O(log N) search for nodes with similar history.
+**Fate:** Merged (Experimental)
+**Lesson:**
+- The "Observer Effect" is real: Indexing a node updates its history, creating a heartbeat. This is a feature, not a bug.
+- Bridging `EchoChamber` (Time) and `VectorIndex` (Space) unlocks "Behavioral Search".
+- Core bug in `update_node` (ignoring write buffer) required a workaround, highlighting the importance of reading core code carefully.

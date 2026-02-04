@@ -24,3 +24,6 @@ pub mod semantic_navigator;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
+#[cfg(feature = "nova")]
+/// Temporal Indexer for indexing behavioral patterns (Time + Vectors).
+pub mod temporal_index;

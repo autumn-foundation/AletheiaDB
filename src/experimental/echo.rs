@@ -145,11 +145,19 @@ impl<'a> EchoChamber<'a> {
         self
     }
 
+    /// Generate a fingerprint for a specific node.
+    ///
+    /// This method exposes the internal resonator logic, allowing the fingerprint
+    /// to be used for other purposes (e.g., indexing).
+    pub fn generate_fingerprint(&self, node_id: NodeId) -> Result<TemporalFingerprint> {
+        let history = self.db.get_node_history(node_id)?;
+        Ok(self.resonator.resonate(&history))
+    }
+
     /// Find nodes that resonate with the target node.
     pub fn find_echoes(&self, target: NodeId, candidates: &[NodeId]) -> Result<Vec<(NodeId, f32)>> {
         // 1. Get Target History & Fingerprint
-        let target_history = self.db.get_node_history(target)?;
-        let target_fp = self.resonator.resonate(&target_history);
+        let target_fp = self.generate_fingerprint(target)?;
 
         let mut results = Vec::with_capacity(candidates.len());
 
