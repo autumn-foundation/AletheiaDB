@@ -38,3 +38,11 @@
 - Combining `scan(None)` with batch processing enables powerful global graph analysis.
 - Reifying analysis results back into the graph ("Region" nodes) makes the structure queryable by other tools.
 - `QueryBuilder` provides a flexible way to harvest data for experimental algorithms.
+
+## Prophet (Link Prediction)
+**Concept:** A link prediction engine that suggests missing connections using Adamic-Adar (Topological) and Vector Similarity (Semantic) scores.
+**Fate:** Merged (Experimental)
+**Lesson:**
+- Link prediction in directed graphs requires treating neighbors as undirected (incoming + outgoing) to find "shared context".
+- Combining topological structure with semantic similarity creates a "best of both worlds" predictor: structure finds candidates, semantics ranks them.
+- Simple heuristics (Adamic-Adar) are surprisingly effective when boosted by embeddings.
