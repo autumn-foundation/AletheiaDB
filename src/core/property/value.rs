@@ -1,9 +1,9 @@
-use std::fmt;
-use std::sync::Arc;
+use super::serialization::*;
 use crate::core::interning::InternedString;
 use crate::core::vector::SparseVec;
 use crate::utils::error::{Result, StorageError};
-use super::serialization::*;
+use std::fmt;
+use std::sync::Arc;
 
 /// Common keys like "name", "age", and "id" are deduplicated in memory.
 pub type PropertyKey = InternedString;
@@ -760,33 +760,7 @@ impl PropertyValue {
     }
 }
 
-// ============================================================================
-// Vector Serialization Functions
-// ============================================================================
 
-/// Serialize a vector (dense f32 array) to bytes.
-///
-/// # Binary Format
-/// ```text
-/// [tag:1][dimension:4][f32_0:4][f32_1:4]...[f32_n:4]
-/// ```
-///
-/// - Tag: TAG_VECTOR (7)
-/// - Dimension: u32 little-endian, number of elements
-/// - Values: f32 little-endian, the vector elements
-///
-/// # Arguments
-/// * `v` - The vector data to serialize
-///
-/// # Returns
-/// A `Vec<u8>` containing the serialized vector
-///
-/// # Example
-/// ```ignore
-/// let embedding = [0.1f32, 0.2, 0.3];
-/// let bytes = serialize_vector(&embedding);
-/// // bytes = [7, 3, 0, 0, 0, <12 bytes of f32 data>]
-/// ```
 
 impl fmt::Display for PropertyValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -1,9 +1,9 @@
+use super::serialization::*;
+use super::value::{PropertyKey, PropertyValue};
+use crate::core::interning::GLOBAL_INTERNER;
+use crate::utils::error::{Result, StorageError};
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::core::interning::{GLOBAL_INTERNER};
-use crate::utils::error::{Result, StorageError};
-use super::value::{PropertyKey, PropertyValue};
-use super::serialization::*;
 
 /// A map of property keys to values with copy-on-write semantics.
 ///

@@ -14,9 +14,9 @@ mod value;
 
 pub use map::{PropertyMap, PropertyMapBuilder};
 pub use serialization::{
-    deserialize_sparse_vector, deserialize_vector, serialize_sparse_vector,
-    serialize_vector, MAX_ARRAY_ELEMENTS, MAX_PROPERTY_MAP_CAPACITY,
-    MAX_RECURSION_DEPTH, MAX_VECTOR_DIMENSIONS, TAG_ARRAY, TAG_BOOL, TAG_BYTES,
-    TAG_FLOAT, TAG_INT, TAG_NULL, TAG_SPARSE_VECTOR, TAG_STRING, TAG_VECTOR,
+    MAX_ARRAY_ELEMENTS, MAX_PROPERTY_MAP_CAPACITY, MAX_RECURSION_DEPTH, MAX_VECTOR_DIMENSIONS,
+    TAG_ARRAY, TAG_BOOL, TAG_BYTES, TAG_FLOAT, TAG_INT, TAG_NULL, TAG_SPARSE_VECTOR, TAG_STRING,
+    TAG_VECTOR, deserialize_sparse_vector, deserialize_vector, serialize_sparse_vector,
+    serialize_vector,
 };
 pub use value::{PropertyKey, PropertyValue};

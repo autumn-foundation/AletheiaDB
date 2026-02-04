@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crate::core::vector::SparseVec;
 use crate::utils::error::{Result, StorageError};
 
+/// Type tag for Null value.
 pub const TAG_NULL: u8 = 0;
 /// Type tag for Bool value.
 pub const TAG_BOOL: u8 = 1;
@@ -41,7 +42,29 @@ pub const MAX_PROPERTY_MAP_CAPACITY: usize = 10_000;
 /// Set to 100 to prevent stack overflow from malicious input.
 pub const MAX_RECURSION_DEPTH: usize = 100;
 
-
+/// Serialize a vector (dense f32 array) to bytes.
+///
+/// # Binary Format
+/// ```text
+/// [tag:1][dimension:4][f32_0:4][f32_1:4]...[f32_n:4]
+/// ```
+///
+/// - Tag: TAG_VECTOR (7)
+/// - Dimension: u32 little-endian, number of elements
+/// - Values: f32 little-endian, the vector elements
+///
+/// # Arguments
+/// * `v` - The vector data to serialize
+///
+/// # Returns
+/// A `Vec<u8>` containing the serialized vector
+///
+/// # Example
+/// ```ignore
+/// let embedding = [0.1f32, 0.2, 0.3];
+/// let bytes = serialize_vector(&embedding);
+/// // bytes = [7, 3, 0, 0, 0, <12 bytes of f32 data>]
+/// ```
 pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(1 + 4 + v.len() * 4);
     serialize_vector_into(v, &mut buffer);
@@ -67,7 +90,7 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 ///
 /// Panics if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
 /// This is a defensive check; vectors should be validated at construction
-/// time via [`PropertyValue::vector()`] which enforces this limit.
+/// time via [`PropertyValue::vector()`](crate::core::property::PropertyValue::vector) which enforces this limit.
 pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
     // Defensive check: vectors should be validated at construction via PropertyValue::vector()
     if v.len() > MAX_VECTOR_DIMENSIONS {
