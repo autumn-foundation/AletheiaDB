@@ -408,6 +408,7 @@ impl Default for QueryResult {
 }
 
 impl std::fmt::Display for QueryResult {
+    #[inline(never)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.nodes.is_empty() {
             return write!(f, "QueryResult {{ 0 items }}");
