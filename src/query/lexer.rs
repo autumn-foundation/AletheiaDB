@@ -1499,4 +1499,94 @@ mod tests {
         assert_eq!(format!("{}", Token::FloatLiteral(2.71)), "2.71");
         assert_eq!(format!("{}", Token::Parameter("p".to_string())), "$p");
     }
+
+    #[test]
+    fn test_token_coverage() {
+        let tokens = vec![
+            // Keywords - Graph
+            Token::Match,
+            Token::Where,
+            Token::Return,
+            Token::Order,
+            Token::By,
+            Token::Limit,
+            Token::Skip,
+            Token::Distinct,
+            Token::Count,
+            Token::Asc,
+            Token::Desc,
+            // Keywords - Logical
+            Token::And,
+            Token::Or,
+            Token::Not,
+            Token::In,
+            Token::Is,
+            Token::Null,
+            Token::True,
+            Token::False,
+            // Keywords - Vector
+            Token::Similar,
+            Token::To,
+            Token::Using,
+            Token::Find,
+            Token::Rank,
+            Token::Similarity,
+            Token::Top,
+            // Keywords - Temporal
+            Token::As,
+            Token::Of,
+            Token::Between,
+            // Keywords - String predicates
+            Token::Exists,
+            Token::Contains,
+            Token::Starts,
+            Token::Ends,
+            Token::With,
+            // Keywords - Distance metrics
+            Token::Cosine,
+            Token::Euclidean,
+            Token::DotProduct,
+            // Punctuation
+            Token::LeftParen,
+            Token::RightParen,
+            Token::LeftBracket,
+            Token::RightBracket,
+            Token::LeftBrace,
+            Token::RightBrace,
+            Token::Colon,
+            Token::Comma,
+            Token::Dot,
+            Token::Star,
+            Token::Dash,
+            // Arrow patterns
+            Token::Arrow,
+            Token::LeftArrow,
+            // Comparison operators
+            Token::Eq,
+            Token::Ne,
+            Token::Lt,
+            Token::Le,
+            Token::Gt,
+            Token::Ge,
+            // Literals
+            Token::Identifier("id".to_string()),
+            Token::StringLiteral("str".to_string()),
+            Token::IntegerLiteral(42),
+            Token::FloatLiteral(3.14),
+            Token::Parameter("param".to_string()),
+            // EOF
+            Token::Eof,
+        ];
+
+        for token in tokens {
+            // Test Clone
+            let cloned = token.clone();
+            // Test PartialEq
+            assert_eq!(token, cloned);
+            // Test Debug
+            let _ = format!("{:?}", token);
+            // Test Display
+            let _ = format!("{}", token);
+        }
+    }
 }
