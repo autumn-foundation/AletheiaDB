@@ -730,6 +730,28 @@ impl WalRingBuffer {
     pub fn is_empty_approx(&self) -> bool {
         self.len_approx() == 0
     }
+
+    /// Set internal state for testing wraparound conditions.
+    ///
+    /// 👺 HAVOC: This method breaks encapsulation to inject chaos.
+    #[cfg(test)]
+    pub fn set_state_for_test(&mut self, pos: u64) {
+        self.write_pos.store(pos, Ordering::Relaxed);
+        self.read_pos.store(pos, Ordering::Relaxed);
+        // Initialize slots as if we just reached this position
+        // We assume pos is aligned to capacity for simplicity
+        assert_eq!(pos & (self.capacity as u64 - 1), 0, "pos must be aligned");
+
+        for i in 0..self.capacity {
+            self.slots[i]
+                .sequence
+                .store(pos + i as u64, Ordering::Relaxed);
+            // Clear entries
+            unsafe {
+                *self.slots[i].entry.get() = None;
+            }
+        }
+    }
 }
 
 impl Drop for WalRingBuffer {
@@ -1189,5 +1211,66 @@ mod tests {
         assert!(!buf.is_closed());
         buf.close();
         assert!(buf.is_closed());
+    }
+
+    #[test]
+    #[ignore]
+    fn test_ring_buffer_wraparound_livelock() {
+        // Reproduce the infinite spin when u64 wraps around
+        let mut buf = WalRingBuffer::new(4);
+
+        // Start near max u64
+        // Capacity is 4. u64::MAX is ...15 (ends in 1111 in binary? No. 2^64 - 1 is odd)
+        // 2^64 is divisible by 4. So 2^64 - 4 is divisible by 4.
+        // u64::MAX = 2^64 - 1.
+        // u64::MAX - 3 = 2^64 - 4.
+        let start_pos = u64::MAX - 3;
+        buf.set_state_for_test(start_pos);
+
+        // Fill buffer (4 items)
+        // pos goes: MAX-3 -> MAX-2 -> MAX-1 -> MAX -> 0 (wrapped)
+        for i in 0..4 {
+            let lsn = LSN(start_pos + i as u64);
+            let entry = PendingEntry::new_async(lsn, vec![]);
+            buf.try_append(entry).expect("Should append");
+        }
+
+        // Now write_pos is 0. read_pos is MAX-3.
+        // Buffer is full.
+        // Reader has not advanced.
+
+        // Try to append one more
+        // This should return Err(entry) because buffer is full.
+        // BUT due to the bug, it will spin forever (livelock).
+        // OR it might panic due to overflow in debug mode (crash).
+
+        let entry = PendingEntry::new_async(LSN(0), vec![]);
+
+        // Run in a thread with timeout to detect livelock
+        let (tx, rx) = std::sync::mpsc::channel();
+        let buf = Arc::new(buf);
+        let buf_clone = Arc::clone(&buf);
+
+        thread::spawn(move || {
+            // This is expected to hang or panic
+            let result = buf_clone.try_append(entry);
+            tx.send(result).ok();
+        });
+
+        // Wait for a short time
+        let result = rx.recv_timeout(std::time::Duration::from_millis(500));
+
+        match result {
+            Ok(_) => {
+                // It returned! This means the system handled it (or failed fast with Err).
+                // This implies the bug is fixed.
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("Havoc: Livelock detected! Thread hung on wraparound.");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("Havoc: Thread panicked! Likely overflow check in debug mode.");
+            }
+        }
     }
 }
