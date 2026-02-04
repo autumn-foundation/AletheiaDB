@@ -35,6 +35,12 @@ pub fn configure_health_routes(cfg: &mut web::ServiceConfig) {
 // Query Endpoint
 // ============================================================================
 
+/// Maximum number of results to return in a single query page to prevent memory exhaustion.
+const MAX_LIMIT: usize = 1000;
+
+/// Maximum "deep pagination" (offset + limit) to prevent CPU DoS.
+const MAX_DEEP_PAGINATION: usize = 10_000;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum QueryRequest {
@@ -102,6 +108,25 @@ fn json_to_predicate_value(v: &serde_json::Value) -> Option<PredicateValue> {
         serde_json::Value::String(s) => Some(PredicateValue::String(s.clone())),
         _ => None, // Arrays/Objects not supported for simple equality predicates yet
     }
+}
+
+/// Validate pagination parameters to prevent DoS and integer overflow.
+fn validate_pagination(
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<(usize, usize), HttpResponse> {
+    let offset_val = offset.unwrap_or(0);
+    let limit_val = limit.unwrap_or(100).min(MAX_LIMIT);
+
+    // Prevent deep pagination attacks (CPU DoS) and integer overflow bypass
+    if offset_val.saturating_add(limit_val) > MAX_DEEP_PAGINATION {
+        return Err(HttpResponse::BadRequest().json(ApiResponse::error(format!(
+            "Pagination limit exceeded: offset + limit must be <= {}",
+            MAX_DEEP_PAGINATION
+        ))));
+    }
+
+    Ok((offset_val, limit_val))
 }
 
 /// Query endpoint handler.
@@ -193,11 +218,15 @@ pub async fn handle_query(
             }
 
             // Issue 4: Pagination
-            if let Some(skip) = offset {
-                builder = builder.skip(skip);
+            let (offset_val, limit_val) = match validate_pagination(offset, limit) {
+                Ok(vals) => vals,
+                Err(resp) => return resp,
+            };
+
+            if offset_val > 0 {
+                builder = builder.skip(offset_val);
             }
 
-            let limit_val = limit.unwrap_or(100);
             match builder.limit(limit_val).execute(db) {
                 Ok(results) => {
                     let mut nodes = Vec::new();
@@ -231,20 +260,10 @@ pub async fn handle_query(
         } => {
             match NodeId::new(node_id) {
                 Ok(nid) => {
-                    // Safety limits to prevent DoS
-                    let max_limit = 1000;
-                    let max_deep_pagination = 10_000;
-
-                    let limit_val = limit.unwrap_or(100).min(max_limit);
-                    let offset_val = offset.unwrap_or(0);
-
-                    // Prevent deep pagination attacks (CPU DoS)
-                    if offset_val + limit_val > max_deep_pagination {
-                        return HttpResponse::BadRequest().json(ApiResponse::error(format!(
-                            "Pagination limit exceeded: offset + limit must be <= {}",
-                            max_deep_pagination
-                        )));
-                    }
+                    let (offset_val, limit_val) = match validate_pagination(offset, limit) {
+                        Ok(vals) => vals,
+                        Err(resp) => return resp,
+                    };
 
                     // Deduplication
                     let mut seen_ids = HashSet::new();

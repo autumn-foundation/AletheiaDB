@@ -149,3 +149,22 @@ This ensures memory is only allocated if the client has actually sent a proporti
 
 **Verification:** Reproduction Test
 Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed that the new logic returns `StorageError::CorruptedData` ("Insufficient buffer size") *before* attempting allocation.
+
+## 2026-02-19 - FindNode DoS Hardening
+
+**Threat:** Unbounded Result Set & Deep Pagination (DoS)
+The `FindNode` endpoint allowed users to request an unlimited number of nodes (`limit: usize::MAX`) or perform deep pagination (`offset: 1_000_000`).
+- Unbounded limit leads to memory exhaustion (OOM) as the server attempts to fetch and serialize all nodes.
+- Deep pagination leads to high CPU usage as the server iterates through skipped records.
+- **Integer Overflow:** Malicious `offset + limit` could wrap around, bypassing simple checks.
+
+**Defense:** Pagination Limits & Helper
+- Enforced `MAX_LIMIT = 1000` for `FindNode` and `FindNeighbors`.
+- Enforced `MAX_DEEP_PAGINATION = 10_000`.
+- Implemented `validate_pagination` helper using `saturating_add` to safely check total items and prevent overflow bypass.
+
+**Verification:** Regression Test
+Added `tests/warden_query_dos.rs` which verifies:
+- `limit` is capped at 1000.
+- `offset + limit > 10,000` returns HTTP 400.
+- `offset = usize::MAX` is correctly rejected (no overflow).
