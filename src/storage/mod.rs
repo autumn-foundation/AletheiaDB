@@ -14,6 +14,7 @@
 pub mod checkpoint;
 pub mod compression;
 pub mod current;
+pub mod event;
 pub mod historical;
 pub mod index_persistence;
 pub mod migration;
@@ -34,6 +35,7 @@ pub use checkpoint::{
     CheckpointConfig as UnifiedCheckpointConfig, CheckpointManager, CheckpointStats,
 };
 pub use current::{CurrentStats, CurrentStorage, DEFAULT_MAX_VECTOR_PROPERTIES, VectorIndexInfo};
+pub use event::{StorageEvent, StorageObserver};
 pub use historical::{CacheMetrics, HistoricalStats, HistoricalStorage};
 pub use migration::{
     MigrationCallback, MigrationCandidate, MigrationPolicy, MigrationProgress, MigrationService,

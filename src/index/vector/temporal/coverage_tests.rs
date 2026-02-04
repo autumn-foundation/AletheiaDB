@@ -1,8 +1,8 @@
 use super::*;
 use crate::core::id::{NodeId, VersionId};
-use crate::core::observer::{StorageEvent, StorageObserver};
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, HnswConfig};
+use crate::storage::event::StorageEvent;
 use crate::utils::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,10 +20,12 @@ fn test_config_coverage() {
 
 #[test]
 fn test_observer_coverage() -> Result<()> {
+    use super::observer::create_vector_index_observer;
+
     let config =
         TemporalVectorConfig::default_with_hnsw(HnswConfig::new(4, DistanceMetric::Cosine));
     let index = Arc::new(TemporalVectorIndex::new(config)?);
-    let observer = VectorIndexObserver::new(index);
+    let observer = create_vector_index_observer(index);
 
     // Use NodeVersionCreated with is_anchor=false to hit the "not interested" path
     let event = StorageEvent::NodeVersionCreated {
@@ -33,13 +35,8 @@ fn test_observer_coverage() -> Result<()> {
         is_anchor: false,
     };
 
-    // on_event logic:
-    // match event { NodeAnchorCreated | EdgeAnchorCreated => ... , _ => Ok(()) }
-    // So this should hit the wildcard.
-    assert!(observer.on_event(&event).is_ok());
-
-    // verify interested_in coverage too
-    assert!(!observer.interested_in(&event)); // Should be false for non-anchor events
+    // on_event logic (now in closure) should check is_anchor_event() and return Ok(())
+    assert!(observer(&event).is_ok());
 
     Ok(())
 }
