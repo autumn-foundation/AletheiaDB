@@ -88,11 +88,13 @@
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
+use crate::utils::hashing::IdentityHasher;
 use crate::utils::{Error, Result, error::VectorError};
 use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::fs::File;
+use std::hash::BuildHasherDefault;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -566,8 +568,8 @@ impl HnswIndexBuilder {
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
             config: self.config,
-            id_mapping: Arc::new(DashMap::new()),
-            reverse_mapping: Arc::new(DashMap::new()),
+            id_mapping: Arc::new(DashMap::with_hasher(BuildHasherDefault::default())),
+            reverse_mapping: Arc::new(DashMap::with_hasher(BuildHasherDefault::default())),
             next_key: AtomicU64::new(0),
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
@@ -596,9 +598,9 @@ pub struct HnswIndex {
     /// Configuration used to create this index
     config: HnswConfig,
     /// ID mapping: NodeId -> usearch key (u64)
-    id_mapping: Arc<DashMap<NodeId, u64>>,
+    id_mapping: Arc<DashMap<NodeId, u64, BuildHasherDefault<IdentityHasher>>>,
     /// Reverse mapping: usearch key -> NodeId
-    reverse_mapping: Arc<DashMap<u64, NodeId>>,
+    reverse_mapping: Arc<DashMap<u64, NodeId, BuildHasherDefault<IdentityHasher>>>,
     /// Next available key
     next_key: AtomicU64,
     /// Statistics
@@ -1204,9 +1206,13 @@ impl HnswIndex {
 #[allow(clippy::type_complexity)]
 fn load_mappings_with_integrity(
     mappings_path: &Path,
-) -> Result<(DashMap<NodeId, u64>, DashMap<u64, NodeId>, u64)> {
-    let id_mapping = DashMap::new();
-    let reverse_mapping = DashMap::new();
+) -> Result<(
+    DashMap<NodeId, u64, BuildHasherDefault<IdentityHasher>>,
+    DashMap<u64, NodeId, BuildHasherDefault<IdentityHasher>>,
+    u64,
+)> {
+    let id_mapping = DashMap::with_hasher(BuildHasherDefault::default());
+    let reverse_mapping = DashMap::with_hasher(BuildHasherDefault::default());
     let mut max_key = 0u64;
 
     if !mappings_path.exists() {
@@ -1469,8 +1475,8 @@ impl HnswIndex {
 //    and shared access for reads, even though usearch has internal synchronization.
 //    This double-locking is intentional: usearch's internal locks may not match
 //    Rust's Send/Sync requirements, so we add our own synchronization layer.
-// 2. `id_mapping: Arc<DashMap<NodeId, u64>>` - DashMap is explicitly Send+Sync
-// 3. `reverse_mapping: Arc<DashMap<u64, NodeId>>` - DashMap is explicitly Send+Sync
+// 2. `id_mapping: Arc<DashMap<NodeId, u64, ...>>` - DashMap is explicitly Send+Sync
+// 3. `reverse_mapping: Arc<DashMap<u64, NodeId, ...>>` - DashMap is explicitly Send+Sync
 // 4. `next_key: AtomicU64` - All atomics are Send+Sync
 // 5. `stats: Arc<IndexStats>` - Contains only AtomicU64 fields
 // 6. Remaining fields (config, max_k, is_mmap) contain only Send+Sync types

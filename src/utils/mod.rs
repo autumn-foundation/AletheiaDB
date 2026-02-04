@@ -1,6 +1,7 @@
 //! Utility modules for GallifreyDB.
 
 pub mod error;
+pub mod hashing;
 pub mod lock;
 
 // Re-export commonly used types
