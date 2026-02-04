@@ -14,9 +14,9 @@ use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
-use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
+use crate::storage::event::{StorageEvent, StorageObserver, notify_observers};
 use crate::core::version::{
     AnchorConfig, EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData,
 };
@@ -247,7 +247,7 @@ pub struct HistoricalStorage {
     /// Multiple components can observe storage events (anchors, deletes, etc.)
     /// for indexing, metrics, logging, or coordination. Observers are notified
     /// asynchronously and errors don't block storage operations.
-    observers: Vec<Observer>,
+    observers: Vec<StorageObserver>,
     /// Pre-anchor hook for node anchors (called before storage).
     ///
     /// This hook is called **before** storing a node anchor to create synchronized
@@ -406,31 +406,28 @@ impl HistoricalStorage {
     /// will be notified of events they're interested in.
     ///
     /// # Arguments
-    /// * `observer` - Component implementing the StorageObserver trait
+    /// * `observer` - Closure implementing the StorageObserver signature
     ///
     /// # Example
     /// ```no_run
     /// # use gallifreydb::storage::historical::HistoricalStorage;
-    /// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
+    /// # use gallifreydb::storage::event::{StorageObserver, StorageEvent};
     /// # use std::sync::Arc;
-    /// struct VectorIndexObserver;
     ///
-    /// impl StorageObserver for VectorIndexObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> gallifreydb::utils::Result<()> {
-    ///         match event {
-    ///             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
-    ///                 println!("Anchor {} created at {}", version_id, timestamp);
-    ///                 Ok(())
-    ///             }
-    ///             _ => Ok(())
+    /// let observer: StorageObserver = Arc::new(|event: &StorageEvent| {
+    ///     match event {
+    ///         StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
+    ///             println!("Anchor {} created at {}", version_id, timestamp);
+    ///             Ok(())
     ///         }
+    ///         _ => Ok(())
     ///     }
-    /// }
+    /// });
     ///
     /// let mut storage = HistoricalStorage::new();
-    /// storage.add_observer(Arc::new(VectorIndexObserver));
+    /// storage.add_observer(observer);
     /// ```
-    pub fn add_observer(&mut self, observer: Observer) {
+    pub fn add_observer(&mut self, observer: StorageObserver) {
         self.observers.push(observer);
     }
 

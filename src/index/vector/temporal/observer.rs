@@ -4,19 +4,16 @@
 //! enabling automatic snapshot creation when graph anchors are created.
 
 use super::TemporalVectorIndex;
-use crate::core::observer::{StorageEvent, StorageObserver};
+use crate::storage::event::{StorageEvent, StorageObserver};
 use crate::utils::Result;
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]
 use tracing;
 
-/// Observer that triggers vector snapshot creation on graph anchor events.
+/// Creates a new observer for the given index.
 ///
-/// This implements the `StorageObserver` trait to listen for `NodeAnchorCreated`
-/// events from the historical storage layer. When an anchor is created, this
-/// observer ensures a corresponding vector snapshot is created, maintaining
-/// alignment between graph history and vector history.
+/// This observer triggers vector snapshot creation on graph anchor events.
 ///
 /// # Architecture
 ///
@@ -24,21 +21,15 @@ use tracing;
 /// and the vector index (TemporalVectorIndex).
 ///
 /// ```text
-/// HistoricalStorage -> StorageEvent::NodeAnchorCreated -> VectorIndexObserver -> TemporalVectorIndex::create_snapshot_for_anchor
+/// HistoricalStorage -> StorageEvent::NodeAnchorCreated -> Observer -> TemporalVectorIndex::create_snapshot_for_anchor
 /// ```
-pub struct VectorIndexObserver {
-    index: Arc<TemporalVectorIndex>,
-}
+pub fn create_vector_index_observer(index: Arc<TemporalVectorIndex>) -> StorageObserver {
+    Arc::new(move |event: &StorageEvent| -> Result<()> {
+        // Only interested in anchor creation events
+        if !event.is_anchor_event() {
+            return Ok(());
+        }
 
-impl VectorIndexObserver {
-    /// Creates a new observer for the given index.
-    pub fn new(index: Arc<TemporalVectorIndex>) -> Self {
-        Self { index }
-    }
-}
-
-impl StorageObserver for VectorIndexObserver {
-    fn on_event(&self, event: &StorageEvent) -> Result<()> {
         match event {
             StorageEvent::NodeAnchorCreated {
                 timestamp,
@@ -52,7 +43,7 @@ impl StorageObserver for VectorIndexObserver {
                 );
 
                 // Trigger snapshot creation aligned with this anchor
-                let snapshot_id = self.index.create_snapshot_for_anchor(*timestamp)?;
+                let snapshot_id = index.create_snapshot_for_anchor(*timestamp)?;
 
                 #[cfg(feature = "observability")]
                 if let Some(id) = snapshot_id {
@@ -75,16 +66,11 @@ impl StorageObserver for VectorIndexObserver {
             StorageEvent::EdgeAnchorCreated { timestamp, .. } => {
                 // Also trigger for edge anchors if we support edge vectors in the future
                 // For now, we sync on edge anchors too to keep time alignment
-                self.index.create_snapshot_for_anchor(*timestamp)?;
+                index.create_snapshot_for_anchor(*timestamp)?;
                 Ok(())
             }
             // Ignore other events
             _ => Ok(()),
         }
-    }
-
-    fn interested_in(&self, event: &StorageEvent) -> bool {
-        // Only interested in anchor creation events for logging/metrics
-        event.is_anchor_event()
-    }
+    })
 }

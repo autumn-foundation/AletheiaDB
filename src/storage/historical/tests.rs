@@ -1,8 +1,8 @@
 use super::*;
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::observer::{StorageEvent, StorageObserver};
 use crate::core::property::PropertyMapBuilder;
 use crate::core::temporal::TIMESTAMP_MAX;
+use crate::storage::event::{StorageEvent, StorageObserver};
 
 #[test]
 fn test_create_first_version() {
@@ -1375,52 +1375,46 @@ fn test_extract_edge_version_data() {
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Mock observer that counts anchor events
-struct CountingObserver {
-    anchor_count: AtomicUsize,
-    version_count: AtomicUsize,
-}
+fn create_counting_observer() -> (StorageObserver, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let anchor_count = Arc::new(AtomicUsize::new(0));
+    let version_count = Arc::new(AtomicUsize::new(0));
+    let ac = anchor_count.clone();
+    let vc = version_count.clone();
 
-impl StorageObserver for CountingObserver {
-    fn on_event(&self, event: &StorageEvent) -> Result<()> {
+    let observer = Arc::new(move |event: &StorageEvent| -> Result<()> {
         match event {
             StorageEvent::NodeAnchorCreated { .. } | StorageEvent::EdgeAnchorCreated { .. } => {
-                self.anchor_count.fetch_add(1, Ordering::SeqCst);
+                ac.fetch_add(1, Ordering::SeqCst);
             }
             StorageEvent::NodeVersionCreated { .. } | StorageEvent::EdgeVersionCreated { .. } => {
-                self.version_count.fetch_add(1, Ordering::SeqCst);
+                vc.fetch_add(1, Ordering::SeqCst);
             }
         }
         Ok(())
-    }
+    });
+    (observer, anchor_count, version_count)
 }
 
-/// Mock observer that only cares about node anchors
-struct NodeAnchorObserver {
-    count: AtomicUsize,
-}
-
-impl StorageObserver for NodeAnchorObserver {
-    fn on_event(&self, _event: &StorageEvent) -> Result<()> {
-        self.count.fetch_add(1, Ordering::SeqCst);
+fn create_node_anchor_observer() -> (StorageObserver, Arc<AtomicUsize>) {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    let observer = Arc::new(move |event: &StorageEvent| -> Result<()> {
+        if matches!(event, StorageEvent::NodeAnchorCreated { .. }) {
+            c.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
-    }
-
-    fn interested_in(&self, event: &StorageEvent) -> bool {
-        matches!(event, StorageEvent::NodeAnchorCreated { .. })
-    }
+    });
+    (observer, count)
 }
 
-/// Mock observer that collects events
-struct CollectingObserver {
-    events: StdMutex<Vec<StorageEvent>>,
-}
-
-impl StorageObserver for CollectingObserver {
-    fn on_event(&self, event: &StorageEvent) -> Result<()> {
-        self.events.lock().unwrap().push(event.clone());
+fn create_collecting_observer() -> (StorageObserver, Arc<StdMutex<Vec<StorageEvent>>>) {
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let e = events.clone();
+    let observer = Arc::new(move |event: &StorageEvent| -> Result<()> {
+        e.lock().unwrap().push(event.clone());
         Ok(())
-    }
+    });
+    (observer, events)
 }
 
 #[test]
@@ -1430,11 +1424,8 @@ fn test_observer_triggered_on_node_anchor_creation() {
         max_delta_chain: 10,
     });
 
-    let observer = Arc::new(CountingObserver {
-        anchor_count: AtomicUsize::new(0),
-        version_count: AtomicUsize::new(0),
-    });
-    storage.add_observer(observer.clone());
+    let (observer, anchor_count, version_count) = create_counting_observer();
+    storage.add_observer(observer);
 
     let node_id = NodeId::new(1).unwrap();
     let label = GLOBAL_INTERNER.intern("Test").unwrap();
@@ -1455,9 +1446,9 @@ fn test_observer_triggered_on_node_anchor_creation() {
     }
 
     // Should have 2 anchors (v0 and v3)
-    assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2);
+    assert_eq!(anchor_count.load(Ordering::SeqCst), 2);
     // Should have 5 total version events
-    assert_eq!(observer.version_count.load(Ordering::SeqCst), 5);
+    assert_eq!(version_count.load(Ordering::SeqCst), 5);
 }
 
 #[test]
@@ -1467,11 +1458,8 @@ fn test_observer_triggered_on_edge_anchor_creation() {
         max_delta_chain: 10,
     });
 
-    let observer = Arc::new(CountingObserver {
-        anchor_count: AtomicUsize::new(0),
-        version_count: AtomicUsize::new(0),
-    });
-    storage.add_observer(observer.clone());
+    let (observer, anchor_count, _version_count) = create_counting_observer();
+    storage.add_observer(observer);
 
     let edge_id = EdgeId::new(1).unwrap();
     let source = NodeId::new(10).unwrap();
@@ -1496,7 +1484,7 @@ fn test_observer_triggered_on_edge_anchor_creation() {
     }
 
     // Should have 2 anchors
-    assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2);
+    assert_eq!(anchor_count.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -1504,10 +1492,8 @@ fn test_observer_filtering() {
     let mut storage = HistoricalStorage::new();
 
     // Observer only interested in node anchors
-    let observer = Arc::new(NodeAnchorObserver {
-        count: AtomicUsize::new(0),
-    });
-    storage.add_observer(observer.clone());
+    let (observer, count) = create_node_anchor_observer();
+    storage.add_observer(observer);
 
     let node_id = NodeId::new(1).unwrap();
     let edge_id = EdgeId::new(1).unwrap();
@@ -1542,17 +1528,15 @@ fn test_observer_filtering() {
         .unwrap();
 
     // Should only count node anchor (not edge anchor)
-    assert_eq!(observer.count.load(Ordering::SeqCst), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
 #[test]
 fn test_observer_receives_correct_event_data() {
     let mut storage = HistoricalStorage::new();
 
-    let collector = Arc::new(CollectingObserver {
-        events: StdMutex::new(Vec::new()),
-    });
-    storage.add_observer(collector.clone());
+    let (observer, events_mutex) = create_collecting_observer();
+    storage.add_observer(observer);
 
     let node_id = NodeId::new(42).unwrap();
     let version_id = VersionId::new(100).unwrap();
@@ -1571,7 +1555,7 @@ fn test_observer_receives_correct_event_data() {
         )
         .unwrap();
 
-    let events = collector.events.lock().unwrap();
+    let events = events_mutex.lock().unwrap();
     assert_eq!(events.len(), 2); // NodeAnchorCreated + NodeVersionCreated
 
     // Check anchor event
@@ -1598,17 +1582,11 @@ fn test_observer_receives_correct_event_data() {
 fn test_multiple_observers() {
     let mut storage = HistoricalStorage::new();
 
-    let observer1 = Arc::new(CountingObserver {
-        anchor_count: AtomicUsize::new(0),
-        version_count: AtomicUsize::new(0),
-    });
-    let observer2 = Arc::new(CountingObserver {
-        anchor_count: AtomicUsize::new(0),
-        version_count: AtomicUsize::new(0),
-    });
+    let (observer1, anchor_count1, _) = create_counting_observer();
+    let (observer2, anchor_count2, _) = create_counting_observer();
 
-    storage.add_observer(observer1.clone());
-    storage.add_observer(observer2.clone());
+    storage.add_observer(observer1);
+    storage.add_observer(observer2);
 
     let node_id = NodeId::new(1).unwrap();
     let label = GLOBAL_INTERNER.intern("Test").unwrap();
@@ -1626,27 +1604,23 @@ fn test_multiple_observers() {
         .unwrap();
 
     // Both observers should be notified
-    assert_eq!(observer1.anchor_count.load(Ordering::SeqCst), 1);
-    assert_eq!(observer2.anchor_count.load(Ordering::SeqCst), 1);
+    assert_eq!(anchor_count1.load(Ordering::SeqCst), 1);
+    assert_eq!(anchor_count2.load(Ordering::SeqCst), 1);
 }
 
 #[test]
 fn test_observer_error_doesnt_block_storage() {
-    /// Observer that always returns an error
-    struct FailingObserver;
-
-    impl StorageObserver for FailingObserver {
-        fn on_event(&self, _event: &StorageEvent) -> Result<()> {
-            Err(crate::utils::error::Error::Storage(
-                StorageError::InconsistentState {
-                    reason: "Test error".to_string(),
-                },
-            ))
-        }
-    }
+    // Observer that always returns an error
+    let failing_observer = Arc::new(|_event: &StorageEvent| -> Result<()> {
+        Err(crate::utils::error::Error::Storage(
+            StorageError::InconsistentState {
+                reason: "Test error".to_string(),
+            },
+        ))
+    });
 
     let mut storage = HistoricalStorage::new();
-    storage.add_observer(Arc::new(FailingObserver));
+    storage.add_observer(failing_observer);
 
     let node_id = NodeId::new(1).unwrap();
     let label = GLOBAL_INTERNER.intern("Test").unwrap();

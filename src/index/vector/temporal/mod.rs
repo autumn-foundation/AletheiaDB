@@ -97,7 +97,7 @@ pub mod stats;
 
 // Re-exports
 pub use config::{DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig};
-pub use observer::VectorIndexObserver;
+pub use observer::create_vector_index_observer;
 pub use stats::{MemoryStats, SnapshotInfo};
 
 // Internal imports
