@@ -391,30 +391,49 @@ impl Parser {
         }
     }
 
+    fn parse_float_value(&mut self) -> Result<f32, ParseError> {
+        match self.current() {
+            Some(Token::FloatLiteral(f)) => {
+                let v = *f as f32;
+                self.advance();
+                Ok(v)
+            }
+            Some(Token::IntegerLiteral(i)) => {
+                let v = *i as f32;
+                self.advance();
+                Ok(v)
+            }
+            Some(Token::Dash) => {
+                self.advance();
+                match self.current() {
+                    Some(Token::FloatLiteral(f)) => {
+                        let v = -(*f as f32);
+                        self.advance();
+                        Ok(v)
+                    }
+                    Some(Token::IntegerLiteral(i)) => {
+                        let v = -(*i as f32);
+                        self.advance();
+                        Ok(v)
+                    }
+                    _ => Err(self.error(
+                        "Expected number after '-'".to_string(),
+                        Some("number".to_string()),
+                    )),
+                }
+            }
+            _ => Err(self.error("Expected number".to_string(), Some("number".to_string()))),
+        }
+    }
+
     fn parse_float_list(&mut self) -> Result<Vec<f32>, ParseError> {
         let mut values = Vec::new();
 
-        loop {
-            let value = match self.current() {
-                Some(Token::FloatLiteral(f)) => *f as f32,
-                Some(Token::IntegerLiteral(i)) => *i as f32,
-                Some(Token::Dash) => {
-                    self.advance();
-                    match self.current() {
-                        Some(Token::FloatLiteral(f)) => -(*f as f32),
-                        Some(Token::IntegerLiteral(i)) => -(*i as f32),
-                        _ => {
-                            return Err(self.error(
-                                "Expected number after '-'".to_string(),
-                                Some("number".to_string()),
-                            ));
-                        }
-                    }
-                }
-                _ => break,
-            };
-            self.advance();
-            values.push(value);
+        while let Some(Token::FloatLiteral(_))
+        | Some(Token::IntegerLiteral(_))
+        | Some(Token::Dash) = self.current()
+        {
+            values.push(self.parse_float_value()?);
 
             if !self.check(&Token::Comma) {
                 break;
@@ -692,30 +711,7 @@ impl Parser {
         }
     }
 
-    fn parse_property_map(&mut self) -> Result<PropertyMap, ParseError> {
-        self.expect(&Token::LeftBrace)?;
-
-        let mut props = Vec::new();
-
-        if !self.check(&Token::RightBrace) {
-            loop {
-                let key = self.parse_identifier()?;
-                self.expect(&Token::Colon)?;
-                let value = self.parse_property_value()?;
-                props.push((key, value));
-
-                if !self.check(&Token::Comma) {
-                    break;
-                }
-                self.advance();
-            }
-        }
-
-        self.expect(&Token::RightBrace)?;
-        Ok(props)
-    }
-
-    fn parse_property_value(&mut self) -> Result<PropertyValue, ParseError> {
+    fn parse_value(&mut self) -> Result<PropertyValue, ParseError> {
         match self.current() {
             Some(Token::Null) => {
                 self.advance();
@@ -769,10 +765,37 @@ impl Parser {
                 }
             }
             _ => Err(self.error(
-                "Expected property value".to_string(),
-                Some("value".to_string()),
+                "Expected value".to_string(),
+                Some("literal or parameter".to_string()),
             )),
         }
+    }
+
+    fn parse_property_map(&mut self) -> Result<PropertyMap, ParseError> {
+        self.expect(&Token::LeftBrace)?;
+
+        let mut props = Vec::new();
+
+        if !self.check(&Token::RightBrace) {
+            loop {
+                let key = self.parse_identifier()?;
+                self.expect(&Token::Colon)?;
+                let value = self.parse_property_value()?;
+                props.push((key, value));
+
+                if !self.check(&Token::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+
+        self.expect(&Token::RightBrace)?;
+        Ok(props)
+    }
+
+    fn parse_property_value(&mut self) -> Result<PropertyValue, ParseError> {
+        self.parse_value()
     }
 
     // =========================================================
@@ -1092,57 +1115,30 @@ impl Parser {
     }
 
     fn parse_literal_expression(&mut self) -> Result<Expression, ParseError> {
-        match self.current() {
-            Some(Token::StringLiteral(s)) => {
-                let val = PropertyValue::String(s.clone());
-                self.advance();
+        match self.parse_value() {
+            Ok(val) => {
+                // To maintain strict parity with original behavior, we must reject parameters here.
+                // Parameters are handled in parse_expression explicitly.
+                if let PropertyValue::Parameter(_) = val {
+                    return Err(self.error(
+                        "Expected expression".to_string(),
+                        Some("identifier, literal, or parameter".to_string()),
+                    ));
+                }
                 Ok(Expression::Literal(val))
             }
-            Some(Token::IntegerLiteral(n)) => {
-                let val = PropertyValue::Int(*n);
-                self.advance();
-                Ok(Expression::Literal(val))
-            }
-            Some(Token::FloatLiteral(f)) => {
-                let val = PropertyValue::Float(*f);
-                self.advance();
-                Ok(Expression::Literal(val))
-            }
-            Some(Token::True) => {
-                self.advance();
-                Ok(Expression::Literal(PropertyValue::Bool(true)))
-            }
-            Some(Token::False) => {
-                self.advance();
-                Ok(Expression::Literal(PropertyValue::Bool(false)))
-            }
-            Some(Token::Null) => {
-                self.advance();
-                Ok(Expression::Literal(PropertyValue::Null))
-            }
-            Some(Token::Dash) => {
-                self.advance();
-                match self.current() {
-                    Some(Token::IntegerLiteral(n)) => {
-                        let val = PropertyValue::Int(-*n);
-                        self.advance();
-                        Ok(Expression::Literal(val))
-                    }
-                    Some(Token::FloatLiteral(f)) => {
-                        let val = PropertyValue::Float(-*f);
-                        self.advance();
-                        Ok(Expression::Literal(val))
-                    }
-                    _ => Err(self.error(
-                        "Expected number after '-'".to_string(),
-                        Some("number".to_string()),
-                    )),
+            Err(e) => {
+                // If parse_value failed, we want to report that we expected an expression
+                // (which could be an identifier, which parse_value doesn't know about)
+                if e.message.starts_with("Expected value") {
+                    Err(self.error(
+                        "Expected expression".to_string(),
+                        Some("identifier, literal, or parameter".to_string()),
+                    ))
+                } else {
+                    Err(e)
                 }
             }
-            _ => Err(self.error(
-                "Expected expression".to_string(),
-                Some("identifier, literal, or parameter".to_string()),
-            )),
         }
     }
 
