@@ -667,6 +667,18 @@ impl PropertyValue {
                     .into());
                 }
 
+                // Prevent DoS via pre-allocation amplification:
+                // Ensure we have at least 1 byte per element in the buffer
+                // before allocating the vector.
+                if bytes.len().saturating_sub(offset) < count {
+                    return Err(StorageError::CorruptedData(format!(
+                        "Insufficient buffer size for Array elements: need {} bytes, have {}",
+                        count,
+                        bytes.len().saturating_sub(offset)
+                    ))
+                    .into());
+                }
+
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
                     if offset >= bytes.len() {
@@ -1588,6 +1600,21 @@ impl PropertyMap {
         }
 
         let mut offset = 4;
+
+        // Prevent DoS via pre-allocation amplification:
+        // Ensure we have at least 5 bytes per entry (minimum size)
+        // Key length (4) + Key data (0) + Value tag (1) = 5 bytes
+        // Use checked arithmetic to prevent overflow in count * 5
+        let min_required_bytes = count.saturating_mul(5);
+        if bytes.len().saturating_sub(offset) < min_required_bytes {
+            return Err(StorageError::CorruptedData(format!(
+                "Insufficient buffer size for PropertyMap entries: need {} bytes, have {}",
+                min_required_bytes,
+                bytes.len().saturating_sub(offset)
+            ))
+            .into());
+        }
+
         let mut map = HashMap::with_capacity(count);
         // Track the actual logical size of the map to validate against consumed bytes
         let mut calculated_size: usize = 4;
