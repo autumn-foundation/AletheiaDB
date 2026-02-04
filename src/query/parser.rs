@@ -534,18 +534,7 @@ impl Parser {
     }
 
     fn parse_relationship_pattern(&mut self) -> Result<RelationshipPattern, ParseError> {
-        let direction_start = if self.check(&Token::LeftArrow) {
-            self.advance();
-            RelationshipDirection::Incoming
-        } else if self.check(&Token::Dash) {
-            self.advance();
-            RelationshipDirection::Both // Default, may change to Outgoing
-        } else {
-            return Err(self.error(
-                "Expected relationship pattern".to_string(),
-                Some("'-' or '<-'".to_string()),
-            ));
-        };
+        let direction_start = self.parse_relationship_direction_start()?;
 
         // Parse relationship details inside brackets
         self.expect(&Token::LeftBracket)?;
@@ -587,6 +576,30 @@ impl Parser {
 
         self.expect(&Token::RightBracket)?;
 
+        rel.direction = self.resolve_relationship_direction(direction_start);
+
+        Ok(rel)
+    }
+
+    fn parse_relationship_direction_start(&mut self) -> Result<RelationshipDirection, ParseError> {
+        if self.check(&Token::LeftArrow) {
+            self.advance();
+            Ok(RelationshipDirection::Incoming)
+        } else if self.check(&Token::Dash) {
+            self.advance();
+            Ok(RelationshipDirection::Both) // Default, may change to Outgoing
+        } else {
+            Err(self.error(
+                "Expected relationship pattern".to_string(),
+                Some("'-' or '<-'".to_string()),
+            ))
+        }
+    }
+
+    fn resolve_relationship_direction(
+        &mut self,
+        start_dir: RelationshipDirection,
+    ) -> RelationshipDirection {
         // Parse end arrow to determine final direction
         // Pattern combinations:
         //   -[]->  = Outgoing
@@ -595,26 +608,26 @@ impl Parser {
         //   <-[]-> = Both (bidirectional)
         if self.check(&Token::Arrow) {
             self.advance();
-            if direction_start == RelationshipDirection::Incoming {
+            if start_dir == RelationshipDirection::Incoming {
                 // <-[]-> is bidirectional
-                rel.direction = RelationshipDirection::Both;
+                RelationshipDirection::Both
             } else {
                 // -[]-> is outgoing
-                rel.direction = RelationshipDirection::Outgoing;
+                RelationshipDirection::Outgoing
             }
         } else if self.check(&Token::Dash) {
             self.advance();
-            if direction_start == RelationshipDirection::Incoming {
+            if start_dir == RelationshipDirection::Incoming {
                 // <-[]- stays as Incoming
-                rel.direction = RelationshipDirection::Incoming;
+                RelationshipDirection::Incoming
             } else {
                 // -[]- is both
-                rel.direction = RelationshipDirection::Both;
+                RelationshipDirection::Both
             }
+        } else {
+            // If no ending marker, keep the start direction
+            start_dir
         }
-        // If no ending marker, keep the start direction
-
-        Ok(rel)
     }
 
     fn parse_depth_spec(&mut self) -> Result<DepthSpec, ParseError> {
@@ -623,45 +636,11 @@ impl Parser {
         // Check for range or exact
         match self.current() {
             Some(Token::IntegerLiteral(n)) => {
-                let n_val = *n;
-                if n_val < 0 {
-                    return Err(self.error(
-                        format!("Depth must be non-negative, got {}", n_val),
-                        Some("non-negative integer".to_string()),
-                    ));
-                }
-                let min = n_val as usize;
+                let min = self.validate_non_negative(*n)?;
                 self.advance();
 
                 if self.check(&Token::Dot) {
-                    self.advance();
-                    self.expect(&Token::Dot)?;
-
-                    if let Some(Token::IntegerLiteral(m)) = self.current() {
-                        let m_val = *m;
-                        if m_val < 0 {
-                            return Err(self.error(
-                                format!("Depth must be non-negative, got {}", m_val),
-                                Some("non-negative integer".to_string()),
-                            ));
-                        }
-                        let max = m_val as usize;
-                        if min > max {
-                            return Err(self.error(
-                                format!("Invalid depth range: min ({}) > max ({})", min, max),
-                                Some("valid range".to_string()),
-                            ));
-                        }
-                        self.advance();
-                        Ok(DepthSpec::Range { min, max })
-                    } else {
-                        // *n.. is unbounded max, use Variable with min hops
-                        // Since we can't express min with Variable, use a large max
-                        Ok(DepthSpec::Range {
-                            min,
-                            max: usize::MAX / 2, // Use half max to avoid overflow issues
-                        })
-                    }
+                    self.parse_depth_range(min)
                 } else {
                     Ok(DepthSpec::Exact(min))
                 }
@@ -671,14 +650,7 @@ impl Parser {
                 self.expect(&Token::Dot)?;
 
                 if let Some(Token::IntegerLiteral(n)) = self.current() {
-                    let n_val = *n;
-                    if n_val < 0 {
-                        return Err(self.error(
-                            format!("Depth must be non-negative, got {}", n_val),
-                            Some("non-negative integer".to_string()),
-                        ));
-                    }
-                    let max = n_val as usize;
+                    let max = self.validate_non_negative(*n)?;
                     self.advance();
                     Ok(DepthSpec::Max(max))
                 } else {
@@ -686,6 +658,41 @@ impl Parser {
                 }
             }
             _ => Ok(DepthSpec::Variable),
+        }
+    }
+
+    fn validate_non_negative(&self, n: i64) -> Result<usize, ParseError> {
+        if n < 0 {
+            Err(self.error(
+                format!("Depth must be non-negative, got {}", n),
+                Some("non-negative integer".to_string()),
+            ))
+        } else {
+            Ok(n as usize)
+        }
+    }
+
+    fn parse_depth_range(&mut self, min: usize) -> Result<DepthSpec, ParseError> {
+        self.advance(); // consume first dot
+        self.expect(&Token::Dot)?; // expect second dot
+
+        if let Some(Token::IntegerLiteral(m)) = self.current() {
+            let max = self.validate_non_negative(*m)?;
+            if min > max {
+                return Err(self.error(
+                    format!("Invalid depth range: min ({}) > max ({})", min, max),
+                    Some("valid range".to_string()),
+                ));
+            }
+            self.advance();
+            Ok(DepthSpec::Range { min, max })
+        } else {
+            // *n.. is unbounded max, use Variable with min hops
+            // Since we can't express min with Variable, use a large max
+            Ok(DepthSpec::Range {
+                min,
+                max: usize::MAX / 2, // Use half max to avoid overflow issues
+            })
         }
     }
 
@@ -1084,6 +1091,22 @@ impl Parser {
                 self.advance();
                 Ok(Expression::Parameter(param))
             }
+            Some(Token::StringLiteral(_))
+            | Some(Token::IntegerLiteral(_))
+            | Some(Token::FloatLiteral(_))
+            | Some(Token::True)
+            | Some(Token::False)
+            | Some(Token::Null)
+            | Some(Token::Dash) => self.parse_literal_expression(),
+            _ => Err(self.error(
+                "Expected expression".to_string(),
+                Some("identifier, literal, or parameter".to_string()),
+            )),
+        }
+    }
+
+    fn parse_literal_expression(&mut self) -> Result<Expression, ParseError> {
+        match self.current() {
             Some(Token::StringLiteral(s)) => {
                 let val = PropertyValue::String(s.clone());
                 self.advance();
@@ -1131,8 +1154,8 @@ impl Parser {
                 }
             }
             _ => Err(self.error(
-                "Expected expression".to_string(),
-                Some("identifier, literal, or parameter".to_string()),
+                "Expected literal".to_string(),
+                Some("string, number, boolean, or null".to_string()),
             )),
         }
     }
