@@ -3864,3 +3864,139 @@ mod tests {
         assert!(size >= expected_min);
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "Vector dimension")]
+    fn test_try_insert_vector_panics_on_overflow() {
+        // 💣 Risk: try_insert_vector implies fallibility but panics on large inputs.
+        // This test documents this behavior to prevent regression or unexpected changes.
+        let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
+        let _ = PropertyMapBuilder::new().try_insert_vector("test", &large_vector);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector dimension")]
+    fn test_serialize_vector_into_panics_on_overflow() {
+        // 💣 Risk: serialize_vector_into panics on large inputs instead of returning Result.
+        let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
+        let mut buffer = Vec::new();
+        serialize_vector_into(&large_vector, &mut buffer);
+    }
+
+    #[test]
+    fn test_serialize_vector_into_buffer_appending() {
+        // 🧪 Strategy: Verify that serialize_vector_into correctly appends to an existing buffer
+        // and doesn't overwrite data or corrupt offsets.
+        let mut buffer = vec![0xAA, 0xBB, 0xCC]; // Existing data
+        let vector = vec![1.0f32, 2.0, 3.0];
+
+        serialize_vector_into(&vector, &mut buffer);
+
+        // Verify prefix is intact
+        assert_eq!(buffer[0], 0xAA);
+        assert_eq!(buffer[1], 0xBB);
+        assert_eq!(buffer[2], 0xCC);
+
+        // Verify vector serialization starts at offset 3
+        assert_eq!(buffer[3], TAG_VECTOR);
+
+        // Verify deserialization works from the offset
+        let (deserialized, consumed) = deserialize_vector(&buffer[3..]).unwrap();
+        assert_eq!(deserialized.as_ref(), &vector[..]);
+        assert_eq!(consumed, buffer.len() - 3);
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_validates_duplicates() {
+        // 💣 Risk: Malicious input could provide duplicate indices, violating invariants.
+        // SparseVec::new checks this, so deserialize should fail.
+        let mut buffer = Vec::new();
+        buffer.push(TAG_SPARSE_VECTOR);
+
+        let dim = 10u32;
+        let nnz = 2u32;
+        buffer.extend_from_slice(&dim.to_le_bytes());
+        buffer.extend_from_slice(&nnz.to_le_bytes());
+
+        // Duplicate index 5
+        buffer.extend_from_slice(&5u32.to_le_bytes());
+        buffer.extend_from_slice(&5u32.to_le_bytes());
+
+        // Values
+        buffer.extend_from_slice(&1.0f32.to_le_bytes());
+        buffer.extend_from_slice(&2.0f32.to_le_bytes());
+
+        let result = deserialize_sparse_vector(&buffer);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::InvalidSparseVector { reason },
+            )) => {
+                assert!(reason.contains("Duplicate index"));
+            }
+            _ => panic!("Expected InvalidSparseVector error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_validates_zeros() {
+        // 💣 Risk: Sparse vectors should not contain zero values.
+        let mut buffer = Vec::new();
+        buffer.push(TAG_SPARSE_VECTOR);
+
+        let dim = 10u32;
+        let nnz = 1u32;
+        buffer.extend_from_slice(&dim.to_le_bytes());
+        buffer.extend_from_slice(&nnz.to_le_bytes());
+
+        // Index 0
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        // Value 0.0 (Invalid!)
+        buffer.extend_from_slice(&0.0f32.to_le_bytes());
+
+        let result = deserialize_sparse_vector(&buffer);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::InvalidSparseVector { reason },
+            )) => {
+                assert!(reason.contains("zero value"));
+            }
+            _ => panic!("Expected InvalidSparseVector error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_sorts_indices() {
+        // 🧪 Strategy: Verify that deserializing unsorted indices results in a sorted SparseVec.
+        // SparseVec::new sorts them, so this should succeed and return sorted indices.
+        let mut buffer = Vec::new();
+        buffer.push(TAG_SPARSE_VECTOR);
+
+        let dim = 10u32;
+        let nnz = 2u32;
+        buffer.extend_from_slice(&dim.to_le_bytes());
+        buffer.extend_from_slice(&nnz.to_le_bytes());
+
+        // Unsorted indices: 5, 2
+        buffer.extend_from_slice(&5u32.to_le_bytes());
+        buffer.extend_from_slice(&2u32.to_le_bytes());
+
+        // Values: 1.0 corresponds to 5, 2.0 corresponds to 2
+        buffer.extend_from_slice(&1.0f32.to_le_bytes());
+        buffer.extend_from_slice(&2.0f32.to_le_bytes());
+
+        let (sv_arc, _) =
+            deserialize_sparse_vector(&buffer).expect("Should succeed and sort indices");
+
+        // Check sorted order
+        assert_eq!(sv_arc.indices(), &[2, 5]);
+        // Check values moved with indices (2 was paired with 2.0)
+        assert_eq!(sv_arc.values(), &[2.0, 1.0]);
+    }
+}
