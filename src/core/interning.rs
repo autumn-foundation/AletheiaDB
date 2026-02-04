@@ -1067,4 +1067,25 @@ mod tests {
             GLOBAL_INTERNER.len()
         );
     }
+
+    #[test]
+    fn test_identity_hasher() {
+        use std::hash::Hasher;
+        let mut hasher = IdentityHasher::default();
+
+        // Test write_u32 (primary path)
+        hasher.write_u32(42);
+        assert_eq!(hasher.finish(), 42);
+
+        // Test write with 4 bytes (fallback success path)
+        let bytes = 12345u32.to_le_bytes();
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 12345);
+
+        // Test write with other length (fallback fail path)
+        // This covers the else branch in IdentityHasher::write
+        let bytes = [1u8, 2, 3];
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 3); // Should use len()
+    }
 }
