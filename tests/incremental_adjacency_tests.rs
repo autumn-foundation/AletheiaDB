@@ -853,10 +853,10 @@ mod phase5_background_compaction {
         }
 
         // Wait for background compaction (poll)
-        // We wait for frozen_edge_count to reach 15, as delta might be drained
-        // slightly before frozen is updated (race condition).
+        // We wait for frozen_edge_count to reach 15 AND delta to be cleared.
+        // Compaction updates might not be atomic from reader's perspective, so we wait for stable state.
         let mut attempts = 0;
-        while index.frozen_edge_count() < 15 && attempts < 200 {
+        while (index.frozen_edge_count() < 15 || index.delta_edge_count() > 0) && attempts < 200 {
             thread::sleep(Duration::from_millis(50));
             attempts += 1;
         }
