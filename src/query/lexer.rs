@@ -839,6 +839,7 @@ impl<'a> Lexer<'a> {
         Ok(token)
     }
 
+    #[inline(never)]
     fn error(&self, message: String) -> LexerError {
         LexerError {
             message,
@@ -1580,8 +1581,8 @@ mod tests {
             // Test Debug
             let debug_str = format!("{:?}", token);
             assert!(!debug_str.is_empty());
-            // Test Display
-            assert_eq!(format!("{}", token), *expected_display);
+            // Test Display (on value)
+            assert_eq!(format!("{}", token.clone()), *expected_display);
         }
     }
 
