@@ -693,10 +693,8 @@ impl WalRingBuffer {
 
                         // Mark slot as available for writing again
                         // New sequence = pos + capacity (next write cycle)
-                        slot.sequence.store(
-                            pos.wrapping_add(self.capacity as u64),
-                            Ordering::Release,
-                        );
+                        slot.sequence
+                            .store(pos.wrapping_add(self.capacity as u64), Ordering::Release);
 
                         if let Some(e) = entry {
                             entries.push(e);
