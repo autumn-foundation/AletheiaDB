@@ -1483,110 +1483,97 @@ mod tests {
     }
 
     // =====================================================
-    // Token Display Tests
+    // Token Coverage Tests
     // =====================================================
 
     #[test]
-    fn test_token_display() {
-        assert_eq!(format!("{}", Token::Match), "MATCH");
-        assert_eq!(format!("{}", Token::Arrow), "->");
-        assert_eq!(format!("{}", Token::Identifier("foo".to_string())), "foo");
-        assert_eq!(
-            format!("{}", Token::StringLiteral("bar".to_string())),
-            "'bar'"
-        );
-        assert_eq!(format!("{}", Token::IntegerLiteral(42)), "42");
-        assert_eq!(format!("{}", Token::FloatLiteral(2.71)), "2.71");
-        assert_eq!(format!("{}", Token::Parameter("p".to_string())), "$p");
-    }
-
-    #[test]
     fn test_token_coverage() {
-        let tokens = vec![
+        let cases = vec![
             // Keywords - Graph
-            Token::Match,
-            Token::Where,
-            Token::Return,
-            Token::Order,
-            Token::By,
-            Token::Limit,
-            Token::Skip,
-            Token::Distinct,
-            Token::Count,
-            Token::Asc,
-            Token::Desc,
+            (Token::Match, "MATCH"),
+            (Token::Where, "WHERE"),
+            (Token::Return, "RETURN"),
+            (Token::Order, "ORDER"),
+            (Token::By, "BY"),
+            (Token::Limit, "LIMIT"),
+            (Token::Skip, "SKIP"),
+            (Token::Distinct, "DISTINCT"),
+            (Token::Count, "COUNT"),
+            (Token::Asc, "ASC"),
+            (Token::Desc, "DESC"),
             // Keywords - Logical
-            Token::And,
-            Token::Or,
-            Token::Not,
-            Token::In,
-            Token::Is,
-            Token::Null,
-            Token::True,
-            Token::False,
+            (Token::And, "AND"),
+            (Token::Or, "OR"),
+            (Token::Not, "NOT"),
+            (Token::In, "IN"),
+            (Token::Is, "IS"),
+            (Token::Null, "NULL"),
+            (Token::True, "TRUE"),
+            (Token::False, "FALSE"),
             // Keywords - Vector
-            Token::Similar,
-            Token::To,
-            Token::Using,
-            Token::Find,
-            Token::Rank,
-            Token::Similarity,
-            Token::Top,
+            (Token::Similar, "SIMILAR"),
+            (Token::To, "TO"),
+            (Token::Using, "USING"),
+            (Token::Find, "FIND"),
+            (Token::Rank, "RANK"),
+            (Token::Similarity, "SIMILARITY"),
+            (Token::Top, "TOP"),
             // Keywords - Temporal
-            Token::As,
-            Token::Of,
-            Token::Between,
+            (Token::As, "AS"),
+            (Token::Of, "OF"),
+            (Token::Between, "BETWEEN"),
             // Keywords - String predicates
-            Token::Exists,
-            Token::Contains,
-            Token::Starts,
-            Token::Ends,
-            Token::With,
+            (Token::Exists, "EXISTS"),
+            (Token::Contains, "CONTAINS"),
+            (Token::Starts, "STARTS"),
+            (Token::Ends, "ENDS"),
+            (Token::With, "WITH"),
             // Keywords - Distance metrics
-            Token::Cosine,
-            Token::Euclidean,
-            Token::DotProduct,
+            (Token::Cosine, "COSINE"),
+            (Token::Euclidean, "EUCLIDEAN"),
+            (Token::DotProduct, "DOT_PRODUCT"),
             // Punctuation
-            Token::LeftParen,
-            Token::RightParen,
-            Token::LeftBracket,
-            Token::RightBracket,
-            Token::LeftBrace,
-            Token::RightBrace,
-            Token::Colon,
-            Token::Comma,
-            Token::Dot,
-            Token::Star,
-            Token::Dash,
+            (Token::LeftParen, "("),
+            (Token::RightParen, ")"),
+            (Token::LeftBracket, "["),
+            (Token::RightBracket, "]"),
+            (Token::LeftBrace, "{"),
+            (Token::RightBrace, "}"),
+            (Token::Colon, ":"),
+            (Token::Comma, ","),
+            (Token::Dot, "."),
+            (Token::Star, "*"),
+            (Token::Dash, "-"),
             // Arrow patterns
-            Token::Arrow,
-            Token::LeftArrow,
+            (Token::Arrow, "->"),
+            (Token::LeftArrow, "<-"),
             // Comparison operators
-            Token::Eq,
-            Token::Ne,
-            Token::Lt,
-            Token::Le,
-            Token::Gt,
-            Token::Ge,
+            (Token::Eq, "="),
+            (Token::Ne, "<>"),
+            (Token::Lt, "<"),
+            (Token::Le, "<="),
+            (Token::Gt, ">"),
+            (Token::Ge, ">="),
             // Literals
-            Token::Identifier("id".to_string()),
-            Token::StringLiteral("str".to_string()),
-            Token::IntegerLiteral(42),
-            Token::FloatLiteral(3.14),
-            Token::Parameter("param".to_string()),
+            (Token::Identifier("id".to_string()), "id"),
+            (Token::StringLiteral("str".to_string()), "'str'"),
+            (Token::IntegerLiteral(42), "42"),
+            (Token::FloatLiteral(3.14), "3.14"),
+            (Token::Parameter("param".to_string()), "$param"),
             // EOF
-            Token::Eof,
+            (Token::Eof, "EOF"),
         ];
 
-        for token in tokens {
+        for (token, expected_display) in cases {
             // Test Clone
             let cloned = token.clone();
             // Test PartialEq
             assert_eq!(token, cloned);
             // Test Debug
-            let _ = format!("{:?}", token);
+            let debug_str = format!("{:?}", token);
+            assert!(!debug_str.is_empty());
             // Test Display
-            let _ = format!("{}", token);
+            assert_eq!(format!("{}", token), expected_display);
         }
     }
 }
