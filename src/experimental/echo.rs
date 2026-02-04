@@ -198,7 +198,10 @@ mod tests {
             resolution_us: 1000,
         };
         let fp3 = TemporalFingerprint {
-            bins: vec![std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2], // ~45 degrees
+            bins: vec![
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+            ], // ~45 degrees
             resolution_us: 1000,
         };
 
