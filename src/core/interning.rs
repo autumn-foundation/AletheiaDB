@@ -61,7 +61,14 @@ impl InternedString {
 
 impl fmt::Display for InternedString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Interned({})", self.0)
+        // Try to resolve using the global interner
+        // This makes debugging much easier by showing the actual string content
+        let result = GLOBAL_INTERNER.resolve_with(*self, |s| f.write_str(s));
+
+        match result {
+            Some(res) => res,
+            None => write!(f, "Interned({})", self.0),
+        }
     }
 }
 
