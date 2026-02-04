@@ -57,9 +57,9 @@ use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::index::vector::DistanceMetric;
 
+use super::QueryRunner;
 use super::ir::{Predicate, QueryOp, TraversalDepth};
 use super::plan::{IndexHint, QueryHints, TemporalContext};
-use super::QueryRunner;
 
 /// A fully constructed query ready for execution.
 #[derive(Debug, Clone)]

@@ -5,6 +5,7 @@
 
 use super::{Query, QueryResults};
 use crate::utils::error::Result;
+use std::sync::Arc;
 
 /// Trait for executing queries.
 ///
@@ -13,4 +14,11 @@ use crate::utils::error::Result;
 pub trait QueryRunner {
     /// Execute a compiled query and return results.
     fn execute_query(&self, query: Query) -> Result<QueryResults>;
+}
+
+/// Implement QueryRunner for Arc<T> to allow passing Arc<GallifreyDB> directly.
+impl<T: QueryRunner + ?Sized> QueryRunner for Arc<T> {
+    fn execute_query(&self, query: Query) -> Result<QueryResults> {
+        (**self).execute_query(query)
+    }
 }
