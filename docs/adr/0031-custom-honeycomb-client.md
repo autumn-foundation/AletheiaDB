@@ -1,6 +1,6 @@
 # ADR-0031: Internalize Honeycomb Client
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-24
 **Deciders:** GallifreyDB Core Team
 **Categories:** engineering, observability, dependency-management
