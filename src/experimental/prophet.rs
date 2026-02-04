@@ -44,7 +44,7 @@ impl<'a> Prophet<'a> {
             Ok(idx_info.property_name.clone())
         } else {
             // It's okay if no vector index exists, we just won't use vector scoring.
-             Ok("".to_string())
+            Ok("".to_string())
         }
     }
 
@@ -91,17 +91,28 @@ impl<'a> Prophet<'a> {
 
         // Helper to get vector
         let get_vec = |id| -> Option<Vec<f32>> {
-            self.db.get_node(id).ok()?
-                .properties.get(property)?
+            self.db
+                .get_node(id)
+                .ok()?
+                .properties
+                .get(property)?
                 .as_vector()
                 .map(|v| v.to_vec())
         };
 
-        let vec_a = match get_vec(a) { Some(v) => v, None => return 0.0 };
-        let vec_b = match get_vec(b) { Some(v) => v, None => return 0.0 };
+        let vec_a = match get_vec(a) {
+            Some(v) => v,
+            None => return 0.0,
+        };
+        let vec_b = match get_vec(b) {
+            Some(v) => v,
+            None => return 0.0,
+        };
 
         // Cosine Similarity
-        if vec_a.len() != vec_b.len() { return 0.0; }
+        if vec_a.len() != vec_b.len() {
+            return 0.0;
+        }
 
         let dot: f32 = vec_a.iter().zip(vec_b.iter()).map(|(x, y)| x * y).sum();
         let mag_a: f32 = vec_a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -151,7 +162,8 @@ impl<'a> Prophet<'a> {
         }
 
         // 3. Sort and truncate
-        scored_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored_candidates
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         if scored_candidates.len() > k {
             scored_candidates.truncate(k);
         }
@@ -164,7 +176,7 @@ impl<'a> Prophet<'a> {
 mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
-    use crate::index::vector::{HnswConfig, DistanceMetric};
+    use crate::index::vector::{DistanceMetric, HnswConfig};
 
     #[test]
     fn test_prophet_diamond_prediction() {
@@ -209,7 +221,9 @@ mod tests {
         db.enable_vector_index("embedding", config).unwrap();
 
         // A: [1, 0]
-        let p_a = PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build();
+        let p_a = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[1.0, 0.0])
+            .build();
         let a = db.create_node("Node", p_a).unwrap();
 
         // B, C (Connectors)
@@ -218,11 +232,15 @@ mod tests {
         let c = db.create_node("Node", p_x.clone()).unwrap();
 
         // D: [1, 0] (Similar to A)
-        let p_d = PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build();
+        let p_d = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[1.0, 0.0])
+            .build();
         let d = db.create_node("Node", p_d).unwrap();
 
         // E: [0, 1] (Orthogonal to A)
-        let p_e = PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 1.0]).build();
+        let p_e = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[0.0, 1.0])
+            .build();
         let e = db.create_node("Node", p_e).unwrap();
 
         // Edges
@@ -240,9 +258,22 @@ mod tests {
 
         assert!(predictions.len() >= 2);
 
-        let d_score = predictions.iter().find(|(id, _)| *id == d).map(|(_, s)| *s).unwrap();
-        let e_score = predictions.iter().find(|(id, _)| *id == e).map(|(_, s)| *s).unwrap();
+        let d_score = predictions
+            .iter()
+            .find(|(id, _)| *id == d)
+            .map(|(_, s)| *s)
+            .unwrap();
+        let e_score = predictions
+            .iter()
+            .find(|(id, _)| *id == e)
+            .map(|(_, s)| *s)
+            .unwrap();
 
-        assert!(d_score > e_score, "D should rank higher than E due to vector similarity (D: {}, E: {})", d_score, e_score);
+        assert!(
+            d_score > e_score,
+            "D should rank higher than E due to vector similarity (D: {}, E: {})",
+            d_score,
+            e_score
+        );
     }
 }
