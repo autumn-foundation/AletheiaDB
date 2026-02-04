@@ -179,17 +179,29 @@ impl PropertyValue {
     ///
     /// Panics if the vector dimension exceeds [`MAX_VECTOR_DIMENSIONS`].
     /// This validation ensures that vectors can be serialized without error.
+    ///
+    /// For a fallible version that returns `Result` instead of panicking,
+    /// use [`try_vector`](Self::try_vector).
     #[inline]
     pub fn vector<V: AsRef<[f32]>>(v: V) -> Self {
+        Self::try_vector(v).unwrap_or_else(|e| panic!("{}", e))
+    }
+
+    /// Create a vector property value from a slice (fallible).
+    ///
+    /// Returns `Err` if the vector dimension exceeds [`MAX_VECTOR_DIMENSIONS`].
+    #[inline]
+    pub fn try_vector<V: AsRef<[f32]>>(v: V) -> Result<Self> {
         let slice = v.as_ref();
         if slice.len() > MAX_VECTOR_DIMENSIONS {
-            panic!(
+            return Err(StorageError::CorruptedData(format!(
                 "Vector dimension {} exceeds maximum allowed {}",
                 slice.len(),
                 MAX_VECTOR_DIMENSIONS
-            );
+            ))
+            .into());
         }
-        PropertyValue::Vector(Arc::from(slice))
+        Ok(PropertyValue::Vector(Arc::from(slice)))
     }
 
     /// Returns true if this value is null.
@@ -515,10 +527,7 @@ impl PropertyValue {
                 }
                 Ok(())
             }
-            PropertyValue::Vector(v) => {
-                serialize_vector_into(v, buffer);
-                Ok(())
-            }
+            PropertyValue::Vector(v) => try_serialize_vector_into(v, buffer),
             PropertyValue::SparseVector(sv) => {
                 serialize_sparse_vector_into(sv, buffer);
                 Ok(())
@@ -883,14 +892,25 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 /// Panics if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
 /// This is a defensive check; vectors should be validated at construction
 /// time via [`PropertyValue::vector()`] which enforces this limit.
+///
+/// For a fallible version that returns `Result` instead of panicking,
+/// use [`try_serialize_vector_into`].
 pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
+    try_serialize_vector_into(v, buffer).unwrap_or_else(|e| panic!("{}", e))
+}
+
+/// Serialize a vector into an existing buffer (fallible).
+///
+/// Returns `Err` if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
+pub fn try_serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) -> Result<()> {
     // Defensive check: vectors should be validated at construction via PropertyValue::vector()
     if v.len() > MAX_VECTOR_DIMENSIONS {
-        panic!(
+        return Err(StorageError::CorruptedData(format!(
             "Vector dimension {} exceeds maximum allowed {}",
             v.len(),
             MAX_VECTOR_DIMENSIONS
-        );
+        ))
+        .into());
     }
 
     // Pre-allocate space to avoid multiple reallocations
@@ -929,6 +949,7 @@ pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
             buffer.extend_from_slice(&value.to_le_bytes());
         }
     }
+    Ok(())
 }
 
 /// Deserialize a vector from bytes.
@@ -1900,7 +1921,8 @@ impl PropertyMapBuilder {
 
     /// Insert a vector property (fallible).
     pub fn try_insert_vector(self, key: &str, vector: &[f32]) -> Result<Self> {
-        self.try_insert(key, PropertyValue::vector(vector))
+        let val = PropertyValue::try_vector(vector)?;
+        self.try_insert(key, val)
     }
 
     /// Remove a property.
@@ -3870,12 +3892,11 @@ mod sentry_tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "Vector dimension")]
-    fn test_try_insert_vector_panics_on_overflow() {
-        // 💣 Risk: try_insert_vector implies fallibility but panics on large inputs.
-        // This test documents this behavior to prevent regression or unexpected changes.
+    fn test_try_insert_vector_returns_error_on_overflow() {
+        // 🔒 Warden Fix: try_insert_vector now returns Result instead of panicking.
         let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
-        let _ = PropertyMapBuilder::new().try_insert_vector("test", &large_vector);
+        let result = PropertyMapBuilder::new().try_insert_vector("test", &large_vector);
+        assert!(result.is_err());
     }
 
     #[test]

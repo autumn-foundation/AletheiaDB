@@ -149,3 +149,14 @@ This ensures memory is only allocated if the client has actually sent a proporti
 
 **Verification:** Reproduction Test
 Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed that the new logic returns `StorageError::CorruptedData` ("Insufficient buffer size") *before* attempting allocation.
+
+## 2026-02-18 - Property DoS Hardening
+
+**Threat:** Panic DoS in Vector Insertion
+`PropertyMapBuilder::try_insert_vector` and `PropertyValue::vector` panicked when vector dimensions exceeded `MAX_VECTOR_DIMENSIONS`. Since `try_insert_vector` is often exposed to user input (e.g. via API), an attacker could crash the server by sending an oversized vector.
+
+**Defense:** Fallible Constructors
+Refactored vector creation to use `PropertyValue::try_vector` which returns `Result` instead of panicking. Updated `try_insert_vector` to propagate this error. Also implemented `try_serialize_vector_into` to prevent panics during serialization of manually constructed oversized vectors.
+
+**Verification:** Regression Test
+Added `tests/security_dos_property.rs` which attempts to insert an oversized vector using `try_insert_vector`. Verified that it now returns `Err` instead of panicking.
