@@ -60,11 +60,14 @@ This document describes the core architecture principles, design patterns, and s
 C4Context
   title System Context diagram for GallifreyDB
 
-  Person(user, "Developer / LLM Agent", "Uses the database for knowledge retrieval")
+  Person(developer, "Developer", "Uses the database for building apps")
+  Person(agent, "AI Agent", "LLM (Claude/Cursor): Uses the database for reasoning")
+
   System(gallifreydb, "GallifreyDB", "Bi-temporal Graph Database")
   System_Ext(filesystem, "File System", "Stores WAL, Indexes, and Cold Data")
 
-  Rel(user, gallifreydb, "Reads/Writes", "Rust API / GQL")
+  Rel(developer, gallifreydb, "Reads/Writes", "Rust API / GQL")
+  Rel(agent, gallifreydb, "Tool Execution", "MCP (stdio)")
   Rel(gallifreydb, filesystem, "Persists", "mmap / fsync")
 ```
 
@@ -74,6 +77,12 @@ C4Context
 
 ```mermaid
 classDiagram
+    namespace Interfaces {
+        class MCPServer {
+            +serve_stdio()
+            +handle_tool_call()
+        }
+    }
     namespace Core {
         class QueryEngine
         class TemporalPlanner
@@ -87,7 +96,13 @@ classDiagram
         class HistoricalStorage
         class RedbImplementation
     }
+    namespace Observability {
+        class HoneycombClient {
+            +send_batch()
+        }
+    }
 
+    MCPServer --> QueryEngine : Uses
     QueryEngine --> StorageTrait : Uses (Trait Bound)
     %% Removed the circular dependency arrow
     RedbImplementation ..|> StorageTrait : Implements
@@ -120,6 +135,86 @@ classDiagram
 ```
 
 **Pattern:** Reifying implicit vector similarity into explicit graph structure to enable high-level topological analysis.
+
+### Experimental Features
+
+**Concept Algebra (Semantic Arithmetic)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class ConceptAlgebra {
+            +add(a, b)
+            +subtract(a, b)
+            +analogy(a, b, c)
+            +mean(nodes)
+        }
+    }
+    class GallifreyDB
+    ConceptAlgebra --> GallifreyDB : Uses (Vector Index)
+```
+
+**Sequence: Concept Analogy**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CA as ConceptAlgebra
+    participant DB as GallifreyDB
+
+    User->>CA: analogy(king, man, woman)
+    CA->>DB: get_vector(king)
+    CA->>DB: get_vector(man)
+    CA->>DB: get_vector(woman)
+    CA->>CA: Compute: K - M + W
+    CA->>DB: search_vectors(result)
+    DB-->>CA: neighbors
+    CA-->>User: Result (Queen)
+```
+
+**Temporal Resonance (Echo)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class EchoChamber {
+            +find_echoes(target, candidates)
+        }
+        class Resonator {
+            <<interface>>
+            +resonate(history)
+        }
+        class ActivityDensityResonator
+    }
+
+    EchoChamber --> GallifreyDB : Uses (History)
+    EchoChamber --> Resonator : Uses
+    ActivityDensityResonator ..|> Resonator : Implements
+```
+
+**Sequence: Finding Echoes**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Echo as EchoChamber
+    participant Res as Resonator
+    participant DB as GallifreyDB
+
+    User->>Echo: find_echoes(target, candidates)
+    Echo->>DB: get_node_history(target)
+    Echo->>Res: resonate(target_history)
+    Res-->>Echo: target_fingerprint
+
+    loop Every Candidate
+        Echo->>DB: get_node_history(candidate)
+        Echo->>Res: resonate(candidate_history)
+        Res-->>Echo: candidate_fingerprint
+        Echo->>Echo: similarity(target, candidate)
+    end
+
+    Echo-->>User: Ranked Results
+```
 
 ### Temporal Query Processing
 

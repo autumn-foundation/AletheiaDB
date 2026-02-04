@@ -1,8 +1,51 @@
-//! GQL Parser
+//! # GQL Parser
 //!
-//! A recursive descent parser that converts tokenized GQL input into an AST.
-//! The parser supports the full GQL grammar including MATCH patterns, vector
-//! search operations, temporal clauses, and hybrid queries.
+//! A recursive descent parser that converts tokenized GQL (Gallifrey Query Language) input into an
+//! Abstract Syntax Tree (AST).
+//!
+//! This module is the entry point for the query compilation pipeline. It takes a raw string query
+//! and transforms it into a structured representation that the query planner can optimize and execute.
+//!
+//! ## Grammar Overview
+//!
+//! The parser supports a Cypher-like syntax with GallifreyDB-specific extensions for:
+//!
+//! - **Graph Pattern Matching**: `MATCH (n:Person)-[:KNOWS]->(m)`
+//! - **Vector Search**: `SIMILAR TO $embedding` or `RANK BY SIMILARITY`
+//! - **Temporal Queries**: `AS OF '2024-01-01'` or `BETWEEN t1 AND t2`
+//! - **Hybrid Queries**: Combining graph traversal, vector similarity, and temporal filters.
+//!
+//! ## Example: The "Hero's Journey" Query
+//!
+//! This example demonstrates a complex hybrid query that uses most of the parser's capabilities.
+//! It finds friends of "Alice" as of a specific time, ranks them by similarity to a query vector,
+//! filters by age, and returns the top results.
+//!
+//! ```rust
+//! use gallifreydb::query::parser::Parser;
+//!
+//! let query = "
+//!     AS OF '2024-01-15T10:00:00Z'
+//!     MATCH (alice:Person {name: 'Alice'})-[:KNOWS]->(friend)
+//!     RANK BY SIMILARITY TO $query_embedding TOP 10
+//!     WHERE friend.age > 25
+//!     RETURN friend.name, friend.age
+//!     ORDER BY friend.age DESC
+//!     LIMIT 5
+//! ";
+//!
+//! let ast = Parser::parse(query).unwrap();
+//! assert!(ast.is_temporal());
+//! assert!(ast.has_vector_ops());
+//! ```
+//!
+//! ## Implementation Details
+//!
+//! The parser is implemented as a recursive descent parser. It consumes a stream of `Token`s
+//! produced by the `Lexer`.
+//!
+//! - **Recursion Depth**: Limited to [`MAX_RECURSION_DEPTH`] to prevent stack overflow on deeply nested predicates.
+//! - **Error Handling**: Returns detailed `ParseError`s with position information to help users debug syntax errors.
 
 use std::sync::Arc;
 
@@ -15,15 +58,18 @@ use super::lexer::{Lexer, LexerError, Token};
 const MAX_RECURSION_DEPTH: usize = 100;
 
 /// Error type for parser errors.
+///
+/// This error provides detailed information about what went wrong during parsing,
+/// including the position in the token stream and what was expected vs found.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
-    /// Error message
+    /// A descriptive error message explaining the failure.
     pub message: String,
-    /// Position in the token stream
+    /// The index in the token stream where the error occurred.
     pub position: usize,
-    /// Expected token description
+    /// A description of what token or construct was expected (optional).
     pub expected: Option<String>,
-    /// Found token
+    /// The actual token found at the error position (optional).
     pub found: Option<Token>,
 }
 
@@ -58,13 +104,40 @@ impl From<LexerError> for ParseError {
 }
 
 /// A parser for the GQL query language.
+///
+/// The `Parser` maintains state (tokens and current position) as it walks through
+/// the input stream. It is designed to be used via the static [`Parser::parse`] method.
 pub struct Parser {
     tokens: Vec<Token>,
     position: usize,
 }
 
 impl Parser {
-    /// Parse a GQL query string into an AST.
+    /// Parse a GQL query string into an Abstract Syntax Tree (AST).
+    ///
+    /// This is the main entry point for the parser. It tokenizes the input string
+    /// and processes it according to the GQL grammar.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The GQL query string to parse.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(QueryAst)` - The parsed AST if the query is valid.
+    /// * `Err(ParseError)` - An error describing why parsing failed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::query::parser::Parser;
+    ///
+    /// let query = "MATCH (n:Person) RETURN n.name";
+    /// match Parser::parse(query) {
+    ///     Ok(ast) => println!("Successfully parsed query: {:?}", ast),
+    ///     Err(e) => eprintln!("Parse error: {}", e),
+    /// }
+    /// ```
     pub fn parse(input: &str) -> Result<QueryAst, ParseError> {
         let tokens = Lexer::tokenize(input)?;
         let mut parser = Parser {
@@ -133,6 +206,13 @@ impl Parser {
     // Temporal Clause Parsing
     // =========================================================
 
+    /// Parse an optional temporal clause (`AS OF ...` or `BETWEEN ...`).
+    ///
+    /// Grammar:
+    /// ```text
+    /// temporal_clause ::= "AS OF" timestamp ("," timestamp)?
+    ///                   | "BETWEEN" timestamp "AND" timestamp
+    /// ```
     fn parse_temporal_clause(&mut self) -> Result<Option<TemporalClause>, ParseError> {
         if self.check(&Token::As) {
             self.advance(); // consume AS
@@ -195,6 +275,10 @@ impl Parser {
     // Source Clause Parsing
     // =========================================================
 
+    /// Parse the main source of data for the query.
+    ///
+    /// This can be either a graph pattern match (`MATCH`) or a vector search
+    /// (`SIMILAR TO` or `FIND SIMILAR`).
     fn parse_source_clause(&mut self) -> Result<SourceClause, ParseError> {
         if self.check(&Token::Match) {
             return self.parse_match_clause();
@@ -214,6 +298,12 @@ impl Parser {
         ))
     }
 
+    /// Parse a `MATCH` clause containing one or more patterns.
+    ///
+    /// Grammar:
+    /// ```text
+    /// match_clause ::= "MATCH" pattern ("," pattern)*
+    /// ```
     fn parse_match_clause(&mut self) -> Result<SourceClause, ParseError> {
         self.expect(&Token::Match)?;
 
@@ -384,6 +474,12 @@ impl Parser {
     // Pattern Parsing
     // =========================================================
 
+    /// Parse a graph pattern consisting of nodes connected by relationships.
+    ///
+    /// Grammar:
+    /// ```text
+    /// pattern ::= node_pattern (relationship_pattern node_pattern)*
+    /// ```
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         let first_node = self.parse_node_pattern()?;
         let mut pattern = Pattern::node(first_node);
@@ -438,18 +534,7 @@ impl Parser {
     }
 
     fn parse_relationship_pattern(&mut self) -> Result<RelationshipPattern, ParseError> {
-        let direction_start = if self.check(&Token::LeftArrow) {
-            self.advance();
-            RelationshipDirection::Incoming
-        } else if self.check(&Token::Dash) {
-            self.advance();
-            RelationshipDirection::Both // Default, may change to Outgoing
-        } else {
-            return Err(self.error(
-                "Expected relationship pattern".to_string(),
-                Some("'-' or '<-'".to_string()),
-            ));
-        };
+        let direction_start = self.parse_relationship_direction_start()?;
 
         // Parse relationship details inside brackets
         self.expect(&Token::LeftBracket)?;
@@ -491,6 +576,26 @@ impl Parser {
 
         self.expect(&Token::RightBracket)?;
 
+        rel.direction = self.resolve_relationship_direction(direction_start);
+
+        Ok(rel)
+    }
+
+    fn parse_relationship_direction_start(&mut self) -> Result<RelationshipDirection, ParseError> {
+        if self.check(&Token::LeftArrow) {
+            self.advance();
+            Ok(RelationshipDirection::Incoming)
+        } else {
+            // Must be dash because is_relationship_start() checked it
+            self.expect(&Token::Dash)?;
+            Ok(RelationshipDirection::Both) // Default, may change to Outgoing
+        }
+    }
+
+    fn resolve_relationship_direction(
+        &mut self,
+        start_dir: RelationshipDirection,
+    ) -> RelationshipDirection {
         // Parse end arrow to determine final direction
         // Pattern combinations:
         //   -[]->  = Outgoing
@@ -499,26 +604,26 @@ impl Parser {
         //   <-[]-> = Both (bidirectional)
         if self.check(&Token::Arrow) {
             self.advance();
-            if direction_start == RelationshipDirection::Incoming {
+            if start_dir == RelationshipDirection::Incoming {
                 // <-[]-> is bidirectional
-                rel.direction = RelationshipDirection::Both;
+                RelationshipDirection::Both
             } else {
                 // -[]-> is outgoing
-                rel.direction = RelationshipDirection::Outgoing;
+                RelationshipDirection::Outgoing
             }
         } else if self.check(&Token::Dash) {
             self.advance();
-            if direction_start == RelationshipDirection::Incoming {
+            if start_dir == RelationshipDirection::Incoming {
                 // <-[]- stays as Incoming
-                rel.direction = RelationshipDirection::Incoming;
+                RelationshipDirection::Incoming
             } else {
                 // -[]- is both
-                rel.direction = RelationshipDirection::Both;
+                RelationshipDirection::Both
             }
+        } else {
+            // If no ending marker, keep the start direction
+            start_dir
         }
-        // If no ending marker, keep the start direction
-
-        Ok(rel)
     }
 
     fn parse_depth_spec(&mut self) -> Result<DepthSpec, ParseError> {
@@ -527,45 +632,11 @@ impl Parser {
         // Check for range or exact
         match self.current() {
             Some(Token::IntegerLiteral(n)) => {
-                let n_val = *n;
-                if n_val < 0 {
-                    return Err(self.error(
-                        format!("Depth must be non-negative, got {}", n_val),
-                        Some("non-negative integer".to_string()),
-                    ));
-                }
-                let min = n_val as usize;
+                let min = self.validate_non_negative(*n)?;
                 self.advance();
 
                 if self.check(&Token::Dot) {
-                    self.advance();
-                    self.expect(&Token::Dot)?;
-
-                    if let Some(Token::IntegerLiteral(m)) = self.current() {
-                        let m_val = *m;
-                        if m_val < 0 {
-                            return Err(self.error(
-                                format!("Depth must be non-negative, got {}", m_val),
-                                Some("non-negative integer".to_string()),
-                            ));
-                        }
-                        let max = m_val as usize;
-                        if min > max {
-                            return Err(self.error(
-                                format!("Invalid depth range: min ({}) > max ({})", min, max),
-                                Some("valid range".to_string()),
-                            ));
-                        }
-                        self.advance();
-                        Ok(DepthSpec::Range { min, max })
-                    } else {
-                        // *n.. is unbounded max, use Variable with min hops
-                        // Since we can't express min with Variable, use a large max
-                        Ok(DepthSpec::Range {
-                            min,
-                            max: usize::MAX / 2, // Use half max to avoid overflow issues
-                        })
-                    }
+                    self.parse_depth_range(min)
                 } else {
                     Ok(DepthSpec::Exact(min))
                 }
@@ -575,14 +646,7 @@ impl Parser {
                 self.expect(&Token::Dot)?;
 
                 if let Some(Token::IntegerLiteral(n)) = self.current() {
-                    let n_val = *n;
-                    if n_val < 0 {
-                        return Err(self.error(
-                            format!("Depth must be non-negative, got {}", n_val),
-                            Some("non-negative integer".to_string()),
-                        ));
-                    }
-                    let max = n_val as usize;
+                    let max = self.validate_non_negative(*n)?;
                     self.advance();
                     Ok(DepthSpec::Max(max))
                 } else {
@@ -590,6 +654,41 @@ impl Parser {
                 }
             }
             _ => Ok(DepthSpec::Variable),
+        }
+    }
+
+    fn validate_non_negative(&self, n: i64) -> Result<usize, ParseError> {
+        if n < 0 {
+            Err(self.error(
+                format!("Depth must be non-negative, got {}", n),
+                Some("non-negative integer".to_string()),
+            ))
+        } else {
+            Ok(n as usize)
+        }
+    }
+
+    fn parse_depth_range(&mut self, min: usize) -> Result<DepthSpec, ParseError> {
+        self.advance(); // consume first dot
+        self.expect(&Token::Dot)?; // expect second dot
+
+        if let Some(Token::IntegerLiteral(m)) = self.current() {
+            let max = self.validate_non_negative(*m)?;
+            if min > max {
+                return Err(self.error(
+                    format!("Invalid depth range: min ({}) > max ({})", min, max),
+                    Some("valid range".to_string()),
+                ));
+            }
+            self.advance();
+            Ok(DepthSpec::Range { min, max })
+        } else {
+            // *n.. is unbounded max, use Variable with min hops
+            // Since we can't express min with Variable, use a large max
+            Ok(DepthSpec::Range {
+                min,
+                max: usize::MAX / 2, // Use half max to avoid overflow issues
+            })
         }
     }
 
@@ -680,6 +779,15 @@ impl Parser {
     // RANK BY SIMILARITY Clause
     // =========================================================
 
+    /// Parse a `RANK BY SIMILARITY` clause.
+    ///
+    /// This is an extension to GQL for hybrid search, allowing graph results to be
+    /// re-ranked based on vector similarity.
+    ///
+    /// Grammar:
+    /// ```text
+    /// rank_clause ::= "RANK BY SIMILARITY TO" embedding ("TOP" integer)?
+    /// ```
     fn parse_rank_clause(&mut self) -> Result<Option<RankClause>, ParseError> {
         if !self.check(&Token::Rank) {
             return Ok(None);
@@ -706,6 +814,12 @@ impl Parser {
     // WHERE Clause
     // =========================================================
 
+    /// Parse a `WHERE` clause containing predicates.
+    ///
+    /// Grammar:
+    /// ```text
+    /// where_clause ::= "WHERE" predicate
+    /// ```
     fn parse_where_clause(&mut self) -> Result<Option<WhereClause>, ParseError> {
         if !self.check(&Token::Where) {
             return Ok(None);
@@ -973,6 +1087,12 @@ impl Parser {
                 self.advance();
                 Ok(Expression::Parameter(param))
             }
+            _ => self.parse_literal_expression(),
+        }
+    }
+
+    fn parse_literal_expression(&mut self) -> Result<Expression, ParseError> {
+        match self.current() {
             Some(Token::StringLiteral(s)) => {
                 let val = PropertyValue::String(s.clone());
                 self.advance();
@@ -1810,5 +1930,132 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.message.contains("property expression"));
+    }
+
+    // =====================================================
+    // Coverage Tests
+    // =====================================================
+
+    #[test]
+    fn test_parse_error_traits() {
+        let err1 = ParseError {
+            message: "msg".to_string(),
+            position: 0,
+            expected: None,
+            found: None,
+        };
+        // Test Clone
+        let err2 = err1.clone();
+        // Test PartialEq
+        assert_eq!(err1, err2);
+        // Test Debug
+        let debug_str = format!("{:?}", err1);
+        assert!(debug_str.contains("ParseError"));
+        assert!(debug_str.contains("msg"));
+    }
+
+    #[test]
+    fn test_parse_error_display_full() {
+        // Case 1: All fields present
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: Some("exp".to_string()),
+            found: Some(Token::Eof),
+        };
+        let s = format!("{}", err);
+        assert!(s.contains("Parse error at position 1: Error"));
+        assert!(s.contains("(expected exp)"));
+        assert!(s.contains("(found EOF)"));
+
+        // Case 2: No expected, no found
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: None,
+            found: None,
+        };
+        let s = format!("{}", err);
+        assert_eq!(s, "Parse error at position 1: Error");
+
+        // Case 3: Expected only
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: Some("exp".to_string()),
+            found: None,
+        };
+        let s = format!("{}", err);
+        assert!(s.contains("(expected exp)"));
+        assert!(!s.contains("(found"));
+
+        // Case 4: Found only
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: None,
+            found: Some(Token::Eof),
+        };
+        let s = format!("{}", err);
+        assert!(!s.contains("(expected"));
+        assert!(s.contains("(found EOF)"));
+    }
+
+    #[test]
+    fn test_relationship_direction_half_open() {
+        // Test fallback for missing end arrow: -[]
+        let query = Parser::parse("MATCH (a)-[:REL](b) RETURN a").unwrap();
+        if let SourceClause::Match(patterns) = &query.source
+            && let PatternElement::Relationship(rel) = &patterns[0].elements[1]
+        {
+            // Should default to Both
+            assert_eq!(rel.direction, RelationshipDirection::Both);
+        }
+    }
+
+    #[test]
+    fn test_depth_range_negative() {
+        // Test validate_non_negative
+        let result = Parser::parse("MATCH (a)-[:REL*-5]->(b) RETURN a");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("non-negative"));
+    }
+
+    #[test]
+    fn test_depth_range_negative_max() {
+        // Test validate_non_negative in max position
+        let result = Parser::parse("MATCH (a)-[:REL*1..-5]->(b) RETURN a");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("non-negative"));
+    }
+
+    #[test]
+    fn test_depth_range_inverted() {
+        // Test parse_depth_range min > max
+        let result = Parser::parse("MATCH (a)-[:REL*5..1]->(b) RETURN a");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Invalid depth range"));
+    }
+
+    #[test]
+    fn test_expression_error_unexpected() {
+        // Test parse_expression fallback
+        let result = Parser::parse("MATCH (n) WHERE )");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected expression"));
+    }
+
+    #[test]
+    fn test_parse_error_from_lexer_error() {
+        // Trigger a lexer error (invalid character)
+        let result = Parser::parse("MATCH @");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Unexpected character"));
+        // This implicitly tests From<LexerError> for ParseError
     }
 }

@@ -7,6 +7,9 @@
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
 #[cfg(feature = "nova")]
+/// Concept Algebra for semantic vector arithmetic.
+pub mod concept_algebra;
+#[cfg(feature = "nova")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
 #[cfg(feature = "nova")]
@@ -15,6 +18,9 @@ pub mod fishing;
 #[cfg(feature = "nova")]
 /// Graph context exporter for LLM integration.
 pub mod graph_context;
+#[cfg(feature = "nova")]
+/// Prophet Link Prediction Engine.
+pub mod prophet;
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
