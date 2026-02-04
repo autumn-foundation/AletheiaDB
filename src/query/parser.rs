@@ -585,14 +585,10 @@ impl Parser {
         if self.check(&Token::LeftArrow) {
             self.advance();
             Ok(RelationshipDirection::Incoming)
-        } else if self.check(&Token::Dash) {
-            self.advance();
-            Ok(RelationshipDirection::Both) // Default, may change to Outgoing
         } else {
-            Err(self.error(
-                "Expected relationship pattern".to_string(),
-                Some("'-' or '<-'".to_string()),
-            ))
+            // Must be dash because is_relationship_start() checked it
+            self.expect(&Token::Dash)?;
+            Ok(RelationshipDirection::Both) // Default, may change to Outgoing
         }
     }
 
@@ -1091,17 +1087,7 @@ impl Parser {
                 self.advance();
                 Ok(Expression::Parameter(param))
             }
-            Some(Token::StringLiteral(_))
-            | Some(Token::IntegerLiteral(_))
-            | Some(Token::FloatLiteral(_))
-            | Some(Token::True)
-            | Some(Token::False)
-            | Some(Token::Null)
-            | Some(Token::Dash) => self.parse_literal_expression(),
-            _ => Err(self.error(
-                "Expected expression".to_string(),
-                Some("identifier, literal, or parameter".to_string()),
-            )),
+            _ => self.parse_literal_expression(),
         }
     }
 
@@ -1154,8 +1140,8 @@ impl Parser {
                 }
             }
             _ => Err(self.error(
-                "Expected literal".to_string(),
-                Some("string, number, boolean, or null".to_string()),
+                "Expected expression".to_string(),
+                Some("identifier, literal, or parameter".to_string()),
             )),
         }
     }
@@ -2013,6 +1999,54 @@ mod tests {
         let s = format!("{}", err);
         assert!(!s.contains("(expected"));
         assert!(s.contains("(found EOF)"));
+    }
+
+    #[test]
+    fn test_relationship_direction_half_open() {
+        // Test fallback for missing end arrow: -[]
+        let query = Parser::parse("MATCH (a)-[:REL](b) RETURN a").unwrap();
+        if let SourceClause::Match(patterns) = &query.source
+            && let PatternElement::Relationship(rel) = &patterns[0].elements[1]
+        {
+            // Should default to Both
+            assert_eq!(rel.direction, RelationshipDirection::Both);
+        }
+    }
+
+    #[test]
+    fn test_depth_range_negative() {
+        // Test validate_non_negative
+        let result = Parser::parse("MATCH (a)-[:REL*-5]->(b) RETURN a");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("non-negative"));
+    }
+
+    #[test]
+    fn test_depth_range_negative_max() {
+        // Test validate_non_negative in max position
+        let result = Parser::parse("MATCH (a)-[:REL*1..-5]->(b) RETURN a");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("non-negative"));
+    }
+
+    #[test]
+    fn test_depth_range_inverted() {
+        // Test parse_depth_range min > max
+        let result = Parser::parse("MATCH (a)-[:REL*5..1]->(b) RETURN a");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Invalid depth range"));
+    }
+
+    #[test]
+    fn test_expression_error_unexpected() {
+        // Test parse_expression fallback
+        let result = Parser::parse("MATCH (n) WHERE )");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected expression"));
     }
 
     #[test]
