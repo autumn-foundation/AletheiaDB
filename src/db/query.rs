@@ -2,9 +2,15 @@ use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::GallifreyDB;
 use crate::query::builder::state::Initial;
-use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults};
+use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults, QueryRunner};
 use crate::utils::error::Result;
 use std::sync::Arc;
+
+impl QueryRunner for GallifreyDB {
+    fn execute_query(&self, query: Query) -> Result<QueryResults> {
+        self.execute_query(query)
+    }
+}
 
 impl GallifreyDB {
     /// Create a new query builder for constructing hybrid queries.

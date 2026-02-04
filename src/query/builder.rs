@@ -59,6 +59,7 @@ use crate::index::vector::DistanceMetric;
 
 use super::ir::{Predicate, QueryOp, TraversalDepth};
 use super::plan::{IndexHint, QueryHints, TemporalContext};
+use super::QueryRunner;
 
 /// A fully constructed query ready for execution.
 #[derive(Debug, Clone)]
@@ -737,7 +738,7 @@ impl<S: QueryState> QueryBuilder<S> {
     ///
     /// # Arguments
     ///
-    /// * `db` - Reference to the database to execute against
+    /// * `runner` - Reference to the database (or other query runner) to execute against
     ///
     /// # Returns
     ///
@@ -775,10 +776,10 @@ impl<S: QueryState> QueryBuilder<S> {
     /// ```
     pub fn execute(
         self,
-        db: &crate::GallifreyDB,
+        runner: &impl QueryRunner,
     ) -> crate::utils::error::Result<super::executor::QueryResults> {
         let query = self.build();
-        db.execute_query(query)
+        runner.execute_query(query)
     }
     /// Build the final query
     #[must_use]

@@ -97,10 +97,12 @@ pub mod parser;
 pub mod plan;
 pub mod planner;
 pub mod result;
+pub mod runner;
 pub mod semantic_pathfinding;
 
 // Re-export commonly used types
 pub use ast::QueryAst;
+pub use runner::QueryRunner;
 pub use builder::{Query, QueryBuilder};
 pub use converter::{AstConverter, ParameterValue, parse_query, parse_query_with_params};
 pub use executor::{QueryExecutor, QueryResults, QueryRow};
