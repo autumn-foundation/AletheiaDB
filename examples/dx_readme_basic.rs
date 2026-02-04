@@ -1,3 +1,5 @@
+#![allow(unused_variables)]
+
 use gallifreydb::{GallifreyDB, PropertyMap, PropertyMapBuilder, WriteOps};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
