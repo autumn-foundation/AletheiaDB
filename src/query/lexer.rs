@@ -1538,7 +1538,7 @@ mod tests {
             Token::Identifier("id".to_string()),
             Token::StringLiteral("str".to_string()),
             Token::IntegerLiteral(42),
-            Token::FloatLiteral(3.14),
+            Token::FloatLiteral(1.5),
             Token::Parameter("param".to_string()),
             Token::Eof,
         ];
@@ -1618,7 +1618,7 @@ mod tests {
         assert_eq!(Token::Identifier("id".to_string()).to_string(), "id");
         assert_eq!(Token::StringLiteral("str".to_string()).to_string(), "'str'");
         assert_eq!(Token::IntegerLiteral(42).to_string(), "42");
-        assert_eq!(Token::FloatLiteral(3.14).to_string(), "3.14");
+        assert_eq!(Token::FloatLiteral(1.5).to_string(), "1.5");
         assert_eq!(Token::Parameter("param".to_string()).to_string(), "$param");
         assert_eq!(Token::Eof.to_string(), "EOF");
     }
