@@ -80,3 +80,60 @@ impl Hasher for IdentityHasher {
         self.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_methods() {
+        let mut hasher = IdentityHasher::default();
+
+        hasher.write_u8(42);
+        assert_eq!(hasher.finish(), 42);
+
+        hasher.write_u16(1000);
+        assert_eq!(hasher.finish(), 1000);
+
+        hasher.write_u32(100_000);
+        assert_eq!(hasher.finish(), 100_000);
+
+        hasher.write_u64(10_000_000_000);
+        assert_eq!(hasher.finish(), 10_000_000_000);
+
+        hasher.write_usize(500);
+        assert_eq!(hasher.finish(), 500);
+    }
+
+    #[test]
+    fn test_write_fallback() {
+        let mut hasher = IdentityHasher::default();
+
+        // Length 3 (not 4 or 8)
+        let bytes = [1u8, 2, 3];
+        hasher.write(&bytes);
+
+        // Expected: len(3) + 1 + 2 + 3 = 9
+        // Logic:
+        // hash = 3
+        // hash += 1 => 4
+        // hash += 2 => 6
+        // hash += 3 => 9
+        assert_eq!(hasher.finish(), 9);
+    }
+
+    #[test]
+    fn test_write_exact_matches() {
+        let mut hasher = IdentityHasher::default();
+
+        // 4 bytes
+        let bytes4 = 12345u32.to_le_bytes();
+        hasher.write(&bytes4);
+        assert_eq!(hasher.finish(), 12345);
+
+        // 8 bytes
+        let bytes8 = 1234567890123456789u64.to_le_bytes();
+        hasher.write(&bytes8);
+        assert_eq!(hasher.finish(), 1234567890123456789);
+    }
+}
