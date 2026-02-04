@@ -1,8 +1,51 @@
-//! GQL Parser
+//! # GQL Parser
 //!
-//! A recursive descent parser that converts tokenized GQL input into an AST.
-//! The parser supports the full GQL grammar including MATCH patterns, vector
-//! search operations, temporal clauses, and hybrid queries.
+//! A recursive descent parser that converts tokenized GQL (Gallifrey Query Language) input into an
+//! Abstract Syntax Tree (AST).
+//!
+//! This module is the entry point for the query compilation pipeline. It takes a raw string query
+//! and transforms it into a structured representation that the query planner can optimize and execute.
+//!
+//! ## Grammar Overview
+//!
+//! The parser supports a Cypher-like syntax with GallifreyDB-specific extensions for:
+//!
+//! - **Graph Pattern Matching**: `MATCH (n:Person)-[:KNOWS]->(m)`
+//! - **Vector Search**: `SIMILAR TO $embedding` or `RANK BY SIMILARITY`
+//! - **Temporal Queries**: `AS OF '2024-01-01'` or `BETWEEN t1 AND t2`
+//! - **Hybrid Queries**: Combining graph traversal, vector similarity, and temporal filters.
+//!
+//! ## Example: The "Hero's Journey" Query
+//!
+//! This example demonstrates a complex hybrid query that uses most of the parser's capabilities.
+//! It finds friends of "Alice" as of a specific time, ranks them by similarity to a query vector,
+//! filters by age, and returns the top results.
+//!
+//! ```rust
+//! use gallifreydb::query::parser::Parser;
+//!
+//! let query = "
+//!     AS OF '2024-01-15T10:00:00Z'
+//!     MATCH (alice:Person {name: 'Alice'})-[:KNOWS]->(friend)
+//!     RANK BY SIMILARITY TO $query_embedding TOP 10
+//!     WHERE friend.age > 25
+//!     RETURN friend.name, friend.age
+//!     ORDER BY friend.age DESC
+//!     LIMIT 5
+//! ";
+//!
+//! let ast = Parser::parse(query).unwrap();
+//! assert!(ast.is_temporal());
+//! assert!(ast.has_vector_ops());
+//! ```
+//!
+//! ## Implementation Details
+//!
+//! The parser is implemented as a recursive descent parser. It consumes a stream of `Token`s
+//! produced by the `Lexer`.
+//!
+//! - **Recursion Depth**: Limited to [`MAX_RECURSION_DEPTH`] to prevent stack overflow on deeply nested predicates.
+//! - **Error Handling**: Returns detailed `ParseError`s with position information to help users debug syntax errors.
 
 use std::sync::Arc;
 
@@ -15,15 +58,18 @@ use super::lexer::{Lexer, LexerError, Token};
 const MAX_RECURSION_DEPTH: usize = 100;
 
 /// Error type for parser errors.
+///
+/// This error provides detailed information about what went wrong during parsing,
+/// including the position in the token stream and what was expected vs found.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
-    /// Error message
+    /// A descriptive error message explaining the failure.
     pub message: String,
-    /// Position in the token stream
+    /// The index in the token stream where the error occurred.
     pub position: usize,
-    /// Expected token description
+    /// A description of what token or construct was expected (optional).
     pub expected: Option<String>,
-    /// Found token
+    /// The actual token found at the error position (optional).
     pub found: Option<Token>,
 }
 
@@ -58,13 +104,40 @@ impl From<LexerError> for ParseError {
 }
 
 /// A parser for the GQL query language.
+///
+/// The `Parser` maintains state (tokens and current position) as it walks through
+/// the input stream. It is designed to be used via the static [`Parser::parse`] method.
 pub struct Parser {
     tokens: Vec<Token>,
     position: usize,
 }
 
 impl Parser {
-    /// Parse a GQL query string into an AST.
+    /// Parse a GQL query string into an Abstract Syntax Tree (AST).
+    ///
+    /// This is the main entry point for the parser. It tokenizes the input string
+    /// and processes it according to the GQL grammar.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The GQL query string to parse.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(QueryAst)` - The parsed AST if the query is valid.
+    /// * `Err(ParseError)` - An error describing why parsing failed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::query::parser::Parser;
+    ///
+    /// let query = "MATCH (n:Person) RETURN n.name";
+    /// match Parser::parse(query) {
+    ///     Ok(ast) => println!("Successfully parsed query: {:?}", ast),
+    ///     Err(e) => eprintln!("Parse error: {}", e),
+    /// }
+    /// ```
     pub fn parse(input: &str) -> Result<QueryAst, ParseError> {
         let tokens = Lexer::tokenize(input)?;
         let mut parser = Parser {
@@ -133,6 +206,13 @@ impl Parser {
     // Temporal Clause Parsing
     // =========================================================
 
+    /// Parse an optional temporal clause (`AS OF ...` or `BETWEEN ...`).
+    ///
+    /// Grammar:
+    /// ```text
+    /// temporal_clause ::= "AS OF" timestamp ("," timestamp)?
+    ///                   | "BETWEEN" timestamp "AND" timestamp
+    /// ```
     fn parse_temporal_clause(&mut self) -> Result<Option<TemporalClause>, ParseError> {
         if self.check(&Token::As) {
             self.advance(); // consume AS
@@ -195,6 +275,10 @@ impl Parser {
     // Source Clause Parsing
     // =========================================================
 
+    /// Parse the main source of data for the query.
+    ///
+    /// This can be either a graph pattern match (`MATCH`) or a vector search
+    /// (`SIMILAR TO` or `FIND SIMILAR`).
     fn parse_source_clause(&mut self) -> Result<SourceClause, ParseError> {
         if self.check(&Token::Match) {
             return self.parse_match_clause();
@@ -214,6 +298,12 @@ impl Parser {
         ))
     }
 
+    /// Parse a `MATCH` clause containing one or more patterns.
+    ///
+    /// Grammar:
+    /// ```text
+    /// match_clause ::= "MATCH" pattern ("," pattern)*
+    /// ```
     fn parse_match_clause(&mut self) -> Result<SourceClause, ParseError> {
         self.expect(&Token::Match)?;
 
@@ -384,6 +474,12 @@ impl Parser {
     // Pattern Parsing
     // =========================================================
 
+    /// Parse a graph pattern consisting of nodes connected by relationships.
+    ///
+    /// Grammar:
+    /// ```text
+    /// pattern ::= node_pattern (relationship_pattern node_pattern)*
+    /// ```
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         let first_node = self.parse_node_pattern()?;
         let mut pattern = Pattern::node(first_node);
@@ -680,6 +776,15 @@ impl Parser {
     // RANK BY SIMILARITY Clause
     // =========================================================
 
+    /// Parse a `RANK BY SIMILARITY` clause.
+    ///
+    /// This is an extension to GQL for hybrid search, allowing graph results to be
+    /// re-ranked based on vector similarity.
+    ///
+    /// Grammar:
+    /// ```text
+    /// rank_clause ::= "RANK BY SIMILARITY TO" embedding ("TOP" integer)?
+    /// ```
     fn parse_rank_clause(&mut self) -> Result<Option<RankClause>, ParseError> {
         if !self.check(&Token::Rank) {
             return Ok(None);
@@ -706,6 +811,12 @@ impl Parser {
     // WHERE Clause
     // =========================================================
 
+    /// Parse a `WHERE` clause containing predicates.
+    ///
+    /// Grammar:
+    /// ```text
+    /// where_clause ::= "WHERE" predicate
+    /// ```
     fn parse_where_clause(&mut self) -> Result<Option<WhereClause>, ParseError> {
         if !self.check(&Token::Where) {
             return Ok(None);
@@ -1810,5 +1921,84 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.message.contains("property expression"));
+    }
+
+    // =====================================================
+    // Coverage Tests
+    // =====================================================
+
+    #[test]
+    fn test_parse_error_traits() {
+        let err1 = ParseError {
+            message: "msg".to_string(),
+            position: 0,
+            expected: None,
+            found: None,
+        };
+        // Test Clone
+        let err2 = err1.clone();
+        // Test PartialEq
+        assert_eq!(err1, err2);
+        // Test Debug
+        let debug_str = format!("{:?}", err1);
+        assert!(debug_str.contains("ParseError"));
+        assert!(debug_str.contains("msg"));
+    }
+
+    #[test]
+    fn test_parse_error_display_full() {
+        // Case 1: All fields present
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: Some("exp".to_string()),
+            found: Some(Token::Eof),
+        };
+        let s = format!("{}", err);
+        assert!(s.contains("Parse error at position 1: Error"));
+        assert!(s.contains("(expected exp)"));
+        assert!(s.contains("(found EOF)"));
+
+        // Case 2: No expected, no found
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: None,
+            found: None,
+        };
+        let s = format!("{}", err);
+        assert_eq!(s, "Parse error at position 1: Error");
+
+        // Case 3: Expected only
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: Some("exp".to_string()),
+            found: None,
+        };
+        let s = format!("{}", err);
+        assert!(s.contains("(expected exp)"));
+        assert!(!s.contains("(found"));
+
+        // Case 4: Found only
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: None,
+            found: Some(Token::Eof),
+        };
+        let s = format!("{}", err);
+        assert!(!s.contains("(expected"));
+        assert!(s.contains("(found EOF)"));
+    }
+
+    #[test]
+    fn test_parse_error_from_lexer_error() {
+        // Trigger a lexer error (invalid character)
+        let result = Parser::parse("MATCH @");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Unexpected character"));
+        // This implicitly tests From<LexerError> for ParseError
     }
 }
