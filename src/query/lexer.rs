@@ -1,97 +1,222 @@
 //! Query Language Lexer
 //!
-//! Tokenizes GQL (Gallifrey Query Language) input strings into a stream of tokens.
-//! This is the first stage of parsing - converting raw text into structured tokens
-//! that the parser can work with.
+//! This module provides the `Lexer` which transforms a raw GQL (Gallifrey Query Language)
+//! query string into a stream of structured [`Token`]s. This is the first stage of the
+//! query compilation pipeline.
+//!
+//! # Overview
+//!
+//! The lexer handles:
+//! - **Keywords**: Graph (`MATCH`), Vector (`SIMILAR TO`), Temporal (`AS OF`), etc.
+//! - **Literals**: Strings, integers, floats.
+//! - **Identifiers**: Variable names, labels, property keys.
+//! - **Operators & Punctuation**: Arrows (`->`), comparison (`=`, `<`), delimiters.
+//! - **Parameters**: Query parameters starting with `$` (e.g., `$name`).
+//!
+//! # Example
+//!
+//! ```rust
+//! use gallifreydb::query::lexer::{Lexer, Token};
+//!
+//! let input = "MATCH (n:Person) RETURN n";
+//! let tokens = Lexer::tokenize(input).unwrap();
+//!
+//! assert_eq!(tokens[0], Token::Match);
+//! assert_eq!(tokens[1], Token::LeftParen);
+//! assert_eq!(tokens[2], Token::Identifier("n".to_string()));
+//! assert_eq!(tokens[3], Token::Colon);
+//! assert_eq!(tokens[4], Token::Identifier("Person".to_string()));
+//! assert_eq!(tokens[5], Token::RightParen);
+//! assert_eq!(tokens[6], Token::Return);
+//! assert_eq!(tokens[7], Token::Identifier("n".to_string()));
+//! assert_eq!(tokens[8], Token::Eof);
+//! ```
 
 use std::fmt;
 
-/// A token in the GQL language.
+/// A token in the GQL (Gallifrey Query Language) stream.
+///
+/// Tokens represent the smallest meaningful units of the query language, such as keywords,
+/// literals, identifiers, and punctuation.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum Token {
-    // Keywords - Graph
+    // ========================================================================
+    // Keywords - Graph Pattern Matching
+    // ========================================================================
+
+    /// The `MATCH` keyword, used to specify graph patterns.
     Match,
+    /// The `WHERE` keyword, used to filter results based on predicates.
     Where,
+    /// The `RETURN` keyword, used to specify what to return from the query.
     Return,
+    /// The `ORDER` keyword, used in `ORDER BY` clauses.
     Order,
+    /// The `BY` keyword, used in `ORDER BY` and `RANK BY` clauses.
     By,
+    /// The `LIMIT` keyword, used to restrict the number of results.
     Limit,
+    /// The `SKIP` keyword, used to skip a number of results for pagination.
     Skip,
+    /// The `DISTINCT` keyword, used to filter duplicate results.
     Distinct,
+    /// The `COUNT` keyword, used for aggregation.
     Count,
+    /// The `ASC` keyword, specifying ascending sort order.
     Asc,
+    /// The `DESC` keyword, specifying descending sort order.
     Desc,
 
-    // Keywords - Logical
+    // ========================================================================
+    // Keywords - Logical & Predicates
+    // ========================================================================
+
+    /// The `AND` logical operator.
     And,
+    /// The `OR` logical operator.
     Or,
+    /// The `NOT` logical operator.
     Not,
+    /// The `IN` operator, checking if a value exists in a list.
     In,
+    /// The `IS` operator, used in `IS NULL`.
     Is,
+    /// The `NULL` literal value.
     Null,
+    /// The `TRUE` boolean literal.
     True,
+    /// The `FALSE` boolean literal.
     False,
 
-    // Keywords - Vector
+    // ========================================================================
+    // Keywords - Vector Search
+    // ========================================================================
+
+    /// The `SIMILAR` keyword, used in vector similarity searches.
     Similar,
+    /// The `TO` keyword, used in `SIMILAR TO`.
     To,
+    /// The `USING` keyword, used to specify a distance metric.
     Using,
+    /// The `FIND` keyword, used in `FIND SIMILAR`.
     Find,
+    /// The `RANK` keyword, used in `RANK BY SIMILARITY` hybrid queries.
     Rank,
+    /// The `SIMILARITY` keyword, used in `RANK BY SIMILARITY`.
     Similarity,
+    /// The `TOP` keyword, used to limit vector search candidates (e.g., `TOP 10`).
     Top,
 
+    // ========================================================================
     // Keywords - Temporal
+    // ========================================================================
+
+    /// The `AS` keyword, used in `AS OF` temporal clauses or for aliasing (`RETURN n AS name`).
     As,
+    /// The `OF` keyword, used in `AS OF`.
     Of,
+    /// The `BETWEEN` keyword, used for temporal range queries.
     Between,
 
-    // Keywords - String predicates
+    // ========================================================================
+    // Keywords - String Predicates
+    // ========================================================================
+
+    /// The `EXISTS` predicate function.
     Exists,
+    /// The `CONTAINS` string predicate.
     Contains,
+    /// The `STARTS` keyword, used in `STARTS WITH`.
     Starts,
+    /// The `ENDS` keyword, used in `ENDS WITH`.
     Ends,
+    /// The `WITH` keyword, used in `STARTS WITH` and `ENDS WITH`.
     With,
 
-    // Keywords - Distance metrics
+    // ========================================================================
+    // Keywords - Distance Metrics
+    // ========================================================================
+
+    /// The `COSINE` distance metric.
     Cosine,
+    /// The `EUCLIDEAN` distance metric.
     Euclidean,
+    /// The `DOT_PRODUCT` distance metric.
     DotProduct,
 
-    // Punctuation
+    // ========================================================================
+    // Punctuation & Delimiters
+    // ========================================================================
+
+    /// Left parenthesis `(`.
     LeftParen,
+    /// Right parenthesis `)`.
     RightParen,
+    /// Left bracket `[` (for lists or relationship types).
     LeftBracket,
+    /// Right bracket `]` (for lists or relationship types).
     RightBracket,
+    /// Left brace `{` (for property maps).
     LeftBrace,
+    /// Right brace `}` (for property maps).
     RightBrace,
+    /// Colon `:`, used for labels and property keys.
     Colon,
+    /// Comma `,`, used as a separator.
     Comma,
+    /// Dot `.`, used for property access.
     Dot,
+    /// Asterisk `*`, used for variable length paths or multiplication (reserved).
     Star,
+    /// Dash `-`, used in relationship patterns.
     Dash,
 
-    // Arrow patterns for relationships
+    // ========================================================================
+    // Arrow Patterns
+    // ========================================================================
+
+    /// Right arrow `->` for outgoing relationships.
     Arrow,
+    /// Left arrow `<-` for incoming relationships.
     LeftArrow,
 
-    // Comparison operators
+    // ========================================================================
+    // Comparison Operators
+    // ========================================================================
+
+    /// Equality operator `=`.
     Eq,
+    /// Inequality operator `<>` or `!=`.
     Ne,
+    /// Less than operator `<`.
     Lt,
+    /// Less than or equal operator `<=`.
     Le,
+    /// Greater than operator `>`.
     Gt,
+    /// Greater than or equal operator `>=`.
     Ge,
 
-    // Literals
+    // ========================================================================
+    // Literals & Identifiers
+    // ========================================================================
+
+    /// An identifier (variable name, label, property key).
     Identifier(String),
+    /// A string literal (e.g., `'hello'`).
     StringLiteral(String),
+    /// An integer literal (e.g., `42`).
     IntegerLiteral(i64),
+    /// A floating-point literal (e.g., `3.14`).
     FloatLiteral(f64),
+    /// A query parameter (e.g., `$param`).
     Parameter(String),
 
-    // End of file
+    // ========================================================================
+    // Special
+    // ========================================================================
+
+    /// End of file/input marker.
     Eof,
 }
 
@@ -165,15 +290,18 @@ impl fmt::Display for Token {
 }
 
 /// Error type for lexer errors.
+///
+/// Contains details about the error location (line, column, byte position) to help
+/// with error reporting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError {
-    /// Error message describing what went wrong
+    /// Error message describing what went wrong.
     pub message: String,
-    /// Byte position in the input where the error occurred
+    /// Byte position in the input where the error occurred.
     pub position: usize,
-    /// Line number (1-indexed) where the error occurred
+    /// Line number (1-indexed) where the error occurred.
     pub line: usize,
-    /// Column number (1-indexed) where the error occurred
+    /// Column number (1-indexed) where the error occurred.
     pub column: usize,
 }
 
@@ -190,6 +318,10 @@ impl fmt::Display for LexerError {
 impl std::error::Error for LexerError {}
 
 /// A lexer for the GQL query language.
+///
+/// Maintains state (current position, line, column) while iterating through the input string.
+/// It is usually easier to use the static [`Lexer::tokenize`] method rather than instantiating
+/// `Lexer` directly.
 pub struct Lexer<'a> {
     input: &'a str,
     chars: std::iter::Peekable<std::str::CharIndices<'a>>,
@@ -200,6 +332,10 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     /// Create a new lexer for the given input.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The raw GQL query string to tokenize.
     pub fn new(input: &'a str) -> Self {
         Lexer {
             input,
@@ -211,6 +347,26 @@ impl<'a> Lexer<'a> {
     }
 
     /// Tokenize the entire input and return a vector of tokens.
+    ///
+    /// This is the main entry point for using the lexer.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The raw GQL query string.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Token>)` - A vector of tokens ending with `Token::Eof`.
+    /// * `Err(LexerError)` - If an invalid character or sequence is encountered.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::query::lexer::{Lexer, Token};
+    ///
+    /// let tokens = Lexer::tokenize("RETURN 42").unwrap();
+    /// assert_eq!(tokens, vec![Token::Return, Token::IntegerLiteral(42), Token::Eof]);
+    /// ```
     pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
         let mut lexer = Lexer::new(input);
         let mut tokens = Vec::new();
@@ -228,6 +384,14 @@ impl<'a> Lexer<'a> {
     }
 
     /// Get the next token from the input.
+    ///
+    /// Advances the lexer state and returns the next token found. Skips whitespace
+    /// and comments automatically.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Token)` - The next token.
+    /// * `Err(LexerError)` - If an error occurs.
     pub fn next_token(&mut self) -> Result<Token, LexerError> {
         self.skip_whitespace_and_comments()?;
 
