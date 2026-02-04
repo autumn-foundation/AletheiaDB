@@ -537,7 +537,13 @@ impl WalRingBuffer {
             let expected_seq = pos;
             let current_seq = slot.sequence.load(Ordering::Acquire);
 
-            if current_seq == expected_seq {
+            // Use modular arithmetic to handle wraparound correctly.
+            // diff == 0: Slot is available (current_seq == expected_seq)
+            // diff < 0: Slot is behind (buffer full)
+            // diff > 0: Slot is ahead (shouldn't happen, retry)
+            let diff = current_seq.wrapping_sub(expected_seq) as i64;
+
+            if diff == 0 {
                 // Slot is available - try to claim it
                 match self.write_pos.compare_exchange_weak(
                     pos,
@@ -555,7 +561,7 @@ impl WalRingBuffer {
                         }
 
                         // Signal that the slot is ready for reading
-                        slot.sequence.store(expected_seq + 1, Ordering::Release);
+                        slot.sequence.store(expected_seq.wrapping_add(1), Ordering::Release);
 
                         return Ok(());
                     }
@@ -564,7 +570,7 @@ impl WalRingBuffer {
                         continue;
                     }
                 }
-            } else if current_seq < expected_seq {
+            } else if diff < 0 {
                 // Buffer is full - the consumer hasn't caught up
                 spin_count += 1;
 
@@ -581,7 +587,7 @@ impl WalRingBuffer {
 
                 std::hint::spin_loop();
             } else {
-                // current_seq > expected_seq: This shouldn't happen in normal operation.
+                // current_seq > expected_seq (diff > 0): This shouldn't happen in normal operation.
                 // It indicates the consumer has advanced past where we expected.
                 // Retry with fresh position.
                 continue;
@@ -656,7 +662,7 @@ impl WalRingBuffer {
             let slot = &self.slots[idx];
 
             // Expected sequence for this slot to contain data
-            let expected_seq = pos + 1;
+            let expected_seq = pos.wrapping_add(1);
             let current_seq = slot.sequence.load(Ordering::Acquire);
 
             if current_seq == expected_seq {
@@ -693,7 +699,7 @@ impl WalRingBuffer {
                         // Mark slot as available for writing again
                         // New sequence = pos + capacity (next write cycle)
                         slot.sequence
-                            .store(pos + self.capacity as u64, Ordering::Release);
+                            .store(pos.wrapping_add(self.capacity as u64), Ordering::Release);
 
                         if let Some(e) = entry {
                             entries.push(e);
@@ -729,6 +735,21 @@ impl WalRingBuffer {
     #[inline]
     pub fn is_empty_approx(&self) -> bool {
         self.len_approx() == 0
+    }
+
+    #[cfg(test)]
+    pub fn set_state_for_test(&self, write: u64, read: u64) {
+        self.write_pos.store(write, Ordering::Relaxed);
+        self.read_pos.store(read, Ordering::Relaxed);
+
+        // Reset all slots to be ready for writing starting from `write`.
+        // We assume an empty buffer state (read == write) or at least
+        // that we want to prepare the slots ahead of `write`.
+        for i in 0..self.capacity {
+            let seq = write.wrapping_add(i as u64);
+            let idx = (seq as usize) & self.mask;
+            self.slots[idx].sequence.store(seq, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1189,5 +1210,70 @@ mod tests {
         assert!(!buf.is_closed());
         buf.close();
         assert!(buf.is_closed());
+    }
+
+    #[test]
+    fn test_ring_buffer_wraparound_livelock() {
+        // Use a small capacity to make reasoning easier
+        let buf = WalRingBuffer::new(4);
+
+        // Start just before wraparound
+        // u64::MAX = 18446744073709551615
+        // Capacity 4
+        // We start at MAX - 3.
+        // This means the next 4 writes will be at:
+        // MAX-3, MAX-2, MAX-1, MAX
+        // After these 4 writes, write_pos will wrap to 0.
+        let start_pos = u64::MAX - 3;
+
+        // Initialize state (empty buffer at start_pos)
+        buf.set_state_for_test(start_pos, start_pos);
+
+        // Fill the buffer (4 items)
+        for i in 0..4 {
+            let entry = PendingEntry::new_async(LSN(i), vec![]);
+            assert!(buf.try_append(entry).is_ok(), "Failed to append item {}", i);
+        }
+
+        // Buffer is now full.
+        // write_pos should be 0 (wrapped).
+        // read_pos should be MAX - 3.
+
+        // Try to append one more item.
+        // This should return Err(entry) because buffer is full.
+        // However, due to the bug, it will livelock.
+
+        // We use a timeout to detect the livelock.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let buf = Arc::new(buf);
+        let buf_clone = Arc::clone(&buf);
+
+        std::thread::spawn(move || {
+            let entry = PendingEntry::new_async(LSN(4), vec![]);
+            // We expect this to fail immediately (buffer full)
+            // or spin for a bit then fail.
+            // If it loops forever, this thread never finishes.
+            let result = buf_clone.try_append(entry);
+            tx.send(result).unwrap();
+        });
+
+        // Wait for result with timeout
+        // The default backpressure spins 1000 times then returns Err.
+        // This should be very fast (< 1ms).
+        // We give it 1 second to be generous.
+        let result = rx.recv_timeout(std::time::Duration::from_secs(1));
+
+        match result {
+            Ok(res) => {
+                // It returned!
+                // If it returned Err, that's correct behavior (Buffer Full).
+                // If it returned Ok, that's wrong (Buffer Overwritten).
+                assert!(res.is_err(), "Buffer should be full, but append succeeded");
+            }
+            Err(_) => {
+                // Timeout! Livelock detected.
+                panic!("Livelock detected! try_append hung on wraparound.");
+            }
+        }
     }
 }
