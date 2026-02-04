@@ -135,3 +135,17 @@ The `FindNeighbors` endpoint allocated a `Vec` containing all neighbor nodes bef
 - Exposed zero-allocation iterators (`get_outgoing_edges_iter`) in `GallifreyDB` to traverse edges without intermediate allocations.
 - Implemented streaming deduplication and pagination pipeline.
 - Added safety check for deep pagination (`offset + limit <= 10,000`) to prevent CPU DoS.
+
+## 2026-02-18 - Allocation Amplification DoS Hardening
+
+**Threat:** Allocation Amplification (DoS)
+`deserialize_recursive` (for Arrays) and `PropertyMap::deserialize` in `src/core/property.rs` were vulnerable to allocation amplification. They allocated memory based on a `count` field read from the input before verifying that sufficient data existed in the buffer. An attacker could send a tiny payload (e.g., 5 bytes) claiming to have 1,000,000 elements, causing the server to allocate ~16MB. With concurrent requests, this leads to rapid memory exhaustion.
+
+**Defense:** Pre-allocation Validation
+Implemented strict validation logic that checks the remaining buffer size against the minimum possible size for the requested number of elements:
+- Arrays: `remaining_bytes >= count` (min 1 byte/element).
+- Maps: `remaining_bytes >= count * 5` (min 5 bytes/entry).
+This ensures memory is only allocated if the client has actually sent a proportional amount of data.
+
+**Verification:** Reproduction Test
+Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed that the new logic returns `StorageError::CorruptedData` ("Insufficient buffer size") *before* attempting allocation.
