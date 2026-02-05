@@ -1,27 +1,57 @@
 use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder};
 
 #[test]
-fn test_havoc_ef_construction_crash() {
+fn test_havoc_ef_construction_too_large() {
     // Attempt to crash usearch by requesting 1 billion candidates per search
-    // This should cause massive allocation in C++ heap during add().
-
-    // ef_construction = 1,000,000,000
-    // If usearch allocates vector of this size, it's >4GB or >8GB.
-    // On limited RAM CI, this should OOM.
-
-    // Fix: We now validate ef_construction <= 4096.
-
     let result = HnswIndexBuilder::new(128, DistanceMetric::Cosine)
         .ef_construction(1_000_000_000)
         .build();
 
-    // Verify the builder rejected the dangerous configuration
-    assert!(result.is_err(), "Builder should reject excessive ef_construction to prevent DoS");
-
+    assert!(result.is_err(), "Builder should reject excessive ef_construction");
     if let Err(e) = result {
-        // Optional: verify error message
         let msg = e.to_string();
-        println!("Builder rejected config as expected: {}", msg);
-        assert!(msg.contains("ef_construction must be in range"), "Error should mention parameter range");
+        assert!(msg.contains("ef_construction must be in range"), "Error: {}", msg);
+    }
+}
+
+#[test]
+fn test_havoc_ef_construction_too_small() {
+    // Lower bound check (< 10)
+    let result = HnswIndexBuilder::new(128, DistanceMetric::Cosine)
+        .ef_construction(5)
+        .build();
+
+    assert!(result.is_err(), "Builder should reject small ef_construction");
+    if let Err(e) = result {
+        let msg = e.to_string();
+        assert!(msg.contains("ef_construction must be in range"), "Error: {}", msg);
+    }
+}
+
+#[test]
+fn test_havoc_ef_search_too_large() {
+    // Upper bound check (> 4096)
+    let result = HnswIndexBuilder::new(128, DistanceMetric::Cosine)
+        .ef_search(5000)
+        .build();
+
+    assert!(result.is_err(), "Builder should reject excessive ef_search");
+    if let Err(e) = result {
+        let msg = e.to_string();
+        assert!(msg.contains("ef_search must be in range"), "Error: {}", msg);
+    }
+}
+
+#[test]
+fn test_havoc_ef_search_too_small() {
+    // Lower bound check (< 1)
+    let result = HnswIndexBuilder::new(128, DistanceMetric::Cosine)
+        .ef_search(0)
+        .build();
+
+    assert!(result.is_err(), "Builder should reject zero ef_search");
+    if let Err(e) = result {
+        let msg = e.to_string();
+        assert!(msg.contains("ef_search must be in range"), "Error: {}", msg);
     }
 }
