@@ -13,7 +13,7 @@ use crate::core::version::VersionMetadata;
 ///
 /// This represents the current version of a node, optimized for fast access.
 /// Historical versions are stored separately in the temporal storage layer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier for this node.
     pub id: NodeId,
@@ -110,11 +110,27 @@ impl Node {
     }
 }
 
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label_str = crate::core::interning::GLOBAL_INTERNER
+            .resolve_with(self.label, |s| s.to_string())
+            .unwrap_or_else(|| format!("{:?}", self.label));
+
+        f.debug_struct("Node")
+            .field("id", &self.id)
+            .field("label", &label_str)
+            .field("properties", &self.properties)
+            .field("current_version", &self.current_version)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
 /// An edge in the current state of the graph.
 ///
 /// Edges are directed relationships between nodes with properties.
 /// This represents the current version, optimized for fast traversals.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Edge {
     /// Unique identifier for this edge.
     pub id: EdgeId,
@@ -226,6 +242,24 @@ impl Edge {
     #[inline]
     pub fn connects(&self, source: NodeId, target: NodeId) -> bool {
         self.source == source && self.target == target
+    }
+}
+
+impl std::fmt::Debug for Edge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label_str = crate::core::interning::GLOBAL_INTERNER
+            .resolve_with(self.label, |s| s.to_string())
+            .unwrap_or_else(|| format!("{:?}", self.label));
+
+        f.debug_struct("Edge")
+            .field("id", &self.id)
+            .field("label", &label_str)
+            .field("source", &self.source)
+            .field("target", &self.target)
+            .field("properties", &self.properties)
+            .field("current_version", &self.current_version)
+            .field("metadata", &self.metadata)
+            .finish()
     }
 }
 

@@ -1380,7 +1380,7 @@ impl From<SparseVec> for PropertyValue {
 /// The underlying HashMap is wrapped in an Arc, making clones very cheap
 /// (just incrementing a reference count). This enables efficient sharing
 /// of unchanged properties across versions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct PropertyMap {
     inner: Arc<HashMap<PropertyKey, PropertyValue>>,
     /// Cached serialized size in bytes.
@@ -1726,6 +1726,32 @@ impl PropertyMap {
     #[inline(always)]
     pub fn serialized_size(&self) -> usize {
         self.cached_size
+    }
+}
+
+impl fmt::Debug for PropertyMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = f.debug_map();
+        // Collect entries to sort them for deterministic output
+        let mut entries: Vec<_> = self.inner.iter().collect();
+        // Sort by key string representation if possible, or ID if not
+        entries.sort_by(|(k1, _), (k2, _)| {
+            let s1 = GLOBAL_INTERNER.resolve_with(**k1, |s| s.to_string());
+            let s2 = GLOBAL_INTERNER.resolve_with(**k2, |s| s.to_string());
+            match (s1, s2) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                _ => k1.cmp(k2),
+            }
+        });
+
+        for (key, value) in entries {
+            if let Some(key_str) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string()) {
+                map.entry(&key_str, value);
+            } else {
+                map.entry(key, value);
+            }
+        }
+        map.finish()
     }
 }
 
