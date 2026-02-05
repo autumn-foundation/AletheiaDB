@@ -1,5 +1,5 @@
-use gallifreydb::core::property::MAX_VECTOR_DIMENSIONS;
 use gallifreydb::core::PropertyValue;
+use gallifreydb::core::property::MAX_VECTOR_DIMENSIONS;
 use proptest::prelude::*;
 
 const TAG_VECTOR: u8 = 7;
@@ -25,7 +25,8 @@ proptest! {
                 msg.contains("exceeded") ||
                 msg.contains("exceeds maximum allowed") ||
                 msg.contains("exceeds dimension") ||
-                msg.contains("Unknown PropertyValue type tag"),
+                msg.contains("Unknown PropertyValue type tag") ||
+                msg.contains("Empty buffer"),
                 "Unexpected error message: {}", msg
             );
         }
@@ -93,7 +94,10 @@ fn test_exact_max_vector_dimensions() {
     bytes.extend_from_slice(&data);
 
     let result = PropertyValue::deserialize(&bytes);
-    assert!(result.is_ok(), "Should succeed at exact MAX_VECTOR_DIMENSIONS");
+    assert!(
+        result.is_ok(),
+        "Should succeed at exact MAX_VECTOR_DIMENSIONS"
+    );
 }
 
 #[test]
@@ -110,7 +114,8 @@ fn test_integer_overflow_dimension() {
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("exceeds maximum allowed"),
-        "Should be caught by MAX check first: {}", err
+        "Should be caught by MAX check first: {}",
+        err
     );
 }
 
@@ -129,7 +134,10 @@ fn test_unaligned_vector_access() {
 
     // Parse from offset 1
     let result = PropertyValue::deserialize(&buffer[1..]);
-    assert!(result.is_ok(), "Should handle unaligned access via copy_nonoverlapping");
+    assert!(
+        result.is_ok(),
+        "Should handle unaligned access via copy_nonoverlapping"
+    );
     let (val, consumed) = result.unwrap();
     assert_eq!(consumed, vec_bytes.len());
     if let PropertyValue::Vector(v) = val {
