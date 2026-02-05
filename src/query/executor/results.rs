@@ -10,6 +10,7 @@ use crate::core::{EdgeId, NodeId};
 use crate::utils::error::Result;
 
 use super::iterators::ResultIterator;
+use crossterm::style::Stylize;
 
 /// A path through the graph, represented as a sequence of entity IDs.
 pub type Path = Vec<EntityId>;
@@ -466,7 +467,15 @@ impl std::fmt::Display for QueryResult {
                             let k_str = crate::core::interning::GLOBAL_INTERNER
                                 .resolve_with(*k, |s| s.to_string())
                                 .unwrap_or_else(|| format!("key:{}", k.as_u32()));
-                            format!("{}: {}", k_str, v)
+
+                            let v_str = match v {
+                                crate::core::property::PropertyValue::Bool(true) => {
+                                    format!("{}", v.to_string().green())
+                                }
+                                _ => format!("{}", v),
+                            };
+
+                            format!("{}: {}", k_str, v_str)
                         })
                         .collect();
 
@@ -1428,5 +1437,34 @@ mod tests {
         assert_eq!(versions[0], VersionId::new(100).unwrap());
         assert_eq!(versions[1], VersionId::new(0).unwrap()); // Clamped
         assert_eq!(versions[2], VersionId::new(0).unwrap());
+    }
+
+    #[test]
+    fn test_query_result_display_boolean_color() {
+        use crate::core::property::PropertyMapBuilder;
+
+        let node_id = NodeId::new(1).unwrap();
+        let props = PropertyMapBuilder::new()
+            .insert("active", true)
+            .insert("inactive", false)
+            .build();
+
+        let result = QueryResult::with_nodes(vec![node_id])
+            .with_properties(vec![props]);
+
+        let display = format!("{}", result);
+
+        // "true" should be colorized (green)
+        // We verify that "active: true" is NOT present as plain text
+        // because there should be ANSI codes.
+        let plain_true = "active: true";
+        assert!(!display.contains(plain_true), "Display should contain color codes for true");
+
+        // For false, we did NOT add color, so it should be plain text
+        let plain_false = "inactive: false";
+        assert!(display.contains(plain_false), "Display should NOT contain color codes for false");
+
+        // Verify it contains "true" content
+        assert!(display.contains("true"));
     }
 }
