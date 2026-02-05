@@ -428,4 +428,74 @@ mod tests {
             "Interner should not contain 'NeverInternedEdge' after has_label_str call"
         );
     }
+
+    #[test]
+    fn test_node_debug() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let debug_str = format!("{:?}", node);
+        assert!(debug_str.contains("Person"), "Debug output should contain resolved label");
+        assert!(debug_str.contains("Alice"), "Debug output should contain property value");
+    }
+
+    #[test]
+    fn test_node_debug_fallback() {
+        // Create a Node with a raw InternedString that doesn't exist in the interner
+        // InternedString(u32::MAX) is extremely unlikely to exist
+        let raw_label = InternedString::from_raw(u32::MAX);
+        let node = Node::new(
+            NodeId::new(99).unwrap(),
+            raw_label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let debug_str = format!("{:?}", node);
+        // Should fallback to InternedString(4294967295)
+        assert!(debug_str.contains("InternedString(4294967295)"), "Debug output should fallback to raw ID for unknown label");
+    }
+
+    #[test]
+    fn test_edge_debug() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(10).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new()
+                .insert("since", 2024)
+                .build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let debug_str = format!("{:?}", edge);
+        assert!(debug_str.contains("KNOWS"), "Debug output should contain resolved label");
+        assert!(debug_str.contains("2024"), "Debug output should contain property value");
+    }
+
+    #[test]
+    fn test_edge_debug_fallback() {
+        // Create an Edge with a raw InternedString that doesn't exist
+        let raw_label = InternedString::from_raw(u32::MAX - 1);
+        let edge = Edge::new(
+            EdgeId::new(10).unwrap(),
+            raw_label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let debug_str = format!("{:?}", edge);
+        assert!(debug_str.contains("InternedString(4294967294)"), "Debug output should fallback to raw ID for unknown label");
+    }
 }
