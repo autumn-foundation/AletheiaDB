@@ -202,15 +202,6 @@ pub enum StorageError {
     /// This variant preserves the original IndexPersistenceError information
     /// for better debugging and error handling of persistence operations.
     PersistenceError(String),
-    /// A lock was poisoned by a panicking thread.
-    ///
-    /// This occurs when a thread panics while holding a lock, causing subsequent
-    /// lock acquisitions to fail. This prevents cascade panics by returning an
-    /// error instead of panicking.
-    LockPoisoned {
-        /// The type of lock that was poisoned (e.g., "Mutex", "RwLock")
-        lock_type: &'static str,
-    },
     /// Property with the given key was not found.
     PropertyNotFound(String),
     /// Invalid ID value (out of range or reserved).
@@ -272,13 +263,6 @@ impl fmt::Display for StorageError {
             StorageError::IoError(msg) => write!(f, "I/O error: {}", msg),
             StorageError::CorruptedData(msg) => write!(f, "Corrupted data: {}", msg),
             StorageError::PersistenceError(msg) => write!(f, "Persistence error: {}", msg),
-            StorageError::LockPoisoned { lock_type } => {
-                write!(
-                    f,
-                    "{} lock poisoned: a thread panicked while holding this lock",
-                    lock_type
-                )
-            }
             StorageError::PropertyNotFound(key) => {
                 write!(f, "Property not found: {}", key)
             }
@@ -986,12 +970,6 @@ mod tests {
         let err = StorageError::PersistenceError("failed to save index".to_string());
         assert!(format!("{}", err).contains("Persistence error"));
         assert!(format!("{}", err).contains("failed to save index"));
-
-        // Test LockPoisoned
-        let err = StorageError::LockPoisoned { lock_type: "Mutex" };
-        assert!(format!("{}", err).contains("Mutex"));
-        assert!(format!("{}", err).contains("lock poisoned"));
-        assert!(format!("{}", err).contains("panicked"));
 
         // Test PropertyNotFound
         let err = StorageError::PropertyNotFound("embedding".to_string());

@@ -14,7 +14,6 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::IndexPersistenceManager;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use crate::utils::error::{Result, StorageError};
-use crate::utils::lock::MutexExt;
 
 use super::tracker::PersistenceTracker;
 
@@ -412,10 +411,9 @@ pub(crate) fn persist_temporal_adjacency_index(
     manager: &Arc<IndexPersistenceManager>,
 ) -> Result<()> {
     use crate::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index;
-    use crate::utils::lock::RwLockExt;
 
     // Get the temporal adjacency index from historical storage
-    let historical_read = historical.read_or_err()?;
+    let historical_read = historical.read();
     if let Some(adj_index) = historical_read.get_temporal_adjacency_index() {
         save_temporal_adjacency_index(adj_index, manager.base_path()).map_err(|e| {
             StorageError::PersistenceError(format!(
@@ -459,7 +457,6 @@ pub(crate) fn persist_all_indexes(
         GraphIndexManifestEntry, IndexManifest, StringInternerManifestEntry,
         TemporalAdjacencyIndexManifestEntry,
     };
-    use crate::utils::lock::RwLockExt;
 
     let current_lsn = wal.current_lsn().0;
     let mut manifest = IndexManifest::new(current_lsn);
@@ -482,9 +479,8 @@ pub(crate) fn persist_all_indexes(
     }
 
     // Add temporal adjacency index entry if configured
-    if let Ok(hist_read) = historical.read_or_err()
-        && let Some(adj_index) = hist_read.get_temporal_adjacency_index()
-    {
+    let hist_read = historical.read();
+    if let Some(adj_index) = hist_read.get_temporal_adjacency_index() {
         let total_entries: usize = adj_index
             .outgoing
             .iter()
@@ -573,20 +569,17 @@ pub(crate) fn load_indexes_startup(
                 }
 
                 // Initialize ID generators BEFORE inserting entities to prevent collisions
-                if max_node_id > 0
-                    && let Ok(mut node_gen) = node_id_gen.lock_or_err()
-                {
+                if max_node_id > 0 {
+                    let mut node_gen = node_id_gen.lock().unwrap();
                     *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
                 }
-                if max_edge_id > 0
-                    && let Ok(mut edge_gen) = edge_id_gen.lock_or_err()
-                {
+                if max_edge_id > 0 {
+                    let mut edge_gen = edge_id_gen.lock().unwrap();
                     *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
                 }
                 // Initialize version ID generator from max persisted version_id
-                if max_version_id > 0
-                    && let Ok(mut version_gen) = version_id_gen.lock_or_err()
-                {
+                if max_version_id > 0 {
+                    let mut version_gen = version_id_gen.lock().unwrap();
                     *version_gen = crate::core::id::IdGenerator::with_start(max_version_id + 1);
                 }
 
@@ -800,7 +793,6 @@ pub(crate) fn load_indexes_startup(
 
     // Load temporal adjacency index
     use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index;
-    use crate::utils::lock::RwLockExt;
 
     let adjacency_file = manager
         .base_path()
@@ -809,12 +801,9 @@ pub(crate) fn load_indexes_startup(
     if adjacency_file.exists() {
         match load_temporal_adjacency_index(manager.base_path()) {
             Ok(adj_index) => {
-                if let Ok(mut hist_write) = historical.write_or_err() {
-                    hist_write.set_temporal_adjacency_index(adj_index);
-                    eprintln!("Loaded temporal adjacency index from disk");
-                } else {
-                    eprintln!("Warning: Failed to acquire write lock for temporal adjacency index");
-                }
+                let mut hist_write = historical.write();
+                hist_write.set_temporal_adjacency_index(adj_index);
+                eprintln!("Loaded temporal adjacency index from disk");
             }
             Err(e) => {
                 eprintln!("Warning: Failed to load temporal adjacency index: {}", e);

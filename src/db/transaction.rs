@@ -3,7 +3,6 @@ use crate::core::temporal::Timestamp;
 use crate::db::GallifreyDB;
 use crate::storage::wal::WriteOptions;
 use crate::utils::error::Result;
-use crate::utils::lock::MutexExt;
 use std::sync::Arc;
 
 impl GallifreyDB {
@@ -28,7 +27,7 @@ impl GallifreyDB {
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
         let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
+        let snapshot_timestamp = *self.current_timestamp.lock().unwrap();
 
         // Register as active
         self.visibility_manager.register_active(tx_id);
@@ -93,7 +92,7 @@ impl GallifreyDB {
         // >= the last commit timestamp (monotonicity). This allows the transaction
         // to see all commits that happened before it started.
         let snapshot_timestamp = {
-            let ts = self.current_timestamp.lock_or_err()?;
+            let ts = self.current_timestamp.lock().unwrap();
             std::cmp::max(crate::core::temporal::time::now(), *ts)
         };
 
@@ -285,7 +284,7 @@ impl GallifreyDB {
         // >= the last commit timestamp (monotonicity). This allows the transaction
         // to see all commits that happened before it started.
         let snapshot_timestamp = {
-            let ts = self.current_timestamp.lock_or_err()?;
+            let ts = self.current_timestamp.lock().unwrap();
             std::cmp::max(crate::core::temporal::time::now(), *ts)
         };
 
