@@ -524,10 +524,7 @@ impl TxVisibilityManager {
     /// Uses lock recovery to prevent cascade panics if the lock was poisoned
     /// by a panicking thread. The transaction set can safely be used after recovery.
     pub fn register_active(&self, tx_id: TxId) {
-        let mut active_guard = self
-            .active
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut active_guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
 
         // Use Arc::make_mut for idiomatic copy-on-write.
         // This avoids a clone if the Arc is not shared (only one strong reference).
@@ -552,10 +549,7 @@ impl TxVisibilityManager {
     /// overhead with N concurrent transactions. Now clones only the Arc (cheap pointer
     /// copy), reducing snapshot capture from O(N) to O(1).
     pub fn capture_snapshot(&self, snapshot_timestamp: Timestamp) -> TransactionSnapshot {
-        let active_guard = self
-            .active
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let active_guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
 
         TransactionSnapshot {
             snapshot_timestamp,
@@ -585,10 +579,7 @@ impl TxVisibilityManager {
     pub fn register_commit(&self, tx_id: TxId, commit_timestamp: Timestamp) {
         // Drop active lock before acquiring committed write lock to reduce contention
         {
-            let mut active_guard = self
-                .active
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut active_guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
 
             // Use Arc::make_mut for idiomatic copy-on-write.
             Arc::make_mut(&mut *active_guard).remove(&tx_id);
@@ -614,10 +605,7 @@ impl TxVisibilityManager {
     /// Uses copy-on-write to remove from active set: clones HashSet, removes tx_id,
     /// wraps in new Arc. This ensures existing snapshots remain valid.
     pub fn register_abort(&self, tx_id: TxId) {
-        let mut active_guard = self
-            .active
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut active_guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
 
         // Use Arc::make_mut for idiomatic copy-on-write.
         Arc::make_mut(&mut *active_guard).remove(&tx_id);
@@ -661,10 +649,7 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn active_count(&self) -> usize {
-        let active_guard = self
-            .active
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let active_guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         active_guard.len()
     }
 
