@@ -56,26 +56,30 @@ impl<'a> Dreamer<'a> {
         let mut snapshots: Vec<(i64, Vec<f32>)> = Vec::new();
 
         for version in &history.versions {
-             let valid_time = version.temporal.valid_time();
+            let valid_time = version.temporal.valid_time();
 
-             // Check if version is relevant to the window
-             // We include versions that start within the window or overlap it significantly.
-             // Simplest is to check if valid_start is inside the window.
-             if valid_time.start() < history_window.end() && valid_time.end() > history_window.start() {
+            // Check if version is relevant to the window
+            // We include versions that start within the window or overlap it significantly.
+            // Simplest is to check if valid_start is inside the window.
+            if valid_time.start() < history_window.end()
+                && valid_time.end() > history_window.start()
+            {
+                // Get the property value from this version
+                if let Some(prop_val) = version.properties.get(property) {
+                    if let Some(vec) = prop_val.as_vector() {
+                        // Use the max of (valid_start, window_start) as the effective timestamp
+                        // ensuring we don't look back before the window started.
+                        let effective_time = valid_time
+                            .start()
+                            .wallclock()
+                            .max(history_window.start().wallclock());
 
-                 // Get the property value from this version
-                 if let Some(prop_val) = version.properties.get(property) {
-                     if let Some(vec) = prop_val.as_vector() {
-                         // Use the max of (valid_start, window_start) as the effective timestamp
-                         // ensuring we don't look back before the window started.
-                         let effective_time = valid_time.start().wallclock().max(history_window.start().wallclock());
-
-                         // Avoid duplicates if multiple versions map to same effective time?
-                         // Just take them all, sort later.
-                         snapshots.push((effective_time, vec.to_vec()));
-                     }
-                 }
-             }
+                        // Avoid duplicates if multiple versions map to same effective time?
+                        // Just take them all, sort later.
+                        snapshots.push((effective_time, vec.to_vec()));
+                    }
+                }
+            }
         }
 
         // Sort by time to ensure chronological order
@@ -85,10 +89,10 @@ impl<'a> Dreamer<'a> {
         snapshots.dedup_by_key(|(t, _)| *t);
 
         if snapshots.is_empty() {
-             return Err(Error::Vector(VectorError::IndexError(format!(
-                 "No vector history found for node {} in property '{}' within the specified window",
-                 node_id, property
-             ))));
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "No vector history found for node {} in property '{}' within the specified window",
+                node_id, property
+            ))));
         }
 
         // 2. Calculate Trajectory (Velocity)
@@ -98,27 +102,27 @@ impl<'a> Dreamer<'a> {
             // Not enough history to determine trajectory. Assume static.
             last_vec.clone()
         } else {
-             let (first_time, first_vec) = snapshots.first().unwrap();
+            let (first_time, first_vec) = snapshots.first().unwrap();
 
-             let duration_micros = last_time - first_time;
+            let duration_micros = last_time - first_time;
 
-             if duration_micros <= 0 {
-                 last_vec.clone()
-             } else {
-                 let duration_secs = duration_micros as f32 / 1_000_000.0;
-                 let horizon_secs = future_horizon.as_secs_f32();
+            if duration_micros <= 0 {
+                last_vec.clone()
+            } else {
+                let duration_secs = duration_micros as f32 / 1_000_000.0;
+                let horizon_secs = future_horizon.as_secs_f32();
 
-                 // Linear projection: Future = Last + (Velocity * Horizon)
-                 // Velocity = (Last - First) / Duration
-                 let mut proj = Vec::with_capacity(last_vec.len());
+                // Linear projection: Future = Last + (Velocity * Horizon)
+                // Velocity = (Last - First) / Duration
+                let mut proj = Vec::with_capacity(last_vec.len());
 
-                 for (start, end) in first_vec.iter().zip(last_vec.iter()) {
-                     let velocity = (end - start) / duration_secs;
-                     let future_val = end + (velocity * horizon_secs);
-                     proj.push(future_val);
-                 }
-                 proj
-             }
+                for (start, end) in first_vec.iter().zip(last_vec.iter()) {
+                    let velocity = (end - start) / duration_secs;
+                    let future_val = end + (velocity * horizon_secs);
+                    proj.push(future_val);
+                }
+                proj
+            }
         };
 
         // 3. Search
@@ -129,10 +133,10 @@ impl<'a> Dreamer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMapBuilder;
-    use crate::index::vector::{HnswConfig, DistanceMetric};
-    use crate::core::temporal::time;
     use crate::api::transaction::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
+    use crate::index::vector::{DistanceMetric, HnswConfig};
 
     #[test]
     fn test_dreamer_trajectory_extrapolation() {
@@ -149,9 +153,30 @@ mod tests {
         // 2. Intermediate [5, 5]
         // 3. Expert [10, 10] (This is where we predict it goes)
 
-        let _novice = db.create_node("Level", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 0.0]).build()).unwrap();
-        let _inter = db.create_node("Level", PropertyMapBuilder::new().insert_vector("embedding", &[5.0, 5.0]).build()).unwrap();
-        let expert = db.create_node("Level", PropertyMapBuilder::new().insert_vector("embedding", &[10.0, 10.0]).build()).unwrap();
+        let _novice = db
+            .create_node(
+                "Level",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let _inter = db
+            .create_node(
+                "Level",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[5.0, 5.0])
+                    .build(),
+            )
+            .unwrap();
+        let expert = db
+            .create_node(
+                "Level",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[10.0, 10.0])
+                    .build(),
+            )
+            .unwrap();
 
         // The Learner Node
         // Starts at [0, 0]
@@ -170,7 +195,8 @@ mod tests {
         let update_props = PropertyMapBuilder::new()
             .insert_vector("embedding", &[5.0, 5.0])
             .build();
-        db.write(|tx| tx.update_node(learner, update_props)).unwrap();
+        db.write(|tx| tx.update_node(learner, update_props))
+            .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(50));
         let t_end = time::now();
@@ -201,27 +227,29 @@ mod tests {
         // Let's use a generic future horizon
         let horizon = Duration::from_millis(50);
 
-        let predictions = dreamer.predict_future(
-            learner,
-            "embedding",
-            window,
-            horizon,
-            1
-        ).unwrap();
+        let predictions = dreamer
+            .predict_future(learner, "embedding", window, horizon, 1)
+            .unwrap();
 
         assert!(!predictions.is_empty());
 
         // Should find "Expert" node [10, 10]
-        assert_eq!(predictions[0].0, expert, "Dreamer should predict the learner becomes an expert");
+        assert_eq!(
+            predictions[0].0, expert,
+            "Dreamer should predict the learner becomes an expert"
+        );
     }
 
     #[test]
     fn test_dreamer_static_trajectory() {
         let db = GallifreyDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean)).unwrap();
+        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
+            .unwrap();
 
         let t0 = time::now();
-        let props = PropertyMapBuilder::new().insert_vector("vec", &[1.0, 1.0]).build();
+        let props = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 1.0])
+            .build();
         let node = db.create_node("Node", props).unwrap();
         let t1 = time::now();
 
@@ -230,7 +258,9 @@ mod tests {
         let window = TimeRange::new(t0, t1).unwrap();
 
         // Should return same position
-        let res = dreamer.predict_future(node, "vec", window, Duration::from_secs(10), 1).unwrap();
+        let res = dreamer
+            .predict_future(node, "vec", window, Duration::from_secs(10), 1)
+            .unwrap();
 
         // Should match itself (as it's the closest to [1.0, 1.0])
         assert_eq!(res[0].0, node);
