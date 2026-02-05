@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::vector::SparseVec;
-use crate::utils::error::{Result, StorageError};
+use crate::utils::error::{Error, Result, StorageError, VectorError};
 
 // ============================================================================
 // Serialization Type Tags
@@ -59,6 +59,19 @@ pub const MAX_PROPERTY_MAP_CAPACITY: usize = 10_000;
 /// Maximum recursion depth for nested properties (e.g., arrays of arrays).
 /// Set to 100 to prevent stack overflow from malicious input.
 pub const MAX_RECURSION_DEPTH: usize = 100;
+
+/// Validates that a vector dimension does not exceed the maximum allowed.
+/// Returns Ok(()) if valid, Err(VectorError::DimensionTooLarge) otherwise.
+#[inline]
+fn validate_vector_dimensions(len: usize) -> Result<()> {
+    if len > MAX_VECTOR_DIMENSIONS {
+        return Err(Error::Vector(VectorError::DimensionTooLarge {
+            dimension: len,
+            max_allowed: MAX_VECTOR_DIMENSIONS,
+        }));
+    }
+    Ok(())
+}
 
 /// Property key type.
 ///
@@ -179,17 +192,24 @@ impl PropertyValue {
     ///
     /// Panics if the vector dimension exceeds [`MAX_VECTOR_DIMENSIONS`].
     /// This validation ensures that vectors can be serialized without error.
+    ///
+    /// For a fallible version that returns `Result` instead of panicking,
+    /// use [`try_vector`](Self::try_vector).
     #[inline]
     pub fn vector<V: AsRef<[f32]>>(v: V) -> Self {
+        Self::try_vector(v).unwrap_or_else(|e| panic!("{}", e))
+    }
+
+    /// Create a vector property value from a slice (fallible).
+    ///
+    /// This is the fallible version of [`vector`](Self::vector). It returns
+    /// an error if the vector dimension exceeds [`MAX_VECTOR_DIMENSIONS`]
+    /// instead of panicking.
+    #[inline]
+    pub fn try_vector<V: AsRef<[f32]>>(v: V) -> Result<Self> {
         let slice = v.as_ref();
-        if slice.len() > MAX_VECTOR_DIMENSIONS {
-            panic!(
-                "Vector dimension {} exceeds maximum allowed {}",
-                slice.len(),
-                MAX_VECTOR_DIMENSIONS
-            );
-        }
-        PropertyValue::Vector(Arc::from(slice))
+        validate_vector_dimensions(slice.len())?;
+        Ok(PropertyValue::Vector(Arc::from(slice)))
     }
 
     /// Returns true if this value is null.
@@ -516,7 +536,7 @@ impl PropertyValue {
                 Ok(())
             }
             PropertyValue::Vector(v) => {
-                serialize_vector_into(v, buffer);
+                try_serialize_vector_into(v, buffer)?;
                 Ok(())
             }
             PropertyValue::SparseVector(sv) => {
@@ -881,17 +901,21 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 /// # Panics
 ///
 /// Panics if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
-/// This is a defensive check; vectors should be validated at construction
-/// time via [`PropertyValue::vector()`] which enforces this limit.
+///
+/// For a fallible version that returns `Result` instead of panicking,
+/// use [`try_serialize_vector_into`].
 pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
+    try_serialize_vector_into(v, buffer).unwrap_or_else(|e| panic!("{}", e))
+}
+
+/// Serialize a vector into an existing buffer (fallible).
+///
+/// This is the fallible version of [`serialize_vector_into`]. It returns
+/// an error if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`
+/// instead of panicking.
+pub fn try_serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) -> Result<()> {
     // Defensive check: vectors should be validated at construction via PropertyValue::vector()
-    if v.len() > MAX_VECTOR_DIMENSIONS {
-        panic!(
-            "Vector dimension {} exceeds maximum allowed {}",
-            v.len(),
-            MAX_VECTOR_DIMENSIONS
-        );
-    }
+    validate_vector_dimensions(v.len())?;
 
     // Pre-allocate space to avoid multiple reallocations
     // Total: 1 byte (tag) + 4 bytes (length) + v.len() * 4 bytes (data)
@@ -929,6 +953,7 @@ pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
             buffer.extend_from_slice(&value.to_le_bytes());
         }
     }
+    Ok(())
 }
 
 /// Deserialize a vector from bytes.
@@ -976,13 +1001,7 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
     let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
 
     // Prevent DoS via memory exhaustion from malicious input
-    if dimension > MAX_VECTOR_DIMENSIONS {
-        return Err(StorageError::CorruptedData(format!(
-            "Vector dimension {} exceeds maximum allowed {}",
-            dimension, MAX_VECTOR_DIMENSIONS
-        ))
-        .into());
-    }
+    validate_vector_dimensions(dimension)?;
 
     // Calculate total length with overflow check
     let data_start: usize = 5;
@@ -1150,13 +1169,7 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     }
 
     // Prevent DoS via memory exhaustion from malicious input
-    if nnz > MAX_VECTOR_DIMENSIONS {
-        return Err(StorageError::CorruptedData(format!(
-            "Sparse vector nnz {} exceeds maximum allowed {}",
-            nnz, MAX_VECTOR_DIMENSIONS
-        ))
-        .into());
-    }
+    validate_vector_dimensions(nnz)?;
 
     // Calculate required size
     let data_start: usize = 9;
@@ -1934,7 +1947,7 @@ impl PropertyMapBuilder {
 
     /// Insert a vector property (fallible).
     pub fn try_insert_vector(self, key: &str, vector: &[f32]) -> Result<Self> {
-        self.try_insert(key, PropertyValue::vector(vector))
+        self.try_insert(key, PropertyValue::try_vector(vector)?)
     }
 
     /// Remove a property.
@@ -3950,15 +3963,6 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-
-    #[test]
-    #[should_panic(expected = "Vector dimension")]
-    fn test_try_insert_vector_panics_on_overflow() {
-        // 💣 Risk: try_insert_vector implies fallibility but panics on large inputs.
-        // This test documents this behavior to prevent regression or unexpected changes.
-        let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
-        let _ = PropertyMapBuilder::new().try_insert_vector("test", &large_vector);
-    }
 
     #[test]
     #[should_panic(expected = "Vector dimension")]
