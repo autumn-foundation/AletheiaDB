@@ -1,8 +1,8 @@
 use super::*;
-use std::sync::Arc;
-use crate::properties;
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::properties;
 use crate::utils::error::StorageError;
+use std::sync::Arc;
 
 #[test]
 fn test_property_value_types() {
@@ -190,9 +190,18 @@ fn test_properties_macro() {
     };
 
     assert_eq!(map.len(), 3);
-    assert_eq!(map.get("name").and_then(|v: &PropertyValue| v.as_str()), Some("Bob"));
-    assert_eq!(map.get("age").and_then(|v: &PropertyValue| v.as_int()), Some(25));
-    assert_eq!(map.get("score").and_then(|v: &PropertyValue| v.as_float()), Some(98.5));
+    assert_eq!(
+        map.get("name").and_then(|v: &PropertyValue| v.as_str()),
+        Some("Bob")
+    );
+    assert_eq!(
+        map.get("age").and_then(|v: &PropertyValue| v.as_int()),
+        Some(25)
+    );
+    assert_eq!(
+        map.get("score").and_then(|v: &PropertyValue| v.as_float()),
+        Some(98.5)
+    );
 }
 
 #[test]
@@ -580,8 +589,7 @@ fn test_vector_serialization_optimization_correctness() {
         assert_eq!(deserialized.len(), test_vector.len());
         assert_eq!(consumed, bytes.len());
 
-        for (i, (&original, &recovered)) in
-            test_vector.iter().zip(deserialized.iter()).enumerate()
+        for (i, (&original, &recovered)) in test_vector.iter().zip(deserialized.iter()).enumerate()
         {
             assert_eq!(
                 original,
@@ -959,9 +967,7 @@ fn test_invalid_interned_string_serialization() {
     );
 
     match result {
-        Err(crate::utils::error::Error::Storage(StorageError::InconsistentState {
-            reason,
-        })) => {
+        Err(crate::utils::error::Error::Storage(StorageError::InconsistentState { reason })) => {
             assert!(
                 reason.contains("not found in interner"),
                 "Error message should indicate missing key in interner"
@@ -986,9 +992,7 @@ fn test_serialize_with_invalid_key() {
 
     assert!(result.is_err(), "Should return error for missing key");
     match result {
-        Err(crate::utils::error::Error::Storage(StorageError::InconsistentState {
-            reason,
-        })) => {
+        Err(crate::utils::error::Error::Storage(StorageError::InconsistentState { reason })) => {
             assert!(
                 reason.contains("888888"),
                 "Error message should contain the invalid key ID"
@@ -1103,9 +1107,7 @@ fn test_sparse_vector_arc_sharing() {
     let prop1 = PropertyValue::sparse_vector(sparse);
     let prop2 = prop1.clone();
 
-    if let (PropertyValue::SparseVector(sv1), PropertyValue::SparseVector(sv2)) =
-        (&prop1, &prop2)
-    {
+    if let (PropertyValue::SparseVector(sv1), PropertyValue::SparseVector(sv2)) = (&prop1, &prop2) {
         assert!(
             Arc::ptr_eq(sv1, sv2),
             "SparseVector Arc should be shared after clone"

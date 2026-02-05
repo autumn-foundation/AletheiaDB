@@ -361,28 +361,28 @@ impl PropertyValue {
 
     /// Calculate the number of bytes required for serialization.
     pub fn serialized_size(&self) -> Result<usize> {
-         use crate::core::property::serialization::PropertyValueSerialization;
+        use crate::core::property::serialization::PropertyValueSerialization;
         PropertyValueSerialization::serialized_size(self)
     }
 
     // Helper to access private recursive methods from serialization module
     pub(crate) fn serialize_recursive(&self, buffer: &mut Vec<u8>, depth: usize) -> Result<()> {
-         use crate::core::property::serialization::PropertyValueSerialization;
+        use crate::core::property::serialization::PropertyValueSerialization;
         PropertyValueSerialization::serialize_recursive(self, buffer, depth)
     }
 
     pub(crate) fn deserialize_recursive(bytes: &[u8], depth: usize) -> Result<(Self, usize)> {
-         use crate::core::property::serialization::PropertyValueSerialization;
+        use crate::core::property::serialization::PropertyValueSerialization;
         PropertyValueSerialization::deserialize_recursive(bytes, depth)
     }
 
     pub(crate) fn estimated_heap_size_recursive(&self, depth: usize) -> Result<usize> {
-         use crate::core::property::serialization::PropertyValueSerialization;
+        use crate::core::property::serialization::PropertyValueSerialization;
         PropertyValueSerialization::estimated_heap_size_recursive(self, depth)
     }
 
     pub(crate) fn serialized_size_recursive(&self, depth: usize) -> Result<usize> {
-         use crate::core::property::serialization::PropertyValueSerialization;
+        use crate::core::property::serialization::PropertyValueSerialization;
         PropertyValueSerialization::serialized_size_recursive(self, depth)
     }
 }

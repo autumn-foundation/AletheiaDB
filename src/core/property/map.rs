@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::types::*;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::utils::error::{Result, StorageError};
-use super::types::*;
 
 /// A map of property keys to values with copy-on-write semantics.
 ///

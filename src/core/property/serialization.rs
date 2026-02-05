@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use crate::utils::error::{Result, StorageError};
-use crate::core::vector::SparseVec;
 use super::types::*;
+use crate::core::vector::SparseVec;
+use crate::utils::error::{Result, StorageError};
+use std::sync::Arc;
 
 /// Serialization logic for PropertyValue.
 pub struct PropertyValueSerialization;
@@ -24,7 +24,11 @@ impl PropertyValueSerialization {
     }
 
     /// Internal recursive serialization helper.
-    pub fn serialize_recursive(value: &PropertyValue, buffer: &mut Vec<u8>, depth: usize) -> Result<()> {
+    pub fn serialize_recursive(
+        value: &PropertyValue,
+        buffer: &mut Vec<u8>,
+        depth: usize,
+    ) -> Result<()> {
         if depth > MAX_RECURSION_DEPTH {
             return Err(StorageError::CorruptedData(format!(
                 "Property value recursion depth limit exceeded (max {})",
@@ -267,8 +271,7 @@ impl PropertyValueSerialization {
 
     /// Estimate heap size of a PropertyValue.
     pub fn estimated_heap_size(value: &PropertyValue) -> usize {
-        Self::estimated_heap_size_recursive(value, 0)
-            .unwrap_or(10 * 1024 * 1024)
+        Self::estimated_heap_size_recursive(value, 0).unwrap_or(10 * 1024 * 1024)
     }
 
     /// Internal recursive heap size estimation helper.

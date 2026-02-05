@@ -6,16 +6,16 @@
 //! - Deduplication of unchanged properties across versions
 //! - Zero-copy sharing of immutable data
 
-/// Property types and values.
-pub mod types;
 /// Property map and builder.
 pub mod map;
 /// Serialization logic for properties.
 pub mod serialization;
+/// Property types and values.
+pub mod types;
 
 #[cfg(test)]
 mod tests;
 
-pub use types::*;
 pub use map::*;
 pub use serialization::*;
+pub use types::*;
