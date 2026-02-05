@@ -472,21 +472,23 @@ impl HnswIndexBuilder {
         // Validate ef_construction
         // Prevent DoS via excessive memory allocation
         if self.config.ef_construction < 10 || self.config.ef_construction > 4096 {
-            let reason = format!(
-                "ef_construction must be in range [10, 4096], got {}",
-                self.config.ef_construction
-            );
-            return Err(Error::Vector(VectorError::InvalidVector { reason }));
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "ef_construction must be in range [10, 4096], got {}",
+                    self.config.ef_construction
+                ),
+            }));
         }
 
         // Validate ef_search
         // Prevent DoS via excessive CPU/Memory usage
         if self.config.ef_search < 1 || self.config.ef_search > 4096 {
-            let reason = format!(
-                "ef_search must be in range [1, 4096], got {}",
-                self.config.ef_search
-            );
-            return Err(Error::Vector(VectorError::InvalidVector { reason }));
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "ef_search must be in range [1, 4096], got {}",
+                    self.config.ef_search
+                ),
+            }));
         }
 
         // Security Check: Custom metrics require F32 quantization
@@ -639,6 +641,16 @@ pub struct HnswIndex {
 // ║ NEVER hold DashMap shard locks while acquiring inner lock.               ║
 // ║ Violating this order causes deadlock between add() and save().           ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
+impl std::fmt::Debug for HnswIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnswIndex")
+            .field("config", &self.config)
+            .field("is_mmap", &self.is_mmap)
+            .field("stats", &self.stats)
+            .finish_non_exhaustive()
+    }
+}
+
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         // Check if index is read-only (memory-mapped)
@@ -1589,6 +1601,35 @@ mod tests {
 
         assert!(config.custom_metric.is_some());
         assert_eq!(config.custom_metric.as_ref().unwrap().name, "weighted");
+    }
+
+    #[test]
+    fn test_validate_ef_parameters() {
+        // Test ef_construction limits
+        let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_construction(5) // Too small
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ef_construction"));
+
+        let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_construction(5000) // Too large
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ef_construction"));
+
+        // Test ef_search limits
+        let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_search(0) // Too small
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ef_search"));
+
+        let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_search(5000) // Too large
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ef_search"));
     }
 
     #[test]
