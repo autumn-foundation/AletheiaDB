@@ -1186,6 +1186,30 @@ mod tests {
     }
 
     #[test]
+    fn test_query_result_display_boolean_coloring() {
+        use crate::core::property::PropertyMapBuilder;
+
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let props = PropertyMapBuilder::new()
+            .insert("active", true)
+            .insert("flag", false)
+            .build();
+
+        let result = QueryResult::with_nodes(nodes)
+            .with_properties(vec![props]);
+
+        let display = format!("{}", result);
+
+        // Check that "true" is colored green
+        // Use crossterm to generate the expected string to be robust against env differences
+        let expected_true = format!("{}", "true".green());
+        assert!(display.contains(&expected_true));
+
+        // Check that "false" is present
+        assert!(display.contains("false"));
+    }
+
+    #[test]
     fn test_collect_structured_nodes_only() {
         let rows = vec![
             QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())),
