@@ -1524,4 +1524,81 @@ mod tests {
         assert_eq!(format!("{}", Token::Parameter("p".to_string())), "$p");
         assert_eq!(format!("{}", Token::Eof), "EOF");
     }
+
+    #[test]
+    fn test_token_derive() {
+        let tokens = vec![
+            Token::Match,
+            Token::Where,
+            Token::Return,
+            Token::Order,
+            Token::By,
+            Token::Limit,
+            Token::Skip,
+            Token::Distinct,
+            Token::Count,
+            Token::Asc,
+            Token::Desc,
+            Token::And,
+            Token::Or,
+            Token::Not,
+            Token::In,
+            Token::Is,
+            Token::Null,
+            Token::True,
+            Token::False,
+            Token::Similar,
+            Token::To,
+            Token::Using,
+            Token::Find,
+            Token::Rank,
+            Token::Similarity,
+            Token::Top,
+            Token::As,
+            Token::Of,
+            Token::Between,
+            Token::Exists,
+            Token::Contains,
+            Token::Starts,
+            Token::Ends,
+            Token::With,
+            Token::Cosine,
+            Token::Euclidean,
+            Token::DotProduct,
+            Token::LeftParen,
+            Token::RightParen,
+            Token::LeftBracket,
+            Token::RightBracket,
+            Token::LeftBrace,
+            Token::RightBrace,
+            Token::Colon,
+            Token::Comma,
+            Token::Dot,
+            Token::Star,
+            Token::Dash,
+            Token::Arrow,
+            Token::LeftArrow,
+            Token::Eq,
+            Token::Ne,
+            Token::Lt,
+            Token::Le,
+            Token::Gt,
+            Token::Ge,
+            Token::Identifier("id".to_string()),
+            Token::StringLiteral("s".to_string()),
+            Token::IntegerLiteral(1),
+            Token::FloatLiteral(1.0),
+            Token::Parameter("p".to_string()),
+            Token::Eof,
+        ];
+
+        for token in tokens {
+            // Test Clone
+            let cloned = token.clone();
+            // Test PartialEq
+            assert_eq!(token, cloned);
+            // Test Debug
+            let _ = format!("{:?}", token);
+        }
+    }
 }
