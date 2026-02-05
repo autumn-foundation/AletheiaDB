@@ -39,11 +39,7 @@ use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
 use crate::utils::error::{Result, StorageError};
 use dashmap::DashMap;
-
-/// Threshold for distinguishing point queries from range queries (in ticks).
-/// Queries with range < POINT_QUERY_THRESHOLD are considered "point queries"
-/// and pre-allocate less capacity (typically return 1-2 versions).
-const POINT_QUERY_THRESHOLD_TICKS: i64 = 1000;
+use smallvec::SmallVec;
 
 /// Policy for handling duplicate versions during batch insertion.
 ///
@@ -103,6 +99,10 @@ impl Default for TemporalIndexConfig {
 /// without proportional cost increase per timeline entry. Each additional field
 /// in `VersionMetadata` is stored once, not twice.
 pub type VersionMetadataIndex = u32;
+
+/// Optimization: Use SmallVec for index lists to avoid heap allocations for common small queries.
+/// 16 * 4 bytes = 64 bytes, fits well on stack.
+pub type IndexVec = SmallVec<[VersionMetadataIndex; 16]>;
 
 /// Consolidated version metadata storage.
 ///
@@ -386,18 +386,10 @@ impl EntityTimeline {
     /// This is a convenience method that collects results into a `Vec`. For better performance
     /// when you only need a count, first element, or want to process results lazily, use
     /// `find_indices_in_range_iter()` instead.
-    fn find_indices_in_range(&self, range: TimeRange) -> Vec<VersionMetadataIndex> {
-        // Use iterator version and collect with adaptive pre-allocation.
-        // The pre-allocation heuristic reduces reallocations for common cases.
-        let cutoff = self.versions.partition_point(|e| e.start < range.end());
-        let range_size = range.end().wallclock() - range.start().wallclock();
-        let estimated_capacity = if range_size < POINT_QUERY_THRESHOLD_TICKS {
-            cutoff.min(4) // Point query or small range
-        } else {
-            cutoff.min(16) // Large range query
-        };
-
-        let mut results = Vec::with_capacity(estimated_capacity);
+    fn find_indices_in_range(&self, range: TimeRange) -> IndexVec {
+        // Use iterator version and collect.
+        // SmallVec stays on stack for up to 16 items (inline capacity).
+        let mut results = IndexVec::new();
         results.extend(self.find_indices_in_range_iter(range));
         results
     }
@@ -447,9 +439,8 @@ impl EntityTimeline {
     /// This is a convenience method that collects results into a `Vec`. For better performance
     /// when you only need a count, first element, or want to process results lazily, use
     /// `find_indices_at_point_iter()` instead.
-    fn find_indices_at_point(&self, timestamp: Timestamp) -> Vec<VersionMetadataIndex> {
-        let cutoff = self.versions.partition_point(|e| e.start <= timestamp);
-        let mut results = Vec::with_capacity(cutoff.min(4));
+    fn find_indices_at_point(&self, timestamp: Timestamp) -> IndexVec {
+        let mut results = IndexVec::new();
         results.extend(self.find_indices_at_point_iter(timestamp));
         results
     }
@@ -559,8 +550,8 @@ impl EntityTimelines {
     ///
     /// Convenience method that collects the iterator results.
     #[inline]
-    fn resolve_version_ids(&self, indices: Vec<VersionMetadataIndex>) -> Vec<VersionId> {
-        self.resolve_version_ids_iter(&indices).collect()
+    fn resolve_version_ids(&self, indices: &[VersionMetadataIndex]) -> Vec<VersionId> {
+        self.resolve_version_ids_iter(indices).collect()
     }
 
     /// Find the metadata index for a given VersionId.
@@ -1015,7 +1006,7 @@ impl TemporalIndexes {
             .get(&EntityId::Node(node_id))
             .map(|t| {
                 let indices = t.valid.find_indices_in_range(time_range);
-                t.resolve_version_ids(indices)
+                t.resolve_version_ids(&indices)
             })
             .unwrap_or_default()
     }
@@ -1030,7 +1021,7 @@ impl TemporalIndexes {
             .get(&EntityId::Edge(edge_id))
             .map(|t| {
                 let indices = t.valid.find_indices_in_range(time_range);
-                t.resolve_version_ids(indices)
+                t.resolve_version_ids(&indices)
             })
             .unwrap_or_default()
     }
@@ -1045,7 +1036,7 @@ impl TemporalIndexes {
             .get(&EntityId::Node(node_id))
             .map(|t| {
                 let indices = t.tx.find_indices_in_range(time_range);
-                t.resolve_version_ids(indices)
+                t.resolve_version_ids(&indices)
             })
             .unwrap_or_default()
     }
@@ -1060,7 +1051,7 @@ impl TemporalIndexes {
             .get(&EntityId::Edge(edge_id))
             .map(|t| {
                 let indices = t.tx.find_indices_in_range(time_range);
-                t.resolve_version_ids(indices)
+                t.resolve_version_ids(&indices)
             })
             .unwrap_or_default()
     }
@@ -1243,10 +1234,10 @@ impl TemporalIndexes {
         let tx_indices = timelines.tx.find_indices_at_point(transaction_time);
 
         // Intersect metadata indices: version must be visible in BOTH dimensions
-        let intersected_indices = Self::intersect_metadata_indices(valid_indices, tx_indices);
+        let intersected_indices = Self::intersect_metadata_indices(&valid_indices, &tx_indices);
 
         // Resolve intersected indices to VersionIds
-        timelines.resolve_version_ids(intersected_indices)
+        timelines.resolve_version_ids(&intersected_indices)
     }
 
     /// Efficiently intersect two sets of metadata indices.
@@ -1259,9 +1250,9 @@ impl TemporalIndexes {
     /// - Small K (< 16): O(K²) but with low constant factor
     /// - Large K (>= 16): O(K) using HashSet
     fn intersect_metadata_indices(
-        a: Vec<VersionMetadataIndex>,
-        b: Vec<VersionMetadataIndex>,
-    ) -> Vec<VersionMetadataIndex> {
+        a: &[VersionMetadataIndex],
+        b: &[VersionMetadataIndex],
+    ) -> IndexVec {
         // Threshold for switching to HashSet-based intersection.
         // Below this, linear scan is faster due to cache locality and no allocation.
         const HASH_THRESHOLD: usize = 16;
@@ -1271,15 +1262,15 @@ impl TemporalIndexes {
         if max_len < HASH_THRESHOLD {
             // Small sets: linear intersection is efficient due to cache locality
             if a.len() <= b.len() {
-                a.into_iter().filter(|v| b.contains(v)).collect()
+                a.iter().copied().filter(|v| b.contains(v)).collect()
             } else {
-                b.into_iter().filter(|v| a.contains(v)).collect()
+                b.iter().copied().filter(|v| a.contains(v)).collect()
             }
         } else {
             // Large sets: use HashSet for O(K) intersection instead of O(K²)
             use std::collections::HashSet;
-            let b_set: HashSet<_> = b.into_iter().collect();
-            a.into_iter().filter(|v| b_set.contains(v)).collect()
+            let b_set: HashSet<_> = b.iter().copied().collect();
+            a.iter().copied().filter(|v| b_set.contains(v)).collect()
         }
     }
 
