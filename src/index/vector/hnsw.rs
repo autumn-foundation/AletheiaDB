@@ -473,10 +473,7 @@ impl HnswIndexBuilder {
         // Prevent DoS via excessive memory allocation
         if self.config.ef_construction < 10 || self.config.ef_construction > 4096 {
             return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "ef_construction must be in range [10, 4096], got {}",
-                    self.config.ef_construction
-                ),
+                reason: format!("ef_construction must be in range [10, 4096], got {}", self.config.ef_construction),
             }));
         }
 
@@ -484,10 +481,7 @@ impl HnswIndexBuilder {
         // Prevent DoS via excessive CPU/Memory usage
         if self.config.ef_search < 1 || self.config.ef_search > 4096 {
             return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "ef_search must be in range [1, 4096], got {}",
-                    self.config.ef_search
-                ),
+                reason: format!("ef_search must be in range [1, 4096], got {}", self.config.ef_search),
             }));
         }
 
