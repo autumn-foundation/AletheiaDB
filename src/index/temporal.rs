@@ -41,7 +41,6 @@ use crate::utils::error::{Result, StorageError};
 use dashmap::DashMap;
 use smallvec::SmallVec;
 
-
 /// Policy for handling duplicate versions during batch insertion.
 ///
 /// Duplicate versions are identified by their `VersionId`.
