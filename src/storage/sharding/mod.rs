@@ -51,7 +51,6 @@ pub mod persistent_commit_log;
 pub mod rebalance;
 pub mod router;
 pub mod rpc_client;
-pub mod simulation;
 pub mod transaction;
 pub mod types;
 
@@ -78,7 +77,6 @@ pub use persistent_commit_log::{
 pub use rebalance::{MigrationPlan, MigrationProgress, MigrationState, RebalanceManager};
 pub use router::{ShardRouter, TraversalPlan, TraversalStep};
 pub use rpc_client::{ClientStats, HttpShardClient, RpcConfig};
-pub use simulation::{EdgeCutAnalysis, ShardingSimulation, SimulationResult};
 pub use transaction::{
     DistributedTransaction, ParticipantState, TransactionPhase, TwoPhaseCommitLog,
 };
