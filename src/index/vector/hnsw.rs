@@ -469,6 +469,28 @@ impl HnswIndexBuilder {
             }));
         }
 
+        // Validate ef_construction
+        // Prevent DoS via excessive memory allocation
+        if self.config.ef_construction < 10 || self.config.ef_construction > 4096 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "ef_construction must be in range [10, 4096], got {}",
+                    self.config.ef_construction
+                ),
+            }));
+        }
+
+        // Validate ef_search
+        // Prevent DoS via excessive CPU/Memory usage
+        if self.config.ef_search < 1 || self.config.ef_search > 4096 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "ef_search must be in range [1, 4096], got {}",
+                    self.config.ef_search
+                ),
+            }));
+        }
+
         // Security Check: Custom metrics require F32 quantization
         // This is critical because usearch passes raw pointers to the metric function.
         // If quantization is not F32 (e.g., I8 or F16), the pointers will point to
