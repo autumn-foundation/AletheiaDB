@@ -84,17 +84,16 @@ classDiagram
         }
     }
     namespace Core {
+        class GallifreyDB
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
-        class StorageTrait {
-            <<interface>>
-        }
     }
     namespace Storage {
         class CurrentStorage
         class HistoricalStorage
-        class RedbImplementation
+        class TieredStorage
+        class RedbColdStorage
     }
     namespace Observability {
         class HoneycombClient {
@@ -103,11 +102,11 @@ classDiagram
     }
 
     MCPServer --> QueryEngine : Uses
-    QueryEngine --> StorageTrait : Uses (Trait Bound)
-    %% Removed the circular dependency arrow
-    RedbImplementation ..|> StorageTrait : Implements
-    CurrentStorage --|> StorageTrait : Implements
-    HistoricalStorage --|> StorageTrait : Implements
+    QueryEngine --> GallifreyDB : Uses
+    GallifreyDB --> CurrentStorage : Composes
+    GallifreyDB --> HistoricalStorage : Composes
+    HistoricalStorage --> TieredStorage : Uses
+    TieredStorage --> RedbColdStorage : Uses
 ```
 
 **When to Use Each:**
