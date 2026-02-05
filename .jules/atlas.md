@@ -56,12 +56,3 @@
 4. `apply.rs`: Extracted storage application logic.
 5. `wal.rs`: Extracted WAL logging logic.
 6. `tests.rs`: Moved all tests (~4000 lines) to a separate file.
-
-## 2026-02-04 - Splitting Property God Struct
-**Tangle:** `src/core/property.rs` was a 4000-line "Blob" containing core domain types (`PropertyValue`, `PropertyMap`), extensive serialization logic, and a massive test suite. This violated the Single Responsibility Principle.
-**Blueprint:** Refactored into `src/core/property/` directory module:
-1. `types.rs`: Domain definitions (`PropertyValue`, `PropertyKey`).
-2. `map.rs`: Container logic (`PropertyMap`, `PropertyMapBuilder`).
-3. `serialization.rs`: Complex serialization/deserialization logic.
-4. `tests.rs`: Unit tests.
-5. `mod.rs`: Facade re-exporting public API.
