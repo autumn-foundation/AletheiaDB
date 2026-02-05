@@ -170,7 +170,8 @@ impl<'a> Chronos<'a> {
             }
         }
 
-        let total_valid_duration: i64 = common_intervals.iter()
+        let total_valid_duration: i64 = common_intervals
+            .iter()
             .map(|r| r.end().wallclock() - r.start().wallclock())
             .sum();
 
@@ -240,9 +241,9 @@ impl<'a> Chronos<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
-    use crate::api::transaction::WriteOps;
 
     #[test]
     fn test_snapshot_pathfinding() {
@@ -308,9 +309,8 @@ mod tests {
         // Update 5 times
         for i in 1..=5 {
             std::thread::sleep(std::time::Duration::from_millis(10));
-            db.write(|tx| {
-                tx.update_node(node, PropertyMapBuilder::new().insert("val", i).build())
-            }).unwrap();
+            db.write(|tx| tx.update_node(node, PropertyMapBuilder::new().insert("val", i).build()))
+                .unwrap();
         }
 
         let t_end = time::now();
