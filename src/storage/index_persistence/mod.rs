@@ -215,11 +215,17 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 
     // Write to temporary file
     let temp_path = path.with_extension("tmp");
-    let mut file = fs::File::create(&temp_path)?;
-    file.write_all(data)?;
-    file.sync_all()?; // Ensure data is on disk
+    {
+        // Scope to ensure file handle is dropped before rename
+        // This is critical on Windows where rename fails if file is still open
+        let mut file = fs::File::create(&temp_path)?;
+        file.write_all(data)?;
+        file.sync_all()?; // Ensure data is on disk
+        // File is explicitly dropped here when going out of scope
+    }
 
     // Atomically replace target with temp
+    // On Windows, this requires the file handle to be fully released
     fs::rename(&temp_path, path)?;
 
     Ok(())

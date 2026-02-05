@@ -28,6 +28,8 @@ use gallifreydb::storage::current::CurrentStorage;
 use gallifreydb::storage::historical::HistoricalStorage;
 use gallifreydb::storage::wal::LSN;
 use serial_test::serial;
+use std::thread;
+use std::time::Duration;
 use tempfile::tempdir;
 
 /// Check if running in CI environment
@@ -68,40 +70,94 @@ fn performance_test_node_count() -> usize {
     if is_ci() { 100 } else { 2_000 }
 }
 
+/// Run a test function with a timeout to prevent indefinite hangs.
+///
+/// This is critical for Windows where deadlocks can occur due to file I/O
+/// or synchronization issues that behave differently than on Unix systems.
+///
+/// # Panics
+///
+/// Panics if the test times out or if the test itself panics.
+fn run_with_timeout<F>(timeout_secs: u64, test_name: &str, test_fn: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let handle = thread::spawn(test_fn);
+
+    match join_with_timeout(handle, Duration::from_secs(timeout_secs)) {
+        Ok(Ok(())) => {
+            // Test completed successfully
+        }
+        Ok(Err(panic)) => {
+            // Test panicked, re-panic to propagate the error
+            std::panic::resume_unwind(panic);
+        }
+        Err(_) => {
+            panic!(
+                "{} timed out after {} seconds - likely deadlock or infinite loop",
+                test_name, timeout_secs
+            );
+        }
+    }
+}
+
+/// Join a thread with a timeout.
+///
+/// Returns Ok(result) if the thread completes within the timeout,
+/// or Err(()) if the timeout expires.
+fn join_with_timeout<T>(
+    handle: thread::JoinHandle<T>,
+    timeout: Duration,
+) -> Result<thread::Result<T>, ()> {
+    let start = std::time::Instant::now();
+    loop {
+        if handle.is_finished() {
+            return Ok(handle.join());
+        }
+        if start.elapsed() > timeout {
+            return Err(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[test]
 #[serial]
 fn test_streaming_checkpoint_bounded_memory() {
     // TDD Test 1: Verify that checkpointing doesn't allocate Vec of all nodes
     // Memory usage should be O(1), not O(n) where n = database size
+    // Timeout: 60s to detect deadlocks (normal execution: <5s)
 
-    let dir = tempdir().unwrap();
-    let current = CurrentStorage::new();
-    let historical = HistoricalStorage::new();
+    run_with_timeout(60, "test_streaming_checkpoint_bounded_memory", || {
+        let dir = tempdir().unwrap();
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
 
-    // Create many nodes (simulating large database)
-    // CI: 100 nodes for very fast execution on slow runners
-    // Local: 2,000 nodes for better coverage
-    let node_count = bounded_memory_node_count();
-    for i in 0..node_count {
-        let props = PropertyMapBuilder::new()
-            .insert("id", i as i64)
-            .insert("data", format!("data_{}", i))
-            .build();
-        current.create_node("LargeNode", props).unwrap();
-    }
+        // Create many nodes (simulating large database)
+        // CI: 100 nodes for very fast execution on slow runners
+        // Local: 2,000 nodes for better coverage
+        let node_count = bounded_memory_node_count();
+        for i in 0..node_count {
+            let props = PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert("data", format!("data_{}", i))
+                .build();
+            current.create_node("LargeNode", props).unwrap();
+        }
 
-    let config = CheckpointConfig::with_data_dir(dir.path());
-    let mut manager = CheckpointManager::new(config).unwrap();
+        let config = CheckpointConfig::with_data_dir(dir.path());
+        let mut manager = CheckpointManager::new(config).unwrap();
 
-    // This should use streaming, not allocate Vec of 50k nodes
-    let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
-        .unwrap();
+        // This should use streaming, not allocate Vec of 50k nodes
+        let stats = manager
+            .create_checkpoint(LSN(1), &current, &historical)
+            .unwrap();
 
-    assert_eq!(stats.node_count, node_count);
+        assert_eq!(stats.node_count, node_count);
 
-    // If this runs without OOM, streaming is working
-    // Memory usage should be ~100MB (buffer), not ~5GB (full Vec)
+        // If this runs without OOM, streaming is working
+        // Memory usage should be ~100MB (buffer), not ~5GB (full Vec)
+    });
 }
 
 #[test]
@@ -109,170 +165,179 @@ fn test_streaming_checkpoint_bounded_memory() {
 fn test_streaming_checkpoint_recovery_correctness() {
     // TDD Test 2: Verify that streaming checkpoint produces correct data
     // Recovery should restore exact same state
+    // Timeout: 60s to detect deadlocks (normal execution: <5s)
 
-    let dir = tempdir().unwrap();
-    let current = CurrentStorage::new();
-    let historical = HistoricalStorage::new();
+    run_with_timeout(60, "test_streaming_checkpoint_recovery_correctness", || {
+        let dir = tempdir().unwrap();
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
 
-    // Create nodes with various properties
-    for i in 0..1000 {
-        let props = PropertyMapBuilder::new()
-            .insert("id", i as i64)
-            .insert("value", i * 100)
-            .insert("name", format!("Node_{}", i))
-            .build();
-        current.create_node("TestNode", props).unwrap();
-    }
+        // Create nodes with various properties
+        for i in 0..1000 {
+            let props = PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert("value", i * 100)
+                .insert("name", format!("Node_{}", i))
+                .build();
+            current.create_node("TestNode", props).unwrap();
+        }
 
-    // Checkpoint with streaming
-    let config = CheckpointConfig::with_data_dir(dir.path());
-    let mut manager = CheckpointManager::new(config).unwrap();
-    manager
-        .create_checkpoint(LSN(1), &current, &historical)
-        .unwrap();
+        // Checkpoint with streaming
+        let config = CheckpointConfig::with_data_dir(dir.path());
+        let mut manager = CheckpointManager::new(config).unwrap();
+        manager
+            .create_checkpoint(LSN(1), &current, &historical)
+            .unwrap();
 
-    // Recover and verify all data is correct
-    use gallifreydb::storage::wal::concurrent_system::{
-        ConcurrentWalSystem, ConcurrentWalSystemConfig,
-    };
-    let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
-    let wal = ConcurrentWalSystem::new(wal_config).unwrap();
-    let (recovered, _, _) = manager.recover(&wal).unwrap();
+        // Recover and verify all data is correct
+        use gallifreydb::storage::wal::concurrent_system::{
+            ConcurrentWalSystem, ConcurrentWalSystemConfig,
+        };
+        let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
+        let wal = ConcurrentWalSystem::new(wal_config).unwrap();
+        let (recovered, _, _) = manager.recover(&wal).unwrap();
 
-    assert_eq!(recovered.node_count(), 1000);
+        assert_eq!(recovered.node_count(), 1000);
 
-    // Verify properties are preserved correctly by sampling some nodes
-    // (Can't iterate all nodes from integration test due to visibility)
-    // This is sufficient to verify streaming checkpoint correctness
+        // Verify properties are preserved correctly by sampling some nodes
+        // (Can't iterate all nodes from integration test due to visibility)
+        // This is sufficient to verify streaming checkpoint correctness
+    });
 }
 
 #[test]
 #[serial]
 fn test_streaming_works_with_edges() {
     // TDD Test 3: Verify streaming works for edges too, not just nodes
+    // Timeout: 60s to detect deadlocks (normal execution: <5s)
 
-    let dir = tempdir().unwrap();
-    let current = CurrentStorage::new();
-    let historical = HistoricalStorage::new();
+    run_with_timeout(60, "test_streaming_works_with_edges", || {
+        let dir = tempdir().unwrap();
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
 
-    // Create nodes
-    // CI: 10 nodes, 2 edges each = ~20 edges (very fast)
-    // Local: 100 nodes, 5 edges each = ~500 edges
-    let (num_nodes, edges_per_node) = edges_test_size();
-    let mut node_ids = Vec::new();
-    for i in 0..num_nodes {
-        let props = PropertyMapBuilder::new().insert("id", i as i64).build();
-        let node_id = current.create_node("Node", props).unwrap();
-        node_ids.push(node_id);
-    }
+        // Create nodes
+        // CI: 10 nodes, 2 edges each = ~20 edges (very fast)
+        // Local: 100 nodes, 5 edges each = ~500 edges
+        let (num_nodes, edges_per_node) = edges_test_size();
+        let mut node_ids = Vec::new();
+        for i in 0..num_nodes {
+            let props = PropertyMapBuilder::new().insert("id", i as i64).build();
+            let node_id = current.create_node("Node", props).unwrap();
+            node_ids.push(node_id);
+        }
 
-    // Create many edges
-    for i in 0..num_nodes {
-        for j in 0..edges_per_node {
-            if i != j {
-                let props = PropertyMapBuilder::new()
-                    .insert("weight", (i * edges_per_node + j) as i64)
-                    .build();
-                current
-                    .create_edge(node_ids[i], node_ids[j], "CONNECTS", props)
-                    .unwrap();
+        // Create many edges
+        for i in 0..num_nodes {
+            for j in 0..edges_per_node {
+                if i != j {
+                    let props = PropertyMapBuilder::new()
+                        .insert("weight", (i * edges_per_node + j) as i64)
+                        .build();
+                    current
+                        .create_edge(node_ids[i], node_ids[j], "CONNECTS", props)
+                        .unwrap();
+                }
             }
         }
-    }
 
-    // Checkpoint with streaming
-    let config = CheckpointConfig::with_data_dir(dir.path());
-    let mut manager = CheckpointManager::new(config).unwrap();
-    let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
-        .unwrap();
+        // Checkpoint with streaming
+        let config = CheckpointConfig::with_data_dir(dir.path());
+        let mut manager = CheckpointManager::new(config).unwrap();
+        let stats = manager
+            .create_checkpoint(LSN(1), &current, &historical)
+            .unwrap();
 
-    // Verify edge count is in expected range
-    let expected_min = (num_nodes * edges_per_node) / 2;
-    let expected_max = num_nodes * edges_per_node;
-    assert!(stats.edge_count > expected_min);
-    assert!(stats.edge_count < expected_max);
+        // Verify edge count is in expected range
+        let expected_min = (num_nodes * edges_per_node) / 2;
+        let expected_max = num_nodes * edges_per_node;
+        assert!(stats.edge_count > expected_min);
+        assert!(stats.edge_count < expected_max);
 
-    // Recovery should preserve all edges
-    use gallifreydb::storage::wal::concurrent_system::{
-        ConcurrentWalSystem, ConcurrentWalSystemConfig,
-    };
-    let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
-    let wal = ConcurrentWalSystem::new(wal_config).unwrap();
-    let (recovered, _, _) = manager.recover(&wal).unwrap();
+        // Recovery should preserve all edges
+        use gallifreydb::storage::wal::concurrent_system::{
+            ConcurrentWalSystem, ConcurrentWalSystemConfig,
+        };
+        let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
+        let wal = ConcurrentWalSystem::new(wal_config).unwrap();
+        let (recovered, _, _) = manager.recover(&wal).unwrap();
 
-    assert_eq!(recovered.edge_count(), stats.edge_count);
+        assert_eq!(recovered.edge_count(), stats.edge_count);
+    });
 }
 
 #[test]
 #[serial]
 fn test_streaming_with_temporal_versions() {
     // TDD Test 4: Verify streaming works for historical versions
+    // Timeout: 60s to detect deadlocks (normal execution: <5s)
 
-    let dir = tempdir().unwrap();
-    let current = CurrentStorage::new();
-    let mut historical = HistoricalStorage::new();
+    run_with_timeout(60, "test_streaming_with_temporal_versions", || {
+        let dir = tempdir().unwrap();
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
 
-    let label = GLOBAL_INTERNER.intern("VersionedNode").unwrap();
+        let label = GLOBAL_INTERNER.intern("VersionedNode").unwrap();
 
-    // Create nodes and versions
-    // CI: 20 nodes × 2 versions = 40 versions (very fast)
-    // Local: 100 nodes × 5 versions = 500 versions
-    let (num_nodes, versions_per_node) = temporal_versions_size();
-    for i in 0..num_nodes {
-        let props = PropertyMapBuilder::new().insert("value", i as i64).build();
-        let node_id = current.create_node("VersionedNode", props).unwrap();
+        // Create nodes and versions
+        // CI: 20 nodes × 2 versions = 40 versions (very fast)
+        // Local: 100 nodes × 5 versions = 500 versions
+        let (num_nodes, versions_per_node) = temporal_versions_size();
+        for i in 0..num_nodes {
+            let props = PropertyMapBuilder::new().insert("value", i as i64).build();
+            let node_id = current.create_node("VersionedNode", props).unwrap();
 
-        // Add multiple versions for each node
-        for v in 0..versions_per_node {
-            use gallifreydb::core::id::VersionId;
-            use gallifreydb::core::temporal::time::now;
+            // Add multiple versions for each node
+            for v in 0..versions_per_node {
+                use gallifreydb::core::id::VersionId;
+                use gallifreydb::core::temporal::time::now;
 
-            let version_id = VersionId::new((i * 10 + v) as u64 + 1000).unwrap();
-            let timestamp = now();
+                let version_id = VersionId::new((i * 10 + v) as u64 + 1000).unwrap();
+                let timestamp = now();
 
-            let updated_props = PropertyMapBuilder::new()
-                .insert("value", (i * 10 + v) as i64)
-                .build();
+                let updated_props = PropertyMapBuilder::new()
+                    .insert("value", (i * 10 + v) as i64)
+                    .build();
 
-            historical
-                .add_node_version(
-                    node_id,
-                    version_id,
-                    timestamp,
-                    timestamp,
-                    label,
-                    updated_props,
-                    false, // not a tombstone
-                )
-                .unwrap();
+                historical
+                    .add_node_version(
+                        node_id,
+                        version_id,
+                        timestamp,
+                        timestamp,
+                        label,
+                        updated_props,
+                        false, // not a tombstone
+                    )
+                    .unwrap();
+            }
         }
-    }
 
-    // Checkpoint with streaming
-    let config = CheckpointConfig::with_data_dir(dir.path());
-    let mut manager = CheckpointManager::new(config).unwrap();
-    let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
-        .unwrap();
+        // Checkpoint with streaming
+        let config = CheckpointConfig::with_data_dir(dir.path());
+        let mut manager = CheckpointManager::new(config).unwrap();
+        let stats = manager
+            .create_checkpoint(LSN(1), &current, &historical)
+            .unwrap();
 
-    // Should have many versions persisted
-    let expected_min_versions = (num_nodes * versions_per_node) * 2 / 3;
-    assert!(stats.version_count > expected_min_versions);
+        // Should have many versions persisted
+        let expected_min_versions = (num_nodes * versions_per_node) * 2 / 3;
+        assert!(stats.version_count > expected_min_versions);
 
-    // Recovery should restore all versions
-    use gallifreydb::storage::wal::concurrent_system::{
-        ConcurrentWalSystem, ConcurrentWalSystemConfig,
-    };
-    let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
-    let wal = ConcurrentWalSystem::new(wal_config).unwrap();
-    let (_, recovered_historical, _) = manager.recover(&wal).unwrap();
+        // Recovery should restore all versions
+        use gallifreydb::storage::wal::concurrent_system::{
+            ConcurrentWalSystem, ConcurrentWalSystemConfig,
+        };
+        let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
+        let wal = ConcurrentWalSystem::new(wal_config).unwrap();
+        let (_, recovered_historical, _) = manager.recover(&wal).unwrap();
 
-    // Verify version count matches by iterating
-    let recovered_version_count = recovered_historical
-        .__test_get_node_versions_iterator()
-        .count();
-    assert_eq!(recovered_version_count, stats.version_count);
+        // Verify version count matches by iterating
+        let recovered_version_count = recovered_historical
+            .__test_get_node_versions_iterator()
+            .count();
+        assert_eq!(recovered_version_count, stats.version_count);
+    });
 }
 
 #[test]
@@ -280,38 +345,41 @@ fn test_streaming_with_temporal_versions() {
 fn test_memory_efficient_large_properties() {
     // TDD Test 5: Verify memory efficiency with large properties
     // Even with large properties, memory should stay bounded
+    // Timeout: 60s to detect deadlocks (normal execution: <5s)
 
-    let dir = tempdir().unwrap();
-    let current = CurrentStorage::new();
-    let historical = HistoricalStorage::new();
+    run_with_timeout(60, "test_memory_efficient_large_properties", || {
+        let dir = tempdir().unwrap();
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
 
-    // Create nodes with LARGE properties (1KB each)
-    // CI: 50 nodes = ~50KB (very fast compression)
-    // Local: 1,000 nodes = ~1MB for better stress testing
-    let node_count = large_properties_node_count();
-    for i in 0..node_count {
-        let large_value = "x".repeat(1000); // 1KB string
-        let props = PropertyMapBuilder::new()
-            .insert("id", i as i64)
-            .insert("data", large_value)
-            .build();
-        current.create_node("LargeNode", props).unwrap();
-    }
+        // Create nodes with LARGE properties (1KB each)
+        // CI: 50 nodes = ~50KB (very fast compression)
+        // Local: 1,000 nodes = ~1MB for better stress testing
+        let node_count = large_properties_node_count();
+        for i in 0..node_count {
+            let large_value = "x".repeat(1000); // 1KB string
+            let props = PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert("data", large_value)
+                .build();
+            current.create_node("LargeNode", props).unwrap();
+        }
 
-    // Database size varies by environment
-    // Without streaming: Would need ~3x overhead
-    // With streaming: Should need minimal buffer only
+        // Database size varies by environment
+        // Without streaming: Would need ~3x overhead
+        // With streaming: Should need minimal buffer only
 
-    let config = CheckpointConfig::with_data_dir(dir.path());
-    let mut manager = CheckpointManager::new(config).unwrap();
+        let config = CheckpointConfig::with_data_dir(dir.path());
+        let mut manager = CheckpointManager::new(config).unwrap();
 
-    let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
-        .unwrap();
+        let stats = manager
+            .create_checkpoint(LSN(1), &current, &historical)
+            .unwrap();
 
-    assert_eq!(stats.node_count, node_count);
+        assert_eq!(stats.node_count, node_count);
 
-    // If this completes without OOM, streaming is memory-efficient
+        // If this completes without OOM, streaming is memory-efficient
+    });
 }
 
 #[test]
@@ -319,42 +387,45 @@ fn test_memory_efficient_large_properties() {
 fn test_streaming_preserves_version_ids() {
     // TDD Test 6: Ensure streaming doesn't break version ID preservation
     // (Regression test for Issue #1)
+    // Timeout: 60s to detect deadlocks (normal execution: <5s)
 
-    let dir = tempdir().unwrap();
-    let current = CurrentStorage::new();
-    let historical = HistoricalStorage::new();
+    run_with_timeout(60, "test_streaming_preserves_version_ids", || {
+        let dir = tempdir().unwrap();
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
 
-    // Create nodes and track version IDs
-    let mut expected_versions = Vec::new();
-    for i in 0..100 {
-        let props = PropertyMapBuilder::new().insert("id", i as i64).build();
-        let node_id = current.create_node("Node", props).unwrap();
-        let node = current.get_node(node_id).unwrap();
-        expected_versions.push((node.id, node.current_version));
-    }
+        // Create nodes and track version IDs
+        let mut expected_versions = Vec::new();
+        for i in 0..100 {
+            let props = PropertyMapBuilder::new().insert("id", i as i64).build();
+            let node_id = current.create_node("Node", props).unwrap();
+            let node = current.get_node(node_id).unwrap();
+            expected_versions.push((node.id, node.current_version));
+        }
 
-    // Checkpoint with streaming
-    let config = CheckpointConfig::with_data_dir(dir.path());
-    let mut manager = CheckpointManager::new(config).unwrap();
-    manager
-        .create_checkpoint(LSN(1), &current, &historical)
-        .unwrap();
+        // Checkpoint with streaming
+        let config = CheckpointConfig::with_data_dir(dir.path());
+        let mut manager = CheckpointManager::new(config).unwrap();
+        manager
+            .create_checkpoint(LSN(1), &current, &historical)
+            .unwrap();
 
-    // Recover and verify version IDs are preserved
-    use gallifreydb::storage::wal::concurrent_system::{
-        ConcurrentWalSystem, ConcurrentWalSystemConfig,
-    };
-    let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
-    let wal = ConcurrentWalSystem::new(wal_config).unwrap();
-    let (recovered, _, _) = manager.recover(&wal).unwrap();
+        // Recover and verify version IDs are preserved
+        use gallifreydb::storage::wal::concurrent_system::{
+            ConcurrentWalSystem, ConcurrentWalSystemConfig,
+        };
+        let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
+        let wal = ConcurrentWalSystem::new(wal_config).unwrap();
+        let (recovered, _, _) = manager.recover(&wal).unwrap();
 
-    for (node_id, expected_version_id) in expected_versions {
-        let recovered_node = recovered.get_node(node_id).unwrap();
-        assert_eq!(
-            recovered_node.current_version, expected_version_id,
-            "Streaming should preserve version IDs (Issue #1 regression test)"
-        );
-    }
+        for (node_id, expected_version_id) in expected_versions {
+            let recovered_node = recovered.get_node(node_id).unwrap();
+            assert_eq!(
+                recovered_node.current_version, expected_version_id,
+                "Streaming should preserve version IDs (Issue #1 regression test)"
+            );
+        }
+    });
 }
 
 #[test]
@@ -362,43 +433,46 @@ fn test_streaming_preserves_version_ids() {
 fn test_streaming_checkpoint_performance() {
     // TDD Test 7: Performance test - streaming should be as fast or faster
     // than Vec allocation approach
+    // Timeout: 60s to detect deadlocks (normal execution: <5s)
 
-    let dir = tempdir().unwrap();
-    let current = CurrentStorage::new();
-    let historical = HistoricalStorage::new();
+    run_with_timeout(60, "test_streaming_checkpoint_performance", || {
+        let dir = tempdir().unwrap();
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
 
-    // Create dataset
-    // CI: 100 nodes for very fast CI timing (especially macOS/Windows)
-    // Local: 2,000 nodes for realistic performance measurement
-    let node_count = performance_test_node_count();
-    for i in 0..node_count {
-        let props = PropertyMapBuilder::new()
-            .insert("id", i as i64)
-            .insert("value", (i * 2) as i64)
-            .build();
-        current.create_node("Node", props).unwrap();
-    }
+        // Create dataset
+        // CI: 100 nodes for very fast CI timing (especially macOS/Windows)
+        // Local: 2,000 nodes for realistic performance measurement
+        let node_count = performance_test_node_count();
+        for i in 0..node_count {
+            let props = PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert("value", (i * 2) as i64)
+                .build();
+            current.create_node("Node", props).unwrap();
+        }
 
-    let config = CheckpointConfig::with_data_dir(dir.path());
-    let mut manager = CheckpointManager::new(config).unwrap();
+        let config = CheckpointConfig::with_data_dir(dir.path());
+        let mut manager = CheckpointManager::new(config).unwrap();
 
-    let start = std::time::Instant::now();
-    let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
-        .unwrap();
-    let duration = start.elapsed();
+        let start = std::time::Instant::now();
+        let stats = manager
+            .create_checkpoint(LSN(1), &current, &historical)
+            .unwrap();
+        let duration = start.elapsed();
 
-    assert_eq!(stats.node_count, node_count);
+        assert_eq!(stats.node_count, node_count);
 
-    // Should complete reasonably fast (< 5 seconds even on slow CI for 500 nodes)
-    assert!(
-        duration.as_secs() < 5,
-        "Checkpoint took too long: {:?}",
-        duration
-    );
+        // Should complete reasonably fast (< 5 seconds even on slow CI for 500 nodes)
+        assert!(
+            duration.as_secs() < 5,
+            "Checkpoint took too long: {:?}",
+            duration
+        );
 
-    println!(
-        "Streaming checkpoint of {} nodes took {:?}",
-        node_count, duration
-    );
+        println!(
+            "Streaming checkpoint of {} nodes took {:?}",
+            node_count, duration
+        );
+    });
 }
