@@ -1,8 +1,54 @@
 //! Query Executor
 //!
-//! Executes physical query plans using a pull-based iterator model.
-//! The executor transforms physical operators into iterators that
-//! lazily produce results.
+//! The engine room of the database. This module is responsible for taking a
+//! [`PhysicalPlan`](crate::query::planner::PhysicalPlan) and turning it into a stream of results.
+//!
+//! # Architecture
+//!
+//! The executor uses a **Volcano-style (pull-based) iterator model**:
+//! 1. The [`QueryExecutor`] walks the physical plan tree.
+//! 2. For each [`PhysicalOp`](crate::query::planner::PhysicalOp), it creates a corresponding [`ResultIterator`].
+//! 3. Iterators are chained together, with parent iterators pulling data from their children.
+//!
+//! This "lazy" execution ensures that we only process as much data as requested (e.g., by a `LIMIT` clause)
+//! and keeps memory usage predictable.
+//!
+//! # Example
+//!
+//! ```rust
+//! # use std::sync::{Arc, RwLock};
+//! # use gallifreydb::query::executor::QueryExecutor;
+//! # use gallifreydb::storage::{CurrentStorage, HistoricalStorage};
+//! # use gallifreydb::query::planner::{PhysicalPlan, PhysicalOp};
+//! #
+//! # // Setup storage (normally done by GallifreyDB)
+//! # let current = Arc::new(CurrentStorage::new());
+//! # let historical = Arc::new(RwLock::new(HistoricalStorage::default()));
+//! #
+//! // Create the executor
+//! let executor = QueryExecutor::new(current, historical);
+//!
+//! // Define a simple plan (e.g., Scan all nodes)
+//! let plan = PhysicalPlan {
+//!     root: PhysicalOp::NodeScan {
+//!         label: Some("Person".to_string()),
+//!         estimated_rows: 100,
+//!     },
+//!     // ... other fields default
+//!     # estimated_cost: Default::default(),
+//!     # temporal_context: None,
+//!     # parallel: false,
+//!     # include_provenance: false,
+//! };
+//!
+//! // Execute!
+//! let results = executor.execute(plan).unwrap();
+//!
+//! // Iterate results
+//! for row in results {
+//!     println!("Found entity: {:?}", row.unwrap().entity);
+//! }
+//! ```
 
 mod iterators;
 mod results;
@@ -23,13 +69,36 @@ pub use iterators::TemporalNodeScanIterator;
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
+///
+/// Controls runtime behavior like resource limits and parallelism.
+///
+/// # Examples
+///
+/// ```rust
+/// use gallifreydb::query::executor::ExecutionConfig;
+///
+/// let config = ExecutionConfig {
+///     max_buffer_size: 500, // Limit memory usage
+///     parallel: true,       // Enable multi-threading
+///     timeout_ms: 5000,     // Fail after 5 seconds
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
-    /// Maximum number of results to buffer
+    /// Maximum number of results to buffer in channel-based iterators.
+    ///
+    /// Increasing this can improve throughput for bursty producers but increases memory usage.
+    /// Default: 10,000.
     pub max_buffer_size: usize,
-    /// Enable parallel execution
+    /// Enable parallel execution for supported operators.
+    ///
+    /// When `true`, operators like `NodeScan` may use thread pools to fetch data.
+    /// Default: `false`.
     pub parallel: bool,
-    /// Timeout in milliseconds (0 = no timeout)
+    /// Execution timeout in milliseconds.
+    ///
+    /// If `0`, no timeout is enforced.
+    /// Default: `0` (no timeout).
     pub timeout_ms: u64,
 }
 
@@ -44,6 +113,9 @@ impl Default for ExecutionConfig {
 }
 
 /// Query executor that runs physical plans against storage.
+///
+/// This is the main entry point for executing queries. It holds references to the storage engines
+/// and manages the lifecycle of the execution.
 pub struct QueryExecutor {
     /// Reference to current storage
     current: Arc<CurrentStorage>,
@@ -54,7 +126,7 @@ pub struct QueryExecutor {
 }
 
 impl QueryExecutor {
-    /// Create a new query executor
+    /// Create a new query executor with default configuration.
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
             current,
@@ -63,7 +135,9 @@ impl QueryExecutor {
         }
     }
 
-    /// Create an executor with custom configuration
+    /// Create an executor with custom configuration.
+    ///
+    /// Use this to tune performance parameters like buffer sizes or timeouts.
     pub fn with_config(
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
@@ -76,7 +150,19 @@ impl QueryExecutor {
         }
     }
 
-    /// Execute a physical plan and return results
+    /// Execute a physical plan and return a stream of results.
+    ///
+    /// This method:
+    /// 1. Recursively converts the `PhysicalPlan` into a chain of iterators.
+    /// 2. Wraps the result in a `QueryResults` object (which implements `Iterator`).
+    /// 3. Applies a final provenance filter if requested.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Required indexes are missing (though this is usually caught by the planner).
+    /// - Runtime resource limits are exceeded.
+    /// - Storage access fails.
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;
         // Wrap with provenance filter to conditionally strip metadata
@@ -87,7 +173,15 @@ impl QueryExecutor {
         Ok(QueryResults::new(filtered))
     }
 
-    /// Execute a physical operator, returning an iterator
+    /// Convert a single physical operator into an executable iterator.
+    ///
+    /// This is the core dispatch loop. It matches on the `PhysicalOp` variant and
+    /// constructs the appropriate iterator implementation.
+    ///
+    /// # Recursion
+    ///
+    /// For operators that have inputs (like `Filter` or `Limit`), this function calls
+    /// itself recursively to build the input iterator first, then wraps it.
     fn execute_op(&self, op: &PhysicalOp) -> Result<Box<dyn ResultIterator>> {
         match op {
             PhysicalOp::NodeLookup { node_ids } => Ok(Box::new(
