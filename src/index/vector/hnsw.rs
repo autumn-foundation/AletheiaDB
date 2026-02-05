@@ -86,6 +86,7 @@
 //! - Searches can run concurrently with additions
 
 use crate::core::id::NodeId;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
@@ -459,6 +460,14 @@ impl HnswIndexBuilder {
         if self.config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions must be <= {}, got {}",
+                    MAX_VECTOR_DIMENSIONS, self.config.dimensions
+                ),
             }));
         }
 
@@ -2288,6 +2297,21 @@ mod tests {
             // But here index_path is valid (does not exist). usearch index save should succeed.
             // Then save_mappings should fail.
             panic!("Expected IndexError, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_hnsw_builder_rejects_excessive_dimensions() {
+        // 🛡️ Sentry: Ensure oversized indices cannot be created
+        let excessive = MAX_VECTOR_DIMENSIONS + 1;
+        let result = HnswIndexBuilder::new(excessive, DistanceMetric::Cosine).build();
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::InvalidVector { reason })) => {
+                assert!(reason.contains("dimensions must be <="));
+                assert!(reason.contains(&MAX_VECTOR_DIMENSIONS.to_string()));
+            }
+            _ => panic!("Expected InvalidVector error for excessive dimensions"),
         }
     }
 }
