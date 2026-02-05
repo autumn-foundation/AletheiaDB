@@ -3915,8 +3915,14 @@ mod tests {
         let pos_b = debug_str.find("\"b\"").unwrap();
         let pos_c = debug_str.find("\"c\"").unwrap();
 
-        assert!(pos_a < pos_b, "Debug output should be sorted: 'a' before 'b'");
-        assert!(pos_b < pos_c, "Debug output should be sorted: 'b' before 'c'");
+        assert!(
+            pos_a < pos_b,
+            "Debug output should be sorted: 'a' before 'b'"
+        );
+        assert!(
+            pos_b < pos_c,
+            "Debug output should be sorted: 'b' before 'c'"
+        );
     }
 
     #[test]
@@ -3934,7 +3940,10 @@ mod tests {
 
         let debug_str = format!("{:?}", prop_map);
         // Fallback format for unknown key: InternedString(4294967295)
-        assert!(debug_str.contains("InternedString(4294967295)"), "Debug output should fallback for unknown key");
+        assert!(
+            debug_str.contains("InternedString(4294967295)"),
+            "Debug output should fallback for unknown key"
+        );
     }
 }
 

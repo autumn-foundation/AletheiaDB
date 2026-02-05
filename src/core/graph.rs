@@ -435,15 +435,19 @@ mod tests {
         let node = Node::new(
             NodeId::new(1).unwrap(),
             label,
-            PropertyMapBuilder::new()
-                .insert("name", "Alice")
-                .build(),
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
             VersionId::new(1).unwrap(),
         );
 
         let debug_str = format!("{:?}", node);
-        assert!(debug_str.contains("Person"), "Debug output should contain resolved label");
-        assert!(debug_str.contains("Alice"), "Debug output should contain property value");
+        assert!(
+            debug_str.contains("Person"),
+            "Debug output should contain resolved label"
+        );
+        assert!(
+            debug_str.contains("Alice"),
+            "Debug output should contain property value"
+        );
     }
 
     #[test]
@@ -460,7 +464,10 @@ mod tests {
 
         let debug_str = format!("{:?}", node);
         // Should fallback to InternedString(4294967295)
-        assert!(debug_str.contains("InternedString(4294967295)"), "Debug output should fallback to raw ID for unknown label");
+        assert!(
+            debug_str.contains("InternedString(4294967295)"),
+            "Debug output should fallback to raw ID for unknown label"
+        );
     }
 
     #[test]
@@ -471,15 +478,19 @@ mod tests {
             label,
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
-            PropertyMapBuilder::new()
-                .insert("since", 2024)
-                .build(),
+            PropertyMapBuilder::new().insert("since", 2024).build(),
             VersionId::new(1).unwrap(),
         );
 
         let debug_str = format!("{:?}", edge);
-        assert!(debug_str.contains("KNOWS"), "Debug output should contain resolved label");
-        assert!(debug_str.contains("2024"), "Debug output should contain property value");
+        assert!(
+            debug_str.contains("KNOWS"),
+            "Debug output should contain resolved label"
+        );
+        assert!(
+            debug_str.contains("2024"),
+            "Debug output should contain property value"
+        );
     }
 
     #[test]
@@ -496,6 +507,9 @@ mod tests {
         );
 
         let debug_str = format!("{:?}", edge);
-        assert!(debug_str.contains("InternedString(4294967294)"), "Debug output should fallback to raw ID for unknown label");
+        assert!(
+            debug_str.contains("InternedString(4294967294)"),
+            "Debug output should fallback to raw ID for unknown label"
+        );
     }
 }
