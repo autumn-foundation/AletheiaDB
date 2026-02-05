@@ -35,6 +35,14 @@ pub fn configure_health_routes(cfg: &mut web::ServiceConfig) {
 // Query Endpoint
 // ============================================================================
 
+/// Maximum number of results to return in a single response.
+/// Prevents OOM attacks via unbounded result set collection.
+const MAX_RESULT_LIMIT: usize = 1000;
+
+/// Maximum offset + limit for pagination.
+/// Prevents CPU DoS via deep pagination attacks.
+const MAX_PAGINATION_LIMIT: usize = 10_000;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum QueryRequest {
@@ -193,11 +201,21 @@ pub async fn handle_query(
             }
 
             // Issue 4: Pagination
+            let limit_val = limit.unwrap_or(100).min(MAX_RESULT_LIMIT);
+            let offset_val = offset.unwrap_or(0);
+
+            // Prevent deep pagination attacks (DoS)
+            if offset_val + limit_val > MAX_PAGINATION_LIMIT {
+                return HttpResponse::BadRequest().json(ApiResponse::error(format!(
+                    "Pagination limit exceeded: offset + limit must be <= {}",
+                    MAX_PAGINATION_LIMIT
+                )));
+            }
+
             if let Some(skip) = offset {
                 builder = builder.skip(skip);
             }
 
-            let limit_val = limit.unwrap_or(100);
             match builder.limit(limit_val).execute(db) {
                 Ok(results) => {
                     let mut nodes = Vec::new();
@@ -231,18 +249,14 @@ pub async fn handle_query(
         } => {
             match NodeId::new(node_id) {
                 Ok(nid) => {
-                    // Safety limits to prevent DoS
-                    let max_limit = 1000;
-                    let max_deep_pagination = 10_000;
-
-                    let limit_val = limit.unwrap_or(100).min(max_limit);
+                    let limit_val = limit.unwrap_or(100).min(MAX_RESULT_LIMIT);
                     let offset_val = offset.unwrap_or(0);
 
                     // Prevent deep pagination attacks (CPU DoS)
-                    if offset_val + limit_val > max_deep_pagination {
+                    if offset_val + limit_val > MAX_PAGINATION_LIMIT {
                         return HttpResponse::BadRequest().json(ApiResponse::error(format!(
                             "Pagination limit exceeded: offset + limit must be <= {}",
-                            max_deep_pagination
+                            MAX_PAGINATION_LIMIT
                         )));
                     }
 

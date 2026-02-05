@@ -164,3 +164,19 @@ Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed t
 
 **Verification:** Regression Test
 Added `tests/warden_vector_safety.rs` which attempts to insert and serialize oversized vectors using the `try_` methods. Verified that they now return `VectorError::DimensionTooLarge` instead of crashing the test runner.
+
+## 2026-02-23 - API Unbounded Allocation DoS Hardening
+
+**Threat:** Unbounded Allocation DoS in FindNode
+The `FindNode` HTTP endpoint lacked upper bounds on `limit` and `offset`. A malicious client could request `limit: 1_000_000_000`, causing the server to attempt massive vector allocation during response construction (Out-Of-Memory DoS) or exhaust CPU via deep pagination.
+
+**Defense:** Mandatory Limits
+Enforced strict limits in `src/http/handlers.rs`:
+- `MAX_RESULT_LIMIT = 1000` (clamped).
+- `MAX_PAGINATION_LIMIT = 10_000` (offset + limit).
+- Refactored `FindNeighbors` to use these shared constants.
+
+**Verification:** Reproduction Test
+Added `tests/warden_dos_find_node.rs`.
+- Confirmed that requesting 2000 items now returns 1000 items (clamped).
+- Confirmed that requesting `offset=9999, limit=100` returns 400 Bad Request.
