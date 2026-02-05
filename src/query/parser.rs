@@ -774,7 +774,10 @@ impl Parser {
                         self.advance();
                         Ok(v)
                     }
-            _ => Err(self.error("Expected value".to_string(), Some("value".to_string()))),
+                    _ => Err(self.error(
+                        "Expected number after '-'".to_string(),
+                        Some("number".to_string()),
+                    )),
                 }
             }
             _ => Err(self.error("Expected value".to_string(), Some("value".to_string()))),
