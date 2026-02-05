@@ -46,3 +46,11 @@
 - Link prediction in directed graphs requires treating neighbors as undirected (incoming + outgoing) to find "shared context".
 - Combining topological structure with semantic similarity creates a "best of both worlds" predictor: structure finds candidates, semantics ranks them.
 - Simple heuristics (Adamic-Adar) are surprisingly effective when boosted by embeddings.
+
+## Dreamer (Semantic Trajectory Extrapolation)
+**Concept:** A predictive engine that analyzes a node's vector history to forecast its future position in semantic space.
+**Fate:** Merged (Experimental)
+**Lesson:**
+- Combining `Chronos` (history) and `ConceptAlgebra` (vector math) creates a powerful predictive capability.
+- Validating time-windows for history extraction is critical; gaps in history need careful handling (currently assumes linear velocity).
+- This unlocks "Future Search" use cases (e.g., predicting user interests).
