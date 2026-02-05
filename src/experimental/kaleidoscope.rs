@@ -290,8 +290,10 @@ mod tests {
 
     #[test]
     fn test_topology_convergence() {
-        let mut config = LayoutConfig::default();
-        config.iterations = 50;
+        let config = LayoutConfig {
+            iterations: 50,
+            ..LayoutConfig::default()
+        };
         let mut engine = LayoutEngine::new(config);
 
         let n1 = NodeId::new(1).unwrap();
@@ -326,9 +328,11 @@ mod tests {
 
     #[test]
     fn test_semantic_gravity() {
-        let mut config = LayoutConfig::default();
-        config.iterations = 50;
-        config.semantic_strength = 200.0; // Crank it up
+        let config = LayoutConfig {
+            iterations: 50,
+            semantic_strength: 200.0, // Crank it up
+            ..LayoutConfig::default()
+        };
         let mut engine = LayoutEngine::new(config);
 
         let n1 = NodeId::new(1).unwrap();
@@ -365,10 +369,12 @@ mod tests {
     #[test]
     fn test_visual_output() {
         // This test prints an ASCII map. It always passes, but allows manual verification.
-        let mut config = LayoutConfig::default();
-        config.width = 100.0;
-        config.height = 40.0;
-        config.iterations = 100;
+        let config = LayoutConfig {
+            width: 100.0,
+            height: 40.0,
+            iterations: 100,
+            ..LayoutConfig::default()
+        };
         let mut engine = LayoutEngine::new(config);
 
         // Create a "Star" graph: 1 is center, 2,3,4,5 surround it.
