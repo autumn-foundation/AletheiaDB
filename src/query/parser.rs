@@ -549,10 +549,8 @@ impl Parser {
         // Parse optional variable
         if let Some(Token::Identifier(name)) = self.current() {
             // Check if followed by colon (label) or other
-            let mut peek_clone = self.tokens[self.position..].iter();
-            peek_clone.next(); // skip current
             if matches!(
-                peek_clone.next(),
+                self.peek(),
                 Some(Token::Colon) | Some(Token::Star) | Some(Token::RightBracket)
             ) {
                 rel.variable = Some(name.clone());
@@ -716,6 +714,20 @@ impl Parser {
     }
 
     fn parse_property_value(&mut self) -> Result<PropertyValue, ParseError> {
+        self.parse_value().map_err(|e| {
+            // Maintain original error message for backward compatibility/tests
+            if e.message == "Expected value" {
+                self.error(
+                    "Expected property value".to_string(),
+                    Some("value".to_string()),
+                )
+            } else {
+                e
+            }
+        })
+    }
+
+    fn parse_value(&mut self) -> Result<PropertyValue, ParseError> {
         match self.current() {
             Some(Token::Null) => {
                 self.advance();
@@ -769,7 +781,7 @@ impl Parser {
                 }
             }
             _ => Err(self.error(
-                "Expected property value".to_string(),
+                "Expected value".to_string(),
                 Some("value".to_string()),
             )),
         }
@@ -1092,57 +1104,22 @@ impl Parser {
     }
 
     fn parse_literal_expression(&mut self) -> Result<Expression, ParseError> {
-        match self.current() {
-            Some(Token::StringLiteral(s)) => {
-                let val = PropertyValue::String(s.clone());
-                self.advance();
-                Ok(Expression::Literal(val))
-            }
-            Some(Token::IntegerLiteral(n)) => {
-                let val = PropertyValue::Int(*n);
-                self.advance();
-                Ok(Expression::Literal(val))
-            }
-            Some(Token::FloatLiteral(f)) => {
-                let val = PropertyValue::Float(*f);
-                self.advance();
-                Ok(Expression::Literal(val))
-            }
-            Some(Token::True) => {
-                self.advance();
-                Ok(Expression::Literal(PropertyValue::Bool(true)))
-            }
-            Some(Token::False) => {
-                self.advance();
-                Ok(Expression::Literal(PropertyValue::Bool(false)))
-            }
-            Some(Token::Null) => {
-                self.advance();
-                Ok(Expression::Literal(PropertyValue::Null))
-            }
-            Some(Token::Dash) => {
-                self.advance();
-                match self.current() {
-                    Some(Token::IntegerLiteral(n)) => {
-                        let val = PropertyValue::Int(-*n);
-                        self.advance();
-                        Ok(Expression::Literal(val))
-                    }
-                    Some(Token::FloatLiteral(f)) => {
-                        let val = PropertyValue::Float(-*f);
-                        self.advance();
-                        Ok(Expression::Literal(val))
-                    }
-                    _ => Err(self.error(
-                        "Expected number after '-'".to_string(),
-                        Some("number".to_string()),
-                    )),
+        // Try to parse as value (literal or parameter)
+        // Note: parse_expression handles parameters explicitly, so we shouldn't see them here,
+        // but parse_value supports them.
+        match self.parse_value() {
+            Ok(val) => Ok(Expression::Literal(val)),
+            Err(e) => {
+                // Remap "Expected value" to "Expected expression" for context
+                if e.message == "Expected value" {
+                    Err(self.error(
+                        "Expected expression".to_string(),
+                        Some("identifier, literal, or parameter".to_string()),
+                    ))
+                } else {
+                    Err(e)
                 }
             }
-            _ => Err(self.error(
-                "Expected expression".to_string(),
-                Some("identifier, literal, or parameter".to_string()),
-            )),
         }
     }
 
@@ -1286,6 +1263,10 @@ impl Parser {
 
     fn current(&self) -> Option<&Token> {
         self.tokens.get(self.position)
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.position + 1)
     }
 
     fn check(&self, expected: &Token) -> bool {
