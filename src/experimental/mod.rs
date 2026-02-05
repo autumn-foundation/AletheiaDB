@@ -22,6 +22,9 @@ pub mod fishing;
 /// Graph context exporter for LLM integration.
 pub mod graph_context;
 #[cfg(feature = "nova")]
+/// Kaleidoscope: Semantic Force-Directed Layout Engine.
+pub mod kaleidoscope;
+#[cfg(feature = "nova")]
 /// Prophet Link Prediction Engine.
 pub mod prophet;
 #[cfg(feature = "nova")]
