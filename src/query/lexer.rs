@@ -8,90 +8,151 @@ use std::fmt;
 
 /// A token in the GQL language.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum Token {
     // Keywords - Graph
+    /// The `MATCH` keyword, used to specify graph patterns.
     Match,
+    /// The `WHERE` keyword, used to filter results.
     Where,
+    /// The `RETURN` keyword, used to specify what to return.
     Return,
+    /// The `ORDER` keyword, used in `ORDER BY`.
     Order,
+    /// The `BY` keyword, used in `ORDER BY` and `RANK BY`.
     By,
+    /// The `LIMIT` keyword, used to limit the number of results.
     Limit,
+    /// The `SKIP` keyword, used to skip a number of results.
     Skip,
+    /// The `DISTINCT` keyword, used to return distinct results.
     Distinct,
+    /// The `COUNT` keyword, used to count results.
     Count,
+    /// The `ASC` keyword, used for ascending order.
     Asc,
+    /// The `DESC` keyword, used for descending order.
     Desc,
 
     // Keywords - Logical
+    /// The `AND` logical operator.
     And,
+    /// The `OR` logical operator.
     Or,
+    /// The `NOT` logical operator.
     Not,
+    /// The `IN` operator, used for list membership.
     In,
+    /// The `IS` operator, used for type checking or `IS NULL`.
     Is,
+    /// The `NULL` literal value.
     Null,
+    /// The `TRUE` boolean literal.
     True,
+    /// The `FALSE` boolean literal.
     False,
 
     // Keywords - Vector
+    /// The `SIMILAR` keyword, used in `SIMILAR TO`.
     Similar,
+    /// The `TO` keyword, used in `SIMILAR TO` and `SIMILARITY TO`.
     To,
+    /// The `USING` keyword, used to specify a distance metric.
     Using,
+    /// The `FIND` keyword.
     Find,
+    /// The `RANK` keyword, used in `RANK BY`.
     Rank,
+    /// The `SIMILARITY` keyword, used for similarity scoring.
     Similarity,
+    /// The `TOP` keyword, used to limit vector search results.
     Top,
 
     // Keywords - Temporal
+    /// The `AS` keyword, used for aliasing and in `AS OF`.
     As,
+    /// The `OF` keyword, used in `AS OF`.
     Of,
+    /// The `BETWEEN` keyword, used for range checks.
     Between,
 
     // Keywords - String predicates
+    /// The `EXISTS` predicate.
     Exists,
+    /// The `CONTAINS` string predicate.
     Contains,
+    /// The `STARTS` string predicate, used in `STARTS WITH`.
     Starts,
+    /// The `ENDS` string predicate, used in `ENDS WITH`.
     Ends,
+    /// The `WITH` keyword, used in `STARTS WITH` / `ENDS WITH`.
     With,
 
     // Keywords - Distance metrics
+    /// The `COSINE` distance metric.
     Cosine,
+    /// The `EUCLIDEAN` distance metric.
     Euclidean,
+    /// The `DOT_PRODUCT` distance metric.
     DotProduct,
 
     // Punctuation
+    /// Left parenthesis `(`.
     LeftParen,
+    /// Right parenthesis `)`.
     RightParen,
+    /// Left bracket `[`.
     LeftBracket,
+    /// Right bracket `]`.
     RightBracket,
+    /// Left brace `{`.
     LeftBrace,
+    /// Right brace `}`.
     RightBrace,
+    /// Colon `:`.
     Colon,
+    /// Comma `,`.
     Comma,
+    /// Dot `.`.
     Dot,
+    /// Star `*`.
     Star,
+    /// Dash `-`.
     Dash,
 
     // Arrow patterns for relationships
+    /// Right arrow `->`.
     Arrow,
+    /// Left arrow `<-`.
     LeftArrow,
 
     // Comparison operators
+    /// Equal operator `=`.
     Eq,
+    /// Not equal operator `<>` or `!=`.
     Ne,
+    /// Less than operator `<`.
     Lt,
+    /// Less than or equal operator `<=`.
     Le,
+    /// Greater than operator `>`.
     Gt,
+    /// Greater than or equal operator `>=`.
     Ge,
 
     // Literals
+    /// An identifier (e.g., variable or label name).
     Identifier(String),
+    /// A string literal.
     StringLiteral(String),
+    /// An integer literal.
     IntegerLiteral(i64),
+    /// A floating-point literal.
     FloatLiteral(f64),
+    /// A query parameter (e.g., `$param`).
     Parameter(String),
 
     // End of file
+    /// End of file marker.
     Eof,
 }
 
@@ -165,15 +226,17 @@ impl fmt::Display for Token {
 }
 
 /// Error type for lexer errors.
+///
+/// Indicates a syntax error or unexpected character encountered during tokenization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError {
-    /// Error message describing what went wrong
+    /// Error message describing what went wrong.
     pub message: String,
-    /// Byte position in the input where the error occurred
+    /// Byte position in the input where the error occurred (0-indexed).
     pub position: usize,
-    /// Line number (1-indexed) where the error occurred
+    /// Line number where the error occurred (1-indexed).
     pub line: usize,
-    /// Column number (1-indexed) where the error occurred
+    /// Column number where the error occurred (1-indexed).
     pub column: usize,
 }
 
@@ -190,6 +253,21 @@ impl fmt::Display for LexerError {
 impl std::error::Error for LexerError {}
 
 /// A lexer for the GQL query language.
+///
+/// The lexer takes a string input and converts it into a stream of [`Token`]s.
+/// It handles whitespace skipping, comment processing, and token recognition.
+///
+/// # Examples
+///
+/// ```rust
+/// use gallifreydb::query::lexer::{Lexer, Token};
+///
+/// let input = "MATCH (n) RETURN n";
+/// let tokens = Lexer::tokenize(input).unwrap();
+///
+/// assert_eq!(tokens[0], Token::Match);
+/// assert_eq!(tokens[2], Token::Identifier("n".to_string()));
+/// ```
 pub struct Lexer<'a> {
     input: &'a str,
     chars: std::iter::Peekable<std::str::CharIndices<'a>>,
@@ -200,6 +278,14 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     /// Create a new lexer for the given input.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::query::lexer::Lexer;
+    ///
+    /// let _lexer = Lexer::new("MATCH (n)");
+    /// ```
     pub fn new(input: &'a str) -> Self {
         Lexer {
             input,
@@ -211,6 +297,20 @@ impl<'a> Lexer<'a> {
     }
 
     /// Tokenize the entire input and return a vector of tokens.
+    ///
+    /// This is a convenience method that creates a lexer and consumes it completely.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::query::lexer::{Lexer, Token};
+    ///
+    /// let tokens = Lexer::tokenize("RETURN 42").unwrap();
+    /// assert_eq!(tokens.len(), 3); // RETURN, 42, EOF
+    /// assert_eq!(tokens[0], Token::Return);
+    /// assert_eq!(tokens[1], Token::IntegerLiteral(42));
+    /// assert_eq!(tokens[2], Token::Eof);
+    /// ```
     pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
         let mut lexer = Lexer::new(input);
         let mut tokens = Vec::new();
@@ -228,6 +328,21 @@ impl<'a> Lexer<'a> {
     }
 
     /// Get the next token from the input.
+    ///
+    /// Returns [`Token::Eof`] when the end of input is reached.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::query::lexer::{Lexer, Token};
+    ///
+    /// let mut lexer = Lexer::new("MATCH");
+    /// let token = lexer.next_token().unwrap();
+    /// assert_eq!(token, Token::Match);
+    ///
+    /// let eof = lexer.next_token().unwrap();
+    /// assert_eq!(eof, Token::Eof);
+    /// ```
     pub fn next_token(&mut self) -> Result<Token, LexerError> {
         self.skip_whitespace_and_comments()?;
 
@@ -1324,8 +1439,81 @@ mod tests {
 
     #[test]
     fn test_token_display() {
+        // Keywords - Graph
         assert_eq!(format!("{}", Token::Match), "MATCH");
+        assert_eq!(format!("{}", Token::Where), "WHERE");
+        assert_eq!(format!("{}", Token::Return), "RETURN");
+        assert_eq!(format!("{}", Token::Order), "ORDER");
+        assert_eq!(format!("{}", Token::By), "BY");
+        assert_eq!(format!("{}", Token::Limit), "LIMIT");
+        assert_eq!(format!("{}", Token::Skip), "SKIP");
+        assert_eq!(format!("{}", Token::Distinct), "DISTINCT");
+        assert_eq!(format!("{}", Token::Count), "COUNT");
+        assert_eq!(format!("{}", Token::Asc), "ASC");
+        assert_eq!(format!("{}", Token::Desc), "DESC");
+
+        // Keywords - Logical
+        assert_eq!(format!("{}", Token::And), "AND");
+        assert_eq!(format!("{}", Token::Or), "OR");
+        assert_eq!(format!("{}", Token::Not), "NOT");
+        assert_eq!(format!("{}", Token::In), "IN");
+        assert_eq!(format!("{}", Token::Is), "IS");
+        assert_eq!(format!("{}", Token::Null), "NULL");
+        assert_eq!(format!("{}", Token::True), "TRUE");
+        assert_eq!(format!("{}", Token::False), "FALSE");
+
+        // Keywords - Vector
+        assert_eq!(format!("{}", Token::Similar), "SIMILAR");
+        assert_eq!(format!("{}", Token::To), "TO");
+        assert_eq!(format!("{}", Token::Using), "USING");
+        assert_eq!(format!("{}", Token::Find), "FIND");
+        assert_eq!(format!("{}", Token::Rank), "RANK");
+        assert_eq!(format!("{}", Token::Similarity), "SIMILARITY");
+        assert_eq!(format!("{}", Token::Top), "TOP");
+
+        // Keywords - Temporal
+        assert_eq!(format!("{}", Token::As), "AS");
+        assert_eq!(format!("{}", Token::Of), "OF");
+        assert_eq!(format!("{}", Token::Between), "BETWEEN");
+
+        // Keywords - String predicates
+        assert_eq!(format!("{}", Token::Exists), "EXISTS");
+        assert_eq!(format!("{}", Token::Contains), "CONTAINS");
+        assert_eq!(format!("{}", Token::Starts), "STARTS");
+        assert_eq!(format!("{}", Token::Ends), "ENDS");
+        assert_eq!(format!("{}", Token::With), "WITH");
+
+        // Keywords - Distance metrics
+        assert_eq!(format!("{}", Token::Cosine), "COSINE");
+        assert_eq!(format!("{}", Token::Euclidean), "EUCLIDEAN");
+        assert_eq!(format!("{}", Token::DotProduct), "DOT_PRODUCT");
+
+        // Punctuation
+        assert_eq!(format!("{}", Token::LeftParen), "(");
+        assert_eq!(format!("{}", Token::RightParen), ")");
+        assert_eq!(format!("{}", Token::LeftBracket), "[");
+        assert_eq!(format!("{}", Token::RightBracket), "]");
+        assert_eq!(format!("{}", Token::LeftBrace), "{");
+        assert_eq!(format!("{}", Token::RightBrace), "}");
+        assert_eq!(format!("{}", Token::Colon), ":");
+        assert_eq!(format!("{}", Token::Comma), ",");
+        assert_eq!(format!("{}", Token::Dot), ".");
+        assert_eq!(format!("{}", Token::Star), "*");
+        assert_eq!(format!("{}", Token::Dash), "-");
+
+        // Arrow patterns
         assert_eq!(format!("{}", Token::Arrow), "->");
+        assert_eq!(format!("{}", Token::LeftArrow), "<-");
+
+        // Comparison operators
+        assert_eq!(format!("{}", Token::Eq), "=");
+        assert_eq!(format!("{}", Token::Ne), "<>");
+        assert_eq!(format!("{}", Token::Lt), "<");
+        assert_eq!(format!("{}", Token::Le), "<=");
+        assert_eq!(format!("{}", Token::Gt), ">");
+        assert_eq!(format!("{}", Token::Ge), ">=");
+
+        // Literals
         assert_eq!(format!("{}", Token::Identifier("foo".to_string())), "foo");
         assert_eq!(
             format!("{}", Token::StringLiteral("bar".to_string())),
@@ -1334,5 +1522,83 @@ mod tests {
         assert_eq!(format!("{}", Token::IntegerLiteral(42)), "42");
         assert_eq!(format!("{}", Token::FloatLiteral(2.71)), "2.71");
         assert_eq!(format!("{}", Token::Parameter("p".to_string())), "$p");
+        assert_eq!(format!("{}", Token::Eof), "EOF");
+    }
+
+    #[test]
+    fn test_token_derive() {
+        let tokens = vec![
+            Token::Match,
+            Token::Where,
+            Token::Return,
+            Token::Order,
+            Token::By,
+            Token::Limit,
+            Token::Skip,
+            Token::Distinct,
+            Token::Count,
+            Token::Asc,
+            Token::Desc,
+            Token::And,
+            Token::Or,
+            Token::Not,
+            Token::In,
+            Token::Is,
+            Token::Null,
+            Token::True,
+            Token::False,
+            Token::Similar,
+            Token::To,
+            Token::Using,
+            Token::Find,
+            Token::Rank,
+            Token::Similarity,
+            Token::Top,
+            Token::As,
+            Token::Of,
+            Token::Between,
+            Token::Exists,
+            Token::Contains,
+            Token::Starts,
+            Token::Ends,
+            Token::With,
+            Token::Cosine,
+            Token::Euclidean,
+            Token::DotProduct,
+            Token::LeftParen,
+            Token::RightParen,
+            Token::LeftBracket,
+            Token::RightBracket,
+            Token::LeftBrace,
+            Token::RightBrace,
+            Token::Colon,
+            Token::Comma,
+            Token::Dot,
+            Token::Star,
+            Token::Dash,
+            Token::Arrow,
+            Token::LeftArrow,
+            Token::Eq,
+            Token::Ne,
+            Token::Lt,
+            Token::Le,
+            Token::Gt,
+            Token::Ge,
+            Token::Identifier("id".to_string()),
+            Token::StringLiteral("s".to_string()),
+            Token::IntegerLiteral(1),
+            Token::FloatLiteral(1.0),
+            Token::Parameter("p".to_string()),
+            Token::Eof,
+        ];
+
+        for token in tokens {
+            // Test Clone
+            let cloned = token.clone();
+            // Test PartialEq
+            assert_eq!(token, cloned);
+            // Test Debug
+            let _ = format!("{:?}", token);
+        }
     }
 }
