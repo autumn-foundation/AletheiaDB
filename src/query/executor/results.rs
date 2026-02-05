@@ -1195,8 +1195,7 @@ mod tests {
             .insert("flag", false)
             .build();
 
-        let result = QueryResult::with_nodes(nodes)
-            .with_properties(vec![props]);
+        let result = QueryResult::with_nodes(nodes).with_properties(vec![props]);
 
         let display = format!("{}", result);
 
