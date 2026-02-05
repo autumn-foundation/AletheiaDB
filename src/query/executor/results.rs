@@ -1449,8 +1449,7 @@ mod tests {
             .insert("inactive", false)
             .build();
 
-        let result = QueryResult::with_nodes(vec![node_id])
-            .with_properties(vec![props]);
+        let result = QueryResult::with_nodes(vec![node_id]).with_properties(vec![props]);
 
         let display = format!("{}", result);
 
@@ -1458,11 +1457,17 @@ mod tests {
         // We verify that "active: true" is NOT present as plain text
         // because there should be ANSI codes.
         let plain_true = "active: true";
-        assert!(!display.contains(plain_true), "Display should contain color codes for true");
+        assert!(
+            !display.contains(plain_true),
+            "Display should contain color codes for true"
+        );
 
         // For false, we did NOT add color, so it should be plain text
         let plain_false = "inactive: false";
-        assert!(display.contains(plain_false), "Display should NOT contain color codes for false");
+        assert!(
+            display.contains(plain_false),
+            "Display should NOT contain color codes for false"
+        );
 
         // Verify it contains "true" content
         assert!(display.contains("true"));
