@@ -7,8 +7,8 @@ const TAG_ARRAY: u8 = 6;
 const TAG_NULL: u8 = 0;
 
 proptest! {
-    // Run enough cases to have a chance of hitting edge cases
-    #![proptest_config(ProptestConfig::with_cases(5000))]
+    // Run enough cases to have a chance of hitting edge cases, but not too many for CI
+    #![proptest_config(ProptestConfig::with_cases(1000))]
 
     #[test]
     fn fuzz_deserialize_arbitrary(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {

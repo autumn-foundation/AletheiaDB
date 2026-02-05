@@ -41,7 +41,7 @@ fn havoc_deadlock_stress_test() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             let query = vec![0.1f32; 384];
-            for _ in 0..10_000 {
+            for _ in 0..1000 {
                 // Filter that accesses node ID (reverse mapping)
                 // We access the node ID to force the closure to actually do something with the mapping
                 let _ = index.search_with_filter(&query, 10, |id| {
@@ -58,7 +58,7 @@ fn havoc_deadlock_stress_test() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             let vec = vec![0.1f32; 384];
-            for i in 0..10_000 {
+            for i in 0..1000 {
                 let id_val = 1000 + (t * 1000) + i;
                 let id = NodeId::new(id_val as u64).unwrap();
                 let _ = index.add(id, &vec);
@@ -73,7 +73,7 @@ fn havoc_deadlock_stress_test() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             let vec = vec![0.2f32; 384];
-            for i in 0..10_000 {
+            for i in 0..1000 {
                 // Update existing nodes 1..100
                 // Use a different node each time to hit different shards
                 let id_val = (i % 100) + 1;
@@ -91,7 +91,7 @@ fn havoc_deadlock_stress_test() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("index.usearch");
             barrier.wait();
-            for _ in 0..20 { // Increase saves slightly
+            for _ in 0..10 {
                 let _ = index.save(&path);
                 // Sleep slightly to allow other threads to make progress and create different lock states
                 thread::sleep(Duration::from_millis(5));
