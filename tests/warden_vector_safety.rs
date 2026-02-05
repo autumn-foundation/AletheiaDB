@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use gallifreydb::core::property::{PropertyMapBuilder, MAX_VECTOR_DIMENSIONS};
+    use gallifreydb::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
     use gallifreydb::utils::error::Error;
 
     #[test]
@@ -12,7 +12,10 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(gallifreydb::utils::error::VectorError::DimensionTooLarge { dimension, max_allowed })) => {
+            Err(Error::Vector(gallifreydb::utils::error::VectorError::DimensionTooLarge {
+                dimension,
+                max_allowed,
+            })) => {
                 assert_eq!(dimension, MAX_VECTOR_DIMENSIONS + 1);
                 assert_eq!(max_allowed, MAX_VECTOR_DIMENSIONS);
             }
@@ -32,7 +35,10 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(gallifreydb::utils::error::VectorError::DimensionTooLarge { dimension, max_allowed })) => {
+            Err(Error::Vector(gallifreydb::utils::error::VectorError::DimensionTooLarge {
+                dimension,
+                max_allowed,
+            })) => {
                 assert_eq!(dimension, MAX_VECTOR_DIMENSIONS + 1);
                 assert_eq!(max_allowed, MAX_VECTOR_DIMENSIONS);
             }

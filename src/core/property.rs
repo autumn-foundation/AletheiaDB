@@ -3966,15 +3966,6 @@ mod sentry_tests {
 
     #[test]
     #[should_panic(expected = "Vector dimension")]
-    fn test_try_insert_vector_panics_on_overflow() {
-        // 💣 Risk: try_insert_vector implies fallibility but panics on large inputs.
-        // This test documents this behavior to prevent regression or unexpected changes.
-        let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
-        let _ = PropertyMapBuilder::new().try_insert_vector("test", &large_vector);
-    }
-
-    #[test]
-    #[should_panic(expected = "Vector dimension")]
     fn test_serialize_vector_into_panics_on_overflow() {
         // 💣 Risk: serialize_vector_into panics on large inputs instead of returning Result.
         let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
