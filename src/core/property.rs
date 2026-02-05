@@ -4085,4 +4085,103 @@ mod sentry_tests {
         // Check values moved with indices (2 was paired with 2.0)
         assert_eq!(sv_arc.values(), &[2.0, 1.0]);
     }
+
+    /// 🎯 Target: PropertyMap::from_iter
+    /// 💣 Risk: Panics when recursion depth limit is exceeded.
+    /// 🧪 Strategy: Construct a deeply nested structure and try to create a PropertyMap from it using collect().
+    /// 🔬 Verification: Expect panic with specific message.
+    #[test]
+    #[should_panic(expected = "Recursion depth limit exceeded in FromIterator")]
+    fn test_property_map_from_iter_panics_on_deep_recursion() {
+        // Construct a deeply nested value: Array(Array(...Array(Int(42))...))
+        // Depth: MAX_RECURSION_DEPTH + 1
+        let mut value = PropertyValue::Int(42);
+        // Nest it MAX_RECURSION_DEPTH + 1 times
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            value = PropertyValue::Array(Arc::new(vec![value]));
+        }
+
+        // This should panic because FromIterator uses expect() on serialized_size()
+        let _map: PropertyMap = vec![(GLOBAL_INTERNER.intern("deep").unwrap(), value)]
+            .into_iter()
+            .collect();
+    }
+
+    /// 🎯 Target: PropertyMapBuilder::try_insert
+    /// 💣 Risk: Should fail gracefully (return Err) instead of panicking on deep recursion.
+    /// 🧪 Strategy: Try to insert a deeply nested structure using try_insert.
+    /// 🔬 Verification: Check that Result is Err and contains the recursion limit message.
+    #[test]
+    fn test_property_map_builder_try_insert_returns_error_on_deep_recursion() {
+        let mut value = PropertyValue::Int(42);
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            value = PropertyValue::Array(Arc::new(vec![value]));
+        }
+
+        // try_insert should return an error, not panic
+        let result = PropertyMapBuilder::new().try_insert("deep", value);
+
+        assert!(result.is_err(), "Expected error, got Ok");
+        let err = result.err().unwrap();
+        let err_msg = format!("{}", err);
+        assert!(
+            err_msg.contains("recursion depth limit exceeded"),
+            "Unexpected error message: {}",
+            err_msg
+        );
+    }
+
+    /// 🎯 Target: PropertyValue::estimated_heap_size
+    /// 💣 Risk: Calculation failure should default to a "penalty" size to prevent cache monopolization by malicious inputs.
+    /// 🧪 Strategy: Call estimated_heap_size on a deeply nested structure.
+    /// 🔬 Verification: Verify result is 10MB (10 * 1024 * 1024).
+    #[test]
+    fn test_property_value_estimated_heap_size_penalty() {
+        let mut value = PropertyValue::Int(42);
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            value = PropertyValue::Array(Arc::new(vec![value]));
+        }
+
+        // Should swallow the recursion error and return the penalty size
+        let size = value.estimated_heap_size();
+
+        // 10MB penalty
+        assert_eq!(size, 10 * 1024 * 1024);
+    }
+
+    /// 🎯 Target: PropertyMap::deserialize
+    /// 💣 Risk: Malformed UTF-8 in property keys could cause panic or incorrect behavior.
+    /// 🧪 Strategy: Manually construct a serialized buffer with invalid UTF-8 in the key section.
+    /// 🔬 Verification: Verify deserialize returns a CorruptedData error with "Invalid UTF-8" message.
+    #[test]
+    fn test_property_map_deserialize_invalid_utf8_key() {
+        // Construct a buffer manually
+        // Format: [count: 4 bytes][key_len: 4 bytes][key_bytes][value...]
+        let mut buffer = Vec::new();
+
+        // Count: 1 entry
+        buffer.extend_from_slice(&1u32.to_le_bytes());
+
+        // Key length: 1 byte
+        buffer.extend_from_slice(&1u32.to_le_bytes());
+
+        // Key bytes: 0xFF is invalid in UTF-8
+        buffer.push(0xFF);
+
+        // Value: Tag Null (0), no payload
+        buffer.push(TAG_NULL);
+
+        let result = PropertyMap::deserialize(&buffer);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err);
+
+        // Should be StorageError::CorruptedData wrapping the utf8 error
+        assert!(
+            err_msg.contains("Invalid UTF-8") || err_msg.contains("Corrupted data"),
+            "Unexpected error message: {}",
+            err_msg
+        );
+    }
 }

@@ -65,19 +65,19 @@ impl<'a> Dreamer<'a> {
                 && valid_time.end() > history_window.start()
             {
                 // Get the property value from this version
-                if let Some(prop_val) = version.properties.get(property) {
-                    if let Some(vec) = prop_val.as_vector() {
-                        // Use the max of (valid_start, window_start) as the effective timestamp
-                        // ensuring we don't look back before the window started.
-                        let effective_time = valid_time
-                            .start()
-                            .wallclock()
-                            .max(history_window.start().wallclock());
+                if let Some(prop_val) = version.properties.get(property)
+                    && let Some(vec) = prop_val.as_vector()
+                {
+                    // Use the max of (valid_start, window_start) as the effective timestamp
+                    // ensuring we don't look back before the window started.
+                    let effective_time = valid_time
+                        .start()
+                        .wallclock()
+                        .max(history_window.start().wallclock());
 
-                        // Avoid duplicates if multiple versions map to same effective time?
-                        // Just take them all, sort later.
-                        snapshots.push((effective_time, vec.to_vec()));
-                    }
+                    // Avoid duplicates if multiple versions map to same effective time?
+                    // Just take them all, sort later.
+                    snapshots.push((effective_time, vec.to_vec()));
                 }
             }
         }
