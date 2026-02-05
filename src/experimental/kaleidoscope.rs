@@ -130,8 +130,14 @@ impl LayoutEngine {
             // Deterministic random start position based on ID
             // Simple Linear Congruential Generator
             let seed = id.as_u64();
-            let x = ((seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) % 1000) as f32;
-            let y = ((seed.wrapping_mul(1442695040888963407).wrapping_add(6364136223846793005)) % 1000) as f32;
+            let x = ((seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407))
+                % 1000) as f32;
+            let y = ((seed
+                .wrapping_mul(1442695040888963407)
+                .wrapping_add(6364136223846793005))
+                % 1000) as f32;
 
             self.positions.insert(id, Point::new(x, y));
             self.velocities.insert(id, Point::new(0.0, 0.0));
@@ -170,7 +176,11 @@ impl LayoutEngine {
     /// Execute one step of physics.
     pub fn step(&mut self) {
         let k = self.config.optimal_distance;
-        let mut forces: HashMap<NodeId, Point> = self.nodes.iter().map(|&id| (id, Point::new(0.0, 0.0))).collect();
+        let mut forces: HashMap<NodeId, Point> = self
+            .nodes
+            .iter()
+            .map(|&id| (id, Point::new(0.0, 0.0)))
+            .collect();
 
         // 1. Repulsion (Coulomb) - All pairs
         // Optimizing: only check pairs? O(N^2) is fine for small N (< 500).
@@ -306,7 +316,12 @@ mod tests {
 
         // Connected nodes should be closer than unconnected nodes
         // (Probabilistic, but with 50 iterations and high spring strength, highly likely)
-        assert!(d12 < d13, "Connected nodes (dist={}) should be closer than unconnected (dist={})", d12, d13);
+        assert!(
+            d12 < d13,
+            "Connected nodes (dist={}) should be closer than unconnected (dist={})",
+            d12,
+            d13
+        );
     }
 
     #[test]
@@ -339,7 +354,12 @@ mod tests {
         let d12 = p1.distance(&p2);
         let d13 = p1.distance(&p3);
 
-        assert!(d12 < d13, "Semantically similar nodes (dist={}) should be closer than others (dist={})", d12, d13);
+        assert!(
+            d12 < d13,
+            "Semantically similar nodes (dist={}) should be closer than others (dist={})",
+            d12,
+            d13
+        );
     }
 
     #[test]
@@ -376,21 +396,34 @@ mod tests {
         let mut grid = vec![vec![' '; w]; h];
 
         // Find bounds to normalize
-        let mut min_x = f32::MAX; let mut max_x = f32::MIN;
-        let mut min_y = f32::MAX; let mut max_y = f32::MIN;
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
 
         for p in pos.values() {
-            if p.x < min_x { min_x = p.x; }
-            if p.x > max_x { max_x = p.x; }
-            if p.y < min_y { min_y = p.y; }
-            if p.y > max_y { max_y = p.y; }
+            if p.x < min_x {
+                min_x = p.x;
+            }
+            if p.x > max_x {
+                max_x = p.x;
+            }
+            if p.y < min_y {
+                min_y = p.y;
+            }
+            if p.y > max_y {
+                max_y = p.y;
+            }
         }
 
         let range_x = max_x - min_x;
         let range_y = max_y - min_y;
 
         println!("\nKaleidoscope Layout:");
-        println!("Bounds: X[{:.1}, {:.1}] Y[{:.1}, {:.1}]", min_x, max_x, min_y, max_y);
+        println!(
+            "Bounds: X[{:.1}, {:.1}] Y[{:.1}, {:.1}]",
+            min_x, max_x, min_y, max_y
+        );
 
         for (id, p) in pos {
             // Map to grid
@@ -398,9 +431,13 @@ mod tests {
             let gy = ((p.y - min_y) / range_y * (h as f32 - 1.0)) as usize;
 
             if gx < w && gy < h {
-                let c = if id.as_u64() == 1 { '*' }
-                        else if id.as_u64() >= 10 { '#' }
-                        else { 'o' };
+                let c = if id.as_u64() == 1 {
+                    '*'
+                } else if id.as_u64() >= 10 {
+                    '#'
+                } else {
+                    'o'
+                };
                 grid[gy][gx] = c;
             }
         }
