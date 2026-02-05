@@ -13,6 +13,9 @@ pub mod chronos;
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
 #[cfg(feature = "nova")]
+/// Semantic Trajectory Extrapolation ("Dreamer").
+pub mod dreamer;
+#[cfg(feature = "nova")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
 #[cfg(feature = "nova")]
