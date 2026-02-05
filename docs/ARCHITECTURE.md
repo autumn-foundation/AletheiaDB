@@ -215,6 +215,77 @@ sequenceDiagram
     Echo-->>User: Ranked Results
 ```
 
+**Chronos (Temporal Analysis)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Chronos {
+            +find_path_at_time(start, end, valid_time)
+            +node_volatility(node, window)
+            +path_stability(path, window)
+        }
+    }
+    class GallifreyDB
+    Chronos --> GallifreyDB : Uses (History)
+```
+
+**Dreamer (Semantic Trajectory)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Dreamer {
+            +predict_future(node, prop, window, horizon)
+        }
+    }
+    class GallifreyDB
+    Dreamer --> GallifreyDB : Uses (History & Vectors)
+```
+
+**Fishing (Associative Retrieval)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class FishingRod {
+            +cast(bait, config)
+        }
+        class FishingTrip {
+            +limit
+            +depth
+            +weights
+        }
+        class Catch {
+            +node_id
+            +score
+        }
+    }
+    class GallifreyDB
+    FishingRod --> GallifreyDB : Uses (Vector & Graph)
+    FishingRod ..> FishingTrip : Configured by
+    FishingRod ..> Catch : Returns
+```
+
+**Kaleidoscope (Semantic Layout)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class LayoutEngine {
+            +add_node(id)
+            +add_edge(a, b)
+            +add_semantic_link(a, b, score)
+            +run()
+        }
+        class Point {
+            +x
+            +y
+        }
+    }
+    LayoutEngine *-- Point : Manages positions
+```
+
 ### Temporal Query Processing
 
 **Query Types:**
