@@ -17,3 +17,7 @@
 ## 2026-10-27 - Identity Hashing for Integer Keys in DashMap
 **Learning:** `DashMap<u32, V>` uses `SipHash` by default, which is expensive for simple integer keys that are already unique (like interned IDs). In the `StringInterner::resolve_with` hot path, this hashing overhead was significant.
 **Action:** Use `BuildHasherDefault<IdentityHasher>` for maps where keys are already unique integers or IDs to skip the hashing step, improving throughput by ~2.5x.
+
+## 2026-11-20 - PropertyMap Heap Size Caching
+**Learning:** `PropertyMap::estimated_heap_size` was O(N) recursive, causing overhead in memory accounting. `PropertyMap` is immutable (append-only via builder), allowing us to cache this value.
+**Action:** Cached `heap_size` in `PropertyMap` during construction (O(1) access), moving calculation cost to insertion time.

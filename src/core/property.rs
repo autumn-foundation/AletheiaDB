@@ -1402,6 +1402,11 @@ pub struct PropertyMap {
     /// mutated in place through shared references. The only way to "modify" a map
     /// is to create a new one, which calculates its own fresh `cached_size`.
     cached_size: usize,
+    /// Cached sum of estimated heap sizes of all values in bytes.
+    ///
+    /// This allows O(1) access to the total estimated heap size, avoiding
+    /// recursive traversal of all values.
+    cached_values_heap_size: usize,
 }
 
 impl PropertyMap {
@@ -1410,6 +1415,7 @@ impl PropertyMap {
         PropertyMap {
             inner: Arc::new(HashMap::new()),
             cached_size: 4, // 4 bytes for the count field (0)
+            cached_values_heap_size: 0,
         }
     }
 
@@ -1418,6 +1424,7 @@ impl PropertyMap {
         PropertyMap {
             inner: Arc::new(HashMap::with_capacity(capacity)),
             cached_size: 4, // 4 bytes for the count field (0)
+            cached_values_heap_size: 0,
         }
     }
 
@@ -1618,6 +1625,7 @@ impl PropertyMap {
         let mut map = HashMap::with_capacity(count);
         // Track the actual logical size of the map to validate against consumed bytes
         let mut calculated_size: usize = 4;
+        let mut cached_values_heap_size: usize = 0;
 
         for _ in 0..count {
             // Read key length
@@ -1654,6 +1662,8 @@ impl PropertyMap {
             calculated_size = calculated_size
                 .saturating_add(key_size)
                 .saturating_add(value.serialized_size()?);
+            cached_values_heap_size =
+                cached_values_heap_size.saturating_add(value.estimated_heap_size());
 
             offset += consumed;
 
@@ -1689,6 +1699,7 @@ impl PropertyMap {
             PropertyMap {
                 inner: Arc::new(map),
                 cached_size: calculated_size,
+                cached_values_heap_size,
             },
             offset,
         ))
@@ -1707,15 +1718,11 @@ impl PropertyMap {
     /// PropertyMap shares its underlying data with other instances.
     pub fn estimated_heap_size(&self) -> usize {
         // HashMap overhead: capacity * (key_size + value_size + ~8 bytes overhead per entry)
-        let mut size = self.inner.capacity()
+        let map_overhead = self.inner.capacity()
             * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8);
 
-        // Add heap sizes of individual values
-        for value in self.inner.values() {
-            size += value.estimated_heap_size();
-        }
-
-        size
+        // Add cached heap sizes of values (O(1) access)
+        map_overhead + self.cached_values_heap_size
     }
 
     /// Calculate the number of bytes required for serialization.
@@ -1773,6 +1780,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
     fn from_iter<I: IntoIterator<Item = (PropertyKey, PropertyValue)>>(iter: I) -> Self {
         let mut map = HashMap::new();
         let mut size: usize = 4; // Count field
+        let mut cached_values_heap_size: usize = 0;
 
         for (key, value) in iter {
             // Need key size for serialization
@@ -1783,8 +1791,10 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
             let val_size = value
                 .serialized_size()
                 .expect("Recursion depth limit exceeded in FromIterator");
+            let val_heap_size = value.estimated_heap_size();
 
             size = size.saturating_add(key_size).saturating_add(val_size);
+            cached_values_heap_size = cached_values_heap_size.saturating_add(val_heap_size);
 
             if let Some(old_val) = map.insert(key, value) {
                 // If replaced, subtract the size of the old entry (key + value)
@@ -1800,6 +1810,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
         PropertyMap {
             inner: Arc::new(map),
             cached_size: size,
+            cached_values_heap_size: 0, // Will be calculated by caller or updated later
         }
     }
 }
@@ -1808,6 +1819,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
 pub struct PropertyMapBuilder {
     map: HashMap<PropertyKey, PropertyValue>,
     current_size: usize,
+    current_values_heap_size: usize,
 }
 
 impl PropertyMapBuilder {
@@ -1816,6 +1828,7 @@ impl PropertyMapBuilder {
         PropertyMapBuilder {
             map: HashMap::new(),
             current_size: 4, // Count field
+            current_values_heap_size: 0,
         }
     }
 
@@ -1825,8 +1838,13 @@ impl PropertyMapBuilder {
     /// implementing copy-on-write semantics.
     pub fn from_map(prop_map: PropertyMap) -> Self {
         let current_size = prop_map.cached_size;
+        let current_values_heap_size = prop_map.cached_values_heap_size;
         let map = Arc::try_unwrap(prop_map.inner).unwrap_or_else(|arc| (*arc).clone());
-        PropertyMapBuilder { map, current_size }
+        PropertyMapBuilder {
+            map,
+            current_size,
+            current_values_heap_size,
+        }
     }
 
     /// Insert a property.
@@ -1847,6 +1865,7 @@ impl PropertyMapBuilder {
         };
         let val = value.into();
         let val_size = val.serialized_size()?;
+        let val_heap_size = val.estimated_heap_size();
 
         if let Some(old_val) = self.map.insert(interned_key, val) {
             // Replaced existing entry
@@ -1855,6 +1874,10 @@ impl PropertyMapBuilder {
                 .current_size
                 .saturating_sub(old_val.serialized_size()?)
                 .saturating_add(val_size);
+            self.current_values_heap_size = self
+                .current_values_heap_size
+                .saturating_sub(old_val.estimated_heap_size())
+                .saturating_add(val_heap_size);
         } else {
             // New entry
             let key_size = 4 + key.len(); // Length prefix (4) + string bytes
@@ -1862,6 +1885,8 @@ impl PropertyMapBuilder {
                 .current_size
                 .saturating_add(key_size)
                 .saturating_add(val_size);
+            self.current_values_heap_size =
+                self.current_values_heap_size.saturating_add(val_heap_size);
         }
         Ok(self)
     }
@@ -1877,6 +1902,7 @@ impl PropertyMapBuilder {
     /// Insert a property with an already-interned key (fallible).
     pub fn try_insert_by_key(mut self, key: PropertyKey, value: PropertyValue) -> Result<Self> {
         let val_size = value.serialized_size()?;
+        let val_heap_size = value.estimated_heap_size();
 
         if let Some(old_val) = self.map.insert(key, value) {
             // Replaced existing entry - key size constant
@@ -1884,6 +1910,10 @@ impl PropertyMapBuilder {
                 .current_size
                 .saturating_sub(old_val.serialized_size()?)
                 .saturating_add(val_size);
+            self.current_values_heap_size = self
+                .current_values_heap_size
+                .saturating_sub(old_val.estimated_heap_size())
+                .saturating_add(val_heap_size);
         } else {
             // New entry - need key size!
             // We must look up the string length since we only have the ID.
@@ -1903,6 +1933,8 @@ impl PropertyMapBuilder {
                 .current_size
                 .saturating_add(key_size)
                 .saturating_add(val_size);
+            self.current_values_heap_size =
+                self.current_values_heap_size.saturating_add(val_heap_size);
         }
         Ok(self)
     }
@@ -1975,6 +2007,9 @@ impl PropertyMapBuilder {
                 .current_size
                 .saturating_sub(key_size)
                 .saturating_sub(old_val.serialized_size()?);
+            self.current_values_heap_size = self
+                .current_values_heap_size
+                .saturating_sub(old_val.estimated_heap_size());
         }
         Ok(self)
     }
@@ -1984,6 +2019,7 @@ impl PropertyMapBuilder {
         PropertyMap {
             inner: Arc::new(self.map),
             cached_size: self.current_size,
+            cached_values_heap_size: self.current_values_heap_size,
         }
     }
 }
@@ -3091,6 +3127,7 @@ mod tests {
         let map = PropertyMap {
             inner: Arc::new(inner_map),
             cached_size: 4, // Ignored
+            cached_values_heap_size: 0,
         };
 
         // Serialization should return an error, not panic
@@ -3125,6 +3162,7 @@ mod tests {
         let map = PropertyMap {
             inner: Arc::new(inner_map),
             cached_size: 4, // Ignored
+            cached_values_heap_size: 0,
         };
 
         let mut buffer = Vec::new();
@@ -3936,6 +3974,7 @@ mod tests {
         let prop_map = PropertyMap {
             inner: Arc::new(map),
             cached_size: 0, // Not used for Debug
+            cached_values_heap_size: 0,
         };
 
         let debug_str = format!("{:?}", prop_map);
