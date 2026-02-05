@@ -149,3 +149,18 @@ This ensures memory is only allocated if the client has actually sent a proporti
 
 **Verification:** Reproduction Test
 Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed that the new logic returns `StorageError::CorruptedData` ("Insufficient buffer size") *before* attempting allocation.
+
+## 2026-02-18 - Vector Panic Hardening
+
+**Threat:** Denial of Service (Panic) via Large Vectors
+`PropertyValue::vector` and `serialize_vector_into` panicked when vector dimensions exceeded `MAX_VECTOR_DIMENSIONS`. `PropertyMapBuilder::try_insert_vector` (which implies fallibility) internally called the panicking `vector` constructor. An attacker could potentially trigger a server crash by supplying an oversized vector through an API endpoint that uses these builders.
+
+**Defense:** Fallible Constructors
+- Introduced `PropertyValue::try_vector` and `try_serialize_vector_into` which return `Result` instead of panicking.
+- Refactored `try_insert_vector` to use `try_vector` and propagate the error.
+- Refactored `serialize_recursive` to use `try_serialize_vector_into`.
+- Extracted dimension validation into a DRY helper `validate_vector_dimensions`.
+- Existing `vector` and `serialize_vector_into` methods were preserved as panicking wrappers for backward compatibility, but their internal logic now delegates to the safe implementations.
+
+**Verification:** Regression Test
+Added `tests/warden_vector_safety.rs` which attempts to insert and serialize oversized vectors using the `try_` methods. Verified that they now return `VectorError::DimensionTooLarge` instead of crashing the test runner.
