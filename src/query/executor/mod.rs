@@ -20,7 +20,7 @@ use super::planner::physical::{PhysicalOp, PhysicalPlan};
 pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
 pub use iterators::TemporalNodeScanIterator;
-pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
+pub use results::{EntityId, EntityResult, QueryResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
 #[derive(Debug, Clone)]

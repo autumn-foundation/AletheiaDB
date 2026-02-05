@@ -8,6 +8,7 @@ use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
 use crate::utils::error::Result;
+use crossterm::style::Stylize;
 
 use super::iterators::ResultIterator;
 
@@ -466,7 +467,12 @@ impl std::fmt::Display for QueryResult {
                             let k_str = crate::core::interning::GLOBAL_INTERNER
                                 .resolve_with(*k, |s| s.to_string())
                                 .unwrap_or_else(|| format!("key:{}", k.as_u32()));
-                            format!("{}: {}", k_str, v)
+
+                            if let crate::core::property::PropertyValue::Bool(true) = v {
+                                format!("{}: {}", k_str, "true".green())
+                            } else {
+                                format!("{}: {}", k_str, v)
+                            }
                         })
                         .collect();
 
