@@ -6,10 +6,10 @@
 #![cfg(feature = "http-server")]
 
 use actix_web::{App, test, web};
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use gallifreydb::http::{AppState, configure_app};
-use std::sync::Arc;
+use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use serde_json::Value;
+use std::sync::Arc;
 
 #[actix_rt::test]
 async fn test_find_node_limit_clamping() {
@@ -19,10 +19,9 @@ async fn test_find_node_limit_clamping() {
     for i in 0..1100 {
         db.create_node(
             "Person",
-            PropertyMapBuilder::new()
-                .insert("id", i as i64)
-                .build()
-        ).unwrap();
+            PropertyMapBuilder::new().insert("id", i as i64).build(),
+        )
+        .unwrap();
     }
 
     let state = AppState::new(db);
@@ -31,8 +30,9 @@ async fn test_find_node_limit_clamping() {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(state))
-            .configure(configure_app)
-    ).await;
+            .configure(configure_app),
+    )
+    .await;
 
     // 3. Send request with limit: 2000 (exceeding safety limit of 1000)
     let req_body = serde_json::json!({
@@ -51,7 +51,11 @@ async fn test_find_node_limit_clamping() {
     assert!(resp.status().is_success());
 
     let body: Value = test::read_body_json(resp).await;
-    let data = body.get("data").expect("Should have data").as_array().expect("Data should be array");
+    let data = body
+        .get("data")
+        .expect("Should have data")
+        .as_array()
+        .expect("Data should be array");
 
     if data.len() == 1100 {
         panic!("⚠️ VULNERABILITY CONFIRMED: FindNode returned 1100 nodes (unbounded limit).");
@@ -69,8 +73,9 @@ async fn test_find_node_deep_pagination_prevention() {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(state))
-            .configure(configure_app)
-    ).await;
+            .configure(configure_app),
+    )
+    .await;
 
     // Request offset=9999, limit=100 -> Total 10099 > 10000 -> Bad Request
     let req_body = serde_json::json!({
@@ -90,7 +95,11 @@ async fn test_find_node_deep_pagination_prevention() {
     assert_eq!(resp.status().as_u16(), 400);
 
     let body: Value = test::read_body_json(resp).await;
-    let error = body.get("error").expect("Should have error").as_str().expect("Error should be string");
+    let error = body
+        .get("error")
+        .expect("Should have error")
+        .as_str()
+        .expect("Error should be string");
 
     assert!(error.contains("Pagination limit exceeded"));
     println!("✅ SECURE: Deep pagination rejected.");
