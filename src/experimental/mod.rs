@@ -7,6 +7,9 @@
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
 #[cfg(feature = "nova")]
+/// Chronos: Temporal Graph Analysis & Pathfinding.
+pub mod chronos;
+#[cfg(feature = "nova")]
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
 #[cfg(feature = "nova")]
