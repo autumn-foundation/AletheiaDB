@@ -284,7 +284,7 @@ impl<'a> Lexer<'a> {
     /// ```rust
     /// use gallifreydb::query::lexer::Lexer;
     ///
-    /// let lexer = Lexer::new("MATCH (n)");
+    /// let _lexer = Lexer::new("MATCH (n)");
     /// ```
     pub fn new(input: &'a str) -> Self {
         Lexer {
@@ -1439,8 +1439,81 @@ mod tests {
 
     #[test]
     fn test_token_display() {
+        // Keywords - Graph
         assert_eq!(format!("{}", Token::Match), "MATCH");
+        assert_eq!(format!("{}", Token::Where), "WHERE");
+        assert_eq!(format!("{}", Token::Return), "RETURN");
+        assert_eq!(format!("{}", Token::Order), "ORDER");
+        assert_eq!(format!("{}", Token::By), "BY");
+        assert_eq!(format!("{}", Token::Limit), "LIMIT");
+        assert_eq!(format!("{}", Token::Skip), "SKIP");
+        assert_eq!(format!("{}", Token::Distinct), "DISTINCT");
+        assert_eq!(format!("{}", Token::Count), "COUNT");
+        assert_eq!(format!("{}", Token::Asc), "ASC");
+        assert_eq!(format!("{}", Token::Desc), "DESC");
+
+        // Keywords - Logical
+        assert_eq!(format!("{}", Token::And), "AND");
+        assert_eq!(format!("{}", Token::Or), "OR");
+        assert_eq!(format!("{}", Token::Not), "NOT");
+        assert_eq!(format!("{}", Token::In), "IN");
+        assert_eq!(format!("{}", Token::Is), "IS");
+        assert_eq!(format!("{}", Token::Null), "NULL");
+        assert_eq!(format!("{}", Token::True), "TRUE");
+        assert_eq!(format!("{}", Token::False), "FALSE");
+
+        // Keywords - Vector
+        assert_eq!(format!("{}", Token::Similar), "SIMILAR");
+        assert_eq!(format!("{}", Token::To), "TO");
+        assert_eq!(format!("{}", Token::Using), "USING");
+        assert_eq!(format!("{}", Token::Find), "FIND");
+        assert_eq!(format!("{}", Token::Rank), "RANK");
+        assert_eq!(format!("{}", Token::Similarity), "SIMILARITY");
+        assert_eq!(format!("{}", Token::Top), "TOP");
+
+        // Keywords - Temporal
+        assert_eq!(format!("{}", Token::As), "AS");
+        assert_eq!(format!("{}", Token::Of), "OF");
+        assert_eq!(format!("{}", Token::Between), "BETWEEN");
+
+        // Keywords - String predicates
+        assert_eq!(format!("{}", Token::Exists), "EXISTS");
+        assert_eq!(format!("{}", Token::Contains), "CONTAINS");
+        assert_eq!(format!("{}", Token::Starts), "STARTS");
+        assert_eq!(format!("{}", Token::Ends), "ENDS");
+        assert_eq!(format!("{}", Token::With), "WITH");
+
+        // Keywords - Distance metrics
+        assert_eq!(format!("{}", Token::Cosine), "COSINE");
+        assert_eq!(format!("{}", Token::Euclidean), "EUCLIDEAN");
+        assert_eq!(format!("{}", Token::DotProduct), "DOT_PRODUCT");
+
+        // Punctuation
+        assert_eq!(format!("{}", Token::LeftParen), "(");
+        assert_eq!(format!("{}", Token::RightParen), ")");
+        assert_eq!(format!("{}", Token::LeftBracket), "[");
+        assert_eq!(format!("{}", Token::RightBracket), "]");
+        assert_eq!(format!("{}", Token::LeftBrace), "{");
+        assert_eq!(format!("{}", Token::RightBrace), "}");
+        assert_eq!(format!("{}", Token::Colon), ":");
+        assert_eq!(format!("{}", Token::Comma), ",");
+        assert_eq!(format!("{}", Token::Dot), ".");
+        assert_eq!(format!("{}", Token::Star), "*");
+        assert_eq!(format!("{}", Token::Dash), "-");
+
+        // Arrow patterns
         assert_eq!(format!("{}", Token::Arrow), "->");
+        assert_eq!(format!("{}", Token::LeftArrow), "<-");
+
+        // Comparison operators
+        assert_eq!(format!("{}", Token::Eq), "=");
+        assert_eq!(format!("{}", Token::Ne), "<>");
+        assert_eq!(format!("{}", Token::Lt), "<");
+        assert_eq!(format!("{}", Token::Le), "<=");
+        assert_eq!(format!("{}", Token::Gt), ">");
+        assert_eq!(format!("{}", Token::Ge), ">=");
+
+        // Literals
         assert_eq!(format!("{}", Token::Identifier("foo".to_string())), "foo");
         assert_eq!(
             format!("{}", Token::StringLiteral("bar".to_string())),
@@ -1449,5 +1522,6 @@ mod tests {
         assert_eq!(format!("{}", Token::IntegerLiteral(42)), "42");
         assert_eq!(format!("{}", Token::FloatLiteral(2.71)), "2.71");
         assert_eq!(format!("{}", Token::Parameter("p".to_string())), "$p");
+        assert_eq!(format!("{}", Token::Eof), "EOF");
     }
 }
