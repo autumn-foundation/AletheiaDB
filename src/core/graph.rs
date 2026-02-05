@@ -13,7 +13,7 @@ use crate::core::version::VersionMetadata;
 ///
 /// This represents the current version of a node, optimized for fast access.
 /// Historical versions are stored separately in the temporal storage layer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier for this node.
     pub id: NodeId,
@@ -110,11 +110,27 @@ impl Node {
     }
 }
 
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label_str = crate::core::interning::GLOBAL_INTERNER
+            .resolve_with(self.label, |s| s.to_string())
+            .unwrap_or_else(|| format!("{:?}", self.label));
+
+        f.debug_struct("Node")
+            .field("id", &self.id)
+            .field("label", &label_str)
+            .field("properties", &self.properties)
+            .field("current_version", &self.current_version)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
 /// An edge in the current state of the graph.
 ///
 /// Edges are directed relationships between nodes with properties.
 /// This represents the current version, optimized for fast traversals.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Edge {
     /// Unique identifier for this edge.
     pub id: EdgeId,
@@ -226,6 +242,24 @@ impl Edge {
     #[inline]
     pub fn connects(&self, source: NodeId, target: NodeId) -> bool {
         self.source == source && self.target == target
+    }
+}
+
+impl std::fmt::Debug for Edge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label_str = crate::core::interning::GLOBAL_INTERNER
+            .resolve_with(self.label, |s| s.to_string())
+            .unwrap_or_else(|| format!("{:?}", self.label));
+
+        f.debug_struct("Edge")
+            .field("id", &self.id)
+            .field("label", &label_str)
+            .field("source", &self.source)
+            .field("target", &self.target)
+            .field("properties", &self.properties)
+            .field("current_version", &self.current_version)
+            .field("metadata", &self.metadata)
+            .finish()
     }
 }
 
@@ -392,6 +426,90 @@ mod tests {
         assert!(
             GLOBAL_INTERNER.get_id("NeverInternedEdge").is_none(),
             "Interner should not contain 'NeverInternedEdge' after has_label_str call"
+        );
+    }
+
+    #[test]
+    fn test_node_debug() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let debug_str = format!("{:?}", node);
+        assert!(
+            debug_str.contains("Person"),
+            "Debug output should contain resolved label"
+        );
+        assert!(
+            debug_str.contains("Alice"),
+            "Debug output should contain property value"
+        );
+    }
+
+    #[test]
+    fn test_node_debug_fallback() {
+        // Create a Node with a raw InternedString that doesn't exist in the interner
+        // InternedString(u32::MAX) is extremely unlikely to exist
+        let raw_label = InternedString::from_raw(u32::MAX);
+        let node = Node::new(
+            NodeId::new(99).unwrap(),
+            raw_label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let debug_str = format!("{:?}", node);
+        // Should fallback to InternedString(4294967295)
+        assert!(
+            debug_str.contains("InternedString(4294967295)"),
+            "Debug output should fallback to raw ID for unknown label"
+        );
+    }
+
+    #[test]
+    fn test_edge_debug() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(10).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().insert("since", 2024).build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let debug_str = format!("{:?}", edge);
+        assert!(
+            debug_str.contains("KNOWS"),
+            "Debug output should contain resolved label"
+        );
+        assert!(
+            debug_str.contains("2024"),
+            "Debug output should contain property value"
+        );
+    }
+
+    #[test]
+    fn test_edge_debug_fallback() {
+        // Create an Edge with a raw InternedString that doesn't exist
+        let raw_label = InternedString::from_raw(u32::MAX - 1);
+        let edge = Edge::new(
+            EdgeId::new(10).unwrap(),
+            raw_label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let debug_str = format!("{:?}", edge);
+        assert!(
+            debug_str.contains("InternedString(4294967294)"),
+            "Debug output should fallback to raw ID for unknown label"
         );
     }
 }

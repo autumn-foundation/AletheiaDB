@@ -1380,7 +1380,7 @@ impl From<SparseVec> for PropertyValue {
 /// The underlying HashMap is wrapped in an Arc, making clones very cheap
 /// (just incrementing a reference count). This enables efficient sharing
 /// of unchanged properties across versions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct PropertyMap {
     inner: Arc<HashMap<PropertyKey, PropertyValue>>,
     /// Cached serialized size in bytes.
@@ -1726,6 +1726,40 @@ impl PropertyMap {
     #[inline(always)]
     pub fn serialized_size(&self) -> usize {
         self.cached_size
+    }
+}
+
+impl fmt::Debug for PropertyMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = f.debug_map();
+        // Collect entries and pre-resolve keys to sort them for deterministic output
+        // We map to (resolved_str, raw_id, value)
+        let mut entries: Vec<_> = self
+            .inner
+            .iter()
+            .map(|(key, value)| {
+                let resolved = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string());
+                (resolved, *key, value)
+            })
+            .collect();
+
+        // Sort by resolved string if available, otherwise by ID
+        // Resolved keys always come before unresolved ones for consistency
+        entries.sort_by(|(s1, k1, _), (s2, k2, _)| match (s1, s2) {
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => k1.cmp(k2),
+        });
+
+        for (resolved, key, value) in entries {
+            if let Some(key_str) = resolved {
+                map.entry(&key_str, value);
+            } else {
+                map.entry(&key, value);
+            }
+        }
+        map.finish()
     }
 }
 
@@ -3862,6 +3896,54 @@ mod tests {
         let expected_min = 10 * min_vec_size + 4; // "data".len() = 4
 
         assert!(size >= expected_min);
+    }
+
+    #[test]
+    fn test_property_map_debug_sorting() {
+        // Use unsorted insert order: b, a, c
+        let map = PropertyMapBuilder::new()
+            .insert("b", 2)
+            .insert("a", 1)
+            .insert("c", 3)
+            .build();
+
+        let debug_str = format!("{:?}", map);
+        // Should sort keys alphabetically: a, b, c
+        // The output format is standard debug map: {"key": value, ...}
+        // We look for "a": ... "b": ... "c": ... in that order
+        let pos_a = debug_str.find("\"a\"").unwrap();
+        let pos_b = debug_str.find("\"b\"").unwrap();
+        let pos_c = debug_str.find("\"c\"").unwrap();
+
+        assert!(
+            pos_a < pos_b,
+            "Debug output should be sorted: 'a' before 'b'"
+        );
+        assert!(
+            pos_b < pos_c,
+            "Debug output should be sorted: 'b' before 'c'"
+        );
+    }
+
+    #[test]
+    fn test_property_map_debug_fallback() {
+        // Create a PropertyMap with a raw unresolved key
+        // We must bypass PropertyMapBuilder because it validates keys against the interner
+        let mut map = HashMap::new();
+        let raw_key = InternedString::from_raw(u32::MAX);
+        map.insert(raw_key, PropertyValue::Int(42));
+
+        let prop_map = PropertyMap {
+            inner: Arc::new(map),
+            cached_size: 0, // Not used for Debug
+        };
+
+        let debug_str = format!("{:?}", prop_map);
+        // Fallback format for unknown key: InternedString(4294967295)
+        assert!(
+            debug_str.contains("InternedString(4294967295)"),
+            "Debug output should fallback for unknown key"
+        );
     }
 }
 
