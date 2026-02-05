@@ -16,7 +16,8 @@
 //! # Example
 //!
 //! ```rust
-//! # use std::sync::{Arc, RwLock};
+//! # use std::sync::Arc;
+//! # use parking_lot::RwLock;
 //! # use gallifreydb::query::executor::QueryExecutor;
 //! # use gallifreydb::storage::{CurrentStorage, HistoricalStorage};
 //! # use gallifreydb::query::planner::{PhysicalPlan, PhysicalOp};
