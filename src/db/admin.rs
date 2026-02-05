@@ -10,18 +10,13 @@ use crate::storage::index_persistence::operations::{
     persist_temporal_index, persist_vector_indexes,
 };
 use crate::utils::error::{Result, StorageError};
-use crate::utils::lock::RwLockExt;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 impl GallifreyDB {
     /// Get statistics about the historical storage.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the historical storage lock is poisoned.
     pub fn historical_stats(&self) -> Result<HistoricalStats> {
-        Ok(self.historical.read_or_err()?.stats())
+        Ok(self.historical.read().stats())
     }
 
     /// Persist all indexes to disk.

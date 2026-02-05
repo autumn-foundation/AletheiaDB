@@ -14,7 +14,6 @@ use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::utils::error::{Result, StorageError};
-use crate::utils::lock::RwLockExt;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -82,7 +81,7 @@ impl ReadTransaction {
     /// This is the slow path used when the current version is not visible
     /// or when the node has been deleted from current storage.
     fn get_node_from_historical(&self, id: NodeId) -> Result<Node> {
-        let historical = self.historical.read_or_err()?;
+        let historical = self.historical.read();
 
         // Find version visible at our snapshot timestamp
         let version_id = historical.find_node_version_at_time(
@@ -150,7 +149,7 @@ impl ReadTransaction {
     /// This is the slow path used when the current version is not visible
     /// or when the edge has been deleted from current storage.
     fn get_edge_from_historical(&self, id: EdgeId) -> Result<Edge> {
-        let historical = self.historical.read_or_err()?;
+        let historical = self.historical.read();
 
         // Find version visible at our snapshot timestamp
         let version_id = historical.find_edge_version_at_time(

@@ -4,7 +4,6 @@ use crate::core::temporal::{Timestamp, time};
 use crate::db::GallifreyDB;
 use crate::query::{EntityHistory, VersionDiff};
 use crate::utils::error::Result;
-use crate::utils::lock::RwLockExt;
 
 impl GallifreyDB {
     /// Get outgoing edges from a node at a specific point in time.
@@ -41,9 +40,8 @@ impl GallifreyDB {
         tx_time: Timestamp,
     ) -> Vec<EdgeId> {
         self.historical
-            .read_or_err()
-            .map(|storage| storage.get_outgoing_edges_at_time(source, valid_time, tx_time))
-            .unwrap_or_else(|_| Vec::new())
+            .read()
+            .get_outgoing_edges_at_time(source, valid_time, tx_time)
     }
 
     /// Get incoming edges to a node at a specific point in time.
@@ -80,9 +78,8 @@ impl GallifreyDB {
         tx_time: Timestamp,
     ) -> Vec<EdgeId> {
         self.historical
-            .read_or_err()
-            .map(|storage| storage.get_incoming_edges_at_time(target, valid_time, tx_time))
-            .unwrap_or_else(|_| Vec::new())
+            .read()
+            .get_incoming_edges_at_time(target, valid_time, tx_time)
     }
 
     /// Get a node as it existed at a specific point in bi-temporal space.
@@ -99,7 +96,7 @@ impl GallifreyDB {
         let _span = tracing::info_span!("get_node_at_time").entered();
 
         self.historical
-            .read_or_err()?
+            .read()
             .get_node_at_time(node_id, valid_time, transaction_time)
     }
 
@@ -117,7 +114,7 @@ impl GallifreyDB {
         let _span = tracing::info_span!("get_edge_at_time").entered();
 
         self.historical
-            .read_or_err()?
+            .read()
             .get_edge_at_time(edge_id, valid_time, transaction_time)
     }
 
@@ -196,7 +193,7 @@ impl GallifreyDB {
         let _span = tracing::info_span!("get_nodes_at_time").entered();
 
         self.historical
-            .read_or_err()?
+            .read()
             .get_nodes_at_time(node_ids, valid_time, transaction_time)
     }
 
@@ -270,7 +267,7 @@ impl GallifreyDB {
         let _span = tracing::info_span!("get_edges_at_time").entered();
 
         self.historical
-            .read_or_err()?
+            .read()
             .get_edges_at_time(edge_ids, valid_time, transaction_time)
     }
 
@@ -325,7 +322,7 @@ impl GallifreyDB {
     /// println!("Alice has {} versions", history.version_count());
     /// ```
     pub fn get_node_history(&self, node_id: NodeId) -> Result<EntityHistory> {
-        self.historical.read_or_err()?.get_node_history(node_id)
+        self.historical.read().get_node_history(node_id)
     }
 
     /// Get a node at a specific logical version number.
@@ -340,7 +337,7 @@ impl GallifreyDB {
     /// ```
     pub fn get_node_at_version(&self, node_id: NodeId, version_number: u64) -> Result<Node> {
         self.historical
-            .read_or_err()?
+            .read()
             .get_node_at_version(node_id, version_number)
     }
 
@@ -367,7 +364,7 @@ impl GallifreyDB {
         to_version: VersionId,
     ) -> Result<VersionDiff> {
         self.historical
-            .read_or_err()?
+            .read()
             .diff_node_versions(node_id, from_version, to_version)
     }
 
@@ -395,7 +392,7 @@ impl GallifreyDB {
     ///
     /// Returns all versions in chronological order (oldest first).
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<EntityHistory> {
-        self.historical.read_or_err()?.get_edge_history(edge_id)
+        self.historical.read().get_edge_history(edge_id)
     }
 
     /// Compute the difference between two versions of an edge.
@@ -408,7 +405,7 @@ impl GallifreyDB {
         to_version: VersionId,
     ) -> Result<VersionDiff> {
         self.historical
-            .read_or_err()?
+            .read()
             .diff_edge_versions(edge_id, from_version, to_version)
     }
 }
