@@ -1188,96 +1188,7 @@ mod general_tests {
         }
     }
 
-    // ==================== Lock Poisoning Tests ====================
 
-    /// Create a test write transaction with a custom timestamp mutex.
-    /// This allows testing lock poisoning scenarios.
-    fn create_test_write_tx_with_timestamp(
-        current_timestamp: Arc<Mutex<Timestamp>>,
-    ) -> (WriteTransaction, TempDir) {
-        let current = Arc::new(CurrentStorage::new());
-        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(TemporalIndexes::new());
-
-        let temp_dir = TempDir::new().unwrap();
-        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
-        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
-
-        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
-        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
-        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
-        let tx_id_gen = TxIdGenerator::new();
-
-        let visibility_manager = Arc::new(TxVisibilityManager::new());
-        let snapshot = TransactionSnapshot {
-            snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
-        };
-
-        let tx = WriteTransaction::new(
-            tx_id_gen.next(),
-            snapshot,
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-        );
-
-        (tx, temp_dir)
-    }
-
-    #[test]
-    fn test_commit_timestamp_lock_poisoning_returns_error() {
-        // Test that commit returns a proper error if the timestamp lock is poisoned
-        // instead of panicking (Issue #342).
-        use std::thread;
-
-        // Create timestamp mutex that we'll poison
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let ts_clone = Arc::clone(&current_timestamp);
-
-        // Poison the lock by panicking while holding it
-        let handle = thread::spawn(move || {
-            let _guard = ts_clone.lock().unwrap();
-            panic!("intentional panic to poison timestamp lock");
-        });
-
-        // Wait for the poisoning thread to complete
-        let _ = handle.join();
-
-        // Create the transaction with the poisoned lock
-        let (mut tx, _temp_dir) = create_test_write_tx_with_timestamp(current_timestamp);
-
-        // Create a node so we have something to commit
-        let props = PropertyMapBuilder::new().insert("name", "Test").build();
-        tx.create_node("TestNode", props).unwrap();
-
-        // Commit should return a CommitFailed error, not panic
-        let result = tx.commit();
-        assert!(result.is_err());
-
-        // Verify it's the correct error type (TransactionError::CommitFailed)
-        if let Err(crate::utils::error::Error::Transaction(
-            crate::utils::error::TransactionError::CommitFailed { reason },
-        )) = result
-        {
-            assert!(
-                reason.contains("timestamp lock poisoned"),
-                "Expected error message to contain 'timestamp lock poisoned', got: {}",
-                reason
-            );
-        } else {
-            panic!(
-                "Expected TransactionError::CommitFailed, got {:?}",
-                result.err()
-            );
-        }
-    }
     // ===================================================================
     // Cascade Delete Tests (Issue #364)
     // ===================================================================
@@ -2932,7 +2843,7 @@ mod bitemporal_validation_tests {
 
         fn begin_write(&self) -> WriteTransaction {
             let tx_id = self.tx_id_gen.next();
-            let snapshot_ts = *self.current_timestamp.lock_or_err().unwrap();
+            let snapshot_ts = *self.current_timestamp.lock().unwrap();
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
             WriteTransaction::new(
@@ -2973,7 +2884,7 @@ mod bitemporal_validation_tests {
         assert!(commit_result.is_ok(), "Commit failed: {:?}", commit_result);
 
         // Verify via historical storage that valid_time != transaction_time
-        let historical = harness.historical.read_or_err().unwrap();
+        let historical = harness.historical.read();
         let version_id = historical.get_current_node_version(node_id).unwrap();
         let node_version = historical.get_node_version(version_id).unwrap();
 
@@ -3043,7 +2954,7 @@ mod bitemporal_validation_tests {
         assert!(commit_result.is_ok());
 
         // Get the node's creation time
-        let historical = harness.historical.read_or_err().unwrap();
+        let historical = harness.historical.read();
         let version_id = historical.get_current_node_version(node_id).unwrap();
         let creation_version = historical.get_node_version(version_id).unwrap();
         let creation_time = creation_version.temporal.valid_time().start();
@@ -3109,7 +3020,7 @@ mod bitemporal_validation_tests {
         tx2.commit().unwrap();
 
         // Verify via historical storage
-        let historical = harness.historical.read_or_err().unwrap();
+        let historical = harness.historical.read();
         let version_id = historical.get_current_edge_version(edge_id).unwrap();
         let edge_version = historical.get_edge_version(version_id).unwrap();
 

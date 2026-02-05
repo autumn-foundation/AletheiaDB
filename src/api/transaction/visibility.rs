@@ -6,9 +6,8 @@
 
 use crate::api::transaction::types::TxId;
 use crate::core::temporal::Timestamp;
-use crate::utils::lock::{MutexExt, RwLockExt};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 /// Snapshot of transaction visibility at a point in time.
 ///
@@ -525,7 +524,10 @@ impl TxVisibilityManager {
     /// Uses lock recovery to prevent cascade panics if the lock was poisoned
     /// by a panicking thread. The transaction set can safely be used after recovery.
     pub fn register_active(&self, tx_id: TxId) {
-        let mut active_guard = self.active.lock_or_recover();
+        let mut active_guard = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
 
         // Use Arc::make_mut for idiomatic copy-on-write.
         // This avoids a clone if the Arc is not shared (only one strong reference).
@@ -550,7 +552,10 @@ impl TxVisibilityManager {
     /// overhead with N concurrent transactions. Now clones only the Arc (cheap pointer
     /// copy), reducing snapshot capture from O(N) to O(1).
     pub fn capture_snapshot(&self, snapshot_timestamp: Timestamp) -> TransactionSnapshot {
-        let active_guard = self.active.lock_or_recover();
+        let active_guard = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
 
         TransactionSnapshot {
             snapshot_timestamp,
@@ -580,13 +585,19 @@ impl TxVisibilityManager {
     pub fn register_commit(&self, tx_id: TxId, commit_timestamp: Timestamp) {
         // Drop active lock before acquiring committed write lock to reduce contention
         {
-            let mut active_guard = self.active.lock_or_recover();
+            let mut active_guard = self
+                .active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
 
             // Use Arc::make_mut for idiomatic copy-on-write.
             Arc::make_mut(&mut *active_guard).remove(&tx_id);
         } // active lock released here
 
-        let mut committed = self.committed.write_or_recover();
+        let mut committed = self
+            .committed
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
         committed.insert(tx_id, commit_timestamp);
     }
 
@@ -603,7 +614,10 @@ impl TxVisibilityManager {
     /// Uses copy-on-write to remove from active set: clones HashSet, removes tx_id,
     /// wraps in new Arc. This ensures existing snapshots remain valid.
     pub fn register_abort(&self, tx_id: TxId) {
-        let mut active_guard = self.active.lock_or_recover();
+        let mut active_guard = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
 
         // Use Arc::make_mut for idiomatic copy-on-write.
         Arc::make_mut(&mut *active_guard).remove(&tx_id);
@@ -628,7 +642,10 @@ impl TxVisibilityManager {
         }
 
         // Check if transaction committed
-        let committed = self.committed.read_or_recover();
+        let committed = self
+            .committed
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
 
         match committed.get(created_by_tx) {
             None => false, // Not committed - not visible
@@ -644,7 +661,10 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn active_count(&self) -> usize {
-        let active_guard = self.active.lock_or_recover();
+        let active_guard = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         active_guard.len()
     }
 
@@ -653,7 +673,10 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn committed_count(&self) -> usize {
-        let committed = self.committed.read_or_recover();
+        let committed = self
+            .committed
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         committed.total_transaction_count()
     }
 
@@ -674,7 +697,10 @@ impl TxVisibilityManager {
     /// O(N log N) where N is the number of uncompressed transactions.
     /// Relatively expensive, so should not be called on every commit.
     pub fn compress_commit_log(&self) {
-        let mut committed = self.committed.write_or_recover();
+        let mut committed = self
+            .committed
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
         committed.compress();
     }
 
@@ -682,7 +708,10 @@ impl TxVisibilityManager {
     ///
     /// This is useful for monitoring and triggering compression.
     pub fn commit_log_memory_usage(&self) -> usize {
-        let committed = self.committed.read_or_recover();
+        let committed = self
+            .committed
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         committed.memory_usage()
     }
 
@@ -691,7 +720,10 @@ impl TxVisibilityManager {
     /// This provides detailed information about compression ratio,
     /// memory usage, and memory savings.
     pub fn get_compression_stats(&self) -> CompressionStats {
-        let committed = self.committed.read_or_recover();
+        let committed = self
+            .committed
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         committed.get_stats()
     }
 

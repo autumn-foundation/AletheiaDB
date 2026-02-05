@@ -27,7 +27,6 @@ use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use crate::core::version::VersionMetadata;
 use crate::storage::historical::HistoricalStorage;
 use crate::utils::error::{Result, StorageError};
-use crate::utils::lock::{MutexExt, RwLockExt};
 
 /// Helper function to create a bi-temporal interval with proper closing logic.
 ///
@@ -439,7 +438,7 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
     let _temporal = BiTemporalInterval::current(commit_timestamp);
 
     // Acquire lock on historical storage once before processing all operations.
-    let mut historical = tx.historical.write_or_err()?;
+    let mut historical = tx.historical.write();
 
     // Pre-generate all tombstone version IDs at once to reduce lock contention
     let num_deletes = tx
@@ -457,7 +456,7 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
 
     let mut tombstone_ids = if num_deletes > 0 {
         let ids: Result<Vec<u64>> = {
-            let id_gen = tx.version_id_gen.lock_or_err()?;
+            let id_gen = tx.version_id_gen.lock().unwrap();
             (0..num_deletes)
                 .map(|_| id_gen.next().map_err(Into::into))
                 .collect()

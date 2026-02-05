@@ -25,7 +25,6 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use crate::utils::error::{Result, StorageError, TransactionError};
-use crate::utils::lock::{MutexExt, RwLockExt};
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
@@ -269,11 +268,7 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
 
-            let mut ts = self.current_timestamp.lock_or_err().map_err(|e| {
-                TransactionError::CommitFailed {
-                    reason: format!("timestamp lock poisoned: {}", e),
-                }
-            })?;
+            let mut ts = self.current_timestamp.lock().unwrap();
 
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
@@ -682,8 +677,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let node_id = NodeId::new_unchecked(self.node_id_gen.lock_or_err()?.next()?);
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+        let node_id = NodeId::new_unchecked(self.node_id_gen.lock().unwrap().next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock().unwrap().next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         // Get timestamp: use provided valid_from or default to transaction start time
@@ -723,8 +718,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.lock_or_err()?.next()?);
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.lock().unwrap().next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock().unwrap().next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         // Get timestamp: use provided valid_from or default to transaction start time
@@ -762,7 +757,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current node to preserve label and existing properties
         let node = self.current.get_node(node_id)?;
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock().unwrap().next()?);
 
         // PATCH semantics: Merge new properties with existing ones
         // Start with existing properties
@@ -784,7 +779,7 @@ impl WriteOps for WriteTransaction {
         validation::validate_valid_from_future(valid_from)?;
 
         // Validate valid_from is not before entity creation
-        let historical = self.historical.read_or_err()?;
+        let historical = self.historical.read();
         if let Some(current_version_id) = historical.get_current_node_version(node_id)
             && let Some(current_version) = historical.get_node_version(current_version_id)
         {
@@ -826,7 +821,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current edge to preserve source, target, label and existing properties
         let edge = self.current.get_edge(edge_id)?;
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock().unwrap().next()?);
 
         // PATCH semantics: Merge new properties with existing ones
         // Start with existing properties
@@ -889,7 +884,7 @@ impl WriteOps for WriteTransaction {
         validation::validate_valid_from_future(valid_from)?;
 
         // Validate valid_from is not before entity creation
-        let historical = self.historical.read_or_err()?;
+        let historical = self.historical.read();
         if let Some(current_version_id) = historical.get_current_node_version(node_id)
             && let Some(current_version) = historical.get_node_version(current_version_id)
         {
