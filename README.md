@@ -354,6 +354,7 @@ db.write(|tx| {
 
 // Read current state
 let alice = db.get_node(alice_id)?;
+println!("Created Alice: {:?}", alice);
 ```
 
 ### Time-Travel Queries
@@ -369,9 +370,7 @@ let historical_alice = db.get_node_at_time(
 )?;
 
 // Track how properties changed
-if let Some(old_alice) = historical_alice {
-    println!("Alice's age was: {:?}", old_alice.properties.get("age"));
-}
+println!("Alice's age was: {:?}", historical_alice.properties.get("age"));
 ```
 
 ### Vector Search with HNSW
@@ -386,6 +385,8 @@ let db = AletheiaDB::new().unwrap();
 db.vector_index("embedding")
     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     .enable()?;
+
+let embedding = vec![0.1f32; 384];
 
 // Store node with embedding - automatically indexed!
 let doc_id = db.create_node("Document",
@@ -613,7 +614,7 @@ use std::sync::Arc;
 let cold = RedbColdStorage::new("data/cold.redb", RedbConfig::default())?;
 
 // Create tiered storage
-let tiered = TieredStorage::with_default_config(Box::new(cold));
+let tiered = TieredStorage::with_default_config(Arc::new(cold));
 
 // Configure historical storage
 let mut historical = HistoricalStorage::new();
