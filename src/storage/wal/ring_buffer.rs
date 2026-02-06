@@ -555,7 +555,9 @@ impl WalRingBuffer {
                         }
 
                         // Signal that the slot is ready for reading
-                        slot.sequence.store(expected_seq + 1, Ordering::Release);
+                        // Use wrapping_add to handle u64 wraparound gracefully
+                        slot.sequence
+                            .store(expected_seq.wrapping_add(1), Ordering::Release);
 
                         return Ok(());
                     }
@@ -564,27 +566,39 @@ impl WalRingBuffer {
                         continue;
                     }
                 }
-            } else if current_seq < expected_seq {
-                // Buffer is full - the consumer hasn't caught up
-                spin_count += 1;
-
-                if spin_count >= current_spin_limit {
-                    // Check if we've hit max spins
-                    if current_spin_limit >= self.backpressure.max_spins {
-                        return Err(entry);
-                    }
-                    // Exponential backoff: double the spin limit
-                    current_spin_limit =
-                        (current_spin_limit.saturating_mul(2)).min(self.backpressure.max_spins);
-                    spin_count = 0;
-                }
-
-                std::hint::spin_loop();
             } else {
-                // current_seq > expected_seq: This shouldn't happen in normal operation.
-                // It indicates the consumer has advanced past where we expected.
-                // Retry with fresh position.
-                continue;
+                // Use wrapping subtraction to handle u64 wraparound correctly
+                // This calculates the "distance" from current_seq to expected_seq in
+                // modulo 2^64 arithmetic.
+                //
+                // The slot can be in these states:
+                // - seq == expected_seq: Available (handled above)
+                // - seq < expected_seq: Buffer is full (consumer hasn't caught up)
+                // - seq > expected_seq: Already processed (another producer advanced)
+                let distance_behind = expected_seq.wrapping_sub(current_seq);
+
+                if distance_behind > 0 && distance_behind <= self.capacity as u64 {
+                    // Buffer is full - the slot is still occupied by a previous cycle
+                    // current_seq is behind expected_seq (from previous wrap cycle)
+                    spin_count += 1;
+
+                    if spin_count >= current_spin_limit {
+                        // Check if we've hit max spins
+                        if current_spin_limit >= self.backpressure.max_spins {
+                            return Err(entry);
+                        }
+                        // Exponential backoff: double the spin limit
+                        current_spin_limit =
+                            (current_spin_limit.saturating_mul(2)).min(self.backpressure.max_spins);
+                        spin_count = 0;
+                    }
+
+                    std::hint::spin_loop();
+                } else {
+                    // current_seq > expected_seq: Another producer already claimed and finished this slot.
+                    // Retry with fresh position.
+                    continue;
+                }
             }
         }
     }
@@ -656,7 +670,8 @@ impl WalRingBuffer {
             let slot = &self.slots[idx];
 
             // Expected sequence for this slot to contain data
-            let expected_seq = pos + 1;
+            // Use wrapping_add to handle u64 wraparound gracefully
+            let expected_seq = pos.wrapping_add(1);
             let current_seq = slot.sequence.load(Ordering::Acquire);
 
             if current_seq == expected_seq {
@@ -692,8 +707,9 @@ impl WalRingBuffer {
 
                         // Mark slot as available for writing again
                         // New sequence = pos + capacity (next write cycle)
+                        // Use wrapping_add to handle u64 wraparound gracefully
                         slot.sequence
-                            .store(pos + self.capacity as u64, Ordering::Release);
+                            .store(pos.wrapping_add(self.capacity as u64), Ordering::Release);
 
                         if let Some(e) = entry {
                             entries.push(e);
@@ -1189,5 +1205,151 @@ mod tests {
         assert!(!buf.is_closed());
         buf.close();
         assert!(buf.is_closed());
+    }
+
+    #[cfg(test)]
+    impl WalRingBuffer {
+        /// Helper to inject wraparound state for testing.
+        ///
+        /// This method is only available in test builds and allows tests to
+        /// set up specific wraparound scenarios by directly manipulating the
+        /// internal write/read positions and slot sequences.
+        ///
+        /// # Safety
+        ///
+        /// This method should only be called on a buffer that is not being
+        /// concurrently accessed. It uses `Ordering::Relaxed` and clears all
+        /// slot entries.
+        pub fn set_state_for_wraparound_test(&mut self, write_pos: u64, read_pos: u64) {
+            // Set positions
+            self.write_pos.store(write_pos, Ordering::Relaxed);
+            self.read_pos.store(read_pos, Ordering::Relaxed);
+
+            // Initialize slots to represent an empty buffer at this position.
+            // For an empty buffer, each slot should be available for writing when
+            // the write position reaches it.
+            //
+            // Key insight: For position P, slot[P % capacity] needs sequence == P
+            // to be available for writing.
+            //
+            // We initialize the next `capacity` positions starting from write_pos,
+            // ensuring proper handling of wraparound (e.g., u64::MAX -> 0).
+            for i in 0..self.capacity {
+                // Calculate the position that will write to this slot next
+                let slot_pos = write_pos.wrapping_add(i as u64);
+
+                // Determine which slot index this position maps to
+                let slot_idx = (slot_pos % self.capacity as u64) as usize;
+
+                // Make slot available for writing at its position
+                self.slots[slot_idx]
+                    .sequence
+                    .store(slot_pos, Ordering::Relaxed);
+
+                // Clear entries
+                unsafe {
+                    *self.slots[slot_idx].entry.get() = None;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_wraparound_append_no_panic() {
+        // Test that appending near u64::MAX doesn't panic due to integer overflow
+        let mut buf = WalRingBuffer::new(4);
+
+        // Set write position to be just before u64::MAX
+        let start_pos = u64::MAX - 2;
+        buf.set_state_for_wraparound_test(start_pos, start_pos);
+
+        // Appending should succeed and wrap around without panicking
+        for i in 0..4 {
+            let lsn = LSN(i);
+            let entry = PendingEntry::new_async(lsn, vec![]);
+            buf.try_append(entry)
+                .expect("Append should not panic near wraparound");
+        }
+
+        // Verify write position has wrapped
+        let expected_pos = start_pos.wrapping_add(4);
+        assert_eq!(buf.write_pos.load(Ordering::Relaxed), expected_pos);
+    }
+
+    #[test]
+    fn test_wraparound_drain_no_panic() {
+        // Test that drain uses wrapping_add (no panic in debug mode)
+        let mut buf = WalRingBuffer::new(4);
+
+        // Set read position to be just before u64::MAX
+        let start_pos = u64::MAX - 2;
+        buf.set_state_for_wraparound_test(start_pos, start_pos);
+
+        // Fill the buffer
+        for i in 0..4 {
+            let lsn = LSN(i);
+            let entry = PendingEntry::new_async(lsn, vec![]);
+            buf.try_append(entry).expect("Should append");
+        }
+
+        // Draining should succeed and wrap around without panicking
+        let entries = buf.drain();
+        assert_eq!(entries.len(), 4, "Should drain all entries near wraparound");
+
+        // Verify read position has wrapped
+        let expected_pos = start_pos.wrapping_add(4);
+        assert_eq!(buf.read_pos.load(Ordering::Relaxed), expected_pos);
+    }
+
+    #[test]
+    fn test_wraparound_logic() {
+        // Test that wrapping arithmetic correctly handles sequence comparisons
+        let capacity = 4;
+        let mut buf = WalRingBuffer::new(capacity);
+
+        // Set state to be near u64::MAX to force wraparound
+        let start_pos = u64::MAX - (capacity as u64 / 2);
+        buf.set_state_for_wraparound_test(start_pos, start_pos);
+
+        // 1. Append `capacity` items, which should wrap around u64::MAX
+        for i in 0..capacity {
+            let lsn = LSN(i as u64);
+            let entry = PendingEntry::new_async(lsn, vec![i as u8]);
+            assert!(
+                buf.try_append(entry).is_ok(),
+                "Append should succeed when buffer has space"
+            );
+        }
+
+        // 2. Buffer should now be full, next append should fail
+        let full_entry = PendingEntry::new_async(LSN(capacity as u64), vec![]);
+        assert!(
+            buf.try_append(full_entry).is_err(),
+            "Append should fail when buffer is full across wraparound"
+        );
+
+        // 3. Drain all `capacity` items, which should also wrap around
+        let entries = buf.drain();
+        assert_eq!(
+            entries.len(),
+            capacity,
+            "Should drain all appended entries across wraparound"
+        );
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.data, vec![i as u8]);
+        }
+
+        // 4. Buffer should be empty now
+        assert!(
+            buf.drain().is_empty(),
+            "Buffer should be empty after draining"
+        );
+
+        // 5. Test one more append/drain cycle to ensure state is correct
+        let final_entry = PendingEntry::new_async(LSN(100), vec![100]);
+        assert!(buf.try_append(final_entry).is_ok());
+        let final_drained = buf.drain();
+        assert_eq!(final_drained.len(), 1);
+        assert_eq!(final_drained[0].data, vec![100]);
     }
 }
