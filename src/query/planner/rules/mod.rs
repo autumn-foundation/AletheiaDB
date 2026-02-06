@@ -9,10 +9,12 @@ use crate::utils::error::Result;
 
 use super::stats::Statistics;
 
+mod filter_scan_fusion;
 mod limit_pushdown;
 mod operation_reordering;
 mod predicate_pushdown;
 
+pub use filter_scan_fusion::FilterScanFusion;
 pub use limit_pushdown::LimitPushdown;
 pub use operation_reordering::OperationReordering;
 pub use predicate_pushdown::PredicatePushdown;
@@ -40,6 +42,7 @@ pub trait OptimizationRule: Send + Sync {
 pub fn default_rules() -> Vec<Box<dyn OptimizationRule>> {
     vec![
         Box::new(PredicatePushdown),
+        Box::new(FilterScanFusion),
         Box::new(LimitPushdown),
         Box::new(OperationReordering),
         // Future rules:
@@ -61,6 +64,7 @@ mod tests {
         // Check rule names
         let names: Vec<&str> = rules.iter().map(|r| r.name()).collect();
         assert!(names.contains(&"predicate-pushdown"));
+        assert!(names.contains(&"filter-scan-fusion"));
         assert!(names.contains(&"limit-pushdown"));
         assert!(names.contains(&"operation-reordering"));
     }

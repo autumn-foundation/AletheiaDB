@@ -229,6 +229,32 @@ impl QueryBuilder<state::Initial> {
             label: Some(label.to_string()),
         })
     }
+
+    /// Find nodes by label and property value.
+    ///
+    /// Syntactic sugar for `scan_label(label).filter(Predicate::eq(key, value))`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
+    /// let results = db.query()
+    ///     .find_by_property("Person", "name", "Alice")
+    ///     .build();
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn find_by_property(
+        self,
+        label: &str,
+        key: &str,
+        value: impl Into<super::ir::PredicateValue>,
+    ) -> QueryBuilder<state::HasNodes> {
+        self.scan_label(label).filter(Predicate::eq(key, value))
+    }
 }
 
 impl Default for QueryBuilder<state::Initial> {
@@ -1685,5 +1711,40 @@ mod tests {
         let tx_range = ctx.transaction_time_between.as_ref().unwrap();
         assert_eq!(tx_range.start(), range_start);
         assert_eq!(tx_range.end(), range_end);
+    }
+
+    #[test]
+    fn test_find_by_property_produces_correct_ops() {
+        let query = QueryBuilder::new()
+            .find_by_property("Person", "name", "Alice")
+            .build();
+
+        assert_eq!(query.ops.len(), 2);
+        assert!(matches!(
+            &query.ops[0],
+            QueryOp::ScanNodes { label: Some(l) } if l == "Person"
+        ));
+        assert!(matches!(
+            &query.ops[1],
+            QueryOp::Filter(Predicate::Eq { key, .. }) if key == "name"
+        ));
+    }
+
+    #[test]
+    fn test_find_by_property_with_int_value() {
+        let query = QueryBuilder::new()
+            .find_by_property("Person", "age", 30i64)
+            .build();
+
+        assert_eq!(query.ops.len(), 2);
+        assert!(matches!(
+            &query.ops[0],
+            QueryOp::ScanNodes { label: Some(l) } if l == "Person"
+        ));
+        assert!(matches!(
+            &query.ops[1],
+            QueryOp::Filter(Predicate::Eq { key, value })
+                if key == "age" && matches!(value, super::super::ir::PredicateValue::Int(30))
+        ));
     }
 }

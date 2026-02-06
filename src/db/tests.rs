@@ -875,3 +875,74 @@ fn test_find_similar_as_of_in() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, node_id);
 }
+
+#[test]
+fn test_find_nodes_by_property_facade() {
+    let db = GallifreyDB::new().unwrap();
+
+    let alice_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+    let bob_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Bob")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Charlie")
+            .insert("age", 25i64)
+            .build(),
+    )
+    .unwrap();
+
+    // Find by name
+    let results =
+        db.find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".into()));
+    assert_eq!(results, vec![alice_id]);
+
+    // Find by age (multiple matches)
+    let mut results = db.find_nodes_by_property("Person", "age", &PropertyValue::Int(30));
+    results.sort();
+    let mut expected = vec![alice_id, bob_id];
+    expected.sort();
+    assert_eq!(results, expected);
+
+    // No matches
+    let results =
+        db.find_nodes_by_property("Person", "name", &PropertyValue::String("Nobody".into()));
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_find_nodes_by_property_facade_cross_label() {
+    let db = GallifreyDB::new().unwrap();
+
+    let person_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    db.create_node(
+        "Company",
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+    )
+    .unwrap();
+
+    // Should only match Person label
+    let results =
+        db.find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".into()));
+    assert_eq!(results, vec![person_id]);
+}

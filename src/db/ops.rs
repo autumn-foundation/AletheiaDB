@@ -1,7 +1,7 @@
 use crate::api::transaction::WriteOps;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
-use crate::core::property::PropertyMap;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::db::GallifreyDB;
 use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
 use crate::utils::error::Result;
@@ -144,5 +144,20 @@ impl GallifreyDB {
     #[inline]
     pub fn in_degree(&self, node_id: NodeId) -> usize {
         self.current.in_degree(node_id)
+    }
+
+    /// Find nodes by label and property value (current state).
+    ///
+    /// Returns the IDs of all nodes with the given label whose specified property
+    /// equals the given value.
+    #[inline]
+    pub fn find_nodes_by_property(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &PropertyValue,
+    ) -> Vec<NodeId> {
+        self.current
+            .find_nodes_by_property(label, property_key, property_value)
     }
 }

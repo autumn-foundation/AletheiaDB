@@ -273,6 +273,7 @@ impl OperationReordering {
                 ScanOp::TemporalNodeLookup { node_ids, .. } => node_ids.len(),
                 ScanOp::TemporalVectorSearch { k, .. } => *k,
                 ScanOp::SimilarToNode { k, .. } => *k,
+                ScanOp::PropertyScan { .. } => 100, // ~10% selectivity estimate
             },
             LogicalOp::Unary {
                 op: UnaryOp::Filter(_),

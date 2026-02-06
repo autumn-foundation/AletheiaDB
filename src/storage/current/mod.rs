@@ -7,7 +7,7 @@
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
-use crate::core::property::PropertyMap;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
 use crate::index::current::CurrentIndexes;
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
@@ -1776,6 +1776,45 @@ impl CurrentStorage {
             .iter_nodes()
             .filter(|n| n.label == label_id)
             .map(|n| n.clone())
+            .collect()
+    }
+
+    /// Find nodes by label and property value.
+    ///
+    /// Returns the IDs of all nodes with the given label whose specified property
+    /// equals the given value. Returns an empty `Vec` if no matches are found,
+    /// or if the label or property key has never been interned.
+    ///
+    /// This is more efficient than `get_nodes_by_label` followed by manual filtering
+    /// because it avoids cloning non-matching nodes.
+    ///
+    /// # Performance
+    ///
+    /// - **Time**: O(N) where N = nodes with the given label
+    /// - **Space**: O(M) where M = number of matching nodes
+    pub fn find_nodes_by_property(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &PropertyValue,
+    ) -> Vec<NodeId> {
+        let label_id = match crate::core::interning::GLOBAL_INTERNER.get_id(label) {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+        let key_id = match crate::core::interning::GLOBAL_INTERNER.get_id(property_key) {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+        self.indexes
+            .iter_nodes()
+            .filter(|n| n.label == label_id)
+            .filter(|n| {
+                n.properties
+                    .get_by_interned_key(&key_id)
+                    .is_some_and(|v| v == property_value)
+            })
+            .map(|n| n.id)
             .collect()
     }
 
