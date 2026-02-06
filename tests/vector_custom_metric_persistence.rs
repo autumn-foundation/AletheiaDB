@@ -1,8 +1,6 @@
 use gallifreydb::core::id::NodeId;
 use gallifreydb::index::VectorIndex;
-use gallifreydb::index::vector::{
-    DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder,
-};
+use gallifreydb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
