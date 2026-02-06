@@ -25,7 +25,7 @@ fn test_recursive_array_stack_overflow_protection() {
     match result {
         Ok(_) => panic!("Deserialization should have failed due to recursion depth limit"),
         Err(e) => {
-            let msg = e.to_string();
+            let msg: String = e.to_string();
             if !msg.contains("recursion depth limit exceeded") {
                 panic!("Expected recursion limit error, got: {}", msg);
             }

@@ -86,7 +86,7 @@ fn test_search_with_filter_empty_index() {
         .unwrap();
 
     let results = index
-        .search_with_filter(&[1.0, 0.0, 0.0, 0.0], 10, |_| true)
+        .search_with_filter(&[1.0, 0.0, 0.0, 0.0], 10, |_: &NodeId| true)
         .unwrap();
     assert!(results.is_empty());
 }
@@ -141,7 +141,7 @@ fn test_search_with_filter_no_matches() {
 
     // Filter that matches nothing
     let results = index
-        .search_with_filter(&[0.0, 0.0, 0.0, 0.0], 10, |_| false)
+        .search_with_filter(&[0.0, 0.0, 0.0, 0.0], 10, |_: &NodeId| false)
         .unwrap();
     assert!(results.is_empty());
 }
@@ -408,7 +408,7 @@ fn test_search_with_filter_haversine() {
     }
 
     let results = index
-        .search_with_filter(&[0.0, 0.0], 5, |id| id.as_u64() <= 5)
+        .search_with_filter(&[0.0, 0.0], 5, |id: &NodeId| id.as_u64() <= 5)
         .unwrap();
 
     for (id, _) in &results {
@@ -438,7 +438,7 @@ fn test_search_with_filter_hamming() {
     }
 
     let results = index
-        .search_with_filter(&[1.0, 1.0, 1.0, 1.0], 3, |id| id.as_u64() % 2 == 0)
+        .search_with_filter(&[1.0, 1.0, 1.0, 1.0], 3, |id: &NodeId| id.as_u64() % 2 == 0)
         .unwrap();
 
     for (id, _) in &results {

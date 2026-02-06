@@ -54,7 +54,7 @@ fn test_search_with_filter_hot_path_correctness() {
     // This exercises the filter callback on many candidate nodes
     let k = 10;
     let results = index
-        .search_with_filter(&query, k, |id| id.as_u64() % 2 == 0)
+        .search_with_filter(&query, k, |id: &NodeId| id.as_u64() % 2 == 0)
         .expect("Search should succeed");
 
     // Verify all results satisfy the filter predicate
@@ -101,7 +101,7 @@ fn test_search_with_filter_nodeid_safety() {
 
     // Filter that exercises NodeId methods
     let results = index
-        .search_with_filter(&query, 5, |id| {
+        .search_with_filter(&query, 5, |id: &NodeId| {
             // These operations should work without validation overhead
             let raw_id = id.as_u64();
             let is_valid = raw_id < 100;
@@ -208,7 +208,7 @@ fn test_search_vs_search_with_filter_consistency() {
 
     // Search with filter that accepts all nodes
     let filtered_results = index
-        .search_with_filter(&query, k, |_| true)
+        .search_with_filter(&query, k, |_: &NodeId| true)
         .expect("Filtered search should succeed");
 
     // Both should return the same results (since filter accepts all)
@@ -267,7 +267,7 @@ fn test_search_with_filter_performance_sanity_check() {
     let start = std::time::Instant::now();
     for _ in 0..num_searches {
         let _results = index
-            .search_with_filter(&query, k, |id| {
+            .search_with_filter(&query, k, |id: &NodeId| {
                 id.as_u64() % 2 == 0 // Filter to even IDs
             })
             .expect("Search should succeed");

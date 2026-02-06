@@ -536,7 +536,7 @@ fn test_search_with_filter_euclidean() {
 
     // Filter to only IDs > 5
     let results = index
-        .search_with_filter(&[5.0, 0.0, 0.0, 0.0], 5, |id| id.as_u64() > 5)
+        .search_with_filter(&[5.0, 0.0, 0.0, 0.0], 5, |id: &NodeId| id.as_u64() > 5)
         .unwrap();
 
     for (id, _) in &results {
@@ -556,7 +556,7 @@ fn test_search_with_filter_dot_product() {
     }
 
     let results = index
-        .search_with_filter(&[1.0, 0.0, 0.0, 0.0], 3, |id| id.as_u64() % 2 == 0)
+        .search_with_filter(&[1.0, 0.0, 0.0, 0.0], 3, |id: &NodeId| id.as_u64() % 2 == 0)
         .unwrap();
 
     for (id, _) in &results {
@@ -603,7 +603,7 @@ fn test_dimension_mismatch_on_search_with_filter() {
     let node = NodeId::new(1).unwrap();
     index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
-    let result = index.search_with_filter(&[1.0, 0.0], 1, |_| true);
+    let result = index.search_with_filter(&[1.0, 0.0], 1, |_: &NodeId| true);
     assert!(result.is_err());
 }
 
@@ -654,7 +654,7 @@ fn test_search_with_filter_tanimoto() {
     }
 
     let results = index
-        .search_with_filter(&[1.0, 1.0, 1.0, 1.0], 3, |id| id.as_u64() <= 5)
+        .search_with_filter(&[1.0, 1.0, 1.0, 1.0], 3, |id: &NodeId| id.as_u64() <= 5)
         .unwrap();
 
     for (id, similarity) in &results {
