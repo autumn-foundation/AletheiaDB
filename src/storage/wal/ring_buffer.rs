@@ -1225,15 +1225,22 @@ mod tests {
             self.write_pos.store(write_pos, Ordering::Relaxed);
             self.read_pos.store(read_pos, Ordering::Relaxed);
 
-            // Initialize all slot sequences based on current read position
-            // Each slot's sequence indicates its state:
-            // - sequence == pos: available for writing
-            // - sequence == pos + 1: occupied, ready for reading
-            // - sequence == pos + capacity: available for next cycle
+            // Initialize slots to represent an empty buffer at this position.
+            // For an empty buffer, each slot should be available for writing when
+            // the write position reaches it.
+            //
+            // Key insight: For position P, slot[P % capacity] needs sequence == P
+            // to be available for writing.
             for i in 0..self.capacity {
-                let slot_pos = read_pos.wrapping_add(i as u64);
-                // Set all slots as available (matching their expected write position)
-                self.slots[i].sequence.store(slot_pos, Ordering::Relaxed);
+                // Calculate what position would naturally write to this slot
+                let base = write_pos / self.capacity as u64 * self.capacity as u64;
+                let slot_write_pos = base.wrapping_add(i as u64);
+
+                // Make slot available for writing at its position
+                self.slots[i]
+                    .sequence
+                    .store(slot_write_pos, Ordering::Relaxed);
+
                 // Clear entries
                 unsafe {
                     *self.slots[i].entry.get() = None;
