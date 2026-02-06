@@ -1,8 +1,10 @@
-use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization, HnswConfig, HnswIndex};
-use gallifreydb::index::VectorIndex;
 use gallifreydb::core::id::NodeId;
-use tempfile::tempdir;
+use gallifreydb::index::VectorIndex;
+use gallifreydb::index::vector::{
+    DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder,
+};
 use std::sync::{Arc, Mutex};
+use tempfile::tempdir;
 
 #[test]
 fn test_custom_metric_persistence() {
@@ -49,12 +51,14 @@ fn test_custom_metric_persistence() {
     let call_count_2 = Arc::new(Mutex::new(0));
     let call_count_2_clone = call_count_2.clone();
 
-    let config = HnswConfig::new(dims, DistanceMetric::Cosine)
-        .with_custom_metric("counting_metric", move |a, b| {
+    let config = HnswConfig::new(dims, DistanceMetric::Cosine).with_custom_metric(
+        "counting_metric",
+        move |a, b| {
             let mut guard = call_count_2_clone.lock().unwrap();
             *guard += 1;
             a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
-        });
+        },
+    );
 
     let loaded_index = HnswIndex::load(&index_path, config).unwrap();
 
@@ -63,5 +67,8 @@ fn test_custom_metric_persistence() {
 
     // 4. Verify metric was called
     let guard = call_count_2.lock().unwrap();
-    assert!(*guard > 0, "Metric SHOULD be called after load, but it was ignored!");
+    assert!(
+        *guard > 0,
+        "Metric SHOULD be called after load, but it was ignored!"
+    );
 }

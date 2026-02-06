@@ -1308,7 +1308,11 @@ fn load_mappings_with_integrity(
 
     // Parse count
     let count_offset = if version == 1 { 5 } else { 6 };
-    let count = u64::from_le_bytes(file_data[count_offset..count_offset + 8].try_into().unwrap()) as usize;
+    let count = u64::from_le_bytes(
+        file_data[count_offset..count_offset + 8]
+            .try_into()
+            .unwrap(),
+    ) as usize;
 
     // Verify data size with checked arithmetic
     let data_size = count.checked_mul(16).ok_or_else(|| {
@@ -2106,9 +2110,9 @@ mod tests {
 
         // Modify count to be larger (mismatch with actual size), then fix CRC to pass CRC check
         let mut data = std::fs::read(&mappings_path).unwrap();
-        // Count is at offset 5 (Magic 4 + Version 1)
+        // Count is at offset 6 (Magic 4 + Version 1 + Quant 1)
         // Original count is 1. Let's make it 2.
-        let count_offset = 5;
+        let count_offset = 6;
         data[count_offset] = 2;
 
         // Recompute CRC so we pass the CRC check and hit the size check
@@ -2152,7 +2156,8 @@ mod tests {
 
         // Modify count to be HUGE (u64::MAX) to trigger arithmetic overflow check
         let mut data = std::fs::read(&mappings_path).unwrap();
-        let count_offset = 5;
+        // Count is at offset 6 (Magic 4 + Version 1 + Quant 1)
+        let count_offset = 6;
         let huge_count = u64::MAX;
 
         // Write huge count

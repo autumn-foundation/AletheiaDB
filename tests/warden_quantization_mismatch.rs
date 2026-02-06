@@ -1,6 +1,8 @@
-use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization, HnswConfig, HnswIndex};
-use gallifreydb::index::VectorIndex;
 use gallifreydb::core::id::NodeId;
+use gallifreydb::index::VectorIndex;
+use gallifreydb::index::vector::{
+    DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, Quantization,
+};
 use tempfile::tempdir;
 
 #[test]
