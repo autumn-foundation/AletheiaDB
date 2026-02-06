@@ -1943,8 +1943,8 @@ fn test_reconstruction_depth_limit_exceeded_for_nodes() {
     // and cache_size=0 to prevent caching from defeating the depth test
     let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
         AnchorConfig {
-            anchor_interval: MAX_RECONSTRUCTION_DEPTH * 2, // Won't create anchors
-            max_delta_chain: MAX_RECONSTRUCTION_DEPTH * 2,
+            anchor_interval: (MAX_RECONSTRUCTION_DEPTH * 2) as u32, // Won't create anchors
+            max_delta_chain: (MAX_RECONSTRUCTION_DEPTH * 2) as u32,
         },
         RetentionPolicy {
             max_versions_per_entity: MAX_RECONSTRUCTION_DEPTH * 2, // Allow more versions than depth limit
@@ -2075,8 +2075,8 @@ fn test_reconstruction_depth_limit_exceeded_for_edges() {
     // and cache_size=0 to prevent caching from defeating the depth test
     let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
         AnchorConfig {
-            anchor_interval: MAX_RECONSTRUCTION_DEPTH * 2, // Won't create anchors
-            max_delta_chain: MAX_RECONSTRUCTION_DEPTH * 2,
+            anchor_interval: (MAX_RECONSTRUCTION_DEPTH * 2) as u32, // Won't create anchors
+            max_delta_chain: (MAX_RECONSTRUCTION_DEPTH * 2) as u32,
         },
         RetentionPolicy {
             max_versions_per_entity: MAX_RECONSTRUCTION_DEPTH * 2, // Allow more versions than depth limit
