@@ -1097,4 +1097,18 @@ mod tests {
         hasher.write(&bytes);
         assert_eq!(hasher.finish(), 3); // Should use len()
     }
+
+    #[test]
+    fn test_display_impl() {
+        // Test successful resolution via GLOBAL_INTERNER
+        let s = "display_test_string";
+        let id = GLOBAL_INTERNER.intern(s).unwrap();
+        assert_eq!(format!("{}", id), s);
+
+        // Test fallback (ID not in GLOBAL_INTERNER)
+        // We assume 1 billion is not used yet
+        let raw_id = 1_000_000_000;
+        let id = InternedString::from_raw(raw_id);
+        assert_eq!(format!("{}", id), format!("Interned({})", raw_id));
+    }
 }
