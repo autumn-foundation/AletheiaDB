@@ -101,13 +101,22 @@ def format_time(ns: float) -> tuple[float, str]:
 def collect_benchmark_results(criterion_dir: Path) -> dict[str, list[BenchmarkResult]]:
     """Collect all benchmark results from Criterion output directory."""
     results = defaultdict(list)
+    seen_benchmarks = set()  # Track seen benchmarks to avoid duplicates
 
     # Walk through criterion directory structure
     for root, dirs, files in os.walk(criterion_dir):
         if 'estimates.json' in files:
             # Skip Criterion's base/ directories (used for internal comparison)
-            # We only want the latest results (in new/ or root)
             if 'base' in Path(root).parts:
+                continue
+
+            # Only collect from 'new' directories or root-level estimates
+            # Prefer 'new' over root to avoid duplicates
+            path_parts = Path(root).relative_to(criterion_dir).parts
+
+            # Skip if this is not in a 'new' directory and we have nested structure
+            # (Criterion creates: benchmark/new/estimates.json)
+            if len(path_parts) > 1 and 'new' not in path_parts:
                 continue
 
             estimates_path = Path(root) / 'estimates.json'
@@ -115,11 +124,15 @@ def collect_benchmark_results(criterion_dir: Path) -> dict[str, list[BenchmarkRe
 
             if result:
                 # Determine which benchmark suite this belongs to
-                # Criterion structure: target/criterion/<suite>/<benchmark>/estimates.json
-                parts = Path(root).relative_to(criterion_dir).parts
-                if len(parts) >= 1:
-                    suite = parts[0]
-                    results[suite].append(result)
+                # Criterion structure: target/criterion/<suite>/<benchmark>/new/estimates.json
+                if len(path_parts) >= 1:
+                    suite = path_parts[0]
+
+                    # Use benchmark name as unique key to avoid duplicates
+                    bench_key = f"{suite}/{result.name}"
+                    if bench_key not in seen_benchmarks:
+                        seen_benchmarks.add(bench_key)
+                        results[suite].append(result)
 
     return dict(results)
 
