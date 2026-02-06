@@ -1940,6 +1940,49 @@ impl CurrentStorage {
         self.indexes.iter_edges().map(|e| e.clone())
     }
 
+    /// Scan nodes by label, returning an iterator over matching node IDs.
+    ///
+    /// This method efficiently filters the node collection to find all nodes
+    /// with the specified label.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - The label/type to filter by (e.g., "Person", "Product")
+    ///
+    /// # Returns
+    ///
+    /// An iterator yielding `NodeId` for all nodes matching the label.
+    ///
+    /// # Performance
+    ///
+    /// - **Time Complexity**: O(n) where n is the total number of nodes
+    /// - **Space Complexity**: O(1) - iterator, no allocation
+    /// - **Filtering**: Uses interned string comparison (pointer equality)
+    ///
+    /// Note: This operation scans all nodes. For workloads with frequent label scans,
+    /// consider using the query engine's optimized label index lookups.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Scan all Person nodes
+    /// for node_id in storage.scan_nodes_by_label("Person") {
+    ///     println!("Found Person: {}", node_id);
+    /// }
+    /// ```
+    pub fn scan_nodes_by_label(&self, label: &str) -> impl Iterator<Item = NodeId> + '_ {
+        // Look up the label in the interner without creating a new entry
+        // If the label was never interned, no nodes with that label exist
+        let interned_label = GLOBAL_INTERNER.get_id(label);
+
+        self.indexes
+            .iter_nodes()
+            .filter(move |node_ref| {
+                interned_label.is_some_and(|label_id| node_ref.label == label_id)
+            })
+            .map(|node_ref| node_ref.id)
+    }
+
     /// Create an MVCC snapshot at the specified LSN.
     ///
     /// This provides snapshot isolation for checkpoint operations, preventing
