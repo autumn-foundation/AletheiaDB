@@ -3,7 +3,7 @@ use crate::api::transaction::{ReadOps, WriteOps};
 use crate::core::GLOBAL_INTERNER;
 use crate::core::id::NodeId;
 use crate::core::property::{PropertyMapBuilder, PropertyValue};
-use crate::utils::error::Result;
+use crate::utils::error::{Error, Result};
 
 #[test]
 fn test_create_node() {
@@ -153,7 +153,7 @@ fn test_closure_based_write_api() {
                 "KNOWS",
                 PropertyMapBuilder::new().insert("since", 2024i64).build(),
             )?;
-            Ok((n1, e))
+            Ok::<_, Error>((n1, e))
         })
         .unwrap();
 
@@ -186,10 +186,11 @@ fn test_closure_based_read_api() {
     let name = db
         .read(|tx| {
             let node = tx.get_node(node_id)?;
-            Ok(node
-                .get_property("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()))
+            Ok::<_, Error>(
+                node.get_property("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            )
         })
         .unwrap();
 
@@ -255,7 +256,7 @@ fn test_transaction_atomicity() {
         .unwrap();
 
     // Try to create multiple operations, one of which will fail
-    let result = db.write(|tx| {
+    let result: std::result::Result<(), Error> = db.write(|tx| {
         tx.create_node("Person", PropertyMapBuilder::new().build())?;
         tx.create_node("Person", PropertyMapBuilder::new().build())?;
         // This should fail validation (non-existent target)

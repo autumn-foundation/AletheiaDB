@@ -9,6 +9,7 @@
 mod common;
 
 use aletheiadb::AletheiaDB;
+use aletheiadb::Error;
 use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::core::id::{NodeId, VersionId};
 use aletheiadb::core::property::PropertyMapBuilder;
@@ -657,7 +658,7 @@ fn setup_database_with_versions(count: usize) -> AletheiaDB {
 
             db.write(|tx| {
                 tx.update_node(node_id, updated_props.clone())?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         }

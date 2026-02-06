@@ -281,6 +281,7 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
+    use crate::utils::error::Error;
 
     fn create_test_db() -> AletheiaDB {
         let db = AletheiaDB::new().unwrap();
@@ -401,7 +402,7 @@ mod tests {
             .write_with_timestamp(|tx| {
                 tx.create_edge(start, middle, "NEXT", PropertyMapBuilder::new().build())?;
                 tx.create_edge(middle, end, "NEXT", PropertyMapBuilder::new().build())?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
 
@@ -456,7 +457,7 @@ mod tests {
             .write_with_timestamp(|tx| {
                 tx.create_edge(start, new_middle, "NEXT", PropertyMapBuilder::new().build())?;
                 tx.create_edge(new_middle, end, "NEXT", PropertyMapBuilder::new().build())?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
 

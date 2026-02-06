@@ -4,6 +4,7 @@
 //! AletheiaDB API, including storage, retrieval, versioning, and
 //! temporal queries.
 
+use aletheiadb::Error;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 
 // ============================================================
@@ -958,7 +959,7 @@ fn test_delete_node_removes_from_index() {
     // Delete node1 via transaction
     db.write(|tx| {
         tx.delete_node(node1)?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 
@@ -1012,7 +1013,7 @@ fn test_delete_node_memory_stability_repeated_cycles() {
         // Delete node via transaction
         db.write(|tx| {
             tx.delete_node(node_id)?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .unwrap();
 
@@ -1086,7 +1087,7 @@ fn test_deleted_nodes_not_in_similarity_results() {
         tx.delete_node(similar_nodes[0])?;
         tx.delete_node(similar_nodes[2])?;
         tx.delete_node(similar_nodes[4])?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 
@@ -1186,7 +1187,7 @@ fn test_delete_node_removes_from_multiple_indexes() {
     // Delete the node via transaction
     db.write(|tx| {
         tx.delete_node(node_id)?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 
