@@ -1,6 +1,6 @@
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::VectorIndex;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
