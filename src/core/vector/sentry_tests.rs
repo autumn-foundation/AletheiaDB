@@ -121,12 +121,12 @@ fn test_scale_in_place_correctness_all_lengths() {
         simd::scale_in_place(&mut actual, scale);
 
         // Verify element-wise
-        for i in 0..len {
+        actual.iter().zip(expected.iter()).enumerate().for_each(|(i, (act, exp))| {
             assert!(
-                (actual[i] - expected[i]).abs() < 1e-6,
-                "Len {}: mismatch at index {}. Expected {}, got {}", len, i, expected[i], actual[i]
+                (act - exp).abs() < 1e-6,
+                "Len {}: mismatch at index {}. Expected {}, got {}", len, i, exp, act
             );
-        }
+        });
     }
 }
 
