@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::thread;
 
 use aletheiadb::{
-    AletheiaDB, DistanceMetric, HnswConfig, PropertyMapBuilder, ReadOps, WriteOps,
+    AletheiaDB, DistanceMetric, Error, HnswConfig, PropertyMapBuilder, ReadOps, WriteOps,
     query::traverse_and_rank, storage::version::AnchorConfig,
 };
 
@@ -507,7 +507,7 @@ mod temporal_vector_tests {
                     .insert_vector("embedding", &updated_embedding)
                     .build(),
             )?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .unwrap();
 
@@ -1421,7 +1421,7 @@ mod concurrent_tests {
                                 )
                                 .build(),
                         )?;
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
                 thread::sleep(std::time::Duration::from_millis(5));

@@ -10,6 +10,7 @@
 //! functionality.
 
 use aletheiadb::api::transaction::WriteOps;
+use aletheiadb::Error;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 /// Test that anchors are created at expected positions with default anchor_interval=10
@@ -42,7 +43,7 @@ fn test_anchor_creation_matches_benchmark_assumptions() {
                         .insert("version", i)
                         .build(),
                 )?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .expect("update_node should succeed")
             .1; // Extract commit timestamp
@@ -112,7 +113,7 @@ fn test_delta_reconstruction_produces_correct_state() {
                         .insert("value", i)
                         .build(),
                 )?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .expect("update_node should succeed")
             .1; // Extract commit timestamp
@@ -226,7 +227,7 @@ fn test_multiple_updates_same_transaction() {
                     .build(),
             )?;
 
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Multiple updates in same transaction should succeed");
 

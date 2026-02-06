@@ -28,6 +28,7 @@
 //! ```
 
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
+use aletheiadb::Error;
 
 #[cfg(feature = "observability")]
 use aletheiadb::observability;
@@ -111,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .build(),
             )?;
             println!("  Transaction {}: Created document {:?}", i, node_id);
-            Ok(())
+            Ok::<_, Error>(())
         })?;
     }
 

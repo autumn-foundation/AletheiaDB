@@ -7,6 +7,7 @@
 //! - Edge version chain integrity
 
 use aletheiadb::*;
+use aletheiadb::Error;
 use std::thread;
 use std::time::Duration;
 
@@ -79,7 +80,7 @@ fn test_temporal_edge_lookup_basic() {
                 .insert("strength", "weak")
                 .build(),
         )?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
     println!("Updated edge to strength='weak'");
@@ -223,7 +224,7 @@ fn test_temporal_edge_multiple_updates() {
                     .insert("weight", (i as f64) * 0.1 + 0.5)
                     .build(),
             )?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .unwrap();
 
@@ -329,7 +330,7 @@ fn test_temporal_edge_interval_closing() {
             edge_id,
             PropertyMapBuilder::new().insert("active", false).build(),
         )?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 
@@ -440,7 +441,7 @@ fn test_temporal_edge_version_chain_integrity() {
                 edge_id,
                 PropertyMapBuilder::new().insert("version", i).build(),
             )?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .unwrap();
     }
@@ -533,7 +534,7 @@ fn test_temporal_edge_anchor_delta_pattern() {
         thread::sleep(Duration::from_millis(50));
         db.write(|tx| {
             tx.update_edge(edge_id, PropertyMapBuilder::new().insert("v", i).build())?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .unwrap();
     }
@@ -636,7 +637,7 @@ fn test_temporal_edge_with_vector_properties() {
                 .insert_vector("embedding", &embedding_v2)
                 .build(),
         )?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 

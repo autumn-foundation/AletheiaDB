@@ -1,6 +1,7 @@
 //! Debug test for temporal node lookup issue #306
 
 use aletheiadb::*;
+use aletheiadb::Error;
 use std::thread;
 use std::time::Duration;
 
@@ -45,7 +46,7 @@ fn test_temporal_lookup_directly() {
             node_id,
             PropertyMapBuilder::new().insert("value", "v2").build(),
         )?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
     println!("Updated node to value='v2'");

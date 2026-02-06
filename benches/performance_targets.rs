@@ -19,6 +19,7 @@
 //!   - On PRs: Quick smoke test to verify no major regressions
 //!   - On scheduled runs: Full validation with comprehensive suite
 
+use aletheiadb::Error;
 use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::{AletheiaDB, CurrentStorage, PropertyMapBuilder};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
@@ -178,7 +179,7 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
                         .insert("version", i)
                         .build(),
                 )?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .expect("Benchmark setup: update_node should succeed with valid input")
             .1; // Extract commit timestamp
@@ -237,7 +238,7 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
                         .insert("version", i)
                         .build(),
                 )?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .expect("Benchmark setup: update_node should succeed with valid input")
             .1; // Extract commit timestamp
@@ -298,7 +299,7 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
                         .insert("version", i)
                         .build(),
                 )?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .expect("Benchmark setup: update_node should succeed with valid input")
             .1; // Extract commit timestamp

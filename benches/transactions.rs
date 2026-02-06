@@ -5,6 +5,7 @@
 
 mod common;
 
+use aletheiadb::Error;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, ReadOps, WriteOps};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
@@ -35,7 +36,7 @@ fn bench_closure_based_write_empty(c: &mut Criterion) {
 
     c.bench_function("closure_write_empty_commit", |b| {
         b.iter(|| {
-            db.write(|_tx| Ok(())).unwrap();
+            db.write(|_tx| Ok::<_, Error>(())).unwrap();
         });
     });
 }
@@ -83,7 +84,7 @@ fn bench_closure_based_write_10_ops(c: &mut Criterion) {
                         PropertyMapBuilder::new().build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -159,7 +160,7 @@ fn bench_read_transaction_overhead(c: &mut Criterion) {
         b.iter(|| {
             db.read(|tx| {
                 let _node = tx.get_node(black_box(node_id))?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -201,7 +202,7 @@ fn bench_batch_edge_insertions(c: &mut Criterion) {
                         )?;
                     }
 
-                    Ok(())
+                    Ok::<_, Error>(())
                 })
                 .unwrap();
             });
@@ -241,7 +242,7 @@ fn bench_batch_edge_updates(c: &mut Criterion) {
                             edges.push(edge);
                         }
 
-                        Ok(edges)
+                        Ok::<_, Error>(edges)
                     })
                     .unwrap();
                 (db, edge_ids)
@@ -255,7 +256,7 @@ fn bench_batch_edge_updates(c: &mut Criterion) {
                             PropertyMapBuilder::new().insert("weight", 1i64).build(),
                         )?;
                     }
-                    Ok(())
+                    Ok::<_, Error>(())
                 })
                 .unwrap();
             },
@@ -294,7 +295,7 @@ fn bench_batch_edge_deletions(c: &mut Criterion) {
                             edges.push(edge);
                         }
 
-                        Ok(edges)
+                        Ok::<_, Error>(edges)
                     })
                     .unwrap();
 
@@ -306,7 +307,7 @@ fn bench_batch_edge_deletions(c: &mut Criterion) {
                     for edge_id in edge_ids {
                         tx.delete_edge(edge_id)?;
                     }
-                    Ok(())
+                    Ok::<_, Error>(())
                 })
                 .unwrap();
             },
@@ -348,7 +349,7 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
                             )?;
                         }
 
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
 
@@ -377,7 +378,7 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
                             )?;
                         }
 
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
                 },
@@ -416,7 +417,7 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
                 )?;
             }
 
-            Ok(nodes)
+            Ok::<_, Error>(nodes)
         })
         .unwrap();
 
@@ -455,7 +456,7 @@ fn bench_concurrent_visibility_checks(c: &mut Criterion) {
                 )?;
                 nodes.push(node);
             }
-            Ok(nodes)
+            Ok::<_, Error>(nodes)
         })
         .unwrap();
 
@@ -504,7 +505,7 @@ fn bench_sequential_visibility_checks(c: &mut Criterion) {
                 )?;
                 nodes.push(node);
             }
-            Ok(nodes)
+            Ok::<_, Error>(nodes)
         })
         .unwrap();
 
@@ -606,7 +607,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                                 edges.push(edge);
                             }
 
-                            Ok((nodes, edges))
+                            Ok::<_, Error>((nodes, edges))
                         })
                         .unwrap();
 
@@ -648,7 +649,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                             tx.delete_edge(edge_id)?;
                         }
 
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
                 },
@@ -670,7 +671,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                                 .build(),
                         )?;
                     }
-                    Ok(())
+                    Ok::<_, Error>(())
                 })
                 .unwrap();
             });
@@ -705,7 +706,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                                 edges.push(edge);
                             }
 
-                            Ok((nodes, edges))
+                            Ok::<_, Error>((nodes, edges))
                         })
                         .unwrap();
 
@@ -725,7 +726,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                             tx.delete_node(node)?;
                         }
 
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
                 },
@@ -769,7 +770,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                             .build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -791,7 +792,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                             .build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -812,7 +813,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                             .build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -833,7 +834,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                             .build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
