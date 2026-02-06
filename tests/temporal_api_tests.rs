@@ -1,14 +1,14 @@
-use gallifreydb::GallifreyDB;
-use gallifreydb::WriteOps;
-use gallifreydb::core::graph::{Edge, Node};
-use gallifreydb::core::id::{EdgeId, NodeId};
-use gallifreydb::core::property::PropertyMapBuilder;
+use aletheiadb::AletheiaDB;
+use aletheiadb::WriteOps;
+use aletheiadb::core::graph::{Edge, Node};
+use aletheiadb::core::id::{EdgeId, NodeId};
+use aletheiadb::core::property::PropertyMapBuilder;
 
 // ==================== Batch Temporal Query Tests ====================
 
 #[test]
 fn test_time_travel_query() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create a node at time T1
     let props_v1 = PropertyMapBuilder::new()
@@ -20,7 +20,7 @@ fn test_time_travel_query() {
 
     // Capture timestamp after creation (wallclock time)
     std::thread::sleep(std::time::Duration::from_micros(100));
-    let t1 = gallifreydb::core::temporal::time::now();
+    let t1 = aletheiadb::core::temporal::time::now();
 
     // In a real implementation, we'd create a second version here with an update_node method
     // For now, just verify we can query at T1
@@ -42,7 +42,7 @@ fn test_time_travel_query() {
 
 #[test]
 fn test_time_travel_after_deletion() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create a node
     let props = PropertyMapBuilder::new()
@@ -53,7 +53,7 @@ fn test_time_travel_after_deletion() {
 
     // Record timestamp after creation (wallclock time)
     std::thread::sleep(std::time::Duration::from_micros(100));
-    let t_after_create = gallifreydb::core::temporal::time::now();
+    let t_after_create = aletheiadb::core::temporal::time::now();
 
     // Delete the node
     std::thread::sleep(std::time::Duration::from_micros(100));
@@ -65,7 +65,7 @@ fn test_time_travel_after_deletion() {
 
     // Record timestamp after deletion (wallclock time)
     std::thread::sleep(std::time::Duration::from_micros(100));
-    let t_after_delete = gallifreydb::core::temporal::time::now();
+    let t_after_delete = aletheiadb::core::temporal::time::now();
 
     // Query BEFORE creation - should fail (node didn't exist)
     // Note: We can't easily test this without more control over timestamps
@@ -101,7 +101,7 @@ fn test_time_travel_after_deletion() {
 /// path must verify visibility with historical storage to correctly reject deleted nodes.
 #[test]
 fn test_temporal_index_deletion_integration() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create a node
     let props = PropertyMapBuilder::new().insert("name", "TestNode").build();
@@ -109,7 +109,7 @@ fn test_temporal_index_deletion_integration() {
 
     // Record timestamp after creation
     std::thread::sleep(std::time::Duration::from_micros(100));
-    let t_after_create = gallifreydb::core::temporal::time::now();
+    let t_after_create = aletheiadb::core::temporal::time::now();
 
     // Verify node is queryable after creation
     let result = db.get_node_at_time(node_id, t_after_create, t_after_create);
@@ -140,7 +140,7 @@ fn test_temporal_index_deletion_integration() {
 
     // Record timestamp after deletion
     std::thread::sleep(std::time::Duration::from_micros(100));
-    let t_after_delete = gallifreydb::core::temporal::time::now();
+    let t_after_delete = aletheiadb::core::temporal::time::now();
 
     // CRITICAL: Temporal index may still return the version (it stores insertion-time intervals)
     // but the query should correctly reject it via historical storage visibility check
@@ -173,7 +173,7 @@ fn test_temporal_index_deletion_integration() {
 
 #[test]
 fn test_get_nodes_at_time_basic() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create multiple nodes at time T1
     let props1 = PropertyMapBuilder::new()
@@ -237,7 +237,7 @@ fn test_get_nodes_at_time_basic() {
 
 #[test]
 fn test_get_nodes_at_time_mixed_results() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create two nodes
     let node1 = db
@@ -278,7 +278,7 @@ fn test_get_nodes_at_time_mixed_results() {
 
 #[test]
 fn test_get_nodes_at_time_empty_batch() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let t1 = db.__test_current_timestamp();
 
@@ -291,7 +291,7 @@ fn test_get_nodes_at_time_empty_batch() {
 
 #[test]
 fn test_get_nodes_at_time_after_deletion() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes
     let node1 = db
@@ -340,7 +340,7 @@ fn test_get_nodes_at_time_after_deletion() {
 
 #[test]
 fn test_get_edges_at_time_basic() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes
     let alice = db
@@ -429,7 +429,7 @@ fn test_get_edges_at_time_basic() {
 
 #[test]
 fn test_get_edges_at_time_mixed_results() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes and edges
     let alice = db
@@ -469,7 +469,7 @@ fn test_get_edges_at_time_mixed_results() {
 
 #[test]
 fn test_get_edges_at_time_empty_batch() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let t1 = db.__test_current_timestamp();
 
@@ -482,7 +482,7 @@ fn test_get_edges_at_time_empty_batch() {
 
 #[test]
 fn test_get_edges_at_time_after_deletion() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes and edges
     let alice = db
@@ -532,7 +532,7 @@ fn test_get_edges_at_time_after_deletion() {
 
 #[test]
 fn test_get_nodes_at_time_large_batch() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create 100 nodes
     let node_ids: Vec<_> = (0..100)
@@ -562,7 +562,7 @@ fn test_get_nodes_at_time_large_batch() {
 
 #[test]
 fn test_get_nodes_at_time_duplicate_ids() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let node1 = db
         .create_node(
@@ -588,7 +588,7 @@ fn test_get_nodes_at_time_duplicate_ids() {
 
 #[test]
 fn test_get_edges_at_time_large_batch() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes
     let source = db
@@ -628,7 +628,7 @@ fn test_get_edges_at_time_large_batch() {
 
 #[test]
 fn test_get_edges_at_time_duplicate_ids() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let source = db
         .create_node("Node", PropertyMapBuilder::new().build())

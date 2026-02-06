@@ -9,9 +9,9 @@
 //! - Verification that all data is preserved
 //!
 //! **Note:** This example uses internal recovery APIs (`PersistenceManager`, `ConcurrentWalSystem`)
-//! for demonstration purposes. In future versions, GallifreyDB will provide a high-level API like:
+//! for demonstration purposes. In future versions, AletheiaDB will provide a high-level API like:
 //! ```ignore
-//! let db = GallifreyDB::open_with_recovery("/data/mydb")?;
+//! let db = AletheiaDB::open_with_recovery("/data/mydb")?;
 //! ```
 //! See Issue #XXX for the high-level recovery API implementation.
 //!
@@ -58,20 +58,20 @@
 //! ✅ SUCCESS: All data recovered correctly!
 //! ```
 
-use gallifreydb::core::{
+use aletheiadb::core::{
     id::{EdgeId, NodeId},
     interning::GLOBAL_INTERNER,
     property::{PropertyMapBuilder, PropertyValue},
     temporal::time,
 };
-use gallifreydb::storage::{
+use aletheiadb::storage::{
     persistence::{CheckpointConfig, PersistenceManager},
     wal::{
         WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
-use gallifreydb::utils::error::Result;
+use aletheiadb::utils::error::Result;
 use tempfile::TempDir;
 
 fn main() -> Result<()> {
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     println!("✓ Created 49 edges (chain: 1→2→3→...→50)");
 
     // Update node 1
-    let version_id_51 = gallifreydb::core::id::VersionId::new(51)?;
+    let version_id_51 = aletheiadb::core::id::VersionId::new(51)?;
     let node_id_1 = NodeId::new(1)?;
     wal.append(WalOperation::UpdateNode {
         node_id: node_id_1,

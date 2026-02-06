@@ -14,7 +14,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use gallifreydb::observability::METRICS;
+//! use aletheiadb::observability::METRICS;
 //! use std::sync::atomic::Ordering;
 //!
 //! // Increment metric

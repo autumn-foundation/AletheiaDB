@@ -7,7 +7,7 @@
 //! - Bi-temporal semantics (critical for correctness!)
 //! - Tombstone versions in historical storage
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
@@ -362,7 +362,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     assert!(current.get_node(NodeId::new(3).unwrap()).is_ok());
 
     // And: Node 1 should have the updated value
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     let node1 = current.get_node(NodeId::new(1).unwrap())?;
     assert!(matches!(
         node1.properties.get("value"),

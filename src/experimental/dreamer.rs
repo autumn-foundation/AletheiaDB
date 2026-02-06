@@ -13,7 +13,7 @@
 //! 3. **Extrapolate**: Projects the vector forward in time.
 //! 4. **Search**: Finds the nearest neighbors to the predicted future vector.
 
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::temporal::TimeRange;
 use crate::utils::{Error, Result, VectorError};
@@ -21,12 +21,12 @@ use std::time::Duration;
 
 /// The Dreamer engine for predictive semantic analysis.
 pub struct Dreamer<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
 }
 
 impl<'a> Dreamer<'a> {
     /// Create a new Dreamer instance.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_dreamer_trajectory_extrapolation() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Euclidean); // 2D for simplicity
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_dreamer_static_trajectory() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
             .unwrap();
 

@@ -27,7 +27,7 @@
 //! Runs **1000 test cases**, each with **50-200 random operations**, totaling
 //! **50,000-200,000 operations** to thoroughly validate invariants.
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
@@ -179,7 +179,7 @@ struct RecoveryTestHarness {
 impl RecoveryTestHarness {
     fn new() -> Result<Self> {
         let temp_dir = TempDir::new().map_err(|e| {
-            gallifreydb::utils::error::Error::other(format!("Failed to create temp dir: {}", e))
+            aletheiadb::utils::error::Error::other(format!("Failed to create temp dir: {}", e))
         })?;
         let wal_dir = temp_dir.path().join("wal");
         let checkpoint_dir = temp_dir.path().join("checkpoints");

@@ -1,4 +1,4 @@
-//! Production observability infrastructure for GallifreyDB.
+//! Production observability infrastructure for AletheiaDB.
 //!
 //! This module provides comprehensive instrumentation for production deployments,
 //! including structured logging, metrics collection, and tracing integration.
@@ -13,16 +13,16 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use gallifreydb::observability;
+//! use aletheiadb::observability;
 //!
 //! // Initialize observability (call once at application startup)
 //! observability::init(observability::Config::default());
 //!
 //! // Metrics are automatically collected
-//! let db = GallifreyDB::new();
+//! let db = AletheiaDB::new();
 //!
 //! // Periodically check for critical errors
-//! let metrics = gallifreydb::metrics();
+//! let metrics = aletheiadb::metrics();
 //! if metrics.has_critical_errors() {
 //!     panic!("Data corruption detected!");
 //! }
@@ -101,7 +101,7 @@ static WORKER_HANDLES: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec:
 ///
 /// Use `Config::from_env()` to auto-configure from environment variables:
 /// - `HONEYCOMB_API_KEY`: Enable Honeycomb integration
-/// - `HONEYCOMB_DATASET`: Dataset name (default: "gallifreydb")
+/// - `HONEYCOMB_DATASET`: Dataset name (default: "aletheiadb")
 /// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP endpoint (e.g., "127.0.0.1:9090")
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -148,13 +148,13 @@ impl Config {
     /// This automatically detects available backends based on environment variables:
     ///
     /// - `HONEYCOMB_API_KEY`: Enables Honeycomb (requires `observability-honeycomb` feature)
-    /// - `HONEYCOMB_DATASET`: Dataset name (default: "gallifreydb")
+    /// - `HONEYCOMB_DATASET`: Dataset name (default: "aletheiadb")
     /// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP server address (requires `observability-prometheus` feature)
     ///
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::observability;
+    /// use aletheiadb::observability;
     ///
     /// // Set environment variables
     /// std::env::set_var("HONEYCOMB_API_KEY", "your-api-key");
@@ -176,8 +176,8 @@ impl Config {
                 .map(|api_key| HoneycombConfig {
                     api_key,
                     dataset: std::env::var("HONEYCOMB_DATASET")
-                        .unwrap_or_else(|_| "gallifreydb".to_string()),
-                    service_name: "gallifreydb".to_string(),
+                        .unwrap_or_else(|_| "aletheiadb".to_string()),
+                    service_name: "aletheiadb".to_string(),
                 }),
             prometheus: std::env::var("PROMETHEUS_BIND_ADDR")
                 .ok()
@@ -190,7 +190,7 @@ impl Config {
 ///
 /// This sets up structured logging and tracing infrastructure with support for
 /// multiple backends via Registry-based layer composition. It should be called
-/// **once** at application startup before creating any GallifreyDB instances.
+/// **once** at application startup before creating any AletheiaDB instances.
 ///
 /// # Backends
 ///
@@ -207,7 +207,7 @@ impl Config {
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::observability;
+/// use aletheiadb::observability;
 ///
 /// fn main() {
 ///     // Initialize with environment-based config
@@ -219,15 +219,15 @@ impl Config {
 ///         enable_tracy: false,
 ///         honeycomb: Some(HoneycombConfig {
 ///             api_key: "your-api-key".to_string(),
-///             dataset: "gallifreydb".to_string(),
-///             service_name: "gallifreydb".to_string(),
+///             dataset: "aletheiadb".to_string(),
+///             service_name: "aletheiadb".to_string(),
 ///         }),
 ///         prometheus: None,
 ///     };
 ///     observability::init(config);
 ///
 ///     // Create database
-///     let db = gallifreydb::GallifreyDB::new();
+///     let db = aletheiadb::AletheiaDB::new();
 /// }
 /// ```
 ///
@@ -235,9 +235,9 @@ impl Config {
 ///
 /// The following environment variables control observability behavior:
 ///
-/// - `RUST_LOG`: Filter logs by level (e.g., `gallifreydb=trace`, `gallifreydb=warn`)
+/// - `RUST_LOG`: Filter logs by level (e.g., `aletheiadb=trace`, `aletheiadb=warn`)
 /// - `HONEYCOMB_API_KEY`: Enable Honeycomb integration
-/// - `HONEYCOMB_DATASET`: Honeycomb dataset name (default: "gallifreydb")
+/// - `HONEYCOMB_DATASET`: Honeycomb dataset name (default: "aletheiadb")
 /// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP server address (e.g., "127.0.0.1:9090")
 ///
 /// # Panics
@@ -251,7 +251,7 @@ pub fn init(config: Config) {
             use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt};
 
             let env_filter = EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("gallifreydb=info"));
+                .unwrap_or_else(|_| EnvFilter::new("aletheiadb=info"));
 
             // Build subscriber with Registry and add layers conditionally using Option<Layer>
             let subscriber = Registry::default().with(env_filter);
@@ -348,7 +348,7 @@ pub fn init(config: Config) {
                 honeycomb_enabled = config.honeycomb.is_some(),
                 prometheus_enabled = config.prometheus.is_some(),
                 tracy_enabled = config.enable_tracy,
-                "GallifreyDB observability initialized"
+                "AletheiaDB observability initialized"
             );
         }
 
@@ -366,7 +366,7 @@ pub fn init(config: Config) {
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::observability;
+/// use aletheiadb::observability;
 ///
 /// let metrics = observability::metrics();
 /// println!("Lock poisons: {}", metrics.lock_poison_count);

@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use gallifreydb::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
-    use gallifreydb::utils::error::Error;
+    use aletheiadb::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
+    use aletheiadb::utils::error::Error;
 
     #[test]
     fn test_try_insert_vector_returns_error_on_overflow() {
@@ -12,7 +12,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(gallifreydb::utils::error::VectorError::DimensionTooLarge {
+            Err(Error::Vector(aletheiadb::utils::error::VectorError::DimensionTooLarge {
                 dimension,
                 max_allowed,
             })) => {
@@ -26,7 +26,7 @@ mod tests {
 
     #[test]
     fn test_try_serialize_vector_into_returns_error_on_overflow() {
-        use gallifreydb::core::property::try_serialize_vector_into;
+        use aletheiadb::core::property::try_serialize_vector_into;
 
         let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
         let mut buffer = Vec::new();
@@ -35,7 +35,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(gallifreydb::utils::error::VectorError::DimensionTooLarge {
+            Err(Error::Vector(aletheiadb::utils::error::VectorError::DimensionTooLarge {
                 dimension,
                 max_allowed,
             })) => {

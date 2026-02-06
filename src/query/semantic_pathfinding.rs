@@ -10,7 +10,7 @@
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::core::vector::cosine_similarity;
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::utils::error::Result;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -50,7 +50,7 @@ impl PartialOrd for State {
 
 /// A pathfinder that uses semantic similarity as a heuristic/cost.
 pub struct SemanticPathfinder<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
     vector_property: String,
 }
 
@@ -60,7 +60,7 @@ impl<'a> SemanticPathfinder<'a> {
     /// # Arguments
     /// * `db` - Reference to the database instance.
     /// * `vector_property` - Name of the property containing vector embeddings.
-    pub fn new(db: &'a GallifreyDB, vector_property: &str) -> Self {
+    pub fn new(db: &'a AletheiaDB, vector_property: &str) -> Self {
         Self {
             db,
             vector_property: vector_property.to_string(),
@@ -282,8 +282,8 @@ mod tests {
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
-    fn create_test_db() -> GallifreyDB {
-        let db = GallifreyDB::new().unwrap();
+    fn create_test_db() -> AletheiaDB {
+        let db = AletheiaDB::new().unwrap();
         // Enable vector index to ensure vector properties are handled correctly
         // (though SemanticPathfinder works with raw properties too)
         db.vector_index("embedding")

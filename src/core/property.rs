@@ -163,7 +163,7 @@ impl PropertyValue {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::PropertyValue;
+    /// use aletheiadb::core::PropertyValue;
     ///
     /// // From a Vec
     /// let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
@@ -186,7 +186,7 @@ impl PropertyValue {
     ///
     /// - [`PropertyMapBuilder::insert_vector`] for a builder-pattern alternative
     /// - [`as_vector`](Self::as_vector) for retrieving the vector data
-    /// - [`gallifreydb::core::vector`](crate::core::vector) for similarity functions
+    /// - [`aletheiadb::core::vector`](crate::core::vector) for similarity functions
     ///
     /// # Panics
     ///
@@ -279,7 +279,7 @@ impl PropertyValue {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::PropertyValue;
+    /// use aletheiadb::core::PropertyValue;
     ///
     /// let embedding = vec![0.1f32, 0.2, 0.3];
     /// let prop = PropertyValue::vector(&embedding);
@@ -297,7 +297,7 @@ impl PropertyValue {
     /// # See Also
     ///
     /// - [`vector`](Self::vector) for creating vector properties
-    /// - [`gallifreydb::core::vector`](crate::core::vector) for similarity functions
+    /// - [`aletheiadb::core::vector`](crate::core::vector) for similarity functions
     #[inline]
     pub fn as_vector(&self) -> Option<&[f32]> {
         match self {
@@ -325,7 +325,7 @@ impl PropertyValue {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::PropertyValue;
+    /// use aletheiadb::core::PropertyValue;
     /// use std::sync::Arc;
     ///
     /// let embedding = vec![0.1f32, 0.2, 0.3];
@@ -365,8 +365,8 @@ impl PropertyValue {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::PropertyValue;
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::PropertyValue;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// // Create a sparse vector: [0.0, 1.5, 0.0, 0.0, 2.3, 0.0]
     /// let sparse = SparseVec::new(vec![1, 4], vec![1.5, 2.3], 6).unwrap();
@@ -398,8 +398,8 @@ impl PropertyValue {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::PropertyValue;
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::PropertyValue;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let sparse = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
     /// let prop = PropertyValue::sparse_vector(sparse);
@@ -750,7 +750,7 @@ impl PropertyValue {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::PropertyValue;
+    /// use aletheiadb::core::PropertyValue;
     ///
     /// let small = PropertyValue::Int(42);
     /// assert_eq!(small.estimated_heap_size(), 0); // No heap allocation
@@ -1335,7 +1335,7 @@ impl From<String> for PropertyValue {
         // This leverages Rust's built-in conversion chain:
         // String → Box<str> → Arc<str>
         // which reuses the String's allocation instead of copying.
-        // See: https://github.com/madmax983/GallifreyDB/issues/200
+        // See: https://github.com/madmax983/AletheiaDB/issues/200
         PropertyValue::String(Arc::from(s))
     }
 }
@@ -1352,7 +1352,7 @@ impl From<Vec<u8>> for PropertyValue {
         // This leverages Rust's built-in conversion chain:
         // Vec<u8> → Box<[u8]> → Arc<[u8]>
         // which reuses the Vec's allocation instead of copying.
-        // See: https://github.com/madmax983/GallifreyDB/issues/200
+        // See: https://github.com/madmax983/AletheiaDB/issues/200
         PropertyValue::Bytes(Arc::from(b))
     }
 }
@@ -1928,7 +1928,7 @@ impl PropertyMapBuilder {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::property::PropertyMapBuilder;
+    /// use aletheiadb::core::property::PropertyMapBuilder;
     ///
     /// let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
     /// let props = PropertyMapBuilder::new()

@@ -77,7 +77,7 @@ jobs:
 
       - name: Run benchmarks with profiling
         run: |
-          cargo bench --bench gallifreydb --no-run
+          cargo bench --bench aletheiadb --no-run
           # Generate flamegraph (requires root on Linux)
           # This is a placeholder - actual flamegraph generation needs additional setup
           echo "Profiling data collected"

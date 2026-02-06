@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2026-05-24
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** engineering, observability, dependency-management
 
 ## Context
 
-Observability is a critical requirement for GallifreyDB ("Warden" and "Havoc" personas rely on it). We use Honeycomb.io as our primary observability backend.
+Observability is a critical requirement for AletheiaDB ("Warden" and "Havoc" personas rely on it). We use Honeycomb.io as our primary observability backend.
 Previously, the project relied on the `libhoney-rust` crate. However, this crate:
 1.  Is effectively unmaintained.
 2.  Required a `git` dependency in `Cargo.toml`, which breaks `crates.io` publishing and introduces supply chain risks.
@@ -19,7 +19,7 @@ We have replaced the external `libhoney-rust` dependency with a **Custom, In-Tre
 
 This module (`src/honeycomb`) is a clean-room implementation that:
 1.  **Focuses on Minimalism**: Implements only the subset of the Honeycomb API required for `tracing` integration (Event submission, Batching).
-2.  **Modern Stack**: Uses `reqwest` (async) and `tokio` natively, aligning with the rest of GallifreyDB's async runtime.
+2.  **Modern Stack**: Uses `reqwest` (async) and `tokio` natively, aligning with the rest of AletheiaDB's async runtime.
 3.  **Type Safety**: Enforces strict typing for datasets and API keys to prevent misconfiguration.
 
 ## Consequences

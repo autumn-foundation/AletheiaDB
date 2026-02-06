@@ -497,7 +497,7 @@ pub struct VectorMappingsData {
 /// Single vector ID mapping.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct VectorMapping {
-    /// GallifreyDB node ID
+    /// AletheiaDB node ID
     pub node_id: u64,
     /// usearch internal key
     pub usearch_key: u64,

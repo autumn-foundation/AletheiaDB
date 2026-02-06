@@ -6,7 +6,7 @@
 
 ## Problem Statement
 
-GallifreyDB's three query dimensions (graph traversal, vector similarity, bi-temporal) operate through separate, direct API methods. This prevents:
+AletheiaDB's three query dimensions (graph traversal, vector similarity, bi-temporal) operate through separate, direct API methods. This prevents:
 
 1. **Hybrid queries**: "Who did Alice know in 2023 that was similar to Bob?" requires manual orchestration
 2. **Query optimization**: No cost-based routing between current vs historical storage

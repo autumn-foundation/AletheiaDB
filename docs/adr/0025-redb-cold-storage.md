@@ -2,13 +2,13 @@
 
 **Status:** Accepted
 **Date:** 2026-01-24
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, durability, persistence, architecture
 **Supersedes:** ADR-0013 (partial - cold storage implementation details)
 
 ## Context
 
-GallifreyDB's tiered storage architecture (ADR-0013) requires a cold storage backend for persisting historical versions that have been evicted from the warm tier. The original implementation used RocksDB, which has several challenges:
+AletheiaDB's tiered storage architecture (ADR-0013) requires a cold storage backend for persisting historical versions that have been evicted from the warm tier. The original implementation used RocksDB, which has several challenges:
 
 **RocksDB Challenges:**
 1. **FFI Complexity**: RocksDB is a C++ library requiring FFI bindings, adding build complexity

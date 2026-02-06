@@ -2,13 +2,13 @@
 
 **Status:** Accepted (Implemented)
 **Date:** 2026-01-01
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, durability, performance
 **Implementation:** Completed 2026-01-08
 
 ## Context
 
-GallifreyDB's current WAL implementation performs a synchronous `fsync` on every transaction commit. While this provides maximum durability (zero data loss on crash), it severely limits write throughput:
+AletheiaDB's current WAL implementation performs a synchronous `fsync` on every transaction commit. While this provides maximum durability (zero data loss on crash), it severely limits write throughput:
 
 **Current Performance:**
 - Node creation: ~1.8ms (99% spent in fsync)
@@ -107,7 +107,7 @@ let config = WalConfig {
     },
 };
 
-let db = GallifreyDB::with_wal_config(config);
+let db = AletheiaDB::with_wal_config(config);
 ```
 
 **Per-Transaction Override:**
@@ -432,8 +432,8 @@ where
 ## References
 
 - **Architecture Documentation:** [durability-modes.md](../architecture/durability-modes.md)
-- **GitHub Issues:** [#127](https://github.com/madmax983/GallifreyDB/issues/127), [#128](https://github.com/madmax983/GallifreyDB/issues/128), [#129](https://github.com/madmax983/GallifreyDB/issues/129), [#130](https://github.com/madmax983/GallifreyDB/issues/130), [#131](https://github.com/madmax983/GallifreyDB/issues/131)
-- **Project:** [GallifreyDB Write Performance](https://github.com/users/madmax983/projects/5)
+- **GitHub Issues:** [#127](https://github.com/madmax983/AletheiaDB/issues/127), [#128](https://github.com/madmax983/AletheiaDB/issues/128), [#129](https://github.com/madmax983/AletheiaDB/issues/129), [#130](https://github.com/madmax983/AletheiaDB/issues/130), [#131](https://github.com/madmax983/AletheiaDB/issues/131)
+- **Project:** [AletheiaDB Write Performance](https://github.com/users/madmax983/projects/5)
 - **PostgreSQL synchronous_commit:** [Documentation](https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT)
 - **MongoDB Write Concern:** [Documentation](https://www.mongodb.com/docs/manual/reference/write-concern/)
 - **ADR-0007:** Write-Ahead Log for Durability (extends this ADR)

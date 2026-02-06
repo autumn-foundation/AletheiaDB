@@ -17,7 +17,7 @@
 
 ## Overview
 
-This document defines the WAL (Write-Ahead Log) recovery mechanism for GallifreyDB, ensuring data durability and correct bi-temporal semantics after crashes. The recovery system must:
+This document defines the WAL (Write-Ahead Log) recovery mechanism for AletheiaDB, ensuring data durability and correct bi-temporal semantics after crashes. The recovery system must:
 
 1. **Restore database state** from checkpoints and WAL
 2. **Maintain ACID guarantees** based on durability mode
@@ -501,7 +501,7 @@ criterion_group!(benches,
 
 ### Coverage Requirements
 
-Following GallifreyDB standards (TESTING.md):
+Following AletheiaDB standards (TESTING.md):
 - **Minimum 85% line coverage**
 - **Minimum 88% function coverage**
 - **Minimum 88% region coverage**

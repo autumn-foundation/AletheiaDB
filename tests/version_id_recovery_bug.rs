@@ -2,11 +2,11 @@
 ///
 /// This test verifies that version IDs are PRESERVED when loading from
 /// index persistence (not checkpoints).
-use gallifreydb::core::GLOBAL_INTERNER;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::storage::index_persistence::IndexPersistenceManager;
-use gallifreydb::storage::index_persistence::formats::{PersistedEdge, PersistedNode};
-use gallifreydb::storage::index_persistence::graph::{
+use aletheiadb::core::GLOBAL_INTERNER;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::storage::index_persistence::IndexPersistenceManager;
+use aletheiadb::storage::index_persistence::formats::{PersistedEdge, PersistedNode};
+use aletheiadb::storage::index_persistence::graph::{
     new_graph_index_data, persist_property_map, save_graph_index,
 };
 use std::sync::Mutex;
@@ -59,7 +59,7 @@ fn test_version_id_preserved_when_loading_graph() {
     save_graph_index(&graph_data, &graph_path).unwrap();
 
     // NOW LOAD IT BACK - this exercises the buggy code path in with_unified_config
-    use gallifreydb::storage::index_persistence::graph::load_graph_index;
+    use aletheiadb::storage::index_persistence::graph::load_graph_index;
     let loaded_data = load_graph_index(&graph_path).unwrap();
 
     // Verify version IDs are preserved in the loaded data
@@ -111,7 +111,7 @@ fn test_edge_version_id_preserved_when_loading_graph() {
     let graph_path = manager.graph_path().join("adjacency.idx");
     save_graph_index(&graph_data, &graph_path).unwrap();
 
-    use gallifreydb::storage::index_persistence::graph::load_graph_index;
+    use aletheiadb::storage::index_persistence::graph::load_graph_index;
     let loaded_data = load_graph_index(&graph_path).unwrap();
 
     assert_eq!(loaded_data.edges.len(), 1);

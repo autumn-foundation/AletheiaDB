@@ -1,10 +1,10 @@
 # Durability Modes Architecture
 
-This document describes the architecture of GallifreyDB's configurable durability modes, which control when WAL data is synchronized to disk.
+This document describes the architecture of AletheiaDB's configurable durability modes, which control when WAL data is synchronized to disk.
 
 ## Overview
 
-GallifreyDB uses a **Concurrent WAL with Striped Lock-Free Ring Buffers** architecture that eliminates mutex contention while supporting four durability modes:
+AletheiaDB uses a **Concurrent WAL with Striped Lock-Free Ring Buffers** architecture that eliminates mutex contention while supporting four durability modes:
 
 | Mode | Write Latency | Throughput | Data at Risk | ACID |
 |------|---------------|------------|--------------|------|
@@ -578,7 +578,7 @@ All modes ensure pending writes are synced on shutdown using `FlushGuard`:
 ```mermaid
 sequenceDiagram
     participant App as Application
-    participant DB as GallifreyDB
+    participant DB as AletheiaDB
     participant WAL as WAL
     participant Guard as FlushGuard
     participant BG as Background Thread

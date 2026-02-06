@@ -1,6 +1,6 @@
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::storage::current::CurrentStorage;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::storage::current::CurrentStorage;
 
 fn create_large_graph(storage: &CurrentStorage, count: usize) {
     for i in 0..count {

@@ -1,18 +1,18 @@
-//! Test that temporal adjacency index is enabled by default in GallifreyDB.
+//! Test that temporal adjacency index is enabled by default in AletheiaDB.
 //!
 //! This test verifies that users don't need to manually enable the temporal
 //! adjacency index - it should work out of the box.
 
-use gallifreydb::GallifreyDB;
-use gallifreydb::api::transaction::{ReadOps, WriteOps};
-use gallifreydb::core::property::PropertyMapBuilder;
+use aletheiadb::AletheiaDB;
+use aletheiadb::api::transaction::{ReadOps, WriteOps};
+use aletheiadb::core::property::PropertyMapBuilder;
 use std::thread;
 use std::time::Duration;
 
 #[test]
 fn test_temporal_adjacency_index_enabled_by_default() {
     // Create database with default configuration
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes
     let alice = db
@@ -60,7 +60,7 @@ fn test_temporal_adjacency_index_enabled_by_default() {
 #[test]
 fn test_temporal_queries_work_immediately() {
     // Create database and immediately use temporal queries
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let node_a = db
         .create_node("Node", PropertyMapBuilder::new().build())
@@ -88,7 +88,7 @@ fn test_temporal_queries_work_immediately() {
 
 #[test]
 fn test_temporal_index_survives_many_operations() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let source = db
         .create_node("Node", PropertyMapBuilder::new().build())

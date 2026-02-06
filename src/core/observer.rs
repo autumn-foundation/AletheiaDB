@@ -25,14 +25,14 @@
 //! # Example
 //!
 //! ```no_run
-//! use gallifreydb::core::observer::{StorageObserver, StorageEvent};
-//! use gallifreydb::storage::historical::HistoricalStorage;
+//! use aletheiadb::core::observer::{StorageObserver, StorageEvent};
+//! use aletheiadb::storage::historical::HistoricalStorage;
 //! use std::sync::Arc;
 //!
 //! struct MetricsCollector;
 //!
 //! impl StorageObserver for MetricsCollector {
-//!     fn on_event(&self, event: &StorageEvent) -> gallifreydb::utils::Result<()> {
+//!     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
 //!         match event {
 //!             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
 //!                 println!("Anchor created: {} at {}", version_id, timestamp);
@@ -49,7 +49,7 @@
 //!
 //! # Hooks vs Observers: When to Use Each
 //!
-//! GallifreyDB uses **both** pre-anchor hooks and post-commit observers as complementary
+//! AletheiaDB uses **both** pre-anchor hooks and post-commit observers as complementary
 //! patterns for storage event handling. Understanding when to use each is critical for
 //! correct integration.
 //!
@@ -142,10 +142,10 @@
 //! ## Example: Temporal Vector Integration (VS-047)
 //!
 //! ```rust
-//! # use gallifreydb::storage::historical::{HistoricalStorage, PreAnchorHook};
-//! # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
-//! # use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
-//! # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+//! # use aletheiadb::storage::historical::{HistoricalStorage, PreAnchorHook};
+//! # use aletheiadb::core::observer::{StorageObserver, StorageEvent};
+//! # use aletheiadb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
+//! # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 //! # use std::sync::Arc;
 //! #
 //! # let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
@@ -167,7 +167,7 @@
 //! // Post-Commit Observer: Collect metrics AFTER anchor storage
 //! struct VectorMetricsObserver;
 //! impl StorageObserver for VectorMetricsObserver {
-//!     fn on_event(&self, event: &StorageEvent) -> gallifreydb::utils::Result<()> {
+//!     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
 //!         if let StorageEvent::NodeAnchorCreated { .. } = event {
 //!             // Log metrics, update counters, etc.
 //!         }
@@ -178,7 +178,7 @@
 //! storage.add_observer(Arc::new(VectorMetricsObserver));
 //!
 //! // Result: Anchor stored with snapshot_id + observers notified
-//! # Ok::<(), gallifreydb::utils::error::Error>(())
+//! # Ok::<(), aletheiadb::utils::error::Error>(())
 //! ```
 //!
 //! ## Key Takeaways
@@ -310,11 +310,11 @@ pub trait StorageObserver: Send + Sync {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
+    /// # use aletheiadb::core::observer::{StorageObserver, StorageEvent};
     /// struct VectorIndexObserver;
     ///
     /// impl StorageObserver for VectorIndexObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> gallifreydb::utils::Result<()> {
+    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
     ///         match event {
     ///             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
     ///                 // Create vector snapshot aligned with this anchor
@@ -339,11 +339,11 @@ pub trait StorageObserver: Send + Sync {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
+    /// # use aletheiadb::core::observer::{StorageObserver, StorageEvent};
     /// struct AnchorOnlyObserver;
     ///
     /// impl StorageObserver for AnchorOnlyObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> gallifreydb::utils::Result<()> {
+    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
     ///         // Only called for anchor events due to filter
     ///         Ok(())
     ///     }

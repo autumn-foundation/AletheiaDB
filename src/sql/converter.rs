@@ -1,6 +1,6 @@
 //! SQL to QueryOp Converter.
 //!
-//! This module converts parsed SQL AST from sqlparser-rs into GallifreyDB's
+//! This module converts parsed SQL AST from sqlparser-rs into AletheiaDB's
 //! internal Query representation (QueryOp operations).
 
 use std::collections::HashMap;
@@ -28,12 +28,12 @@ pub enum SqlParameterValue {
     Embedding(Arc<[f32]>),
 }
 
-/// Converter from SQL AST to GallifreyDB Query.
+/// Converter from SQL AST to AletheiaDB Query.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use gallifreydb::sql::SqlConverter;
+/// use aletheiadb::sql::SqlConverter;
 ///
 /// let converter = SqlConverter::new();
 /// let query = converter.convert_sql("SELECT * FROM nodes WHERE label = 'Person'")?;
@@ -519,14 +519,14 @@ impl Default for SqlConverter {
     }
 }
 
-/// Parse a SQL query and convert it to a GallifreyDB Query.
+/// Parse a SQL query and convert it to a AletheiaDB Query.
 ///
 /// This is the simplest way to execute a SQL query.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use gallifreydb::sql::parse_sql;
+/// use aletheiadb::sql::parse_sql;
 ///
 /// let query = parse_sql("SELECT * FROM nodes WHERE label = 'Person' LIMIT 10")?;
 /// ```
@@ -540,8 +540,8 @@ pub fn parse_sql(sql: &str) -> Result<Query, SqlError> {
 /// # Example
 ///
 /// ```rust,ignore
-/// use gallifreydb::sql::{parse_sql_with_params, SqlParameterValue};
-/// use gallifreydb::query::ir::PredicateValue;
+/// use aletheiadb::sql::{parse_sql_with_params, SqlParameterValue};
+/// use aletheiadb::query::ir::PredicateValue;
 ///
 /// let mut params = HashMap::new();
 /// params.insert("min_age".to_string(), SqlParameterValue::Scalar(PredicateValue::Int(21)));

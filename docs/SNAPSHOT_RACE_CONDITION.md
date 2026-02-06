@@ -49,7 +49,7 @@ Result: current_snapshot=[N1, N2]
 ## Current Status
 
 **NOT A PRODUCTION BUG (yet)** because:
-- Checkpointing is not integrated into `GallifreyDB` main database
+- Checkpointing is not integrated into `AletheiaDB` main database
 - Only called from tests currently (grep showed no production usage in `src/db.rs`)
 - Will become critical when background checkpointing is added
 

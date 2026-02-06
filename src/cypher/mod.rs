@@ -5,18 +5,18 @@
 //!
 //! # Feature Flag
 //!
-//! Cypher support is gated behind the `cypher` Cargo feature on the `gallifreydb`
+//! Cypher support is gated behind the `cypher` Cargo feature on the `aletheiadb`
 //! crate. To enable it, add the feature in your `Cargo.toml`:
 //!
 //! ```toml
-//! gallifreydb = { version = "0.x", features = ["cypher"] }
+//! aletheiadb = { version = "0.x", features = ["cypher"] }
 //! ```
 //!
 //! Or enable it on the command line:
 //!
 //! ```sh
-//! cargo test -p gallifreydb --features cypher
-//! cargo run  -p gallifreydb --features cypher
+//! cargo test -p aletheiadb --features cypher
+//! cargo run  -p aletheiadb --features cypher
 //! ```
 //!
 //! # Architecture
@@ -37,7 +37,7 @@
 //! * **Lexer**: tokenizes the input Cypher string into a stream of tokens.
 //! * **Parser**: consumes tokens and produces an abstract syntax tree (AST)
 //!   representing the Cypher query.
-//! * **Transformer**: converts the AST into GallifreyDB query operations
+//! * **Transformer**: converts the AST into AletheiaDB query operations
 //!   (`QueryOp`) that can be executed by the engine.
 //!
 //! # Quick Start
@@ -46,7 +46,7 @@
 //! parameter map created using the [`params!`] macro.
 //!
 //! ```ignore
-//! use gallifreydb::cypher::params;
+//! use aletheiadb::cypher::params;
 //!
 //! // A simple read-only Cypher query with a named parameter.
 //! let query = "MATCH (p:Person { name: $name }) RETURN p";
@@ -64,7 +64,7 @@
 //! construct parameter maps:
 //!
 //! ```ignore
-//! use gallifreydb::cypher::params;
+//! use aletheiadb::cypher::params;
 //!
 //! let p = params! {
 //!     "name" => "Bob",
@@ -75,7 +75,7 @@
 //! # Supported Cypher Syntax
 //!
 //! This module focuses on a practical subset of the Cypher query language that
-//! is sufficient for typical GallifreyDB workloads. In broad terms, the
+//! is sufficient for typical AletheiaDB workloads. In broad terms, the
 //! following features are supported or targeted:
 //!
 //! * Basic **read queries** using `MATCH` and `RETURN`.
@@ -108,7 +108,7 @@ pub mod transform;
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::params;
+/// use aletheiadb::params;
 ///
 /// let p = params! {
 ///     "name" => "Alice",

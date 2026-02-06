@@ -1,7 +1,7 @@
 //! Edge case tests for additional code coverage.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{
     DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, Quantization, StorageMode, VectorIndex,
 };
 use std::path::PathBuf;

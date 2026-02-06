@@ -1,10 +1,10 @@
 # Tiered Storage Guide
 
-This guide explains how to configure and use GallifreyDB's tiered storage feature for storing historical versions on disk while keeping current state in memory.
+This guide explains how to configure and use AletheiaDB's tiered storage feature for storing historical versions on disk while keeping current state in memory.
 
 ## Overview
 
-GallifreyDB's tiered storage architecture enables:
+AletheiaDB's tiered storage architecture enables:
 - **Unlimited historical depth**: Store years of temporal history
 - **Preserved performance**: Current-state queries remain at 22-70ns
 - **Cost-effective**: SSD storage is 10-100x cheaper than RAM
@@ -15,7 +15,7 @@ flowchart TB
         Query["Your Application"]
     end
 
-    subgraph GallifreyDB
+    subgraph AletheiaDB
         subgraph Hot["Hot Tier (RAM)"]
             Current["Current State<br/>22ns lookup"]
         end
@@ -47,7 +47,7 @@ Redb is a pure Rust embedded database that provides excellent performance withou
 external dependencies. It's the recommended backend for production deployments.
 
 ```rust
-use gallifreydb::storage::{
+use aletheiadb::storage::{
     HistoricalStorage, TieredStorage, TieredStorageConfig,
     RedbColdStorage, RedbConfig,
 };
@@ -174,7 +174,7 @@ let policy = MigrationPolicy::builder()
 ### Manual Migration
 
 ```rust
-use gallifreydb::storage::{MigrationService, MigrationPolicy};
+use aletheiadb::storage::{MigrationService, MigrationPolicy};
 use std::sync::Arc;
 
 // Create migration service
@@ -192,7 +192,7 @@ println!("Migrated {} versions", migrated_count);
 ### Migration Callbacks
 
 ```rust
-use gallifreydb::storage::migration::MigrationCallback;
+use aletheiadb::storage::migration::MigrationCallback;
 
 struct LoggingCallback;
 

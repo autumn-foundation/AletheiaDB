@@ -1,11 +1,11 @@
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::temporal::{Timestamp, time};
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::query::{EntityHistory, VersionDiff};
 use crate::utils::error::Result;
 
-impl GallifreyDB {
+impl AletheiaDB {
     /// Get outgoing edges from a node at a specific point in time.
     ///
     /// This method uses the temporal adjacency index to efficiently find all
@@ -26,10 +26,10 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::GallifreyDB;
-    /// use gallifreydb::core::temporal::time;
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::core::temporal::time;
     ///
-    /// let db = GallifreyDB::new().unwrap();
+    /// let db = AletheiaDB::new().unwrap();
     /// // ... create and delete edges ...
     /// let edges = db.get_outgoing_edges_at_time(node_id, valid_time, tx_time);
     /// ```
@@ -64,10 +64,10 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::GallifreyDB;
-    /// use gallifreydb::core::temporal::time;
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::core::temporal::time;
     ///
-    /// let db = GallifreyDB::new().unwrap();
+    /// let db = AletheiaDB::new().unwrap();
     /// // ... create and delete edges ...
     /// let edges = db.get_incoming_edges_at_time(node_id, valid_time, tx_time);
     /// ```

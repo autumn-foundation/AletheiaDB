@@ -1,4 +1,4 @@
-//! Main GallifreyDB database API.
+//! Main AletheiaDB database API.
 //!
 //! This module provides the primary interface to the database, coordinating
 //! between current storage (fast path) and historical storage (temporal path).
@@ -34,7 +34,7 @@ pub mod transaction;
 /// Vector index operations.
 pub mod vector;
 
-/// Main GallifreyDB database.
+/// Main AletheiaDB database.
 ///
 /// This is the primary entry point for interacting with the database.
 /// It coordinates between current storage (for fast current-state queries)
@@ -42,7 +42,7 @@ pub mod vector;
 ///
 /// # Durability Modes
 ///
-/// GallifreyDB supports three durability modes for write transactions:
+/// AletheiaDB supports three durability modes for write transactions:
 ///
 /// - **Synchronous** (default): Each commit waits for fsync. Maximum durability.
 /// - **Async**: Commits return immediately, background thread syncs. Fast but risk of data loss.
@@ -54,11 +54,11 @@ pub mod vector;
 /// # Examples
 ///
 /// ```ignore
-/// use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-/// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+/// use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+/// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 ///
 /// // 1. Initialize the database
-/// let db = GallifreyDB::new().expect("Failed to open database");
+/// let db = AletheiaDB::new().expect("Failed to open database");
 ///
 /// // 2. Enable vector indexing (optional)
 /// db.vector_index("embedding")
@@ -94,7 +94,7 @@ pub mod vector;
 /// let alice = db.get_node(alice_id)?;
 /// println!("Found: {:?}", alice.properties.get("name"));
 /// ```
-pub struct GallifreyDB {
+pub struct AletheiaDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     pub(crate) current: Arc<CurrentStorage>,
     /// Historical version storage (temporal path) - RwLock-protected for concurrent reads
@@ -131,7 +131,7 @@ pub struct GallifreyDB {
     pub(crate) persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
-impl Drop for GallifreyDB {
+impl Drop for AletheiaDB {
     fn drop(&mut self) {
         // Signal shutdown to background persistence thread
         if let Some(ref tracker) = self.persistence_tracker {

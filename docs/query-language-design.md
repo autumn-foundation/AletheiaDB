@@ -1,10 +1,10 @@
-# Query Language Design for GallifreyDB
+# Query Language Design for AletheiaDB
 
-This document describes the query language extensions for GallifreyDB, providing a Cypher-like syntax with support for vector search operations, bi-temporal queries, and hybrid graph-vector queries.
+This document describes the query language extensions for AletheiaDB, providing a Cypher-like syntax with support for vector search operations, bi-temporal queries, and hybrid graph-vector queries.
 
 ## Overview
 
-GallifreyDB's query language (GQL - Gallifrey Query Language) extends the Cypher graph query language with:
+AletheiaDB's query language (AQL - Aletheia Query Language) extends the Cypher graph query language with:
 
 1. **Vector Search Operations**: Native k-NN search and similarity-based ranking
 2. **Bi-Temporal Queries**: Point-in-time and time-range queries
@@ -405,6 +405,6 @@ LIMIT 10
 ## References
 
 - [openCypher Specification](https://opencypher.org/)
-- [GQL Standard (ISO/IEC 39075)](https://www.gqlstandards.org/)
+- [AQL Standard (ISO/IEC 39075)](https://www.gqlstandards.org/)
 - [SQL:2011 Temporal Features](https://en.wikipedia.org/wiki/SQL:2011)
 - [XTDB Bi-temporality](https://v1-docs.xtdb.com/concepts/bitemporality/)

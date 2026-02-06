@@ -1,4 +1,4 @@
-//! Example: Using ONNX local embeddings with GallifreyDB
+//! Example: Using ONNX local embeddings with AletheiaDB
 //!
 //! This example demonstrates using ONNX models for local embedding generation.
 //!
@@ -16,9 +16,9 @@
 
 #![cfg(feature = "embedding-onnx")]
 
-use gallifreydb::embeddings::EmbeddingService;
-use gallifreydb::embeddings::providers::onnx::*;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use aletheiadb::embeddings::EmbeddingService;
+use aletheiadb::embeddings::providers::onnx::*;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -46,9 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embeddings = embedding_service.embed_batch(&documents).await?;
     println!("✅ Generated {} placeholder embeddings\n", embeddings.len());
 
-    // 3. Store in GallifreyDB
-    println!("💾 Storing in GallifreyDB...");
-    let db = GallifreyDB::new()?;
+    // 3. Store in AletheiaDB
+    println!("💾 Storing in AletheiaDB...");
+    let db = AletheiaDB::new()?;
 
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(

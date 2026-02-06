@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+/// use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 /// use std::sync::Arc;
 ///
 /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
@@ -88,7 +88,7 @@ impl EmbeddingService {
     /// # Example
     ///
     /// ```ignore
-    /// let embedding = service.embed("GallifreyDB is a bi-temporal graph database").await?;
+    /// let embedding = service.embed("AletheiaDB is a bi-temporal graph database").await?;
     /// println!("Generated {}-dimensional embedding", embedding.len());
     /// ```
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {

@@ -1,6 +1,6 @@
 //! Observability Demo
 //!
-//! Demonstrates GallifreyDB's production observability features including:
+//! Demonstrates AletheiaDB's production observability features including:
 //! - Honeycomb integration for distributed tracing
 //! - Error categorization and metrics
 //! - Critical error detection
@@ -9,8 +9,8 @@
 //!
 //! ```bash
 //! export HONEYCOMB_API_KEY="your-api-key"
-//! export HONEYCOMB_DATASET="gallifreydb-demo"
-//! export RUST_LOG=gallifreydb=info
+//! export HONEYCOMB_DATASET="aletheiadb-demo"
+//! export RUST_LOG=aletheiadb=info
 //! cargo run --example observability_demo --features observability-honeycomb
 //! ```
 //!
@@ -23,14 +23,14 @@
 //! # Running with basic logging
 //!
 //! ```bash
-//! export RUST_LOG=gallifreydb=info
+//! export RUST_LOG=aletheiadb=info
 //! cargo run --example observability_demo --features observability
 //! ```
 
-use gallifreydb::{GallifreyDB, PropertyMapBuilder, WriteOps};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 
 #[cfg(feature = "observability")]
-use gallifreydb::observability;
+use aletheiadb::observability;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize observability (only compiled with 'observability' feature)
@@ -63,8 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(feature = "observability"))]
     println!("ℹ️  Running without observability (zero overhead mode)");
 
-    println!("\n🚀 Creating GallifreyDB instance...");
-    let db = GallifreyDB::new()?;
+    println!("\n🚀 Creating AletheiaDB instance...");
+    let db = AletheiaDB::new()?;
 
     println!("📝 Creating sample nodes and edges...");
 

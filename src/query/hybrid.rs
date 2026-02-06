@@ -7,10 +7,10 @@
 //! # Example Usage
 //!
 //! ```rust,ignore
-//! use gallifreydb::query::hybrid::traverse_and_rank;
-//! use gallifreydb::GallifreyDB;
+//! use aletheiadb::query::hybrid::traverse_and_rank;
+//! use aletheiadb::AletheiaDB;
 //!
-//! let db = GallifreyDB::new();
+//! let db = AletheiaDB::new();
 //! // ... populate database with nodes and embeddings ...
 //!
 //! // Find neighbors similar to a target embedding
@@ -29,7 +29,7 @@
 
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::utils::Result;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
@@ -113,7 +113,7 @@ impl Ord for ScoredCandidate {
 /// let similar_friends = traverse_and_rank(&db, alice_id, "KNOWS", bob_embedding, 5)?;
 /// ```
 pub fn traverse_and_rank(
-    db: &GallifreyDB,
+    db: &AletheiaDB,
     start: NodeId,
     edge_label: &str,
     target_embedding: &[f32],
@@ -233,8 +233,8 @@ pub fn traverse_and_rank(
 /// # Examples
 ///
 /// ```rust,ignore
-/// use gallifreydb::query::hybrid::find_similar_as_of;
-/// use gallifreydb::core::temporal::time;
+/// use aletheiadb::query::hybrid::find_similar_as_of;
+/// use aletheiadb::core::temporal::time;
 ///
 /// // Find documents similar to a query embedding at a specific timestamp
 /// let query_embedding = vec![0.1f32; 384];
@@ -246,7 +246,7 @@ pub fn traverse_and_rank(
 /// }
 /// ```
 pub fn find_similar_as_of(
-    db: &GallifreyDB,
+    db: &AletheiaDB,
     embedding: &[f32],
     k: usize,
     timestamp: crate::core::temporal::Timestamp,
@@ -266,8 +266,8 @@ mod tests {
     use crate::utils::error::VectorError;
 
     /// Helper to create a test database with vector indexing enabled.
-    fn create_test_db() -> GallifreyDB {
-        let db = GallifreyDB::new().unwrap();
+    fn create_test_db() -> AletheiaDB {
+        let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(4, DistanceMetric::Cosine);
         db.enable_vector_index("embedding", config)
             .expect("Failed to enable vector index");
@@ -279,7 +279,7 @@ mod tests {
     /// Alice -> Carol (embedding [0.0, 1.0, 0.0, 0.0] - dissimilar to Alice)
     /// Alice -> Dave (embedding [0.8, 0.2, 0.0, 0.0] - somewhat similar to Alice)
     /// Returns (alice_id, bob_id, carol_id, dave_id)
-    fn create_social_graph(db: &GallifreyDB) -> (NodeId, NodeId, NodeId, NodeId) {
+    fn create_social_graph(db: &AletheiaDB) -> (NodeId, NodeId, NodeId, NodeId) {
         let alice = db
             .create_node(
                 "Person",
@@ -698,12 +698,12 @@ mod tests {
     // Tests for find_similar_as_of
 
     /// Helper to create a test database with temporal vector indexing enabled.
-    fn create_temporal_test_db() -> GallifreyDB {
+    fn create_temporal_test_db() -> AletheiaDB {
         use crate::index::vector::temporal::{
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
         let temporal_config = TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::TransactionInterval(1),

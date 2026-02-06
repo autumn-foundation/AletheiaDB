@@ -1,4 +1,4 @@
-use gallifreydb::core::property::{PropertyMap, TAG_SPARSE_VECTOR, deserialize_sparse_vector};
+use aletheiadb::core::property::{PropertyMap, TAG_SPARSE_VECTOR, deserialize_sparse_vector};
 
 #[test]
 fn test_property_map_allocation_limit() {

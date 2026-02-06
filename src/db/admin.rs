@@ -1,6 +1,6 @@
 use crate::api::transaction::visibility::CompressionStats;
 use crate::core::temporal::Timestamp;
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;
 use crate::query::planner::Statistics;
 #[cfg(test)]
@@ -13,7 +13,7 @@ use crate::utils::error::{Result, StorageError};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-impl GallifreyDB {
+impl AletheiaDB {
     /// Get statistics about the historical storage.
     pub fn historical_stats(&self) -> Result<HistoricalStats> {
         Ok(self.historical.read().stats())
@@ -34,7 +34,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// let db = GallifreyDB::new();
+    /// let db = AletheiaDB::new();
     /// // ... add data ...
     /// db.persist_indexes()?; // Save indexes to disk
     /// ```
@@ -118,7 +118,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// let db = GallifreyDB::new();
+    /// let db = AletheiaDB::new();
     /// db.create_node("Person", properties)?;
     /// let lsn = db.__test_current_wal_lsn();
     /// assert!(lsn > 0); // LSN advances after operations
@@ -179,7 +179,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// let db = GallifreyDB::new()?;
+    /// let db = AletheiaDB::new()?;
     /// db.enable_vector_index("embedding", config)?;
     /// // ... create nodes and perform searches ...
     /// let (count, candidates, results) = db.__test_get_filter_stats("Person").unwrap();

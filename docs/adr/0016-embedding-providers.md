@@ -7,7 +7,7 @@
 
 ## Context
 
-GallifreyDB supports storing vector embeddings as first-class property values with HNSW indexing for fast k-NN search (Vector Search Phases 1-2). However, users must provide pre-computed embeddings from external sources. This creates friction in the developer experience:
+AletheiaDB supports storing vector embeddings as first-class property values with HNSW indexing for fast k-NN search (Vector Search Phases 1-2). However, users must provide pre-computed embeddings from external sources. This creates friction in the developer experience:
 
 1. **Integration Overhead**: Users must integrate with embedding APIs separately from the database
 2. **Boilerplate Code**: Every application needs similar embedding generation logic
@@ -33,7 +33,7 @@ User Application
     │
     ├─→ EmbeddingService (optional) ─→ Providers (OpenAI, HF, ONNX, Ollama)
     │                                          ↓
-    └─→ GallifreyDB ←──────────────── Vec<f32> embeddings
+    └─→ AletheiaDB ←──────────────── Vec<f32> embeddings
 ```
 
 **Rationale**:
@@ -66,7 +66,7 @@ pub trait EmbeddingProvider: Send + Sync {
 ```
 
 **Rationale**:
-- **Extensibility**: Users can implement custom providers without modifying GallifreyDB code
+- **Extensibility**: Users can implement custom providers without modifying AletheiaDB code
 - **Polymorphism**: All providers share the same interface, enabling runtime provider selection
 - **Type Safety**: Rust's trait system ensures compile-time correctness
 - **Standard Interface**: Guarantees consistency across providers (batch support, metadata, etc.)
@@ -596,8 +596,8 @@ Current ONNX provider is a placeholder. Full implementation requires:
 ### Basic Usage
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -608,11 +608,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = EmbeddingService::new(provider);
 
     // 2. Generate embedding
-    let text = "GallifreyDB is a bi-temporal graph database";
+    let text = "AletheiaDB is a bi-temporal graph database";
     let embedding = service.embed(text).await?;
 
     // 3. Store in database
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new();
     let node_id = db.create_node(
         "Document",
         PropertyMapBuilder::new()
@@ -628,7 +628,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Custom Provider Implementation
 
 ```rust
-use gallifreydb::embeddings::{EmbeddingProvider, EmbeddingError};
+use aletheiadb::embeddings::{EmbeddingProvider, EmbeddingError};
 use async_trait::async_trait;
 
 pub struct CustomProvider {

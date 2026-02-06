@@ -3,16 +3,16 @@
 //! These tests verify the end-to-end functionality of the query planner,
 //! including graph traversal, vector search, and temporal queries.
 
-use gallifreydb::{
-    DistanceMetric, GallifreyDB, HnswConfig, NodeId, PropertyMapBuilder, WriteOps,
+use aletheiadb::{
+    AletheiaDB, DistanceMetric, HnswConfig, NodeId, PropertyMapBuilder, WriteOps,
     query::{QueryBuilder, QueryPlanner, traverse_and_rank},
     storage::{CurrentStorage, version::AnchorConfig},
 };
 use std::sync::Arc;
 
 /// Helper to create a test database with vector indexing enabled.
-fn create_test_db() -> GallifreyDB {
-    let db = GallifreyDB::new().unwrap();
+fn create_test_db() -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -24,12 +24,12 @@ fn create_test_planner() -> QueryPlanner {
     let storage = Arc::new(CurrentStorage::new());
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     storage.enable_vector_index("embedding", config).unwrap();
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
+    let stats = Arc::new(aletheiadb::query::planner::Statistics::default());
     QueryPlanner::new(stats, storage)
 }
 
 /// Helper to assert a query executes successfully and returns expected count
-fn assert_query_returns_count(db: &GallifreyDB, query: gallifreydb::query::Query, expected: usize) {
+fn assert_query_returns_count(db: &AletheiaDB, query: aletheiadb::query::Query, expected: usize) {
     let results = db.execute_query(query).expect("Query should succeed");
     let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
     assert_eq!(
@@ -42,7 +42,7 @@ fn assert_query_returns_count(db: &GallifreyDB, query: gallifreydb::query::Query
 }
 
 /// Helper to assert a query executes successfully and returns non-empty results
-fn assert_query_succeeds(db: &GallifreyDB, query: gallifreydb::query::Query) {
+fn assert_query_succeeds(db: &AletheiaDB, query: aletheiadb::query::Query) {
     let results = db.execute_query(query).expect("Query should succeed");
     let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
     assert!(!rows.is_empty(), "Query should return at least one result");
@@ -50,7 +50,7 @@ fn assert_query_succeeds(db: &GallifreyDB, query: gallifreydb::query::Query) {
 
 /// Helper to create a social graph for testing.
 /// Returns (alice_id, bob_id, carol_id, dave_id)
-fn create_social_graph(db: &GallifreyDB) -> (NodeId, NodeId, NodeId, NodeId) {
+fn create_social_graph(db: &AletheiaDB) -> (NodeId, NodeId, NodeId, NodeId) {
     // Create nodes with embeddings
     let alice = db
         .create_node(
@@ -129,7 +129,7 @@ fn test_query_builder_with_filter() {
     // Build query with filter
     let query = QueryBuilder::new()
         .start(alice)
-        .filter(gallifreydb::query::Predicate::eq("name", "Alice"))
+        .filter(aletheiadb::query::Predicate::eq("name", "Alice"))
         .build();
 
     // Verify by planning
@@ -217,7 +217,7 @@ fn test_planner_node_lookup() {
     // Should produce a NodeLookup physical op
     assert!(matches!(
         plan.root,
-        gallifreydb::query::planner::physical::PhysicalOp::NodeLookup { .. }
+        aletheiadb::query::planner::physical::PhysicalOp::NodeLookup { .. }
     ));
     println!("✓ Planner produces NodeLookup for start query");
 }
@@ -235,7 +235,7 @@ fn test_planner_traversal() {
     // Should produce an IndexedTraversal
     assert!(matches!(
         plan.root,
-        gallifreydb::query::planner::physical::PhysicalOp::IndexedTraversal { .. }
+        aletheiadb::query::planner::physical::PhysicalOp::IndexedTraversal { .. }
     ));
     println!("✓ Planner produces IndexedTraversal for traverse query");
 }
@@ -253,7 +253,7 @@ fn test_planner_vector_search() {
     // Should produce an HnswSearch
     assert!(matches!(
         plan.root,
-        gallifreydb::query::planner::physical::PhysicalOp::HnswSearch { .. }
+        aletheiadb::query::planner::physical::PhysicalOp::HnswSearch { .. }
     ));
     println!("✓ Planner produces HnswSearch for vector query");
 }
@@ -276,7 +276,7 @@ fn test_planner_hybrid_graph_vector() {
     // Should produce VectorRerank(IndexedTraversal(NodeLookup))
     assert!(matches!(
         plan.root,
-        gallifreydb::query::planner::physical::PhysicalOp::VectorRerank { .. }
+        aletheiadb::query::planner::physical::PhysicalOp::VectorRerank { .. }
     ));
     println!("✓ Planner produces VectorRerank for hybrid graph+vector query");
 }
@@ -297,7 +297,7 @@ fn test_planner_temporal_lookup() {
     // Should produce TemporalNodeLookup
     assert!(matches!(
         plan.root,
-        gallifreydb::query::planner::physical::PhysicalOp::TemporalNodeLookup { .. }
+        aletheiadb::query::planner::physical::PhysicalOp::TemporalNodeLookup { .. }
     ));
     println!("✓ Planner produces TemporalNodeLookup for temporal query");
 }
@@ -406,7 +406,7 @@ fn test_multi_hop_traversal_query() {
 
     assert!(matches!(
         plan.root,
-        gallifreydb::query::planner::physical::PhysicalOp::IndexedTraversal { .. }
+        aletheiadb::query::planner::physical::PhysicalOp::IndexedTraversal { .. }
     ));
     println!("✓ Multi-hop traversal query works");
 }
@@ -424,7 +424,7 @@ fn test_scan_all_nodes() {
 
     assert!(matches!(
         plan.root,
-        gallifreydb::query::planner::physical::PhysicalOp::NodeScan { .. }
+        aletheiadb::query::planner::physical::PhysicalOp::NodeScan { .. }
     ));
     println!("✓ Node scan query works");
 }
@@ -435,7 +435,7 @@ fn test_scan_all_nodes() {
 
 #[test]
 fn test_temporal_context_preserved() {
-    let db = GallifreyDB::with_config(AnchorConfig {
+    let db = AletheiaDB::with_config(AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
     })
@@ -456,7 +456,7 @@ fn test_temporal_context_preserved() {
         .expect("Failed to create node");
 
     // Record the timestamp after creation
-    let create_time = gallifreydb::core::temporal::time::now();
+    let create_time = aletheiadb::core::temporal::time::now();
 
     // Update the node
     db.write(|tx| {
@@ -491,7 +491,7 @@ fn test_temporal_context_preserved() {
 
 #[test]
 fn test_full_hybrid_temporal_graph_vector() {
-    let db = GallifreyDB::with_config(AnchorConfig {
+    let db = AletheiaDB::with_config(AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
     })
@@ -504,7 +504,7 @@ fn test_full_hybrid_temporal_graph_vector() {
 
     // Full hybrid: temporal + graph + vector
     let embedding = [1.0f32, 0.0, 0.0, 0.0];
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
 
     let query = QueryBuilder::new()
         .as_of(timestamp, timestamp)
@@ -526,7 +526,7 @@ fn test_full_hybrid_temporal_graph_vector() {
     // Should be a VectorRerank over something
     assert!(matches!(
         plan.root,
-        gallifreydb::query::planner::physical::PhysicalOp::VectorRerank { .. }
+        aletheiadb::query::planner::physical::PhysicalOp::VectorRerank { .. }
     ));
 
     println!("✓ Full hybrid query (temporal + graph + vector) works");
@@ -641,7 +641,7 @@ fn test_execute_filter() {
         .query()
         .start(alice)
         .traverse("KNOWS")
-        .filter(gallifreydb::query::Predicate::eq("name", "Bob"))
+        .filter(aletheiadb::query::Predicate::eq("name", "Bob"))
         .build();
 
     let results = db.execute_query(query).expect("Query execution failed");
@@ -791,7 +791,7 @@ fn test_execute_empty_result() {
         .query()
         .start(alice)
         .traverse("KNOWS")
-        .filter(gallifreydb::query::Predicate::eq("name", "NonExistent"))
+        .filter(aletheiadb::query::Predicate::eq("name", "NonExistent"))
         .build();
 
     let results = db.execute_query(query).expect("Query execution failed");
@@ -816,7 +816,7 @@ fn test_execute_chained_operations() {
         .query()
         .start(alice)
         .traverse("KNOWS")
-        .filter(gallifreydb::query::Predicate::ne("name", "Carol"))
+        .filter(aletheiadb::query::Predicate::ne("name", "Carol"))
         .limit(5)
         .build();
 
@@ -873,7 +873,7 @@ fn test_statistics_caching() {
 #[test]
 fn test_execute_temporal_node_lookup_returns_historical_state() {
     // Create database with frequent anchoring for testing
-    let db = GallifreyDB::with_config(AnchorConfig {
+    let db = AletheiaDB::with_config(AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
     })
@@ -1171,12 +1171,12 @@ fn test_direct_traverse_and_rank_with_different_label() {
 #[test]
 #[ignore = "Temporal + Vector query pattern not yet implemented in planner (Phase 3)"]
 fn test_temporal_vector_query() {
-    use gallifreydb::index::vector::temporal::{
+    use aletheiadb::index::vector::temporal::{
         RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
     };
 
     // Create database with temporal vector indexing
-    let db = GallifreyDB::with_config(AnchorConfig {
+    let db = AletheiaDB::with_config(AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
     })
@@ -1214,7 +1214,7 @@ fn test_temporal_vector_query() {
         )
         .expect("Failed to create Bob");
 
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
 
     // Test Temporal + Vector query pattern: as_of + find_similar
     let query_embedding = [1.0f32, 0.0, 0.0, 0.0];
@@ -1253,7 +1253,7 @@ fn test_temporal_vector_query() {
 
 #[test]
 fn test_query_with_missing_vector_index() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     // Note: NOT enabling vector index
 
     // Create a node
@@ -1282,7 +1282,7 @@ fn test_query_with_missing_vector_index() {
 
 #[test]
 fn test_query_with_invalid_node_id() {
-    use gallifreydb::utils::error::{Error, StorageError};
+    use aletheiadb::utils::error::{Error, StorageError};
 
     let db = create_test_db();
 
@@ -1365,7 +1365,7 @@ fn test_query_with_invalid_embedding_dimensions() {
 
 #[test]
 fn test_all_query_dimension_combinations() {
-    let db = GallifreyDB::with_config(AnchorConfig {
+    let db = AletheiaDB::with_config(AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
     })
@@ -1375,7 +1375,7 @@ fn test_all_query_dimension_combinations() {
         .expect("Failed to enable vector index");
 
     let (alice, _bob, _carol, _dave) = create_social_graph(&db);
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
     let embedding = [1.0f32, 0.0, 0.0, 0.0];
 
     // Test 1: Graph only
@@ -1452,7 +1452,7 @@ fn test_query_with_all_modifiers() {
 
     // Build a query with all possible modifiers
     let embedding = [1.0f32, 0.0, 0.0, 0.0];
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
 
     let query = db
         .query()
@@ -1460,7 +1460,7 @@ fn test_query_with_all_modifiers() {
         .start(alice) // Graph source
         .traverse("KNOWS") // Graph traversal
         .rank_by_similarity(&embedding, 10) // Vector ranking
-        .filter(gallifreydb::query::Predicate::ne("name", "Carol")) // Filter
+        .filter(aletheiadb::query::Predicate::ne("name", "Carol")) // Filter
         .limit(5) // Limit
         .skip(0) // Skip
         .build();
@@ -1492,14 +1492,14 @@ fn test_query_planner_chooses_optimal_operator_order() {
     let q1 = db
         .query()
         .find_similar(&embedding, 2) // Very selective (k=2)
-        .filter(gallifreydb::query::Predicate::eq("name", "Alice"))
+        .filter(aletheiadb::query::Predicate::eq("name", "Alice"))
         .build();
 
     // Query 2: Scan all, then filter, then rank (less optimal)
     let q2 = db
         .query()
         .scan(Some("Person"))
-        .filter(gallifreydb::query::Predicate::eq("name", "Alice"))
+        .filter(aletheiadb::query::Predicate::eq("name", "Alice"))
         .rank_by_similarity(&embedding, 10)
         .build();
 
@@ -1640,7 +1640,7 @@ fn test_query_builder_type_safety() {
         .query()
         .start(alice)
         .similar_to(bob, 10)
-        .filter(gallifreydb::query::Predicate::gt("score", 0.8))
+        .filter(aletheiadb::query::Predicate::gt("score", 0.8))
         .build();
 
     // The following would fail at compile time due to type-state pattern:

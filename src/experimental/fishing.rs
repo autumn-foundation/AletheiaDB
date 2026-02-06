@@ -12,7 +12,7 @@
 //! - **Spreading the Net**: traversing edges from the initial set.
 //! - **Freshness**: Preferring recently updated information.
 
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::temporal::time;
 use crate::utils::{Error, Result};
@@ -85,12 +85,12 @@ pub struct Catch {
 
 /// The main tool for associative retrieval.
 pub struct FishingRod<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
 }
 
 impl<'a> FishingRod<'a> {
     /// Create a new FishingRod.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_fishing_workflow() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_fishing_with_edge_label_filter() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_fishing_no_vector_index_error() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         // Do NOT enable vector index
 
         let rod = FishingRod::new(&db);
@@ -421,7 +421,7 @@ mod tests {
         // This test mostly verifies the code path runs without error.
         // Deterministic testing of time decay is tricky without mocking time,
         // but we can ensure it doesn't crash or behave illogically.
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
         db.enable_vector_index("embedding", config).unwrap();
 

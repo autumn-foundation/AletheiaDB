@@ -1,7 +1,7 @@
 //! Tests verifying usearch native delete functionality.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 
 /// Test that native deletes truly remove vectors from the index.
 #[test]

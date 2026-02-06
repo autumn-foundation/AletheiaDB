@@ -7,9 +7,9 @@
 //! # Example
 //!
 //! ```rust
-//! use gallifreydb::query::QueryBuilder;
-//! use gallifreydb::core::NodeId;
-//! use gallifreydb::core::temporal::Timestamp;
+//! use aletheiadb::query::QueryBuilder;
+//! use aletheiadb::core::NodeId;
+//! use aletheiadb::core::temporal::Timestamp;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let alice_id = NodeId::new(1)?;
@@ -199,8 +199,8 @@ impl QueryBuilder<state::Initial> {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::query::QueryBuilder;
-    /// use gallifreydb::index::vector::DistanceMetric;
+    /// use aletheiadb::query::QueryBuilder;
+    /// use aletheiadb::index::vector::DistanceMetric;
     ///
     /// let embedding = vec![0.1, 0.2, 0.3];
     /// let query = QueryBuilder::new()
@@ -237,9 +237,9 @@ impl QueryBuilder<state::Initial> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
+    /// # use aletheiadb::AletheiaDB;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// let results = db.query()
     ///     .find_by_property("Person", "name", "Alice")
     ///     .build();
@@ -334,8 +334,8 @@ impl QueryBuilder<state::HasNodes> {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::query::QueryBuilder;
-    /// use gallifreydb::core::NodeId;
+    /// use aletheiadb::query::QueryBuilder;
+    /// use aletheiadb::core::NodeId;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let alice_id = NodeId::new(1)?;
@@ -388,10 +388,10 @@ impl QueryBuilder<state::HasNodes> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::core::NodeId;
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// # let node_id = NodeId::new(1)?;
     /// # let bob_id = NodeId::new(2)?;
     /// let results = db.query()
@@ -437,10 +437,10 @@ impl QueryBuilder<state::HasNodes> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::core::NodeId;
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// # let alice_id = NodeId::new(1)?;
     /// # let bob_id = NodeId::new(2)?;
     /// // Find similar documents using custom embedding
@@ -734,9 +734,9 @@ impl<S: QueryState> QueryBuilder<S> {
     /// # Example
     ///
     /// ```rust
-    /// # use gallifreydb::query::QueryBuilder;
-    /// # use gallifreydb::core::NodeId;
-    /// # use gallifreydb::core::temporal::Timestamp;
+    /// # use aletheiadb::query::QueryBuilder;
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let timestamp = Timestamp::new(1000, 0)?;
     /// # let tx_time = Timestamp::new(2000, 0)?;
@@ -780,11 +780,11 @@ impl<S: QueryState> QueryBuilder<S> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use gallifreydb::GallifreyDB;
-    /// use gallifreydb::core::NodeId;
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::core::NodeId;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let db = GallifreyDB::new()?;
+    /// let db = AletheiaDB::new()?;
     /// let alice_id = NodeId::new(1)?;
     ///
     /// let results = db.query()
@@ -801,7 +801,7 @@ impl<S: QueryState> QueryBuilder<S> {
     /// ```
     pub fn execute(
         self,
-        db: &crate::GallifreyDB,
+        db: &crate::AletheiaDB,
     ) -> crate::utils::error::Result<super::executor::QueryResults> {
         let query = self.build();
         db.execute_query(query)
@@ -841,8 +841,8 @@ impl<S: QueryState> QueryBuilder<S> {
 /// # Example
 ///
 /// ```rust
-/// # use gallifreydb::query::QueryBuilder;
-/// # use gallifreydb::core::NodeId;
+/// # use aletheiadb::query::QueryBuilder;
+/// # use aletheiadb::core::NodeId;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let alice_id = NodeId::new(1)?;
 /// # let bob_id = NodeId::new(2)?;
@@ -886,8 +886,8 @@ impl<S: QueryState> SimilarToBuilder<S> {
     /// # Example
     ///
     /// ```rust
-    /// # use gallifreydb::query::QueryBuilder;
-    /// # use gallifreydb::core::NodeId;
+    /// # use aletheiadb::query::QueryBuilder;
+    /// # use aletheiadb::core::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let node_id = NodeId::new(1)?;
     /// QueryBuilder::new()
@@ -908,8 +908,8 @@ impl<S: QueryState> SimilarToBuilder<S> {
     /// # Example
     ///
     /// ```rust
-    /// # use gallifreydb::query::QueryBuilder;
-    /// # use gallifreydb::core::NodeId;
+    /// # use aletheiadb::query::QueryBuilder;
+    /// # use aletheiadb::core::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let node_id = NodeId::new(1)?;
     /// QueryBuilder::new()
@@ -943,8 +943,8 @@ impl<S: QueryState> SimilarToBuilder<S> {
 /// # Example
 ///
 /// ```rust
-/// # use gallifreydb::query::QueryBuilder;
-/// # use gallifreydb::core::NodeId;
+/// # use aletheiadb::query::QueryBuilder;
+/// # use aletheiadb::core::NodeId;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let alice_id = NodeId::new(1)?;
 /// # let embedding = vec![0.1, 0.2, 0.3];
@@ -983,8 +983,8 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
     /// # Example
     ///
     /// ```rust
-    /// # use gallifreydb::query::QueryBuilder;
-    /// # use gallifreydb::core::NodeId;
+    /// # use aletheiadb::query::QueryBuilder;
+    /// # use aletheiadb::core::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let alice_id = NodeId::new(1)?;
     /// # let embedding = vec![0.1, 0.2, 0.3];
@@ -1019,8 +1019,8 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
 /// # Example
 ///
 /// ```rust
-/// # use gallifreydb::query::QueryBuilder;
-/// # use gallifreydb::index::vector::DistanceMetric;
+/// # use aletheiadb::query::QueryBuilder;
+/// # use aletheiadb::index::vector::DistanceMetric;
 /// # fn main() {
 /// # let embedding = vec![0.1, 0.2, 0.3];
 /// let query = QueryBuilder::new()
@@ -1058,7 +1058,7 @@ impl FindSimilarBuilder {
     /// # Example
     ///
     /// ```rust
-    /// # use gallifreydb::query::QueryBuilder;
+    /// # use aletheiadb::query::QueryBuilder;
     /// # fn main() {
     /// # let embedding = vec![0.1, 0.2, 0.3];
     /// QueryBuilder::new()
@@ -1079,8 +1079,8 @@ impl FindSimilarBuilder {
     /// # Example
     ///
     /// ```rust
-    /// # use gallifreydb::query::QueryBuilder;
-    /// # use gallifreydb::index::vector::DistanceMetric;
+    /// # use aletheiadb::query::QueryBuilder;
+    /// # use aletheiadb::index::vector::DistanceMetric;
     /// # fn main() {
     /// # let embedding = vec![0.1, 0.2, 0.3];
     /// QueryBuilder::new()

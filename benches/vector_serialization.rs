@@ -5,8 +5,8 @@
 //!
 //! Expected improvement: 2-10x speedup for typical embedding sizes (384-1536 dimensions)
 
+use aletheiadb::core::property::{deserialize_vector, serialize_vector};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::property::{deserialize_vector, serialize_vector};
 
 /// Benchmark serialization for various embedding sizes
 fn bench_serialize_vector(c: &mut Criterion) {
@@ -152,7 +152,7 @@ fn bench_serialize_into(c: &mut Criterion) {
 
             b.iter(|| {
                 let mut buffer = Vec::new();
-                gallifreydb::core::property::serialize_vector_into(black_box(&vector), &mut buffer);
+                aletheiadb::core::property::serialize_vector_into(black_box(&vector), &mut buffer);
                 black_box(buffer);
             });
         });

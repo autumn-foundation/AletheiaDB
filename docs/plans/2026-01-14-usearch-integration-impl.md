@@ -1067,8 +1067,8 @@ git commit -m "refactor(vector): update temporal index for usearch backend"
 ```rust
 //! Tests verifying usearch native delete functionality.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 
 /// Test that native deletes truly remove vectors from the index.
 #[test]
@@ -1180,8 +1180,8 @@ git commit -m "test(vector): add native delete verification tests"
 ```rust
 //! Tests verifying quantization correctness and recall.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization, VectorIndex};
 use std::collections::HashSet;
 
 /// Helper to generate random-ish vectors for testing.
@@ -1360,8 +1360,8 @@ git commit -m "test(vector): add quantization recall verification tests"
 ```rust
 //! Tests for memory-mapped index persistence.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, StorageMode, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, StorageMode, VectorIndex};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -1482,8 +1482,8 @@ git commit -m "test(vector): add memory-mapped index persistence tests"
 ```rust
 //! Property-based tests for vector index invariants.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use proptest::prelude::*;
 
 /// Generate valid vector dimensions (4-128 for test speed).
@@ -1637,8 +1637,8 @@ git commit -m "test(vector): add property-based tests for index invariants"
 ```rust
 //! Stress tests for concurrent vector index operations.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use std::sync::Arc;
 use std::thread;
 

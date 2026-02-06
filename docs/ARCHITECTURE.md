@@ -1,6 +1,6 @@
-# GallifreyDB Architecture
+# AletheiaDB Architecture
 
-This document describes the core architecture principles, design patterns, and system design of GallifreyDB.
+This document describes the core architecture principles, design patterns, and system design of AletheiaDB.
 
 ## Table of Contents
 
@@ -58,17 +58,17 @@ This document describes the core architecture principles, design patterns, and s
 
 ```mermaid
 C4Context
-  title System Context diagram for GallifreyDB
+  title System Context diagram for AletheiaDB
 
   Person(developer, "Developer", "Uses the database for building apps")
   Person(agent, "AI Agent", "LLM (Claude/Cursor): Uses the database for reasoning")
 
-  System(gallifreydb, "GallifreyDB", "Bi-temporal Graph Database")
+  System(aletheiadb, "AletheiaDB", "Bi-temporal Graph Database")
   System_Ext(filesystem, "File System", "Stores WAL, Indexes, and Cold Data")
 
-  Rel(developer, gallifreydb, "Reads/Writes", "Rust API / GQL")
-  Rel(agent, gallifreydb, "Tool Execution", "MCP (stdio)")
-  Rel(gallifreydb, filesystem, "Persists", "mmap / fsync")
+  Rel(developer, aletheiadb, "Reads/Writes", "Rust API / AQL")
+  Rel(agent, aletheiadb, "Tool Execution", "MCP (stdio)")
+  Rel(aletheiadb, filesystem, "Persists", "mmap / fsync")
 ```
 
 ## Design Patterns
@@ -84,7 +84,7 @@ classDiagram
         }
     }
     namespace Core {
-        class GallifreyDB
+        class AletheiaDB
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
@@ -102,9 +102,9 @@ classDiagram
     }
 
     MCPServer --> QueryEngine : Uses
-    QueryEngine --> GallifreyDB : Uses
-    GallifreyDB --> CurrentStorage : Composes
-    GallifreyDB --> HistoricalStorage : Composes
+    QueryEngine --> AletheiaDB : Uses
+    AletheiaDB --> CurrentStorage : Composes
+    AletheiaDB --> HistoricalStorage : Composes
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
 ```
@@ -149,8 +149,8 @@ classDiagram
             +mean(nodes)
         }
     }
-    class GallifreyDB
-    ConceptAlgebra --> GallifreyDB : Uses (Vector Index)
+    class AletheiaDB
+    ConceptAlgebra --> AletheiaDB : Uses (Vector Index)
 ```
 
 **Sequence: Concept Analogy**
@@ -159,7 +159,7 @@ classDiagram
 sequenceDiagram
     participant User
     participant CA as ConceptAlgebra
-    participant DB as GallifreyDB
+    participant DB as AletheiaDB
 
     User->>CA: analogy(king, man, woman)
     CA->>DB: get_vector(king)
@@ -186,7 +186,7 @@ classDiagram
         class ActivityDensityResonator
     }
 
-    EchoChamber --> GallifreyDB : Uses (History)
+    EchoChamber --> AletheiaDB : Uses (History)
     EchoChamber --> Resonator : Uses
     ActivityDensityResonator ..|> Resonator : Implements
 ```
@@ -198,7 +198,7 @@ sequenceDiagram
     participant User
     participant Echo as EchoChamber
     participant Res as Resonator
-    participant DB as GallifreyDB
+    participant DB as AletheiaDB
 
     User->>Echo: find_echoes(target, candidates)
     Echo->>DB: get_node_history(target)
@@ -225,7 +225,7 @@ sequenceDiagram
 
 ## Hybrid Storage Architecture
 
-GallifreyDB's architecture separates current state from historical data for optimal performance:
+AletheiaDB's architecture separates current state from historical data for optimal performance:
 
 ### Current Storage Layer
 - **Live Graph**: Active nodes and edges in CSR (Compressed Sparse Row) format
@@ -361,7 +361,7 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id).with_provenance()
 
 ### Provenance Tracking
 
-GallifreyDB tracks data lineage for LLM reasoning:
+AletheiaDB tracks data lineage for LLM reasoning:
 
 - **Source Attribution**: Which data source contributed this fact?
 - **Temporal Provenance**: When was this fact recorded?
@@ -403,7 +403,7 @@ for row in result {
 - **Temporal Graph Algorithms**: Shortest path over time, temporal PageRank
 - **Streaming Temporal Queries**: Subscribe to changes in real-time
 - **Incremental Materialized Views**: Maintain derived data efficiently
-- **LLM-Assisted Query Generation**: Natural language → GallifreyDB queries
+- **LLM-Assisted Query Generation**: Natural language → AletheiaDB queries
 
 ## References
 

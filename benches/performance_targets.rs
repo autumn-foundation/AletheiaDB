@@ -19,9 +19,9 @@
 //!   - On PRs: Quick smoke test to verify no major regressions
 //!   - On scheduled runs: Full validation with comprehensive suite
 
+use aletheiadb::api::transaction::WriteOps;
+use aletheiadb::{AletheiaDB, CurrentStorage, PropertyMapBuilder};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::api::transaction::WriteOps;
-use gallifreydb::{CurrentStorage, GallifreyDB, PropertyMapBuilder};
 
 /// Target: Current-state single-hop traversal <1µs
 fn bench_single_hop_target(c: &mut Criterion) {
@@ -158,7 +158,7 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
     // Setup: Create database with anchored versions
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let node_id = db
         .create_node(
             "Person",
@@ -217,7 +217,7 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
 
     // Setup: Create database with 15 updates
     // Anchors at updates 1, 11 (default anchor_interval = 10)
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let node_id = db
         .create_node(
             "Person",
@@ -278,7 +278,7 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
 
     // Setup: Create database with 19 updates
     // Anchors at updates 1, 11 (default anchor_interval = 10)
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let node_id = db
         .create_node(
             "Person",

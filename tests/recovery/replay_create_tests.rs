@@ -8,7 +8,7 @@
 //! - Version metadata creation
 //! - Temporal index updates
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId},
@@ -101,7 +101,7 @@ fn test_replay_create_node_with_properties() -> Result<()> {
 
     // Then: Node has correct properties
     let node = current.get_node(node_id)?;
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     assert!(
         matches!(node.properties.get("name"), Some(PropertyValue::String(s)) if s.as_ref() == "Alice")
     );
@@ -151,7 +151,7 @@ fn test_replay_create_node_with_vector() -> Result<()> {
 
     // Then: Node has correct vector property
     let node = current.get_node(node_id)?;
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     if let Some(PropertyValue::Vector(vec)) = node.properties.get("embedding") {
         assert_eq!(vec.len(), 4);
         assert_eq!(&vec[..], &embedding[..]);
@@ -277,7 +277,7 @@ fn test_replay_create_edge_with_properties() -> Result<()> {
 
     // Then: Edge has correct properties
     let edge = current.get_edge(edge_id)?;
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     assert!(matches!(
         edge.properties.get("since"),
         Some(PropertyValue::Int(2020))

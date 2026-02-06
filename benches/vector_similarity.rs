@@ -13,11 +13,11 @@
 
 mod common;
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::vector::{
+use aletheiadb::core::vector::{
     cosine_similarity, cosine_similarity_normalized, dot_product, euclidean_distance,
     squared_euclidean_distance,
 };
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 /// Generate a test vector with deterministic values.
 fn generate_vector(dim: usize, seed: usize) -> Vec<f32> {

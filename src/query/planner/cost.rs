@@ -3,7 +3,7 @@
 //! Provides cost estimation for physical operators, enabling the planner
 //! to choose the most efficient execution strategy.
 //!
-//! Cost values are calibrated from GallifreyDB benchmarks:
+//! Cost values are calibrated from AletheiaDB benchmarks:
 //! - Node lookup: ~0.5µs
 //! - Single-hop traversal: ~1µs
 //! - HNSW search per k: ~0.3µs (log scale with index size)

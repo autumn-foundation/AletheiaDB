@@ -1,4 +1,4 @@
-//! Unified configuration for GallifreyDB.
+//! Unified configuration for AletheiaDB.
 //!
 //! This module provides a centralized configuration system that consolidates
 //! all previously hardcoded values across WAL, historical storage, and vector indexes.
@@ -12,9 +12,9 @@
 //! # Example (Programmatic)
 //!
 //! ```ignore
-//! use gallifreydb::config::{GallifreyDBConfig, WalConfigBuilder, HistoricalConfigBuilder};
+//! use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder, HistoricalConfigBuilder};
 //!
-//! let config = GallifreyDBConfig::builder()
+//! let config = AletheiaDBConfig::builder()
 //!     .wal(WalConfigBuilder::new()
 //!         .with_validated(32, 2048, 64 * 1024, 64 * 1024 * 1024, 10, 10).unwrap()
 //!         .build())
@@ -24,16 +24,16 @@
 //!         .build())
 //!     .build();
 //!
-//! let db = GallifreyDB::with_unified_config(config);
+//! let db = AletheiaDB::with_unified_config(config);
 //! ```
 //!
 //! # Example (TOML - requires `config-toml` feature)
 //!
 //! ```ignore
-//! use gallifreydb::config::GallifreyDBConfig;
+//! use aletheiadb::config::AletheiaDBConfig;
 //!
-//! let config = GallifreyDBConfig::from_toml_file("config.toml")?;
-//! let db = GallifreyDB::with_unified_config(config);
+//! let config = AletheiaDBConfig::from_toml_file("config.toml")?;
+//! let db = AletheiaDB::with_unified_config(config);
 //! ```
 
 #[cfg(feature = "config-toml")]
@@ -80,7 +80,7 @@ pub struct WalConfig {
     pub flush_interval_ms: u64,
 
     /// Directory where WAL files are stored.
-    /// Default: "gallifreydb/wal"
+    /// Default: "aletheiadb/wal"
     pub wal_dir: std::path::PathBuf,
 
     /// Number of WAL segments to keep for recovery.
@@ -101,7 +101,7 @@ impl Default for WalConfig {
             write_buffer_size: 64 * 1024,   // 64KB
             segment_size: 64 * 1024 * 1024, // 64MB
             flush_interval_ms: 10,
-            wal_dir: std::path::PathBuf::from("gallifreydb/wal"),
+            wal_dir: std::path::PathBuf::from("aletheiadb/wal"),
             segments_to_retain: 10,
             durability_mode: crate::storage::wal::DurabilityMode::group_commit_default(),
         }
@@ -148,7 +148,7 @@ impl WalConfigBuilder {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::WalConfigBuilder;
+    /// use aletheiadb::WalConfigBuilder;
     ///
     /// let config = WalConfigBuilder::new()
     ///     .with_validated(
@@ -562,7 +562,7 @@ impl Default for VectorIndexConfigBuilder {
     }
 }
 
-/// Unified configuration for GallifreyDB.
+/// Unified configuration for AletheiaDB.
 ///
 /// This consolidates all configuration settings for the database,
 /// making it easy to tune for different deployment scenarios.
@@ -570,7 +570,7 @@ impl Default for VectorIndexConfigBuilder {
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
-pub struct GallifreyDBConfig {
+pub struct AletheiaDBConfig {
     /// WAL configuration
     pub wal: WalConfig,
     /// Historical storage configuration
@@ -586,15 +586,15 @@ pub struct GallifreyDBConfig {
 /// Provides a fluent API for constructing complete database configuration.
 #[must_use = "builders do nothing unless you call build()"]
 #[derive(Debug)]
-pub struct GallifreyDBConfigBuilder {
-    config: GallifreyDBConfig,
+pub struct AletheiaDBConfigBuilder {
+    config: AletheiaDBConfig,
 }
 
-impl GallifreyDBConfigBuilder {
+impl AletheiaDBConfigBuilder {
     /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
-            config: GallifreyDBConfig::default(),
+            config: AletheiaDBConfig::default(),
         }
     }
 
@@ -623,21 +623,21 @@ impl GallifreyDBConfigBuilder {
     }
 
     /// Build the unified configuration.
-    pub fn build(self) -> GallifreyDBConfig {
+    pub fn build(self) -> AletheiaDBConfig {
         self.config
     }
 }
 
-impl Default for GallifreyDBConfigBuilder {
+impl Default for AletheiaDBConfigBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl GallifreyDBConfig {
+impl AletheiaDBConfig {
     /// Create a new builder for configuration.
-    pub fn builder() -> GallifreyDBConfigBuilder {
-        GallifreyDBConfigBuilder::new()
+    pub fn builder() -> AletheiaDBConfigBuilder {
+        AletheiaDBConfigBuilder::new()
     }
 
     /// Load configuration from a TOML file.
@@ -645,9 +645,9 @@ impl GallifreyDBConfig {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::config::GallifreyDBConfig;
+    /// use aletheiadb::config::AletheiaDBConfig;
     ///
-    /// let config = GallifreyDBConfig::from_toml_file("config.toml")?;
+    /// let config = AletheiaDBConfig::from_toml_file("config.toml")?;
     /// ```
     #[cfg(feature = "config-toml")]
     pub fn from_toml_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
@@ -661,7 +661,7 @@ impl GallifreyDBConfig {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::config::GallifreyDBConfig;
+    /// use aletheiadb::config::AletheiaDBConfig;
     ///
     /// let toml_str = r#"
     /// [wal]
@@ -669,7 +669,7 @@ impl GallifreyDBConfig {
     /// stripe_capacity = 2048
     /// "#;
     ///
-    /// let config = GallifreyDBConfig::from_toml_str(toml_str)?;
+    /// let config = AletheiaDBConfig::from_toml_str(toml_str)?;
     /// ```
     #[cfg(feature = "config-toml")]
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
@@ -681,9 +681,9 @@ impl GallifreyDBConfig {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::config::GallifreyDBConfig;
+    /// use aletheiadb::config::AletheiaDBConfig;
     ///
-    /// let config = GallifreyDBConfig::default();
+    /// let config = AletheiaDBConfig::default();
     /// config.to_toml_file("config.toml")?;
     /// ```
     #[cfg(feature = "config-toml")]
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_unified_config_defaults() {
-        let config = GallifreyDBConfig::default();
+        let config = AletheiaDBConfig::default();
         assert_eq!(config.wal, WalConfig::default());
         assert_eq!(config.historical, HistoricalConfig::default());
         assert_eq!(config.vector, VectorIndexConfig::default());
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn test_unified_config_builder() {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .wal(WalConfigBuilder::new().num_stripes(32).unwrap().build())
             .historical(
                 HistoricalConfigBuilder::new()
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn test_embedded_system_config() {
         // Embedded systems need smaller buffers
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .wal(
                 WalConfigBuilder::new()
                     .num_stripes(4)
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn test_cloud_deployment_config() {
         // Cloud deployments can afford larger capacities
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .wal(
                 WalConfigBuilder::new()
                     .num_stripes(64)
@@ -971,7 +971,7 @@ mod tests {
     #[test]
     fn test_batch_processing_config() {
         // Batch processing needs different flush intervals
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .wal(
                 WalConfigBuilder::new()
                     .flush_interval_ms(100)
@@ -988,7 +988,7 @@ mod tests {
     #[test]
     #[cfg(feature = "config-toml")]
     fn test_toml_serialization() {
-        let config = GallifreyDBConfig::default();
+        let config = AletheiaDBConfig::default();
         let toml_string = config.to_toml_string().unwrap();
 
         // Should contain all sections
@@ -1022,7 +1022,7 @@ max_k = 10000
 max_layer = 16
         "#;
 
-        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
 
         assert_eq!(config.wal.num_stripes, 32);
         assert_eq!(config.wal.stripe_capacity, 2048);
@@ -1053,7 +1053,7 @@ max_k = 20000
 max_layer = 32
         "#;
 
-        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
 
         // WAL config
         assert_eq!(config.wal.num_stripes, 32);
@@ -1078,7 +1078,7 @@ max_layer = 32
     #[cfg(feature = "config-toml")]
     fn test_toml_round_trip() {
         // Create config with custom values
-        let original = GallifreyDBConfig::builder()
+        let original = AletheiaDBConfig::builder()
             .wal(
                 WalConfigBuilder::new()
                     .num_stripes(32)
@@ -1105,7 +1105,7 @@ max_layer = 32
         let toml_string = original.to_toml_string().unwrap();
 
         // Deserialize back
-        let deserialized = GallifreyDBConfig::from_toml_str(&toml_string).unwrap();
+        let deserialized = AletheiaDBConfig::from_toml_str(&toml_string).unwrap();
 
         // Should be equal
         assert_eq!(original, deserialized);
@@ -1116,7 +1116,7 @@ max_layer = 32
     fn test_toml_file_save_and_load() {
         use tempfile::NamedTempFile;
 
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .wal(WalConfigBuilder::new().num_stripes(64).unwrap().build())
             .build();
 
@@ -1128,7 +1128,7 @@ max_layer = 32
         config.to_toml_file(path).unwrap();
 
         // Load from file
-        let loaded = GallifreyDBConfig::from_toml_file(path).unwrap();
+        let loaded = AletheiaDBConfig::from_toml_file(path).unwrap();
 
         // Should be equal
         assert_eq!(config, loaded);
@@ -1155,7 +1155,7 @@ max_k = 1000
 max_layer = 8
         "#;
 
-        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
 
         assert_eq!(config.wal.num_stripes, 4);
         assert_eq!(config.wal.stripe_capacity, 256);
@@ -1184,7 +1184,7 @@ max_k = 50000
 max_layer = 24
         "#;
 
-        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
 
         assert_eq!(config.wal.num_stripes, 64);
         assert_eq!(config.wal.stripe_capacity, 4096);
@@ -1196,7 +1196,7 @@ max_layer = 24
     #[cfg(feature = "config-toml")]
     fn test_toml_parse_error() {
         let invalid_toml = "this is not valid toml {]";
-        let result = GallifreyDBConfig::from_toml_str(invalid_toml);
+        let result = AletheiaDBConfig::from_toml_str(invalid_toml);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::ParseError(_)));
     }
@@ -1212,7 +1212,7 @@ num_stripes = 32
 max_delay_ms = 10
 max_batch_size = 200
         "#;
-        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
         assert_eq!(config.wal.num_stripes, 32);
         match config.wal.durability_mode {
             crate::storage::wal::DurabilityMode::GroupCommit {
@@ -1234,7 +1234,7 @@ max_batch_size = 200
 [wal.durability_mode.Async]
 flush_interval_ms = 100
         "#;
-        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
         match config.wal.durability_mode {
             crate::storage::wal::DurabilityMode::Async { flush_interval_ms } => {
                 assert_eq!(flush_interval_ms, 100);
@@ -1251,7 +1251,7 @@ flush_interval_ms = 100
 [wal]
 wal_dir = "/custom/path/to/wal"
         "#;
-        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
         assert_eq!(config.wal.wal_dir, PathBuf::from("/custom/path/to/wal"));
     }
 

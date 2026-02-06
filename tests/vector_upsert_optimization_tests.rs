@@ -4,8 +4,8 @@
 //! perform unnecessary FFI calls. The optimized implementation should use a try-add-first
 //! approach instead of unconditionally removing before adding.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 
 /// Test that updating a vector works correctly.
 ///

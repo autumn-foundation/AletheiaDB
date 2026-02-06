@@ -3,10 +3,10 @@
 //! This benchmark demonstrates the performance improvements of the sparse
 //! representation when dealing with large gaps in node IDs (e.g., after deletions).
 
+use aletheiadb::core::id::{EdgeId, NodeId};
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::index::adjacency::AdjacencyIndex;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::{EdgeId, NodeId};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::index::adjacency::AdjacencyIndex;
 
 /// Build an index with dense node IDs (0, 1, 2, 3, ..., n)
 fn build_dense_index(num_nodes: usize) -> AdjacencyIndex {

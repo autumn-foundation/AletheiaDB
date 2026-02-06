@@ -66,7 +66,7 @@ Large graphs often become "hairballs"—visually and structurally unintelligible
 | :--- | :--- | :--- | :--- |
 | **Core Logic** | Implemented (`cartographer.rs`) | Implemented | ✅ Maintain |
 | **Idempotency** | None (Append Only) | Run ID / Cleanup | **Refactor `reify`** to handle cleanup or versioning |
-| **API Exposure** | Internal Rust Struct | Graph-level API | Expose via `GallifreyDB` or `Experimental` facade |
+| **API Exposure** | Internal Rust Struct | Graph-level API | Expose via `AletheiaDB` or `Experimental` facade |
 | **Edge Metadata** | Empty PropertyMap | Distance to Centroid | Add `distance` prop to `LOCATED_IN` edges |
 
 ## 6. 📅 Execution Plan

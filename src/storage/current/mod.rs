@@ -1356,8 +1356,8 @@ impl CurrentStorage {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// use gallifreydb::index::vector::HnswConfig;
+    /// use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
+    /// use aletheiadb::index::vector::HnswConfig;
     ///
     /// let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
     /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
@@ -1656,7 +1656,7 @@ impl CurrentStorage {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::core::temporal::TimeRange;
+    /// use aletheiadb::core::temporal::TimeRange;
     ///
     /// // Track how similar documents changed over time
     /// let query = vec![0.1; 384];

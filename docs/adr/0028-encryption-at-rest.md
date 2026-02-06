@@ -2,13 +2,13 @@
 
 **Status:** Proposed
 **Date:** 2026-01-27
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** security, storage, durability, encryption
 **Related:** ADR-0007 (WAL Durability), ADR-0023 (Index Persistence), ADR-0025 (Redb Cold Storage)
 
 ## Context
 
-GallifreyDB stores sensitive data across multiple persistence layers:
+AletheiaDB stores sensitive data across multiple persistence layers:
 - **WAL segments**: All database mutations including properties and temporal data
 - **Index files**: Graph structure, vector embeddings, temporal version chains
 - **Cold storage (Redb)**: Compressed historical versions
@@ -216,7 +216,7 @@ impl KeyDerivation {
     /// Derive a component-specific DEK
     pub fn derive_dek(&self, component: &str) -> Zeroizing<[u8; 32]> {
         let hk = Hkdf::<Sha256>::new(None, self.mek.as_ref());
-        let info = format!("gallifreydb-{}-dek-v1", component);
+        let info = format!("aletheiadb-{}-dek-v1", component);
         let mut dek = Zeroizing::new([0u8; 32]);
         hk.expand(info.as_bytes(), dek.as_mut())
             .expect("32 bytes is valid output length");
@@ -225,10 +225,10 @@ impl KeyDerivation {
 }
 
 // DEK derivation contexts
-const WAL_DEK_CONTEXT: &str = "wal";       // → "gallifreydb-wal-dek-v1"
-const INDEX_DEK_CONTEXT: &str = "index";   // → "gallifreydb-index-dek-v1"
-const COLD_DEK_CONTEXT: &str = "cold";     // → "gallifreydb-cold-dek-v1"
-const CHECKPOINT_DEK_CONTEXT: &str = "checkpoint"; // → "gallifreydb-checkpoint-dek-v1"
+const WAL_DEK_CONTEXT: &str = "wal";       // → "aletheiadb-wal-dek-v1"
+const INDEX_DEK_CONTEXT: &str = "index";   // → "aletheiadb-index-dek-v1"
+const COLD_DEK_CONTEXT: &str = "cold";     // → "aletheiadb-cold-dek-v1"
+const CHECKPOINT_DEK_CONTEXT: &str = "checkpoint"; // → "aletheiadb-checkpoint-dek-v1"
 ```
 
 **Key Hierarchy Benefits:**
@@ -725,7 +725,7 @@ key_id = "arn:aws:kms:us-east-1:123456789:key/12345678-1234-1234-1234-1234567890
 region = "us-east-1"
 
 [encryption.key_provider.encryption_context]
-service = "gallifreydb"
+service = "aletheiadb"
 environment = "production"
 
 [encryption.components]
@@ -965,7 +965,7 @@ All key access operations are logged:
 - [ ] Leverage existing `key_version_id` field in encryption headers for version tracking
 - [ ] Implement key version cache for reading data encrypted with previous MEKs
 - [ ] Implement background re-encryption service for migrating to new keys
-- [ ] Add key rotation commands to CLI (`gallifreydb key rotate`, `gallifreydb key status`)
+- [ ] Add key rotation commands to CLI (`aletheiadb key rotate`, `aletheiadb key status`)
 - [ ] Document key rotation procedures
 
 **Key Rotation Triggers:**

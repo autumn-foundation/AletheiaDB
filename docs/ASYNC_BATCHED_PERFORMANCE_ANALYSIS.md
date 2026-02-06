@@ -2,11 +2,11 @@
 
 ## Overview
 
-This document analyzes the performance of GallifreyDB's new AsyncBatched durability mode and compares it to:
-1. Other GallifreyDB durability modes
+This document analyzes the performance of AletheiaDB's new AsyncBatched durability mode and compares it to:
+1. Other AletheiaDB durability modes
 2. Industry-standard databases (PostgreSQL, MongoDB, Neo4j, SQLite)
 
-## GallifreyDB Durability Modes Comparison
+## AletheiaDB Durability Modes Comparison
 
 ### Debug Mode Results (1000 operations)
 
@@ -42,12 +42,12 @@ Based on typical debug-to-release improvements for WAL operations:
 - `synchronous_commit = off`: ~50-200µs latency, 5,000-20,000 ops/sec (not ACID)
 - Group commit (auto): ~1-3ms latency, 1,000-5,000 ops/sec (ACID, batched)
 
-**GallifreyDB vs PostgreSQL**:
-| Metric | PostgreSQL | GallifreyDB AsyncBatched | Winner |
+**AletheiaDB vs PostgreSQL**:
+| Metric | PostgreSQL | AletheiaDB AsyncBatched | Winner |
 |--------|-----------|--------------------------|--------|
-| Min latency (non-ACID) | ~50-200µs | ~30-80µs | **GallifreyDB** ✅ |
-| Max throughput (non-ACID) | ~5,000-20,000 | ~12,000-30,000 | **GallifreyDB** ✅ |
-| ACID latency | ~2-5ms | N/A (use GroupCommit: ~100-300µs) | **GallifreyDB** ✅ |
+| Min latency (non-ACID) | ~50-200µs | ~30-80µs | **AletheiaDB** ✅ |
+| Max throughput (non-ACID) | ~5,000-20,000 | ~12,000-30,000 | **AletheiaDB** ✅ |
+| ACID latency | ~2-5ms | N/A (use GroupCommit: ~100-300µs) | **AletheiaDB** ✅ |
 | Maturity | 30+ years | New | PostgreSQL |
 
 ### MongoDB
@@ -57,11 +57,11 @@ Based on typical debug-to-release improvements for WAL operations:
 - `w:1, j:true`: ~10-50ms latency (journal fsync)
 - `w:majority`: ~20-100ms latency (replication + fsync)
 
-**GallifreyDB vs MongoDB**:
-| Metric | MongoDB | GallifreyDB AsyncBatched | Winner |
+**AletheiaDB vs MongoDB**:
+| Metric | MongoDB | AletheiaDB AsyncBatched | Winner |
 |--------|---------|--------------------------|--------|
-| Min latency | ~1-5ms | ~30-80µs | **GallifreyDB** ✅ (20-160x faster) |
-| Throughput | ~5,000-15,000 | ~12,000-30,000 | **GallifreyDB** ✅ |
+| Min latency | ~1-5ms | ~30-80µs | **AletheiaDB** ✅ (20-160x faster) |
+| Throughput | ~5,000-15,000 | ~12,000-30,000 | **AletheiaDB** ✅ |
 | Batched fsync | Yes (oplog) | Yes (intelligent) | Tie |
 | Schema | Flexible | Property map | Tie |
 
@@ -72,13 +72,13 @@ Based on typical debug-to-release improvements for WAL operations:
 - WAL only: ~1-5ms latency, 1,000-5,000 ops/sec
 - No durability: ~100-500µs, 10,000-50,000 ops/sec (memory only)
 
-**GallifreyDB vs Neo4j**:
-| Metric | Neo4j | GallifreyDB AsyncBatched | Winner |
+**AletheiaDB vs Neo4j**:
+| Metric | Neo4j | AletheiaDB AsyncBatched | Winner |
 |--------|-------|--------------------------|--------|
-| Durable write latency | ~1-20ms | ~30-80µs | **GallifreyDB** ✅ (10-250x faster) |
-| Throughput | ~1,000-5,000 | ~12,000-30,000 | **GallifreyDB** ✅ |
+| Durable write latency | ~1-20ms | ~30-80µs | **AletheiaDB** ✅ (10-250x faster) |
+| Throughput | ~1,000-5,000 | ~12,000-30,000 | **AletheiaDB** ✅ |
 | Graph traversal | Excellent | Good (CSR-based) | Neo4j (more mature) |
-| Temporal queries | Limited | **Native bi-temporal** | **GallifreyDB** ✅ |
+| Temporal queries | Limited | **Native bi-temporal** | **AletheiaDB** ✅ |
 
 ### SQLite
 
@@ -88,12 +88,12 @@ Based on typical debug-to-release improvements for WAL operations:
 - `PRAGMA synchronous=OFF`: ~50-200µs latency (no fsync)
 - WAL mode: ~200µs-1ms latency (batched checkpoint)
 
-**GallifreyDB vs SQLite**:
-| Metric | SQLite WAL | GallifreyDB AsyncBatched | Winner |
+**AletheiaDB vs SQLite**:
+| Metric | SQLite WAL | AletheiaDB AsyncBatched | Winner |
 |--------|-----------|--------------------------|--------|
-| Write latency | ~200µs-1ms | ~30-80µs | **GallifreyDB** ✅ (3-30x faster) |
-| Throughput | ~5,000-10,000 | ~12,000-30,000 | **GallifreyDB** ✅ |
-| Concurrent writes | Limited (single writer) | Excellent | **GallifreyDB** ✅ |
+| Write latency | ~200µs-1ms | ~30-80µs | **AletheiaDB** ✅ (3-30x faster) |
+| Throughput | ~5,000-10,000 | ~12,000-30,000 | **AletheiaDB** ✅ |
+| Concurrent writes | Limited (single writer) | Excellent | **AletheiaDB** ✅ |
 | Simplicity | Embedded, zero-config | Embedded Rust | SQLite |
 
 ## Key Advantages of AsyncBatched Mode
@@ -181,7 +181,7 @@ if critical {
 
 ## Industry Comparison Summary
 
-**GallifreyDB AsyncBatched Mode Ranks**:
+**AletheiaDB AsyncBatched Mode Ranks**:
 
 | Category | Ranking | Notes |
 |----------|---------|-------|
@@ -195,7 +195,7 @@ if critical {
 
 ### What Makes AsyncBatched Special
 
-GallifreyDB's AsyncBatched mode achieves a unique position in the database landscape:
+AletheiaDB's AsyncBatched mode achieves a unique position in the database landscape:
 
 1. **Fastest Non-Blocking Writes**: 30-80µs latency beats PostgreSQL async (50-200µs), MongoDB (1-5ms), Neo4j (100-500µs), and matches SQLite's fastest mode
 
@@ -221,7 +221,7 @@ GallifreyDB's AsyncBatched mode achieves a unique position in the database lands
 | Batched fsync | Yes | ✅ Implemented |
 | Configurable | Yes | ✅ batch_size + max_delay |
 
-**Conclusion**: AsyncBatched mode meets all requirements and positions GallifreyDB as having industry-leading write performance while maintaining bi-temporal capabilities.
+**Conclusion**: AsyncBatched mode meets all requirements and positions AletheiaDB as having industry-leading write performance while maintaining bi-temporal capabilities.
 
 ---
 
@@ -239,4 +239,4 @@ GallifreyDB's AsyncBatched mode achieves a unique position in the database lands
 - MongoDB: [Write Concern](https://www.mongodb.com/docs/manual/reference/write-concern/)
 - Neo4j: [Transaction Configuration](https://neo4j.com/docs/operations-manual/current/performance/transaction/)
 - SQLite: [WAL Mode](https://www.sqlite.org/wal.html)
-- GallifreyDB: Issue #128 - WRITE-002: Implement Batched durability mode
+- AletheiaDB: Issue #128 - WRITE-002: Implement Batched durability mode

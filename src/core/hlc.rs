@@ -135,7 +135,7 @@ impl HybridTimestamp {
     /// # Examples
     ///
     /// ```
-    /// use gallifreydb::core::hlc::HybridTimestamp;
+    /// use aletheiadb::core::hlc::HybridTimestamp;
     ///
     /// // Receiving a message from a remote node
     /// let local_time = HybridTimestamp::new(1000, 5).unwrap();
@@ -150,7 +150,7 @@ impl HybridTimestamp {
     /// Receiving multiple messages maintains causality:
     ///
     /// ```
-    /// use gallifreydb::core::hlc::HybridTimestamp;
+    /// use aletheiadb::core::hlc::HybridTimestamp;
     ///
     /// let mut local = HybridTimestamp::new(1000, 0).unwrap();
     /// let msg1 = HybridTimestamp::new(1100, 0).unwrap();
@@ -269,7 +269,7 @@ impl std::fmt::Display for HybridTimestamp {
 ///
 /// # Examples
 /// ```
-/// # use gallifreydb::core::hlc::HybridTimestamp;
+/// # use aletheiadb::core::hlc::HybridTimestamp;
 /// let ts: HybridTimestamp = 1000_i64.into();
 /// assert_eq!(ts.wallclock(), 1000);
 /// assert_eq!(ts.logical(), 0);

@@ -1,4 +1,4 @@
-//! Example: Using HuggingFace embeddings with GallifreyDB
+//! Example: Using HuggingFace embeddings with AletheiaDB
 //!
 //! This example demonstrates using the HuggingFace Inference API for embeddings.
 //!
@@ -17,9 +17,9 @@
 
 #![cfg(feature = "embedding-huggingface")]
 
-use gallifreydb::embeddings::EmbeddingService;
-use gallifreydb::embeddings::providers::huggingface::*;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use aletheiadb::embeddings::EmbeddingService;
+use aletheiadb::embeddings::providers::huggingface::*;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -46,9 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embeddings = embedding_service.embed_batch(&documents).await?;
     println!("✅ Generated {} embeddings\n", embeddings.len());
 
-    // 3. Store in GallifreyDB
-    println!("💾 Storing in GallifreyDB...");
-    let db = GallifreyDB::new()?;
+    // 3. Store in AletheiaDB
+    println!("💾 Storing in AletheiaDB...");
+    let db = AletheiaDB::new()?;
 
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(

@@ -1,13 +1,13 @@
+use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+use aletheiadb::core::vector::cosine_similarity;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::query::executor::QueryExecutor;
+use aletheiadb::query::executor::{QueryRow, ResultIterator};
+use aletheiadb::storage::current::CurrentStorage;
+use aletheiadb::storage::historical::HistoricalStorage;
+use aletheiadb::storage::version::AnchorConfig;
+use aletheiadb::{PhysicalOp, PhysicalPlan};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use gallifreydb::core::property::{PropertyMapBuilder, PropertyValue};
-use gallifreydb::core::vector::cosine_similarity;
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-use gallifreydb::query::executor::QueryExecutor;
-use gallifreydb::query::executor::{QueryRow, ResultIterator};
-use gallifreydb::storage::current::CurrentStorage;
-use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::version::AnchorConfig;
-use gallifreydb::{PhysicalOp, PhysicalPlan};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -59,13 +59,13 @@ impl BaselineVectorRerankIterator {
 }
 
 impl ResultIterator for BaselineVectorRerankIterator {
-    fn next(&mut self) -> Option<gallifreydb::utils::Result<QueryRow>> {
+    fn next(&mut self) -> Option<aletheiadb::utils::Result<QueryRow>> {
         if self.sorted.is_none() && self.input.is_some() {
             let vector_property = match &self.vector_property {
                 Some(prop) => prop.clone(),
                 None => {
-                    return Some(Err(gallifreydb::utils::Error::Vector(
-                        gallifreydb::utils::error::VectorError::IndexError(
+                    return Some(Err(aletheiadb::utils::Error::Vector(
+                        aletheiadb::utils::error::VectorError::IndexError(
                             "VectorRerank requires a vector index to be enabled.".to_string(),
                         ),
                     )));
@@ -179,7 +179,7 @@ fn bench_vector_rerank(c: &mut Criterion) {
                     // We have to manually construct the iterator chain.
                     b.iter(|| {
                         let input_iter =
-                            Box::new(gallifreydb::query::executor::NodeScanIterator::new(
+                            Box::new(aletheiadb::query::executor::NodeScanIterator::new(
                                 Some("Person".to_string()),
                                 current.clone(),
                             ));

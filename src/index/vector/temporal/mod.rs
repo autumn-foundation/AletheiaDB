@@ -2,7 +2,7 @@
 //!
 //! This module implements temporal vector indexing using snapshot-based HNSW indexes,
 //! enabling point-in-time vector queries and semantic drift tracking. This is Phase 3
-//! of GallifreyDB's vector search integration.
+//! of AletheiaDB's vector search integration.
 //!
 //! # Architecture
 //!
@@ -10,7 +10,7 @@
 //! - **Current index**: Live HNSW index for present-time queries
 //! - **Snapshot indexes**: Historical HNSW snapshots at configurable intervals
 //!
-//! This mirrors GallifreyDB's hybrid storage architecture (see ADR-0001) where current
+//! This mirrors AletheiaDB's hybrid storage architecture (see ADR-0001) where current
 //! state is optimized separately from historical data.
 //!
 //! # Snapshot Strategy
@@ -33,12 +33,12 @@
 //! # Examples
 //!
 //! ```rust
-//! use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig, SnapshotStrategy, RetentionPolicy};
-//! use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-//! use gallifreydb::core::id::NodeId;
-//! use gallifreydb::core::temporal::TimeRange;
+//! use aletheiadb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig, SnapshotStrategy, RetentionPolicy};
+//! use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+//! use aletheiadb::core::id::NodeId;
+//! use aletheiadb::core::temporal::TimeRange;
 //!
-//! # fn example() -> gallifreydb::utils::Result<()> {
+//! # fn example() -> aletheiadb::utils::Result<()> {
 //! // Create temporal index configuration
 //! let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
 //! let config = TemporalVectorConfig {
@@ -753,10 +753,10 @@ impl TemporalVectorIndex {
     /// # Examples
     ///
     /// ```no_run
-    /// # use gallifreydb::index::vector::temporal::TemporalVectorIndex;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # fn example() -> gallifreydb::utils::Result<()> {
-    /// # let config = gallifreydb::index::vector::temporal::TemporalVectorConfig::default_with_hnsw(
+    /// # use aletheiadb::index::vector::temporal::TemporalVectorIndex;
+    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+    /// # fn example() -> aletheiadb::utils::Result<()> {
+    /// # let config = aletheiadb::index::vector::temporal::TemporalVectorConfig::default_with_hnsw(
     /// #     HnswConfig::new(384, DistanceMetric::Cosine)
     /// # );
     /// # let index = TemporalVectorIndex::new(config)?;
@@ -872,9 +872,9 @@ impl TemporalVectorIndex {
     /// # Examples
     ///
     /// ```rust
-    /// use gallifreydb::index::vector::temporal::TemporalVectorIndex;
+    /// use aletheiadb::index::vector::temporal::TemporalVectorIndex;
     ///
-    /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::utils::Result<()> {
     /// let query = vec![0.1f32; 384];
     /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
     ///
@@ -961,10 +961,10 @@ impl TemporalVectorIndex {
     /// # Examples
     ///
     /// ```rust
-    /// use gallifreydb::index::vector::temporal::TemporalVectorIndex;
-    /// use gallifreydb::core::temporal::TimeRange;
+    /// use aletheiadb::index::vector::temporal::TemporalVectorIndex;
+    /// use aletheiadb::core::temporal::TimeRange;
     ///
-    /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::utils::Result<()> {
     /// let query = vec![0.1f32; 384];
     /// let time_range = TimeRange::new(1672531200000000.into(), 1704067200000000.into()).unwrap(); // 2023-2024
     ///
@@ -1073,11 +1073,11 @@ impl TemporalVectorIndex {
     /// # Examples
     ///
     /// ```rust
-    /// use gallifreydb::index::vector::temporal::TemporalVectorIndex;
-    /// use gallifreydb::core::temporal::TimeRange;
-    /// use gallifreydb::core::id::NodeId;
+    /// use aletheiadb::index::vector::temporal::TemporalVectorIndex;
+    /// use aletheiadb::core::temporal::TimeRange;
+    /// use aletheiadb::core::id::NodeId;
     ///
-    /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::utils::Result<()> {
     /// let node_id = NodeId::new(42).unwrap();
     /// let reference = vec![0.5f32; 384];
     /// let time_range = TimeRange::new(1000000.into(), 2000000.into()).unwrap();
@@ -1170,10 +1170,10 @@ impl TemporalVectorIndex {
     /// # Examples
     ///
     /// ```rust
-    /// use gallifreydb::index::vector::temporal::{TemporalVectorIndex, DriftMetric};
-    /// use gallifreydb::core::temporal::TimeRange;
+    /// use aletheiadb::index::vector::temporal::{TemporalVectorIndex, DriftMetric};
+    /// use aletheiadb::core::temporal::TimeRange;
     ///
-    /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::utils::Result<()> {
     /// let time_range = TimeRange::new(1000000.into(), 2000000.into()).unwrap();
     ///
     /// // Find documents that changed significantly (cosine distance > 0.3)

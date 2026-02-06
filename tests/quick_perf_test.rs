@@ -3,14 +3,14 @@
 //! This is not a benchmark - just a quick test to measure relative performance
 //! Run with: cargo test quick_perf_test -- --nocapture --ignored
 
-use gallifreydb::storage::wal::DurabilityMode;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder, WalConfigBuilder, WriteOps};
+use aletheiadb::storage::wal::DurabilityMode;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WalConfigBuilder, WriteOps};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use tempfile::TempDir;
 
-fn create_db_with_mode(mode: DurabilityMode) -> (GallifreyDB, TempDir) {
+fn create_db_with_mode(mode: DurabilityMode) -> (AletheiaDB, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
     let config = WalConfigBuilder::new()
         .wal_dir(temp_dir.path().to_path_buf())
@@ -20,7 +20,7 @@ fn create_db_with_mode(mode: DurabilityMode) -> (GallifreyDB, TempDir) {
         .unwrap()
         .durability_mode(mode)
         .build();
-    let db = GallifreyDB::with_wal_config(config).unwrap();
+    let db = AletheiaDB::with_wal_config(config).unwrap();
     (db, temp_dir)
 }
 

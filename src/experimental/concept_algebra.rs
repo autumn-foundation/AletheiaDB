@@ -10,12 +10,12 @@
 //! # Quick Start
 //!
 //! ```rust,no_run
-//! use gallifreydb::GallifreyDB;
-//! use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
-//! use gallifreydb::core::id::NodeId;
+//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+//! use aletheiadb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = GallifreyDB::new()?;
+//! let db = AletheiaDB::new()?;
 //! // ... (assume db is populated with nodes and vectors) ...
 //! let king = NodeId::new(1).unwrap();
 //! let man = NodeId::new(2).unwrap();
@@ -33,20 +33,20 @@
 //! # }
 //! ```
 
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::utils::{Error, Result, VectorError};
 
 /// A tool for performing vector arithmetic on graph nodes.
 pub struct ConceptAlgebra<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
     /// The property name to use for vectors. If None, auto-detected.
     property_name: Option<String>,
 }
 
 impl<'a> ConceptAlgebra<'a> {
     /// Create a new ConceptAlgebra instance.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self {
             db,
             property_name: None,
@@ -108,11 +108,11 @@ impl<'a> ConceptAlgebra<'a> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
-    /// # use gallifreydb::core::id::NodeId;
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// let algebra = ConceptAlgebra::new(&db);
     /// let concept1 = NodeId::new(1).unwrap();
     /// let concept2 = NodeId::new(2).unwrap();
@@ -153,11 +153,11 @@ impl<'a> ConceptAlgebra<'a> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
-    /// # use gallifreydb::core::id::NodeId;
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// let algebra = ConceptAlgebra::new(&db);
     /// let concept = NodeId::new(1).unwrap();
     /// let noise = NodeId::new(2).unwrap();
@@ -197,11 +197,11 @@ impl<'a> ConceptAlgebra<'a> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
-    /// # use gallifreydb::core::id::NodeId;
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// let algebra = ConceptAlgebra::new(&db);
     /// let king = NodeId::new(1).unwrap();
     /// let man = NodeId::new(2).unwrap();
@@ -251,11 +251,11 @@ impl<'a> ConceptAlgebra<'a> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::experimental::concept_algebra::ConceptAlgebra;
-    /// # use gallifreydb::core::id::NodeId;
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// let algebra = ConceptAlgebra::new(&db);
     /// let n1 = NodeId::new(1).unwrap();
     /// let n2 = NodeId::new(2).unwrap();
@@ -308,8 +308,8 @@ mod tests {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     // Helper to create a test DB with vector index enabled
-    fn setup_db() -> GallifreyDB {
-        let db = GallifreyDB::new().unwrap();
+    fn setup_db() -> AletheiaDB {
+        let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
         db.enable_vector_index("embedding", config).unwrap();
         db
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_error_handling() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         // No index enabled yet
 
         let algebra = ConceptAlgebra::new(&db);

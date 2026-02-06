@@ -3,10 +3,10 @@
 //! This test suite validates the incremental CSR implementation using TDD methodology.
 //! Tests are organized by phase following the implementation plan.
 
-use gallifreydb::core::id::{EdgeId, NodeId};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
-use gallifreydb::index::incremental_adjacency::{
+use aletheiadb::core::id::{EdgeId, NodeId};
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
+use aletheiadb::index::incremental_adjacency::{
     CompactionScheduler, IncrementalAdjacencyIndex, IncrementalConfig,
 };
 use std::sync::Arc;
@@ -1050,10 +1050,10 @@ mod phase5_background_compaction {
 #[cfg(test)]
 mod phase6_current_indexes_integration {
     use super::*;
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::core::graph::Edge;
-    use gallifreydb::core::id::VersionId;
-    use gallifreydb::index::current::CurrentIndexes;
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::core::graph::Edge;
+    use aletheiadb::core::id::VersionId;
+    use aletheiadb::index::current::CurrentIndexes;
 
     // Step 6.1: Test insert_edge updates adjacency incrementally (no rebuild)
     #[test]
@@ -1262,10 +1262,10 @@ mod phase6_current_indexes_integration {
 #[cfg(test)]
 mod phase7_persistence_integration {
     use super::*;
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::core::graph::Edge;
-    use gallifreydb::core::id::VersionId;
-    use gallifreydb::index::current::CurrentIndexes;
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::core::graph::Edge;
+    use aletheiadb::core::id::VersionId;
+    use aletheiadb::index::current::CurrentIndexes;
 
     // Step 7.1: Test delta reconstruction after import
     #[test]

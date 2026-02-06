@@ -2,15 +2,15 @@
 
 ## Overview
 
-This guide explains how `AppState` manages GallifreyDB state sharing across HTTP handlers in the actix-web server.
+This guide explains how `AppState` manages AletheiaDB state sharing across HTTP handlers in the actix-web server.
 
-## Design Decision: Arc<GallifreyDB> vs Arc<RwLock<GallifreyDB>>
+## Design Decision: Arc<AletheiaDB> vs Arc<RwLock<AletheiaDB>>
 
-**Decision**: Use `Arc<GallifreyDB>` without an outer `RwLock`.
+**Decision**: Use `Arc<AletheiaDB>` without an outer `RwLock`.
 
-### Why Not Arc<RwLock<GallifreyDB>>?
+### Why Not Arc<RwLock<AletheiaDB>>?
 
-GallifreyDB is already designed for concurrent access with fine-grained interior mutability:
+AletheiaDB is already designed for concurrent access with fine-grained interior mutability:
 
 | Component | Concurrency Mechanism | Performance Characteristic |
 |-----------|----------------------|----------------------------|
@@ -20,7 +20,7 @@ GallifreyDB is already designed for concurrent access with fine-grained interior
 | WAL | Striped locks | High write throughput |
 | Indexes | Lock-free/RwLock | Concurrent updates |
 
-Adding an outer `RwLock<GallifreyDB>` would:
+Adding an outer `RwLock<AletheiaDB>` would:
 - Add global lock contention (all operations acquire same lock)
 - Reduce read parallelism (readers block other readers in write mode)
 - Hurt write throughput (serialize all writes)
@@ -28,11 +28,11 @@ Adding an outer `RwLock<GallifreyDB>` would:
 
 ### Established Pattern
 
-The MCP server (see `src/mcp/server.rs`) successfully uses `Arc<GallifreyDB>` directly:
+The MCP server (see `src/mcp/server.rs`) successfully uses `Arc<AletheiaDB>` directly:
 
 ```rust
-pub struct GallifreyMcpServer {
-    db: Arc<GallifreyDB>,
+pub struct AletheiaMcpServer {
+    db: Arc<AletheiaDB>,
 }
 ```
 
@@ -64,21 +64,21 @@ The test suite (`tests/http_server.rs`) verifies thread safety through:
 ### Basic Setup
 
 ```rust
-use gallifreydb::{GallifreyDB, http::AppState};
+use aletheiadb::{AletheiaDB, http::AppState};
 use actix_web::{web, App, HttpServer};
 use std::sync::Arc;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Create database
-    let db = Arc::new(GallifreyDB::new().unwrap());
+    let db = Arc::new(AletheiaDB::new().unwrap());
     let app_state = AppState::new(db);
 
     // Create server with shared state
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
-            .configure(gallifreydb::http::configure_app)  // Use existing configure_app
+            .configure(aletheiadb::http::configure_app)  // Use existing configure_app
     })
     .bind("127.0.0.1:8080")?
     .run()
@@ -90,7 +90,7 @@ async fn main() -> std::io::Result<()> {
 
 ```rust
 use actix_web::{web, HttpResponse};
-use gallifreydb::http::AppState;
+use aletheiadb::http::AppState;
 
 async fn get_node_count(state: web::Data<AppState>) -> HttpResponse {
     let count = state.db().node_count();
@@ -115,20 +115,20 @@ async fn create_node(
 
 ```rust
 pub struct AppState {
-    db: Arc<GallifreyDB>,
+    db: Arc<AletheiaDB>,
 }
 ```
 
 **Methods:**
 
-- `new(db: Arc<GallifreyDB>) -> Self` - Create new state
-- `db(&self) -> &GallifreyDB` - Get database reference for method calls
-- `db_arc(&self) -> Arc<GallifreyDB>` - Clone the Arc (rarely needed)
+- `new(db: Arc<AletheiaDB>) -> Self` - Create new state
+- `db(&self) -> &AletheiaDB` - Get database reference for method calls
+- `db_arc(&self) -> Arc<AletheiaDB>` - Clone the Arc (rarely needed)
 
 **Traits:**
 
 - `Clone` - Required for actix-web worker sharing
-- `From<Arc<GallifreyDB>>` - Ergonomic construction
+- `From<Arc<AletheiaDB>>` - Ergonomic construction
 
 ### Example: Using db() vs db_arc()
 
@@ -143,7 +143,7 @@ let another_state = AppState::new(db_copy);
 
 ## Performance Characteristics
 
-Based on GallifreyDB's internal architecture:
+Based on AletheiaDB's internal architecture:
 
 | Operation | Latency | Concurrency |
 |-----------|---------|-------------|
@@ -162,7 +162,7 @@ Actix-web uses a multi-worker architecture. Each worker gets a clone of the App 
 
 ```
 Worker 1 ← AppState.clone()
-Worker 2 ← AppState.clone()  →  Same Arc<GallifreyDB>
+Worker 2 ← AppState.clone()  →  Same Arc<AletheiaDB>
 Worker 3 ← AppState.clone()
 ```
 
@@ -172,12 +172,12 @@ Cloning AppState is cheap (just clones the Arc, incrementing ref count).
 
 ```
 HTTP Handler 1 ─┐
-HTTP Handler 2 ─┼→ AppState → Arc<GallifreyDB> → GallifreyDB
+HTTP Handler 2 ─┼→ AppState → Arc<AletheiaDB> → AletheiaDB
 HTTP Handler 3 ─┘                                      ↓
                                                   DashMap/RwLock/etc
 ```
 
-All handlers share one GallifreyDB instance via reference counting.
+All handlers share one AletheiaDB instance via reference counting.
 
 ## Testing
 
@@ -200,8 +200,8 @@ async fn confused_handler(
     state: web::Data<AppState>,
     // properties: PropertyMap from request body
 ) -> HttpResponse {
-    let db: &GallifreyDB = state.db();
-    // GallifreyDB methods like `create_node` take `&self` (not `&mut self`)
+    let db: &AletheiaDB = state.db();
+    // AletheiaDB methods like `create_node` take `&self` (not `&mut self`)
     // and use interior mutability, so this compiles even though it mutates state.
     let node_id = db.create_node("Person", properties).unwrap();
     HttpResponse::Ok().json(node_id)
@@ -215,7 +215,7 @@ async fn good_handler(
     state: web::Data<AppState>,
     // properties: PropertyMap from request body
 ) -> actix_web::Result<HttpResponse> {
-    // All GallifreyDB methods take &self and use interior mutability
+    // All AletheiaDB methods take &self and use interior mutability
     let node_id = state.db().create_node("Person", properties)?;
     Ok(HttpResponse::Ok().json(node_id))
 }
@@ -225,14 +225,14 @@ async fn good_handler(
 
 ```rust
 // BAD - adds unnecessary global lock contention
-let db = Arc::new(RwLock::new(GallifreyDB::new()?));
+let db = Arc::new(RwLock::new(AletheiaDB::new()?));
 ```
 
 ### ✅ Do: Use Arc directly
 
 ```rust
 // GOOD - leverages internal lock-free structures
-let db = Arc::new(GallifreyDB::new()?);
+let db = Arc::new(AletheiaDB::new()?);
 let app_state = AppState::new(db);
 ```
 
@@ -250,7 +250,7 @@ Planned additions to AppState:
 1. **Metrics Collection**
    ```rust
    pub struct AppState {
-       db: Arc<GallifreyDB>,
+       db: Arc<AletheiaDB>,
        metrics: Arc<MetricsCollector>,  // Future
    }
    ```
@@ -258,7 +258,7 @@ Planned additions to AppState:
 2. **Configuration**
    ```rust
    pub struct AppState {
-       db: Arc<GallifreyDB>,
+       db: Arc<AletheiaDB>,
        config: Arc<ServerConfig>,  // Future
    }
    ```
@@ -266,7 +266,7 @@ Planned additions to AppState:
 3. **Request Context**
    ```rust
    pub struct AppState {
-       db: Arc<GallifreyDB>,
+       db: Arc<AletheiaDB>,
        request_id_generator: Arc<RequestIdGen>,  // Future
    }
    ```

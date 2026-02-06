@@ -28,7 +28,7 @@ I attempted to use the `story_demo` API ("Narrative Generation") by copying the 
 - To fix this, I had to:
   1. Find out what `InternedString` is.
   2. Discover `GLOBAL_INTERNER`.
-  3. Import `gallifreydb::GLOBAL_INTERNER`.
+  3. Import `aletheiadb::GLOBAL_INTERNER`.
   4. Write `GLOBAL_INTERNER.resolve(node.label).unwrap()`.
 
 **Reproduction:**
@@ -38,14 +38,14 @@ See `examples/echo_complaint.rs`.
 
 **Scenario:** The example uses `db.write(|tx| tx.create_node(...))`.
 **Confusion:** `tx` has methods like `create_node`, but I can't see where they come from.
-**Reality:** I must import `use gallifreydb::WriteOps;` even though I never type `WriteOps` explicitly. If I forget, I get "no method named `create_node` found".
+**Reality:** I must import `use aletheiadb::WriteOps;` even though I never type `WriteOps` explicitly. If I forget, I get "no method named `create_node` found".
 **Verdict:** Standard Rust, but a slight stumbling block for beginners.
 
 #### 3. The Copy-Paste Trap (Feature Flags)
 
 **Scenario:** I copied the "Narrative Generation" code from the README into my own `main.rs`.
 **Action:** Run `cargo run`.
-**Result:** `error[E0433]: failed to resolve: could not find 'experimental' in 'gallifreydb'`
+**Result:** `error[E0433]: failed to resolve: could not find 'experimental' in 'aletheiadb'`
 **Confusion:** The error message is technically correct ("found an item that was configured out"), but a user might think the docs are outdated or the package is broken before realizing they missed the `Cargo.toml` feature flag.
 
 ## 💡 Recommendations
@@ -59,7 +59,7 @@ See `examples/echo_complaint.rs`.
 **Recommendation:** Add a comment directly in the code snippets in the README:
 ```rust
 // Requires "nova" feature in Cargo.toml
-use gallifreydb::experimental::temporal_narrative::NarrativeGenerator;
+use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 ```
 This catches the eye during copy-paste more effectively than a blockquote above the block.
 
@@ -69,7 +69,7 @@ This catches the eye during copy-paste more effectively than a blockquote above 
 
 ## 🏁 Conclusion
 
-GallifreyDB is powerful, but it exposes its internal optimization (`InternedString`) too aggressively to the user. "Simple" is better than "Powerful" for the first 5 minutes of usage.
+AletheiaDB is powerful, but it exposes its internal optimization (`InternedString`) too aggressively to the user. "Simple" is better than "Powerful" for the first 5 minutes of usage.
 
 Signed,
 **Echo** 🗣️

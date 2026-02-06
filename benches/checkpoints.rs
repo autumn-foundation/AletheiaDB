@@ -2,9 +2,8 @@
 
 mod common;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::core::{interning::GLOBAL_INTERNER, property::PropertyMapBuilder, temporal::time};
-use gallifreydb::storage::{
+use aletheiadb::core::{interning::GLOBAL_INTERNER, property::PropertyMapBuilder, temporal::time};
+use aletheiadb::storage::{
     CurrentStorage, HistoricalStorage, LSN,
     persistence::{Checkpoint, CheckpointConfig, PersistenceManager},
     wal::{
@@ -12,6 +11,7 @@ use gallifreydb::storage::{
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tempfile::TempDir;
 
 fn bench_checkpoint_creation(c: &mut Criterion) {
@@ -118,7 +118,7 @@ fn bench_recovery(c: &mut Criterion) {
 
             for i in 0..*wal_entries {
                 let operation = WalOperation::CreateNode {
-                    node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
+                    node_id: aletheiadb::core::id::NodeId::new(i).unwrap(),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     valid_from: time::now(),
@@ -148,7 +148,7 @@ fn bench_recovery(c: &mut Criterion) {
             // Add more WAL entries after checkpoint
             for i in *wal_entries..(*wal_entries + 100) {
                 let operation = WalOperation::CreateNode {
-                    node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
+                    node_id: aletheiadb::core::id::NodeId::new(i).unwrap(),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     valid_from: time::now(),

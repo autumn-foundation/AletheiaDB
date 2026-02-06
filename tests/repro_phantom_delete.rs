@@ -1,12 +1,12 @@
-use gallifreydb::api::transaction::{ReadOps, WriteOps};
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use aletheiadb::api::transaction::{ReadOps, WriteOps};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 #[test]
 fn test_phantom_delete_violation() {
     // 1. Setup: Create DB and a "Doctor" node
-    let db = Arc::new(GallifreyDB::new().unwrap());
+    let db = Arc::new(AletheiaDB::new().unwrap());
 
     let node_id = {
         let mut tx = db.write_transaction().unwrap();

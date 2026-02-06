@@ -1,12 +1,12 @@
 //! Query Language Lexer
 //!
-//! Tokenizes GQL (Gallifrey Query Language) input strings into a stream of tokens.
+//! Tokenizes AQL (Aletheia Query Language) input strings into a stream of tokens.
 //! This is the first stage of parsing - converting raw text into structured tokens
 //! that the parser can work with.
 
 use std::fmt;
 
-/// A token in the GQL language.
+/// A token in the AQL language.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Keywords - Graph
@@ -252,7 +252,7 @@ impl fmt::Display for LexerError {
 
 impl std::error::Error for LexerError {}
 
-/// A lexer for the GQL query language.
+/// A lexer for the AQL query language.
 ///
 /// The lexer takes a string input and converts it into a stream of [`Token`]s.
 /// It handles whitespace skipping, comment processing, and token recognition.
@@ -260,7 +260,7 @@ impl std::error::Error for LexerError {}
 /// # Examples
 ///
 /// ```rust
-/// use gallifreydb::query::lexer::{Lexer, Token};
+/// use aletheiadb::query::lexer::{Lexer, Token};
 ///
 /// let input = "MATCH (n) RETURN n";
 /// let tokens = Lexer::tokenize(input).unwrap();
@@ -282,7 +282,7 @@ impl<'a> Lexer<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// use gallifreydb::query::lexer::Lexer;
+    /// use aletheiadb::query::lexer::Lexer;
     ///
     /// let _lexer = Lexer::new("MATCH (n)");
     /// ```
@@ -303,7 +303,7 @@ impl<'a> Lexer<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// use gallifreydb::query::lexer::{Lexer, Token};
+    /// use aletheiadb::query::lexer::{Lexer, Token};
     ///
     /// let tokens = Lexer::tokenize("RETURN 42").unwrap();
     /// assert_eq!(tokens.len(), 3); // RETURN, 42, EOF
@@ -334,7 +334,7 @@ impl<'a> Lexer<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// use gallifreydb::query::lexer::{Lexer, Token};
+    /// use aletheiadb::query::lexer::{Lexer, Token};
     ///
     /// let mut lexer = Lexer::new("MATCH");
     /// let token = lexer.next_token().unwrap();

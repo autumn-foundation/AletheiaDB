@@ -3,11 +3,11 @@
 //! This test verifies that WalOperation uses InternedString instead of String,
 //! eliminating unnecessary allocations in the hot path.
 
-use gallifreydb::core::id::{EdgeId, NodeId, VersionId};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::{Timestamp, time};
-use gallifreydb::storage::wal::{LSN, WalEntry, WalOperation};
+use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::temporal::{Timestamp, time};
+use aletheiadb::storage::wal::{LSN, WalEntry, WalOperation};
 
 /// Helper to create a test temporal value
 fn test_temporal() -> Timestamp {
@@ -147,7 +147,7 @@ fn test_wal_entry_creation_with_interned_string() {
 /// Test that no allocations occur when converting BufferedWrite to WalOperation
 #[test]
 fn test_no_allocations_in_buffered_write_to_wal_operation() {
-    use gallifreydb::api::transaction::write_buffer::BufferedWrite;
+    use aletheiadb::api::transaction::write_buffer::BufferedWrite;
 
     let label = GLOBAL_INTERNER.intern("Person").unwrap();
     let node_id = NodeId::new(1).unwrap();

@@ -187,7 +187,7 @@ Total memory needed:  30GB
 → Defeats purpose of persistence (enabling larger-than-RAM databases)
 ```
 
-**GallifreyDB targets 1.2B nodes** (256GB+ RAM) - this approach is infeasible.
+**AletheiaDB targets 1.2B nodes** (256GB+ RAM) - this approach is infeasible.
 
 ### Solution: Streaming Persistence
 
@@ -307,7 +307,7 @@ pub fn create_checkpoint(...) {
 
 **Rejected because**:
 - Unacceptable write latency (15+ second stalls)
-- Defeats GallifreyDB's high-throughput design goals
+- Defeats AletheiaDB's high-throughput design goals
 - MVCC snapshots are superior: writes continue during checkpoint
 
 ---
@@ -357,7 +357,7 @@ T2: historical_snapshot captures [V1, V2, V3]
 ### Current Status
 
 **NOT A PRODUCTION BUG** because:
-- Checkpointing is not integrated into `GallifreyDB` main database yet
+- Checkpointing is not integrated into `AletheiaDB` main database yet
 - Only called from tests (verified via `rg "create_checkpoint" src/`)
 - Will become critical when background checkpointing is added
 

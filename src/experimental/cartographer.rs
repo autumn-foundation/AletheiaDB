@@ -4,7 +4,7 @@
 //! identify natural clusters, and reify them as explicit "Region" nodes.
 
 use crate::core::NodeId;
-use crate::{GallifreyDB, PropertyMapBuilder, WriteOps};
+use crate::{AletheiaDB, PropertyMapBuilder, WriteOps};
 use std::collections::HashMap;
 
 /// The result of a clustering operation.
@@ -18,12 +18,12 @@ pub struct ClusteringResult {
 
 /// The Cartographer maps the semantic landscape of the graph.
 pub struct Cartographer<'a> {
-    pub(crate) db: &'a GallifreyDB,
+    pub(crate) db: &'a AletheiaDB,
 }
 
 impl<'a> Cartographer<'a> {
     /// Create a new Cartographer instance.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn test_cartographer_workflow() {
         // Need to set up persistence config to avoid writing to disk
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // Setup vector index
         let config = HnswConfig::new(2, DistanceMetric::Euclidean);

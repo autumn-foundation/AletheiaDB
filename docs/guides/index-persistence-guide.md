@@ -6,7 +6,7 @@
 
 ## Overview
 
-GallifreyDB's index persistence layer enables **fast cold starts** by saving all indexes to disk, eliminating the need for full WAL replay on every restart.
+AletheiaDB's index persistence layer enables **fast cold starts** by saving all indexes to disk, eliminating the need for full WAL replay on every restart.
 
 **Benefits:**
 - ⚡ **Fast Cold Starts**: 2-5 seconds instead of 30-60 seconds for 1M nodes
@@ -25,11 +25,11 @@ GallifreyDB's index persistence layer enables **fast cold starts** by saving all
 ### Basic Usage
 
 ```rust
-use gallifreydb::GallifreyDB;
-use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+use aletheiadb::AletheiaDB;
+use aletheiadb::storage::index_persistence::IndexPersistenceManager;
 
 // Create database
-let db = GallifreyDB::new();
+let db = AletheiaDB::new();
 
 // Set up persistence
 let manager = IndexPersistenceManager::new("data/my-database");
@@ -54,8 +54,8 @@ if manager.indexes_exist() {
 For production use, enable automatic background persistence:
 
 ```rust
-use gallifreydb::GallifreyDB;
-use gallifreydb::config::PersistenceConfig;
+use aletheiadb::AletheiaDB;
+use aletheiadb::config::PersistenceConfig;
 
 let config = PersistenceConfig {
     enabled: true,
@@ -64,7 +64,7 @@ let config = PersistenceConfig {
     save_on_shutdown: true,
 };
 
-let db = GallifreyDB::with_persistence_config(config)?;
+let db = AletheiaDB::with_persistence_config(config)?;
 
 // Database automatically saves indexes in the background
 // No manual save calls needed!
@@ -74,7 +74,7 @@ let db = GallifreyDB::with_persistence_config(config)?;
 
 ### Persistence Directory Structure
 
-When you specify a base path like `"data/my-database"`, GallifreyDB creates:
+When you specify a base path like `"data/my-database"`, AletheiaDB creates:
 
 ```
 data/my-database/
@@ -136,13 +136,13 @@ pub struct PersistenceConfig {
 **Use Case:** Full control over when indexes are persisted
 
 ```rust
-use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+use aletheiadb::storage::index_persistence::IndexPersistenceManager;
 
 let manager = IndexPersistenceManager::new("data/my-db");
 manager.ensure_directories()?;
 
 // Save indexes manually
-fn save_indexes(db: &GallifreyDB, manager: &IndexPersistenceManager) -> Result<()> {
+fn save_indexes(db: &AletheiaDB, manager: &IndexPersistenceManager) -> Result<()> {
     // 1. Save string interner (always first)
     manager.save_string_interner()?;
 
@@ -167,7 +167,7 @@ fn save_indexes(db: &GallifreyDB, manager: &IndexPersistenceManager) -> Result<(
 }
 
 // Load indexes on startup
-fn load_indexes(db: &mut GallifreyDB, manager: &IndexPersistenceManager) -> Result<()> {
+fn load_indexes(db: &mut AletheiaDB, manager: &IndexPersistenceManager) -> Result<()> {
     if !manager.indexes_exist() {
         println!("No persisted indexes found, starting fresh");
         return Ok(());
@@ -195,7 +195,7 @@ use std::sync::Arc;
 use tokio::time;
 
 async fn run_periodic_save(
-    db: Arc<GallifreyDB>,
+    db: Arc<AletheiaDB>,
     manager: Arc<IndexPersistenceManager>,
     interval: Duration,
 ) {
@@ -214,7 +214,7 @@ async fn run_periodic_save(
 // Usage
 #[tokio::main]
 async fn main() {
-    let db = Arc::new(GallifreyDB::new());
+    let db = Arc::new(AletheiaDB::new());
     let manager = Arc::new(IndexPersistenceManager::new("data/my-db"));
 
     // Spawn background save task
@@ -237,7 +237,7 @@ use signal_hook::consts::SIGTERM;
 use signal_hook::iterator::Signals;
 
 fn setup_shutdown_handler(
-    db: Arc<GallifreyDB>,
+    db: Arc<AletheiaDB>,
     manager: Arc<IndexPersistenceManager>,
 ) {
     let mut signals = Signals::new(&[SIGTERM]).unwrap();
@@ -380,11 +380,11 @@ if !manager.indexes_exist() {
 Error: Manifest version 2 not supported (max supported: 1)
 ```
 
-**Cause:** Index file from newer GallifreyDB version
+**Cause:** Index file from newer AletheiaDB version
 
 **Solution:**
 ```
-Upgrade GallifreyDB to a version that supports format v2
+Upgrade AletheiaDB to a version that supports format v2
 or rebuild indexes from WAL with current version
 ```
 
@@ -392,7 +392,7 @@ or rebuild indexes from WAL with current version
 
 ```rust
 fn load_with_fallback(
-    db: &mut GallifreyDB,
+    db: &mut AletheiaDB,
     manager: &IndexPersistenceManager,
 ) -> Result<()> {
     match manager.load_manifest_and_strings() {
@@ -435,13 +435,13 @@ fn load_with_fallback(
 
 ```bash
 # 1. Save indexes
-gallifreydb save-indexes --path data/my-db
+aletheiadb save-indexes --path data/my-db
 
 # 2. Backup the entire indexes directory
 tar -czf backup-$(date +%Y%m%d-%H%M%S).tar.gz data/my-db/indexes/
 
 # 3. Upload to cloud storage
-aws s3 cp backup-*.tar.gz s3://my-backups/gallifreydb/
+aws s3 cp backup-*.tar.gz s3://my-backups/aletheiadb/
 
 # 4. Keep WAL segments for point-in-time recovery
 tar -czf wal-$(date +%Y%m%d-%H%M%S).tar.gz data/my-db/wal/
@@ -452,7 +452,7 @@ tar -czf wal-$(date +%Y%m%d-%H%M%S).tar.gz data/my-db/wal/
 **Key Metrics to Track:**
 
 ```rust
-use gallifreydb::metrics::PersistenceMetrics;
+use aletheiadb::metrics::PersistenceMetrics;
 
 let metrics = db.persistence_metrics()?;
 
@@ -529,7 +529,7 @@ db.disable_temporal_vector_snapshots()?;
 **Diagnosis:**
 ```bash
 # Time each load step
-time gallifreydb load-indexes --path data/my-db --verbose
+time aletheiadb load-indexes --path data/my-db --verbose
 
 # Output:
 # Manifest: 1ms
@@ -543,7 +543,7 @@ time gallifreydb load-indexes --path data/my-db --verbose
 
 1. **Use parallel loading:**
    ```rust
-   use gallifreydb::storage::index_persistence::load_indexes_parallel;
+   use aletheiadb::storage::index_persistence::load_indexes_parallel;
 
    // Load graph, temporal, and vector indexes concurrently (~3x faster)
    load_indexes_parallel(&db, &manager)?;
@@ -551,7 +551,7 @@ time gallifreydb load-indexes --path data/my-db --verbose
 
 2. **Use memory-mapped loading for large indexes:**
    ```rust
-   use gallifreydb::storage::index_persistence::graph::load_graph_index_mmap;
+   use aletheiadb::storage::index_persistence::graph::load_graph_index_mmap;
 
    // Handles multi-GB indexes without loading entire file into RAM
    let graph_data = load_graph_index_mmap(&graph_path)?;
@@ -608,7 +608,7 @@ manager.save_all_indexes(&db)?;
 ### Q: Can I move index files between machines?
 
 **A:** Yes, but ensure:
-- Same GallifreyDB version (check manifest version)
+- Same AletheiaDB version (check manifest version)
 - Same index configuration (vector dimensions, HNSW params)
 - Copy the entire `indexes/` directory
 
@@ -634,7 +634,7 @@ PersistenceConfig {
 
 ### Q: What's the maximum database size for persistence?
 
-**A:** Theoretical limit: Available disk space. GallifreyDB provides several features for handling large databases:
+**A:** Theoretical limit: Available disk space. AletheiaDB provides several features for handling large databases:
 
 **Implemented:**
 - **Memory-mapped loading** (`load_graph_index_mmap()`) - Handle multi-GB indexes without loading entire files into RAM
@@ -658,5 +658,5 @@ PersistenceConfig {
 
 For issues, questions, or feature requests, please:
 - Check the [Troubleshooting](#troubleshooting) section
-- Search existing [GitHub Issues](https://github.com/madmax983/GallifreyDB/issues)
+- Search existing [GitHub Issues](https://github.com/madmax983/AletheiaDB/issues)
 - Create a new issue with `[persistence]` tag

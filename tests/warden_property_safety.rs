@@ -1,4 +1,4 @@
-use gallifreydb::core::property::{PropertyValue, deserialize_vector, serialize_vector};
+use aletheiadb::core::property::{PropertyValue, deserialize_vector, serialize_vector};
 
 #[test]
 fn test_vector_deserialization_safety_truncated() {

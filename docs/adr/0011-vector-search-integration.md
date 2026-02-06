@@ -3,7 +3,7 @@
 **Status:** Accepted (Phases 1-2 Implemented)
 **Date:** 2024-12-31
 **Updated:** 2025-01-03
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** index, vector
 
 ## Implementation Status
@@ -23,13 +23,13 @@
 
 ## Context
 
-GallifreyDB's primary use case is enabling LLMs to reason about knowledge evolution. Modern LLMs heavily rely on vector embeddings for semantic similarity. Adding vector search would enable:
+AletheiaDB's primary use case is enabling LLMs to reason about knowledge evolution. Modern LLMs heavily rely on vector embeddings for semantic similarity. Adding vector search would enable:
 
 - **Semantic retrieval**: Find nodes by meaning, not just keywords
 - **Hybrid queries**: Combine graph traversal with similarity ranking
 - **Temporal semantics**: Track how meanings drift over time
 
-This positions GallifreyDB as "SUPERRAG" - combining:
+This positions AletheiaDB as "SUPERRAG" - combining:
 - **Graph**: Relationship traversal
 - **Vector**: Semantic similarity
 - **Bi-temporal**: Knowledge evolution

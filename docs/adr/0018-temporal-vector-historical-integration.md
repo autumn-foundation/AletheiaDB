@@ -6,7 +6,7 @@
 
 ## Problem Statement
 
-GallifreyDB's temporal vector index and historical storage (anchor+delta versioning) operate as completely independent systems. Vector snapshots have no connection to graph data anchors, preventing:
+AletheiaDB's temporal vector index and historical storage (anchor+delta versioning) operate as completely independent systems. Vector snapshots have no connection to graph data anchors, preventing:
 
 1. **Provenance tracking**: No way to link a graph anchor to its corresponding vector snapshot
 2. **Temporal consistency**: Vector and graph temporal queries aren't synchronized
@@ -31,8 +31,8 @@ This achieves both user requirements:
 
 ```mermaid
 graph TB
-    subgraph "GallifreyDB (Coordinator)"
-        DB[GallifreyDB]
+    subgraph "AletheiaDB (Coordinator)"
+        DB[AletheiaDB]
     end
 
     subgraph "Storage Layer"
@@ -63,7 +63,7 @@ graph TB
 
 ```mermaid
 sequenceDiagram
-    participant GDB as GallifreyDB
+    participant GDB as AletheiaDB
     participant HS as HistoricalStorage
     participant TVI as TemporalVectorIndex
 
@@ -173,7 +173,7 @@ if version.is_anchor() {
 }
 ```
 
-**GallifreyDB**:
+**AletheiaDB**:
 ```rust
 pub fn enable_temporal_vector_index(&self, property_name: &str, config: TemporalVectorConfig) -> Result<()> {
     // 1. Create temporal vector index in CurrentStorage

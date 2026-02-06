@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, performance
 
 ## Context
 
-GallifreyDB tracks all historical versions of nodes and edges, which creates significant storage pressure. Without compression, storage grows linearly with the number of updates.
+AletheiaDB tracks all historical versions of nodes and edges, which creates significant storage pressure. Without compression, storage grows linearly with the number of updates.
 
 Consider a node with 1000 updates over its lifetime:
 - **Naive approach**: Store 1000 full copies → 1000x storage

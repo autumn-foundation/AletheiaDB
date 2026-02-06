@@ -1,7 +1,7 @@
 //! Tests verifying quantization correctness and recall.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization, VectorIndex};
 use std::collections::HashSet;
 
 /// Helper to generate random-ish vectors for testing.

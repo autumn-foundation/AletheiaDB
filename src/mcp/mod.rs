@@ -1,6 +1,6 @@
-//! MCP (Model Context Protocol) server for GallifreyDB.
+//! MCP (Model Context Protocol) server for AletheiaDB.
 //!
-//! This module exposes GallifreyDB's capabilities through the Model Context Protocol,
+//! This module exposes AletheiaDB's capabilities through the Model Context Protocol,
 //! enabling LLMs like Claude to interact with the database for:
 //! - Graph operations (nodes, edges, traversals)
 //! - Vector similarity search
@@ -11,24 +11,24 @@
 //!
 //! Run the MCP server as a binary:
 //! ```bash
-//! cargo run --bin gallifrey-mcp --features mcp-server
+//! cargo run --bin aletheia-mcp --features mcp-server
 //! ```
 //!
 //! Or use it programmatically:
 //! ```ignore
-//! use gallifreydb::mcp::GallifreyMcpServer;
-//! use gallifreydb::GallifreyDB;
+//! use aletheiadb::mcp::AletheiaMcpServer;
+//! use aletheiadb::AletheiaDB;
 //! use std::sync::Arc;
 //!
-//! let db = Arc::new(GallifreyDB::new()?);
-//! let server = GallifreyMcpServer::new(db);
+//! let db = Arc::new(AletheiaDB::new()?);
+//! let server = AletheiaMcpServer::new(db);
 //! server.serve_stdio().await?;
 //! ```
 
 mod server;
 mod tools;
 
-pub use server::GallifreyMcpServer;
+pub use server::AletheiaMcpServer;
 
 // Re-export tool request/response types for testing (alphabetically sorted)
 pub use tools::{

@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2026-05-24
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** architecture, experimental, temporal, observability
 
 ## Context
 
-GallifreyDB stores the complete history of entities (Bi-temporality). While we can query "What happened at time T?", we lack the ability to query based on **Temporal Patterns**.
+AletheiaDB stores the complete history of entities (Bi-temporality). While we can query "What happened at time T?", we lack the ability to query based on **Temporal Patterns**.
 
 Use cases include:
 *   **Observability**: "Find all servers that had a CPU spike at the same time as Server A."

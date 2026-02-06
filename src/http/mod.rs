@@ -1,7 +1,7 @@
-//! HTTP server module for GallifreyDB (Issue #465)
+//! HTTP server module for AletheiaDB (Issue #465)
 //!
 //! This module provides an HTTP server using Actix-web for REST API access
-//! to GallifreyDB functionality.
+//! to AletheiaDB functionality.
 //!
 //! # Features
 //!
@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::http::{ServerConfig, run_server};
+//! use aletheiadb::http::{ServerConfig, run_server};
 //!
 //! #[actix_web::main]
 //! async fn main() -> std::io::Result<()> {

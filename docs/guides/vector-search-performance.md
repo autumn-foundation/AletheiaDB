@@ -1,10 +1,10 @@
 # Vector Search Performance Tuning Guide
 
-> Guide for optimizing vector search performance in GallifreyDB
+> Guide for optimizing vector search performance in AletheiaDB
 
 ## Overview
 
-GallifreyDB's HNSW (Hierarchical Navigable Small World) index provides sub-millisecond k-NN search for most workloads. This guide covers configuration tuning, benchmarking, and optimization strategies to achieve optimal performance for your specific use case.
+AletheiaDB's HNSW (Hierarchical Navigable Small World) index provides sub-millisecond k-NN search for most workloads. This guide covers configuration tuning, benchmarking, and optimization strategies to achieve optimal performance for your specific use case.
 
 ## Performance Characteristics
 
@@ -183,7 +183,7 @@ let config_dot = HnswConfig::new(384, DistanceMetric::DotProduct);
 ### 1. Pre-normalize Vectors for Cosine Similarity
 
 ```rust
-use gallifreydb::core::vector::normalize_in_place;
+use aletheiadb::core::vector::normalize_in_place;
 
 // GOOD: Normalize once before storing
 let mut embedding = get_embedding_from_model();
@@ -311,8 +311,8 @@ cargo bench --bench hnsw_index -- parameter_tuning
 
 ```rust
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 fn bench_my_workload(c: &mut Criterion) {
     let db = setup_db_with_my_data();
@@ -467,7 +467,7 @@ println!("Recall@10: {:.2}%", recall * 100.0);
 index.set_ef_search(32);
 
 // Verify vector normalization
-use gallifreydb::core::vector::is_normalized;
+use aletheiadb::core::vector::is_normalized;
 assert!(is_normalized(&embedding, 1e-6));
 ```
 

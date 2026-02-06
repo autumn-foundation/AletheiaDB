@@ -1,10 +1,10 @@
 # Write-Ahead Log (WAL) Format
 
-This document describes the WAL format and architecture for GallifreyDB.
+This document describes the WAL format and architecture for AletheiaDB.
 
 ## Architecture Overview
 
-GallifreyDB uses a **Concurrent WAL with Striped Lock-Free Ring Buffers** for high-throughput write operations while maintaining ACID compliance.
+AletheiaDB uses a **Concurrent WAL with Striped Lock-Free Ring Buffers** for high-throughput write operations while maintaining ACID compliance.
 
 ### Concurrent WAL Architecture
 
@@ -112,7 +112,7 @@ The WAL uses a versioned binary format to enable future evolution.
 
 ## WAL Recovery
 
-This section describes the comprehensive recovery process for GallifreyDB, including checkpoint-based recovery, WAL replay, crash scenarios, and performance characteristics.
+This section describes the comprehensive recovery process for AletheiaDB, including checkpoint-based recovery, WAL replay, crash scenarios, and performance characteristics.
 
 ### Recovery Algorithm
 
@@ -473,8 +473,8 @@ pub fn recover(
 **Example:**
 
 ```rust
-use gallifreydb::storage::persistence::{PersistenceManager, CheckpointConfig};
-use gallifreydb::storage::wal::concurrent_system::ConcurrentWalSystem;
+use aletheiadb::storage::persistence::{PersistenceManager, CheckpointConfig};
+use aletheiadb::storage::wal::concurrent_system::ConcurrentWalSystem;
 
 // Initialize WAL and persistence manager
 let wal = ConcurrentWalSystem::new(wal_config)?;
@@ -505,7 +505,7 @@ wal.set_next_lsn(recovered_lsn.next());
 - If vector index restoration fails, entire recovery fails (maintains data integrity)
 - Partial recovery is supported for corrupted segments (see error handling)
 
-#### GallifreyDB::open()
+#### AletheiaDB::open()
 
 **File Location:** `src/db.rs` (implementation pending full integration)
 
@@ -513,7 +513,7 @@ Opens an existing database from persistent storage.
 
 ```rust
 // Future API (when fully integrated):
-pub fn open(config: GallifreyDBConfig) -> Result<Self>
+pub fn open(config: AletheiaDBConfig) -> Result<Self>
 ```
 
 **Current Workaround:**
@@ -521,8 +521,8 @@ pub fn open(config: GallifreyDBConfig) -> Result<Self>
 The database doesn't yet have a dedicated `open()` method. To recover a database, use the low-level persistence API:
 
 ```rust
-use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
-use gallifreydb::storage::persistence::{PersistenceManager, CheckpointConfig};
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::storage::persistence::{PersistenceManager, CheckpointConfig};
 
 // 1. Recover storage from checkpoint + WAL
 let wal_config = WalConfig::default().wal_dir("data/mydb/wal");
@@ -537,14 +537,14 @@ let (current, historical, lsn) = persistence.recover(&wal)?;
 
 // 2. Construct database with recovered state
 // (Currently requires manual wiring - will be simplified in future)
-let db = GallifreyDB::with_recovered_state(current, historical, wal, lsn)?;
+let db = AletheiaDB::with_recovered_state(current, historical, wal, lsn)?;
 ```
 
 **Planned API (Issue #XYZ):**
 
 ```rust
 // Simplified future API:
-let db = GallifreyDB::open("data/mydb")?;
+let db = AletheiaDB::open("data/mydb")?;
 ```
 
 This will handle checkpoint loading, WAL replay, and state reconstruction automatically.
@@ -748,8 +748,8 @@ See [docs/ARCHITECTURE.md](ARCHITECTURE.md) for long-term recovery optimization 
 ### ConcurrentWalSystem Configuration
 
 ```rust
-use gallifreydb::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
-use gallifreydb::storage::wal::DurabilityMode;
+use aletheiadb::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+use aletheiadb::storage::wal::DurabilityMode;
 
 let config = ConcurrentWalSystemConfig {
     /// Directory for WAL segments
@@ -884,7 +884,7 @@ impl FlushCoordinator {
 ### Inspecting WAL Contents
 
 ```rust
-use gallifreydb::storage::wal_reader::read_wal_entries;
+use aletheiadb::storage::wal_reader::read_wal_entries;
 
 // Print all entries
 let entries = read_wal_entries(Path::new("data/wal"), LSN(1))?;

@@ -1,4 +1,4 @@
-use gallifreydb::core::property::{PropertyValue, TAG_ARRAY, TAG_NULL};
+use aletheiadb::core::property::{PropertyValue, TAG_ARRAY, TAG_NULL};
 
 #[test]
 fn test_recursive_array_stack_overflow_protection() {

@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::observability::backends::honeycomb::{HoneycombConfig, create_client};
+//! use aletheiadb::observability::backends::honeycomb::{HoneycombConfig, create_client};
 //!
 //! let config = HoneycombConfig::new("api-key", "dataset", "my-service");
 //! let client = create_client(config)?;
@@ -53,14 +53,14 @@ impl HoneycombConfig {
     /// Reads from:
     /// - `HONEYCOMB_API_KEY`
     /// - `HONEYCOMB_DATASET`
-    /// - `HONEYCOMB_SERVICE_NAME` (defaults to "gallifreydb")
+    /// - `HONEYCOMB_SERVICE_NAME` (defaults to "aletheiadb")
     pub fn from_env() -> Result<Self, Error> {
         let api_key = std::env::var("HONEYCOMB_API_KEY")
             .map_err(|_| Error::other("HONEYCOMB_API_KEY environment variable not set"))?;
         let dataset = std::env::var("HONEYCOMB_DATASET")
             .map_err(|_| Error::other("HONEYCOMB_DATASET environment variable not set"))?;
         let service_name =
-            std::env::var("HONEYCOMB_SERVICE_NAME").unwrap_or_else(|_| "gallifreydb".to_string());
+            std::env::var("HONEYCOMB_SERVICE_NAME").unwrap_or_else(|_| "aletheiadb".to_string());
 
         Ok(Self {
             api_key,
@@ -81,7 +81,7 @@ impl HoneycombConfig {
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::observability::backends::honeycomb::{HoneycombConfig, create_client};
+/// use aletheiadb::observability::backends::honeycomb::{HoneycombConfig, create_client};
 ///
 /// let config = HoneycombConfig::new("api-key", "dataset", "my-service");
 /// let client = create_client(config)?;

@@ -12,10 +12,10 @@
 
 mod common;
 
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+use aletheiadb::storage::version::PropertyDelta;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::core::property::{PropertyMapBuilder, PropertyValue};
-use gallifreydb::storage::version::PropertyDelta;
 
 /// Benchmark: PropertyDelta::from_diff with varying numbers of changed properties
 ///

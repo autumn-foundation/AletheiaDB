@@ -1,11 +1,11 @@
 use crate::api::transaction::{ReadTransaction, WriteTransaction};
 use crate::core::temporal::Timestamp;
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::storage::wal::WriteOptions;
 use crate::utils::error::Result;
 use std::sync::Arc;
 
-impl GallifreyDB {
+impl AletheiaDB {
     /// Create a new read-only transaction.
     ///
     /// Read-only transactions are lightweight and have zero overhead:
@@ -213,9 +213,9 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WriteOptions, DurabilityMode};
+    /// use aletheiadb::{AletheiaDB, WriteOptions, DurabilityMode};
     ///
-    /// let db = GallifreyDB::new();
+    /// let db = AletheiaDB::new();
     ///
     /// // Use Async mode for bulk loading (faster but less durable)
     /// let options = WriteOptions::new()

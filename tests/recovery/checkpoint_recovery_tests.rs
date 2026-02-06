@@ -6,7 +6,7 @@
 //! - Correctly replays WAL entries after checkpoint LSN
 //! - Maintains LSN consistency across checkpoint and recovery
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER, PropertyMapBuilder,
     core::{
         graph::Node,

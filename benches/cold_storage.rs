@@ -26,13 +26,13 @@
 
 mod common;
 
+use aletheiadb::core::id::{NodeId, VersionId};
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::temporal::BiTemporalInterval;
+use aletheiadb::storage::redb_cold_storage::{CompressionAlgorithm, RedbColdStorage, RedbConfig};
+use aletheiadb::storage::version::NodeVersion;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::{NodeId, VersionId};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::BiTemporalInterval;
-use gallifreydb::storage::redb_cold_storage::{CompressionAlgorithm, RedbColdStorage, RedbConfig};
-use gallifreydb::storage::version::NodeVersion;
 use std::time::Instant;
 use tempfile::TempDir;
 

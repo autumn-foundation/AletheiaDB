@@ -1,4 +1,4 @@
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::history::{VersionDiff, VersionInfo};
 use crate::core::id::NodeId;
@@ -21,12 +21,12 @@ pub struct NarrativeEvent {
 
 /// Generator for creating natural language narratives from temporal history.
 pub struct NarrativeGenerator<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
 }
 
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_node_narrative_generation() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // 1. Create Node
         let props1 = PropertyMapBuilder::new()
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_property_removal_narrative() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // 1. Create Node with properties
         let props1 = PropertyMapBuilder::new()

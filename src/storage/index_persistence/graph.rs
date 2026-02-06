@@ -322,7 +322,7 @@ pub fn save_graph_index_compressed(
 /// # Examples
 ///
 /// ```ignore
-/// use gallifreydb::storage::index_persistence::graph::load_graph_index_mmap;
+/// use aletheiadb::storage::index_persistence::graph::load_graph_index_mmap;
 ///
 /// let data = load_graph_index_mmap(&path)?;
 /// ```
@@ -434,7 +434,7 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
 /// # Examples
 ///
 /// ```ignore
-/// use gallifreydb::storage::index_persistence::graph::{
+/// use aletheiadb::storage::index_persistence::graph::{
 ///     save_graph_index_delta, load_graph_index, save_graph_index_compressed
 /// };
 ///
@@ -585,7 +585,7 @@ pub fn save_graph_index_delta(
 /// # Examples
 ///
 /// ```ignore
-/// use gallifreydb::storage::index_persistence::graph::load_graph_index_with_delta;
+/// use aletheiadb::storage::index_persistence::graph::load_graph_index_with_delta;
 ///
 /// let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path)?;
 /// ```

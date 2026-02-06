@@ -9,10 +9,10 @@
 //! - Understanding what was recovered
 //!
 //! **Note:** This example uses internal recovery APIs for demonstration purposes.
-//! In future versions, GallifreyDB will provide high-level methods like:
+//! In future versions, AletheiaDB will provide high-level methods like:
 //! ```ignore
-//! if GallifreyDB::needs_recovery("/data/mydb")? {
-//!     let stats = GallifreyDB::recover_with_stats("/data/mydb")?;
+//! if AletheiaDB::needs_recovery("/data/mydb")? {
+//!     let stats = AletheiaDB::recover_with_stats("/data/mydb")?;
 //!     println!("Recovered {} nodes", stats.nodes_recovered);
 //! }
 //! ```
@@ -73,20 +73,20 @@
 //! ✅ Manual recovery completed with full statistics!
 //! ```
 
-use gallifreydb::core::{
+use aletheiadb::core::{
     id::{EdgeId, NodeId},
     interning::GLOBAL_INTERNER,
     property::{PropertyMapBuilder, PropertyValue},
     temporal::time,
 };
-use gallifreydb::storage::{
+use aletheiadb::storage::{
     persistence::{CheckpointConfig, PersistenceManager},
     wal::{
         WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
-use gallifreydb::utils::error::Result;
+use aletheiadb::utils::error::Result;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -162,7 +162,7 @@ fn main() -> Result<()> {
     }
 
     // Update node 1 to create a second version
-    let version_id_500 = gallifreydb::core::id::VersionId::new(500)?;
+    let version_id_500 = aletheiadb::core::id::VersionId::new(500)?;
     let node_id_1 = NodeId::new(1)?;
     wal.append(WalOperation::UpdateNode {
         node_id: node_id_1,

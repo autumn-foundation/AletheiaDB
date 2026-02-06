@@ -432,7 +432,7 @@ impl CurrentIndexes {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
     ///
     /// // Pre-intern the key once outside the loop
     /// let name_key = GLOBAL_INTERNER.intern("name").unwrap();
@@ -469,7 +469,7 @@ impl CurrentIndexes {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
     ///
     /// // Pre-intern the key once outside the loop
     /// let weight_key = GLOBAL_INTERNER.intern("weight").unwrap();

@@ -1,6 +1,6 @@
-//! Hybrid Query Engine for GallifreyDB
+//! Hybrid Query Engine for AletheiaDB
 //!
-//! This module implements the query engine that powers GallifreyDB's unified
+//! This module implements the query engine that powers AletheiaDB's unified
 //! graph, vector, and temporal querying capabilities.
 //!
 //! # Architecture
@@ -10,7 +10,7 @@
 //! ```text
 //! ┌───────────────┐      ┌───────────────┐      ┌───────────────┐
 //! │  Query Input  │      │  Logical Plan │      │ Physical Plan │
-//! │ (Builder/GQL) ├─────►│     (Tree)    ├─────►│  (Executable) ├─────► Results
+//! │ (Builder/AQL) ├─────►│     (Tree)    ├─────►│  (Executable) ├─────► Results
 //! └───────────────┘      └───────┬───────┘      └───────▲───────┘
 //!                                │                      │
 //!                        ┌───────▼───────┐      ┌───────┴───────┐
@@ -19,7 +19,7 @@
 //!                        └───────────────┘      └───────────────┘
 //! ```
 //!
-//! 1. **Input**: Queries are constructed via the fluent [`QueryBuilder`] or parsed from GQL strings.
+//! 1. **Input**: Queries are constructed via the fluent [`QueryBuilder`] or parsed from AQL strings.
 //! 2. **Logical Plan**: A high-level tree of operations ([`LogicalPlan`]) representing *what* to do.
 //! 3. **Optimization**: The [`QueryPlanner`] applies heuristic rules and cost-based optimization.
 //! 4. **Physical Plan**: A low-level executable plan ([`PhysicalPlan`]) representing *how* to do it.
@@ -39,10 +39,10 @@
 //! "Find documents similar to 'Rust' that are written by people Alice knows."
 //!
 //! ```rust,no_run
-//! # use gallifreydb::GallifreyDB;
-//! # use gallifreydb::core::NodeId;
+//! # use aletheiadb::AletheiaDB;
+//! # use aletheiadb::core::NodeId;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let db = GallifreyDB::new()?;
+//! # let db = AletheiaDB::new()?;
 //! # let alice_id = NodeId::new(1)?;
 //! # let rust_embedding = vec![0.1, 0.2, 0.3];
 //! let results = db.query()
@@ -60,14 +60,14 @@
 //! "What did the graph look like on Jan 1st, 2023?"
 //!
 //! ```rust,no_run
-//! # use gallifreydb::GallifreyDB;
-//! # use gallifreydb::core::NodeId;
-//! # use gallifreydb::core::temporal::Timestamp;
+//! # use aletheiadb::AletheiaDB;
+//! # use aletheiadb::core::NodeId;
+//! # use aletheiadb::core::temporal::Timestamp;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let db = GallifreyDB::new()?;
+//! # let db = AletheiaDB::new()?;
 //! # let node_id = NodeId::new(1)?;
 //! # let time_2023 = Timestamp::new(1672531200000000, 0)?;
-//! # let tx_time = gallifreydb::core::temporal::time::now();
+//! # let tx_time = aletheiadb::core::temporal::time::now();
 //! let results = db.query()
 //!     .as_of(time_2023, tx_time)      // Set temporal context
 //!     .start(node_id)
@@ -80,11 +80,11 @@
 //! # Submodules
 //!
 //! - [`builder`]: Fluent API for constructing queries programmatically.
-//! - [`parser`]: Recursive descent parser for GQL query strings.
+//! - [`parser`]: Recursive descent parser for AQL query strings.
 //! - [`planner`]: Logical-to-physical transformation and cost-based optimization.
 //! - [`executor`]: Iterator-based execution engine.
 //! - [`ir`]: Intermediate Representation types ([`QueryOp`], [`Predicate`]).
-//! - [`ast`]: Abstract Syntax Tree for parsed GQL queries.
+//! - [`ast`]: Abstract Syntax Tree for parsed AQL queries.
 
 pub mod ast;
 pub mod builder;

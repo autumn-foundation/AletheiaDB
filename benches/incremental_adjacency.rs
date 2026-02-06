@@ -6,11 +6,11 @@
 //! - Read (with delta): ~20-30ns (+15ns merge overhead)
 //! - Compaction: O(E log E), <10ms for 10K edges
 
+use aletheiadb::core::id::{EdgeId, NodeId};
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
+use aletheiadb::index::incremental_adjacency::IncrementalAdjacencyIndex;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::{EdgeId, NodeId};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
-use gallifreydb::index::incremental_adjacency::IncrementalAdjacencyIndex;
 use std::sync::Arc;
 
 // ============================================================================

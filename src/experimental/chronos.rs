@@ -8,7 +8,7 @@
 //! - **Volatility Analysis**: Measure how frequently a node changes.
 //! - **Path Stability**: Calculate how long a path remains valid over a time window.
 
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::utils::error::Result;
@@ -16,12 +16,12 @@ use std::collections::{HashSet, VecDeque};
 
 /// The Time Lord of the Graph.
 pub struct Chronos<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
 }
 
 impl<'a> Chronos<'a> {
     /// Create a new Chronos instance.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_pathfinding() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         let _t0 = time::now();
         // Wait a bit to ensure t1 > t0
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_node_volatility() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let props = PropertyMapBuilder::new().insert("val", 0).build();
         let node = db.create_node("Node", props.clone()).unwrap();
 

@@ -4,9 +4,9 @@
 //! and validates that the optimized implementation using temporal indexes provides
 //! correct results while improving performance.
 
-use gallifreydb::GallifreyDB;
-use gallifreydb::WriteOps;
-use gallifreydb::core::property::PropertyMapBuilder;
+use aletheiadb::AletheiaDB;
+use aletheiadb::WriteOps;
+use aletheiadb::core::property::PropertyMapBuilder;
 use std::time::Instant;
 
 /// Test that version lookup returns correct results for entities with many versions.
@@ -15,8 +15,8 @@ use std::time::Instant;
 /// at various timestamps return the correct version IDs.
 #[test]
 fn test_version_lookup_correctness_many_versions() {
-    use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
-    use gallifreydb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::config::{AletheiaDBConfigBuilder, HistoricalConfigBuilder};
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -30,12 +30,12 @@ fn test_version_lookup_correctness_many_versions() {
         ..Default::default()
     };
 
-    let config = GallifreyDBConfigBuilder::new()
+    let config = AletheiaDBConfigBuilder::new()
         .historical(historical_config)
         .persistence(persistence_config)
         .build();
 
-    let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
+    let db = AletheiaDB::with_unified_config(config).expect("Failed to create database");
 
     // Create a node
     let node_id = db
@@ -98,7 +98,7 @@ fn test_version_lookup_correctness_many_versions() {
 
         let version_number = props
             .get("version")
-            .and_then(|v: &gallifreydb::core::property::PropertyValue| v.as_int());
+            .and_then(|v: &aletheiadb::core::property::PropertyValue| v.as_int());
 
         assert!(
             version_number.is_some(),
@@ -132,8 +132,8 @@ fn test_version_lookup_correctness_many_versions() {
 /// implementation should remain fast.
 #[test]
 fn test_version_lookup_performance_scaling() {
-    use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
-    use gallifreydb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::config::{AletheiaDBConfigBuilder, HistoricalConfigBuilder};
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -147,12 +147,12 @@ fn test_version_lookup_performance_scaling() {
         ..Default::default()
     };
 
-    let config = GallifreyDBConfigBuilder::new()
+    let config = AletheiaDBConfigBuilder::new()
         .historical(historical_config)
         .persistence(persistence_config)
         .build();
 
-    let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
+    let db = AletheiaDB::with_unified_config(config).expect("Failed to create database");
 
     // Create a node
     let node_id = db
@@ -240,8 +240,8 @@ fn test_version_lookup_performance_scaling() {
 /// Test edge version lookup with many versions.
 #[test]
 fn test_edge_version_lookup_correctness_many_versions() {
-    use gallifreydb::config::GallifreyDBConfigBuilder;
-    use gallifreydb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::config::AletheiaDBConfigBuilder;
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
 
     // Disable persistence to avoid stale index data
     let persistence_config = PersistenceConfig {
@@ -249,11 +249,11 @@ fn test_edge_version_lookup_correctness_many_versions() {
         ..Default::default()
     };
 
-    let config = GallifreyDBConfigBuilder::new()
+    let config = AletheiaDBConfigBuilder::new()
         .persistence(persistence_config)
         .build();
 
-    let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
+    let db = AletheiaDB::with_unified_config(config).expect("Failed to create database");
 
     // Create source and target nodes
     let source = db
@@ -323,7 +323,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
         let weight = props
             .get("weight")
-            .and_then(|v: &gallifreydb::core::property::PropertyValue| v.as_int());
+            .and_then(|v: &aletheiadb::core::property::PropertyValue| v.as_int());
         assert!(
             weight.is_some(),
             "Weight property should exist at timestamp (valid={}, tx={})",
@@ -344,7 +344,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
 /// in the temporal index, which is a prerequisite for the optimized lookup.
 #[test]
 fn test_temporal_index_population() {
-    let db = GallifreyDB::new().expect("Failed to create database");
+    let db = AletheiaDB::new().expect("Failed to create database");
 
     let node_id = db
         .create_node("TestNode", PropertyMapBuilder::new().build())
@@ -370,7 +370,7 @@ fn test_temporal_index_population() {
     let temporal_indexes = db.__test_temporal_indexes();
 
     // Query using temporal index API
-    let current_time = gallifreydb::core::temporal::time::now();
+    let current_time = aletheiadb::core::temporal::time::now();
 
     let versions = temporal_indexes.find_node_version_at_point(node_id, current_time, current_time);
 
@@ -395,7 +395,7 @@ fn test_temporal_index_population() {
 /// correct results.
 #[test]
 fn test_temporal_index_matches_linear_scan() {
-    let db = GallifreyDB::new().expect("Failed to create database");
+    let db = AletheiaDB::new().expect("Failed to create database");
 
     let node_id = db
         .create_node("TestNode", PropertyMapBuilder::new().build())

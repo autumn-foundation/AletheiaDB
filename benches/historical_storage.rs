@@ -5,13 +5,13 @@
 
 mod common;
 
+use aletheiadb::core::id::{NodeId, VersionId};
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::temporal::time;
+use aletheiadb::storage::historical::HistoricalStorage;
+use aletheiadb::storage::version::AnchorConfig;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::{NodeId, VersionId};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::time;
-use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::version::AnchorConfig;
 
 /// Benchmark: Add node versions with varying anchor intervals
 ///

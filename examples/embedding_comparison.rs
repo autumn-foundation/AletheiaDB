@@ -24,8 +24,8 @@
 
 #![cfg(feature = "embedding-all")]
 
-use gallifreydb::embeddings::EmbeddingService;
-use gallifreydb::embeddings::providers::{huggingface::*, ollama::*, onnx::*, openai::*};
+use aletheiadb::embeddings::EmbeddingService;
+use aletheiadb::embeddings::providers::{huggingface::*, ollama::*, onnx::*, openai::*};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔬 Embedding Provider Comparison\n");
     println!("{}", "=".repeat(60));
 
-    let test_text = "GallifreyDB is a high-performance bi-temporal graph database";
+    let test_text = "AletheiaDB is a high-performance bi-temporal graph database";
 
     // Test OpenAI (if available)
     println!("\n📊 OpenAI (text-embedding-3-small)");

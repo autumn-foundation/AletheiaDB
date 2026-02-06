@@ -3,11 +3,11 @@
 //! These tests verify that HistoricalStorage exposes public methods for querying
 //! edges at specific points in time using the Temporal Adjacency Index.
 
-use gallifreydb::core::property::PropertyMap;
-use gallifreydb::core::temporal::time;
-use gallifreydb::core::{EdgeId, InternedString, NodeId, VersionId};
-use gallifreydb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
-use gallifreydb::storage::historical::HistoricalStorage;
+use aletheiadb::core::property::PropertyMap;
+use aletheiadb::core::temporal::time;
+use aletheiadb::core::{EdgeId, InternedString, NodeId, VersionId};
+use aletheiadb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
+use aletheiadb::storage::historical::HistoricalStorage;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;

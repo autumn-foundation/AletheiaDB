@@ -274,7 +274,7 @@ impl StringInterner {
     /// # Examples
     ///
     /// ```
-    /// use gallifreydb::core::interning::StringInterner;
+    /// use aletheiadb::core::interning::StringInterner;
     ///
     /// let interner = StringInterner::new();
     /// let id = interner.intern("hello").unwrap();
@@ -379,7 +379,7 @@ impl StringInterner {
     /// # Example
     ///
     /// ```
-    /// use gallifreydb::core::interning::StringInterner;
+    /// use aletheiadb::core::interning::StringInterner;
     ///
     /// let interner = StringInterner::new();
     /// interner.warm_common_strings();
@@ -410,7 +410,7 @@ impl Default for StringInterner {
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::core::interning::GLOBAL_INTERNER;
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
 ///
 /// let id1 = GLOBAL_INTERNER.intern("Person").unwrap();
 /// let id2 = GLOBAL_INTERNER.intern("Person").unwrap();

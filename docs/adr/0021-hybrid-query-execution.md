@@ -42,7 +42,7 @@ For common query patterns, we provide direct functions that bypass the full plan
 ```rust
 // traverse_and_rank: Graph traversal + vector ranking
 pub fn traverse_and_rank(
-    db: &GallifreyDB,
+    db: &AletheiaDB,
     start: NodeId,
     edge_label: &str,
     target_embedding: &[f32],
@@ -51,7 +51,7 @@ pub fn traverse_and_rank(
 
 // find_similar_as_of: Temporal vector search
 pub fn find_similar_as_of(
-    db: &GallifreyDB,
+    db: &AletheiaDB,
     embedding: &[f32],
     k: usize,
     timestamp: Timestamp,
@@ -248,7 +248,7 @@ Different methods for `get_node_ids()` vs `get_nodes()`.
 
 ### Thread Safety
 
-- `traverse_and_rank` takes `&GallifreyDB` (immutable borrow)
+- `traverse_and_rank` takes `&AletheiaDB` (immutable borrow)
 - No internal mutation; safe for concurrent queries
 - Results are owned (`Vec<(NodeId, f32)>`), not borrowed
 
@@ -277,6 +277,6 @@ match cosine_similarity(target_embedding, embedding) {
 - [ADR-0019: Hybrid Query Planner](./0019-hybrid-query-planner.md) - Query planning architecture
 - [ADR-0011: Vector Search Integration](./0011-vector-search-integration.md) - HNSW index design
 - [ADR-0018: Temporal Vector Integration](./0018-temporal-vector-historical-integration.md) - Snapshot architecture
-- [Issue #85](https://github.com/madmax983/GallifreyDB/issues/85) - VS-072 Phase 4 documentation
+- [Issue #85](https://github.com/madmax983/AletheiaDB/issues/85) - VS-072 Phase 4 documentation
 - [Volcano Query Processing Paper](https://paperhub.s3.amazonaws.com/dace52a42c07f7f8348b08dc2b186061.pdf) - Pull-based execution model
 - [benches/hybrid_query.rs](../../benches/hybrid_query.rs) - Performance benchmarks

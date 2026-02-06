@@ -1,6 +1,6 @@
 # Data Model Architecture
 
-GallifreyDB's data model combines graph structures with bi-temporal tracking to enable knowledge evolution queries.
+AletheiaDB's data model combines graph structures with bi-temporal tracking to enable knowledge evolution queries.
 
 ## Overview
 
