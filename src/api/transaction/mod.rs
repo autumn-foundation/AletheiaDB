@@ -25,9 +25,9 @@
 //! let result = db.read(|tx| {
 //!     // get_node might fail if node doesn't exist
 //!     if let Ok(node) = tx.get_node(id) {
-//!         Ok(node.get_property("name").cloned())
+//!         Ok::<_, Box<dyn std::error::Error>>(node.get_property("name").cloned())
 //!     } else {
-//!         Ok(None)
+//!         Ok::<_, Box<dyn std::error::Error>>(None)
 //!     }
 //! })?;
 //!
@@ -35,7 +35,7 @@
 //! let node_id = db.write(|tx| {
 //!     let node_id = tx.create_node("Person", props)?;
 //!     tx.create_edge(node_id, other, "KNOWS", edge_props)?;
-//!     Ok(node_id)
+//!     Ok::<_, Box<dyn std::error::Error>>(node_id)
 //! })?;
 //! # Ok(())
 //! # }
