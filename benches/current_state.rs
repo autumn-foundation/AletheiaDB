@@ -563,6 +563,93 @@ fn bench_string_hot_path(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark property-based node lookup.
+///
+/// Target: Competitive with get_nodes_by_label + manual filter
+fn bench_find_nodes_by_property(c: &mut Criterion) {
+    use gallifreydb::core::property::PropertyValue;
+
+    let mut group = c.benchmark_group("find_nodes_by_property");
+
+    for graph_size in [100, 1000, 10000] {
+        // Create a graph where each node has a "category" property
+        // with ~10% matching a specific value
+        let storage = CurrentStorage::new();
+        for i in 0..graph_size {
+            let category = format!("cat_{}", i % 10);
+            storage
+                .create_node(
+                    "Item",
+                    PropertyMapBuilder::new()
+                        .insert("category", category.as_str())
+                        .insert("index", i as i64)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        let target = PropertyValue::String(std::sync::Arc::from("cat_0"));
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}_nodes", graph_size)),
+            &(storage, target),
+            |b, (storage, target)| {
+                b.iter(|| {
+                    let results =
+                        storage.find_nodes_by_property(black_box("Item"), "category", target);
+                    black_box(results)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark property lookup vs manual label scan + filter.
+fn bench_property_lookup_vs_scan(c: &mut Criterion) {
+    use gallifreydb::core::property::PropertyValue;
+
+    let storage = CurrentStorage::new();
+    for i in 0..1000 {
+        let name = format!("user_{}", i);
+        storage
+            .create_node(
+                "User",
+                PropertyMapBuilder::new()
+                    .insert("name", name.as_str())
+                    .build(),
+            )
+            .unwrap();
+    }
+
+    let target = PropertyValue::String(std::sync::Arc::from("user_500"));
+
+    let mut group = c.benchmark_group("property_lookup_vs_scan");
+
+    group.bench_function("find_nodes_by_property", |b| {
+        b.iter(|| {
+            let results =
+                storage.find_nodes_by_property(black_box("User"), "name", black_box(&target));
+            black_box(results)
+        });
+    });
+
+    group.bench_function("manual_label_scan_filter", |b| {
+        b.iter(|| {
+            let nodes = storage.get_nodes_by_label(black_box("User"));
+            let results: Vec<_> = nodes
+                .iter()
+                .filter(|n| n.properties.get("name").is_some_and(|v| *v == target))
+                .map(|n| n.id)
+                .collect();
+            black_box(results)
+        });
+    });
+
+    group.finish();
+}
+
 /// Benchmark allocation overhead in get_outgoing() at the index level.
 ///
 /// This micro-benchmark isolates the Vec allocation cost by directly
@@ -628,6 +715,9 @@ criterion_group!(
     bench_degree_queries,
     bench_find_neighbors,
     bench_get_outgoing_allocation_overhead,
+    // Property-based lookup
+    bench_find_nodes_by_property,
+    bench_property_lookup_vs_scan,
     // ID Generation
     bench_id_single_thread,
     bench_id_concurrent,

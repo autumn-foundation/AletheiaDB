@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::property::PropertyMapBuilder;
+use crate::core::property::{PropertyMapBuilder, PropertyValue};
 
 #[test]
 fn test_create_node() {
@@ -1720,4 +1720,187 @@ fn test_iterators_with_delta_and_tombstones() {
 
     iter.next();
     assert_eq!(iter.len(), 0);
+}
+
+// =============================================================
+// find_nodes_by_property tests
+// =============================================================
+
+#[test]
+fn test_find_nodes_by_property_basic_match() {
+    let storage = CurrentStorage::new();
+
+    let alice = storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+    let bob = storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Bob")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+    let _charlie = storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Charlie")
+                .insert("age", 25i64)
+                .build(),
+        )
+        .unwrap();
+
+    // Match multiple nodes by age=30
+    let mut results = storage.find_nodes_by_property("Person", "age", &PropertyValue::Int(30));
+    results.sort();
+    let mut expected = vec![alice, bob];
+    expected.sort();
+    assert_eq!(results, expected);
+
+    // Match single node by name
+    let results =
+        storage.find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".into()));
+    assert_eq!(results, vec![alice]);
+}
+
+#[test]
+fn test_find_nodes_by_property_no_match() {
+    let storage = CurrentStorage::new();
+
+    storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+    let results =
+        storage.find_nodes_by_property("Person", "name", &PropertyValue::String("Nobody".into()));
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_find_nodes_by_property_unknown_label() {
+    let storage = CurrentStorage::new();
+
+    storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+    let results = storage.find_nodes_by_property(
+        "UnknownLabel",
+        "name",
+        &PropertyValue::String("Alice".into()),
+    );
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_find_nodes_by_property_unknown_key() {
+    let storage = CurrentStorage::new();
+
+    storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+    let results = storage.find_nodes_by_property(
+        "Person",
+        "nonexistent_key",
+        &PropertyValue::String("Alice".into()),
+    );
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_find_nodes_by_property_wrong_label() {
+    let storage = CurrentStorage::new();
+
+    storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    storage
+        .create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+    // Should only find Person nodes, not Company
+    let results =
+        storage.find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".into()));
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn test_find_nodes_by_property_int_value() {
+    let storage = CurrentStorage::new();
+
+    let n1 = storage
+        .create_node(
+            "Metric",
+            PropertyMapBuilder::new().insert("count", 42i64).build(),
+        )
+        .unwrap();
+
+    let results = storage.find_nodes_by_property("Metric", "count", &PropertyValue::Int(42));
+    assert_eq!(results, vec![n1]);
+}
+
+#[test]
+fn test_find_nodes_by_property_bool_value() {
+    let storage = CurrentStorage::new();
+
+    let n1 = storage
+        .create_node(
+            "Feature",
+            PropertyMapBuilder::new().insert("active", true).build(),
+        )
+        .unwrap();
+    storage
+        .create_node(
+            "Feature",
+            PropertyMapBuilder::new().insert("active", false).build(),
+        )
+        .unwrap();
+
+    let results = storage.find_nodes_by_property("Feature", "active", &PropertyValue::Bool(true));
+    assert_eq!(results, vec![n1]);
+}
+
+#[test]
+fn test_find_nodes_by_property_float_value() {
+    let storage = CurrentStorage::new();
+
+    let n1 = storage
+        .create_node(
+            "Sensor",
+            PropertyMapBuilder::new().insert("temp", 98.6f64).build(),
+        )
+        .unwrap();
+    storage
+        .create_node(
+            "Sensor",
+            PropertyMapBuilder::new().insert("temp", 37.0f64).build(),
+        )
+        .unwrap();
+
+    let results = storage.find_nodes_by_property("Sensor", "temp", &PropertyValue::Float(98.6));
+    assert_eq!(results, vec![n1]);
 }

@@ -494,6 +494,14 @@ impl QueryPlanner {
                     label_filter: label_filter.clone(),
                 })
             }
+
+            ScanOp::PropertyScan { label, key, value } => Ok(PhysicalOp::PropertyScan {
+                label: label.clone(),
+                key: key.clone(),
+                value: value.clone(),
+                // Property scans are selective - assume 10% of label's rows
+                estimated_rows: 100,
+            }),
         }
     }
 

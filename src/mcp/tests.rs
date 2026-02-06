@@ -248,6 +248,8 @@ mod node_tests {
         // List with label filter (required for listing nodes efficiently)
         let list_req = ListNodesRequest {
             label: Some("ListTest".to_string()),
+            property_key: None,
+            property_value: None,
             limit: None,
             offset: None,
         };
@@ -280,6 +282,8 @@ mod node_tests {
         // List only TypeA
         let list_req = ListNodesRequest {
             label: Some("TypeA".to_string()),
+            property_key: None,
+            property_value: None,
             limit: None,
             offset: None,
         };
@@ -308,6 +312,8 @@ mod node_tests {
         // Get first page (with label filter required for efficient listing)
         let page1_req = ListNodesRequest {
             label: Some("Paginated".to_string()),
+            property_key: None,
+            property_value: None,
             limit: Some(5),
             offset: Some(0),
         };
@@ -320,6 +326,8 @@ mod node_tests {
         // Get second page
         let page2_req = ListNodesRequest {
             label: Some("Paginated".to_string()),
+            property_key: None,
+            property_value: None,
             limit: Some(5),
             offset: Some(5),
         };
@@ -1437,6 +1445,8 @@ mod coverage_tests {
         // Request with a very large offset (should be capped)
         let response = server.list_nodes(ListNodesRequest {
             label: Some("OffsetTest".to_string()),
+            property_key: None,
+            property_value: None,
             limit: Some(10),
             offset: Some(100_000), // Very large offset, should be capped to MAX_PAGINATION_OFFSET
         });
@@ -2514,6 +2524,8 @@ mod list_nodes_extended_tests {
         // List nodes without label filter
         let response = server.list_nodes(ListNodesRequest {
             label: None,
+            property_key: None,
+            property_value: None,
             limit: None,
             offset: None,
         });
@@ -2546,6 +2558,8 @@ mod list_nodes_extended_tests {
         // Request with very large limit (should be capped to MAX_RESULT_LIMIT)
         let response = server.list_nodes(ListNodesRequest {
             label: Some("LimitCap".to_string()),
+            property_key: None,
+            property_value: None,
             limit: Some(100000), // Much larger than MAX_RESULT_LIMIT
             offset: Some(0),
         });
@@ -2556,5 +2570,213 @@ mod list_nodes_extended_tests {
             value.get("nodes").is_some(),
             "Large limit should be capped, not error"
         );
+    }
+
+    // ========================================================================
+    // Property-Based Lookup via MCP
+    // ========================================================================
+
+    #[test]
+    fn test_list_nodes_by_property_string() {
+        let server = create_test_server();
+
+        // Create nodes with different names
+        server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("Alice"));
+                m
+            }),
+        });
+        server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("Bob"));
+                m
+            }),
+        });
+        server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("Alice"));
+                m
+            }),
+        });
+
+        // Filter by property
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Person".to_string()),
+            property_key: Some("name".to_string()),
+            property_value: Some(serde_json::json!("Alice")),
+            limit: None,
+            offset: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2, "Should find exactly 2 Alice nodes");
+    }
+
+    #[test]
+    fn test_list_nodes_by_property_int() {
+        let server = create_test_server();
+
+        server.create_node(CreateNodeRequest {
+            label: "Sensor".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("reading".to_string(), serde_json::json!(42));
+                m
+            }),
+        });
+        server.create_node(CreateNodeRequest {
+            label: "Sensor".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("reading".to_string(), serde_json::json!(99));
+                m
+            }),
+        });
+
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Sensor".to_string()),
+            property_key: Some("reading".to_string()),
+            property_value: Some(serde_json::json!(42)),
+            limit: None,
+            offset: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "Should find exactly 1 sensor with reading=42"
+        );
+    }
+
+    #[test]
+    fn test_list_nodes_by_property_no_match() {
+        let server = create_test_server();
+
+        server.create_node(CreateNodeRequest {
+            label: "Item".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("color".to_string(), serde_json::json!("red"));
+                m
+            }),
+        });
+
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Item".to_string()),
+            property_key: Some("color".to_string()),
+            property_value: Some(serde_json::json!("blue")),
+            limit: None,
+            offset: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 0, "Should find no matching nodes");
+    }
+
+    #[test]
+    fn test_list_nodes_by_property_missing_label() {
+        let server = create_test_server();
+
+        // property_key without label should error
+        let response = server.list_nodes(ListNodesRequest {
+            label: None,
+            property_key: Some("name".to_string()),
+            property_value: Some(serde_json::json!("Alice")),
+            limit: None,
+            offset: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_some(),
+            "Should error when label is missing for property filter"
+        );
+    }
+
+    #[test]
+    fn test_list_nodes_by_property_key_without_value() {
+        let server = create_test_server();
+
+        // property_key without property_value should error
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Person".to_string()),
+            property_key: Some("name".to_string()),
+            property_value: None,
+            limit: None,
+            offset: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_some(),
+            "Should error when property_value is missing"
+        );
+    }
+
+    #[test]
+    fn test_list_nodes_by_property_with_pagination() {
+        let server = create_test_server();
+
+        // Create 5 nodes with same property
+        for _ in 0..5 {
+            server.create_node(CreateNodeRequest {
+                label: "Widget".to_string(),
+                properties: Some({
+                    let mut m = HashMap::new();
+                    m.insert("status".to_string(), serde_json::json!("active"));
+                    m
+                }),
+            });
+        }
+
+        // Page 1: first 2
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Widget".to_string()),
+            property_key: Some("status".to_string()),
+            property_value: Some(serde_json::json!("active")),
+            limit: Some(2),
+            offset: Some(0),
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2, "Page 1 should have 2 nodes");
+
+        // Page 2: next 2
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Widget".to_string()),
+            property_key: Some("status".to_string()),
+            property_value: Some(serde_json::json!("active")),
+            limit: Some(2),
+            offset: Some(2),
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2, "Page 2 should have 2 nodes");
+
+        // Page 3: last 1
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Widget".to_string()),
+            property_key: Some("status".to_string()),
+            property_value: Some(serde_json::json!("active")),
+            limit: Some(2),
+            offset: Some(4),
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 1, "Page 3 should have 1 node");
     }
 }

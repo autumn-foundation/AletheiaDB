@@ -75,7 +75,7 @@ use crate::core::graph::{Edge, Node};
 #[cfg(test)]
 use crate::core::id::MAX_VALID_ID;
 use crate::core::id::{EdgeId, NodeId};
-use crate::core::property::PropertyMap;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
 use crate::utils::error::Result;
 
@@ -193,6 +193,22 @@ pub trait ReadOps {
     /// Unlike `get_edge()`, this count is **NOT snapshot-isolated**. It may include
     /// edges created by transactions that committed after this read transaction started.
     fn edge_count(&self) -> usize;
+
+    /// Find nodes by label and property value.
+    ///
+    /// Returns the IDs of all nodes with the given label whose specified property
+    /// equals the given value. Only nodes visible in the current snapshot are returned.
+    ///
+    /// # Performance
+    ///
+    /// - **Time**: O(N) where N = nodes with the given label
+    /// - **Space**: O(M) where M = number of matching nodes
+    fn find_nodes_by_property(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &PropertyValue,
+    ) -> Vec<NodeId>;
 }
 
 /// Write operations (only available in write transactions)

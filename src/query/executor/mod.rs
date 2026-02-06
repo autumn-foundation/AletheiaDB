@@ -192,6 +192,15 @@ impl QueryExecutor {
                 )))
             }
 
+            PhysicalOp::PropertyScan {
+                label, key, value, ..
+            } => Ok(Box::new(iterators::PropertyScanIterator::new(
+                label.clone(),
+                key.clone(),
+                value,
+                Arc::clone(&self.current),
+            ))),
+
             PhysicalOp::Filter { input, predicate } => {
                 let input_iter = self.execute_op(input)?;
                 Ok(Box::new(iterators::FilterIterator::new(

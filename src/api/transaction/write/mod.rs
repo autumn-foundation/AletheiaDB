@@ -658,6 +658,66 @@ impl ReadOps for WriteTransaction {
     fn edge_count(&self) -> usize {
         self.current.edge_count()
     }
+
+    fn find_nodes_by_property(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &crate::core::property::PropertyValue,
+    ) -> Vec<NodeId> {
+        use crate::core::interning::GLOBAL_INTERNER;
+
+        // 1. Get committed matches, excluding nodes modified in the buffer
+        let mut results: Vec<NodeId> = self
+            .current
+            .find_nodes_by_property(label, property_key, property_value)
+            .into_iter()
+            .filter(|node_id| !self.buffer.has_modified_node(*node_id))
+            .filter(|node_id| {
+                self.current
+                    .get_node(*node_id)
+                    .map(|node| {
+                        self.visibility_manager
+                            .is_visible(&self.snapshot, node.metadata.created_by_tx)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        // 2. Scan buffered writes for matching CreateNode/UpdateNode
+        let label_id = GLOBAL_INTERNER.get_id(label);
+        let key_id = GLOBAL_INTERNER.get_id(property_key);
+
+        if let (Some(label_id), Some(key_id)) = (label_id, key_id) {
+            for op in self.buffer.operations() {
+                match op {
+                    super::BufferedWrite::CreateNode {
+                        node_id,
+                        label: node_label,
+                        properties,
+                        ..
+                    }
+                    | super::BufferedWrite::UpdateNode {
+                        node_id,
+                        label: node_label,
+                        properties,
+                        ..
+                    } => {
+                        if *node_label == label_id
+                            && let Some(val) = properties.get_by_interned_key(&key_id)
+                            && val == property_value
+                        {
+                            results.push(*node_id);
+                        }
+                    }
+                    // DeleteNode is already excluded by has_modified_node filter
+                    _ => {}
+                }
+            }
+        }
+
+        results
+    }
 }
 
 impl WriteOps for WriteTransaction {

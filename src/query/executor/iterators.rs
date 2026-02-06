@@ -1292,6 +1292,75 @@ impl ResultIterator for ProvenanceFilterIterator {
     }
 }
 
+/// Convert a `PredicateValue` to a `PropertyValue` for storage-level lookups.
+fn predicate_to_property_value(pv: &PredicateValue) -> PropertyValue {
+    match pv {
+        PredicateValue::Null => PropertyValue::Null,
+        PredicateValue::Bool(b) => PropertyValue::Bool(*b),
+        PredicateValue::Int(i) => PropertyValue::Int(*i),
+        PredicateValue::Float(f) => PropertyValue::Float(*f),
+        PredicateValue::String(s) => PropertyValue::String(Arc::from(s.as_str())),
+    }
+}
+
+/// Iterator for property-based node scans.
+///
+/// Calls `CurrentStorage::find_nodes_by_property` to get matching node IDs,
+/// then resolves each to a full `Node` for the query result.
+pub struct PropertyScanIterator {
+    current: Arc<CurrentStorage>,
+    initialized: bool,
+    node_ids: Option<std::vec::IntoIter<NodeId>>,
+    label: String,
+    property_value: PropertyValue,
+    property_key: String,
+}
+
+impl PropertyScanIterator {
+    pub fn new(
+        label: String,
+        key: String,
+        value: &PredicateValue,
+        current: Arc<CurrentStorage>,
+    ) -> Self {
+        PropertyScanIterator {
+            current,
+            initialized: false,
+            node_ids: None,
+            label,
+            property_value: predicate_to_property_value(value),
+            property_key: key,
+        }
+    }
+
+    fn initialize(&mut self) {
+        if self.initialized {
+            return;
+        }
+        self.initialized = true;
+        let ids = self.current.find_nodes_by_property(
+            &self.label,
+            &self.property_key,
+            &self.property_value,
+        );
+        self.node_ids = Some(ids.into_iter());
+    }
+}
+
+impl ResultIterator for PropertyScanIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.initialize();
+
+        match self.node_ids.as_mut()?.next() {
+            Some(id) => match self.current.get_node(id) {
+                Ok(node) => Some(Ok(QueryRow::from_entity(EntityResult::Node(node)))),
+                Err(e) => Some(Err(e)),
+            },
+            None => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

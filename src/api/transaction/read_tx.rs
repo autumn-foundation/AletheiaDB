@@ -9,6 +9,7 @@
 use super::{ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
+use crate::core::property::PropertyValue;
 use crate::core::temporal::time;
 use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
@@ -264,6 +265,27 @@ impl ReadOps for ReadTransaction {
     fn edge_count(&self) -> usize {
         self.current.edge_count()
     }
+
+    fn find_nodes_by_property(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &PropertyValue,
+    ) -> Vec<NodeId> {
+        self.current
+            .find_nodes_by_property(label, property_key, property_value)
+            .into_iter()
+            .filter(|node_id| {
+                self.current
+                    .get_node(*node_id)
+                    .map(|node| {
+                        self.visibility_manager
+                            .is_visible(&self.snapshot, node.metadata.created_by_tx)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
 }
 
 impl Drop for ReadTransaction {
@@ -477,5 +499,51 @@ mod tests {
             0,
             "ReadTransaction should remove itself from active set on drop"
         );
+    }
+
+    #[test]
+    fn test_read_transaction_find_nodes_by_property() {
+        let current = Arc::new(CurrentStorage::new());
+
+        let alice_id = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build(),
+            )
+            .unwrap();
+        let _bob_id = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Bob")
+                    .insert("age", 25i64)
+                    .build(),
+            )
+            .unwrap();
+
+        let tx = create_test_read_tx(TxId::new(1), current);
+
+        let results = tx.find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::property::PropertyValue::String("Alice".into()),
+        );
+        assert_eq!(results, vec![alice_id]);
+    }
+
+    #[test]
+    fn test_read_transaction_find_nodes_by_property_empty() {
+        let current = Arc::new(CurrentStorage::new());
+        let tx = create_test_read_tx(TxId::new(1), current);
+
+        let results = tx.find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::property::PropertyValue::String("Nobody".into()),
+        );
+        assert!(results.is_empty());
     }
 }
