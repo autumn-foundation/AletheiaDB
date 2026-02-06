@@ -181,9 +181,11 @@ pub const MAX_TEMPORAL_INDEX_FILE_SIZE: u64 = if cfg!(test) {
 /// Maximum size of a string interner file (DoS protection).
 ///
 /// Limits the amount of memory allocated when loading the string interner.
-/// Default: 256MB in production, 5MB in tests.
+/// Test limit increased to 20MB to allow testing string length validation
+/// (MAX_STRING_LENGTH is 10MB, need buffer for encoding overhead).
+/// Default: 256MB in production, 20MB in tests.
 pub const MAX_STRING_INTERNER_FILE_SIZE: u64 = if cfg!(test) {
-    5 * 1024 * 1024
+    20 * 1024 * 1024
 } else {
     256 * 1024 * 1024
 };

@@ -288,7 +288,16 @@ mod tests {
         let path = dir.path().join("interner.idx");
 
         // Create data with excessively long string
+        // Use MAX_STRING_LENGTH + 1 to exceed the limit
+        // Test file size limit is 20MB to allow this test to work
         let oversized_string = "x".repeat(super::super::MAX_STRING_LENGTH + 1);
+
+        // Verify this exceeds the limit but is within file size bounds for test
+        assert!(oversized_string.len() > super::super::MAX_STRING_LENGTH,
+                "String should exceed MAX_STRING_LENGTH");
+        assert!(oversized_string.len() < super::super::MAX_STRING_INTERNER_FILE_SIZE as usize,
+                "String should be within file size limit to test string length check");
+
         let bad_data = StringInternerData {
             magic: INTERNER_MAGIC,
             version: MANIFEST_VERSION,
