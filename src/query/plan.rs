@@ -207,6 +207,21 @@ pub enum ScanOp {
         /// Optional label filter for results
         label_filter: Option<String>,
     },
+
+    /// Property-based node scan: nodes with a given label where property == value.
+    ///
+    /// This is the fused form of `NodeScan { label } + Filter(Eq { key, value })`,
+    /// produced by the `FilterScanFusion` optimization rule. It delegates to
+    /// `CurrentStorage::find_nodes_by_property` which avoids per-node predicate
+    /// evaluation on non-matching nodes.
+    PropertyScan {
+        /// Label to filter by
+        label: String,
+        /// Property key to match
+        key: String,
+        /// Expected property value
+        value: super::ir::PredicateValue,
+    },
 }
 
 /// Unary operations that transform a single input.

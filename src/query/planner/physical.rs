@@ -173,6 +173,17 @@ impl PhysicalPlan {
                 }
                 line.push_str(&format!(" [property={}]", property_key));
             }
+            PhysicalOp::PropertyScan {
+                label,
+                key,
+                estimated_rows,
+                ..
+            } => {
+                line.push_str(&format!(
+                    " (rows: ~{}) [label={}, key={}]",
+                    estimated_rows, label, key
+                ));
+            }
             PhysicalOp::IndexedTraversal {
                 direction,
                 label,
@@ -334,6 +345,19 @@ pub enum PhysicalOp {
         label_filter: Option<String>,
     },
 
+    /// Property-based node scan: finds nodes with label where property == value.
+    /// Produced by FilterScanFusion rule. Delegates to `CurrentStorage::find_nodes_by_property`.
+    PropertyScan {
+        /// Label to filter by
+        label: String,
+        /// Property key to match
+        key: String,
+        /// Expected property value
+        value: crate::query::ir::PredicateValue,
+        /// Estimated number of matching rows
+        estimated_rows: usize,
+    },
+
     // === Traversal Operators ===
     /// Graph traversal using adjacency index
     IndexedTraversal {
@@ -478,6 +502,7 @@ impl PhysicalOp {
             PhysicalOp::TemporalNodeLookup { .. } => "TemporalNodeLookup",
             PhysicalOp::TemporalVectorSearch { .. } => "TemporalVectorSearch",
             PhysicalOp::SimilarToNode { .. } => "SimilarToNode",
+            PhysicalOp::PropertyScan { .. } => "PropertyScan",
             PhysicalOp::IndexedTraversal { .. } => "IndexedTraversal",
             PhysicalOp::HashJoin { .. } => "HashJoin",
             PhysicalOp::Union { .. } => "Union",
@@ -507,6 +532,7 @@ impl PhysicalOp {
                 | PhysicalOp::TemporalNodeLookup { .. }
                 | PhysicalOp::TemporalVectorSearch { .. }
                 | PhysicalOp::SimilarToNode { .. }
+                | PhysicalOp::PropertyScan { .. }
                 | PhysicalOp::Empty
         )
     }
@@ -521,6 +547,7 @@ impl PhysicalOp {
             | PhysicalOp::TemporalNodeLookup { .. }
             | PhysicalOp::TemporalVectorSearch { .. }
             | PhysicalOp::SimilarToNode { .. }
+            | PhysicalOp::PropertyScan { .. }
             | PhysicalOp::Empty => 1,
 
             PhysicalOp::IndexedTraversal { input, .. }

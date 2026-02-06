@@ -3053,3 +3053,229 @@ mod bitemporal_validation_tests {
         );
     }
 }
+
+mod find_nodes_by_property_tests {
+    use super::*;
+    use crate::api::transaction::ReadOps;
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
+
+    fn create_test_write_tx() -> (WriteTransaction, TempDir) {
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
+        };
+
+        let tx = WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        );
+
+        (tx, temp_dir)
+    }
+
+    #[test]
+    fn test_committed_nodes_visible() {
+        let current = Arc::new(CurrentStorage::new());
+
+        // Pre-create committed nodes
+        let alice_id = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
+        };
+
+        let tx = WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        );
+
+        let results =
+            tx.find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".into()));
+        assert_eq!(results, vec![alice_id]);
+    }
+
+    #[test]
+    fn test_buffered_create_node_visible() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        // Create a node in the write buffer
+        let alice_id = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+
+        // Should find the buffered node
+        let results =
+            tx.find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".into()));
+        assert_eq!(results, vec![alice_id]);
+    }
+
+    #[test]
+    fn test_buffered_delete_excluded() {
+        let current = Arc::new(CurrentStorage::new());
+
+        // Pre-create a committed node
+        let alice_id = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
+        };
+
+        let mut tx = WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        );
+
+        // Delete the node in this transaction
+        tx.delete_node(alice_id).unwrap();
+
+        // Should NOT find the deleted node
+        let results =
+            tx.find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".into()));
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_buffered_update_with_matching_property() {
+        let current = Arc::new(CurrentStorage::new());
+
+        // Pre-create a committed node with a different name
+        let node_id = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "OldName").build(),
+            )
+            .unwrap();
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
+        };
+
+        let mut tx = WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        );
+
+        // Update the node to have a new name
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("name", "NewName").build(),
+        )
+        .unwrap();
+
+        // Should find with new name
+        let results =
+            tx.find_nodes_by_property("Person", "name", &PropertyValue::String("NewName".into()));
+        assert_eq!(results, vec![node_id]);
+
+        // Should NOT find with old name
+        let results =
+            tx.find_nodes_by_property("Person", "name", &PropertyValue::String("OldName".into()));
+        assert!(results.is_empty());
+    }
+}

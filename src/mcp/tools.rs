@@ -68,6 +68,19 @@ pub struct ListNodesRequest {
     #[schemars(description = "Filter by node label (optional)")]
     pub label: Option<String>,
 
+    /// Filter by property key (requires label and property_value).
+    #[schemars(
+        description = "Filter by property key. Must be used with 'label' and 'property_value'."
+    )]
+    pub property_key: Option<String>,
+
+    /// Filter by property value (requires label and property_key).
+    /// Supports: strings, integers, floats, booleans, and null.
+    #[schemars(
+        description = "Filter by property value (JSON). Must be used with 'label' and 'property_key'."
+    )]
+    pub property_value: Option<serde_json::Value>,
+
     /// Maximum number of nodes to return (default: 100).
     #[schemars(description = "Maximum number of nodes to return (default: 100)")]
     pub limit: Option<usize>,

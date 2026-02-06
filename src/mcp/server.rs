@@ -564,7 +564,47 @@ impl GallifreyMcpServer {
             .min(MAX_RESULT_LIMIT);
         let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
 
-        // If a label is provided, use QueryBuilder to scan by label
+        // Validate property filter: both key and value are required together with label
+        if req.property_key.is_some() != req.property_value.is_some() {
+            return self
+                .error_json("Both 'property_key' and 'property_value' are required together");
+        }
+        if req.property_key.is_some() && req.label.is_none() {
+            return self.error_json("Property filtering requires 'label' to be specified");
+        }
+
+        // Property-based lookup: label + property_key + property_value
+        if let (Some(label), Some(prop_key), Some(prop_val)) =
+            (&req.label, &req.property_key, &req.property_value)
+        {
+            let property_value =
+                match self.json_to_property_value(prop_val) {
+                    Some(v) => v,
+                    None => return self.error_json(
+                        "Unsupported property_value type. Use strings, numbers, booleans, or null.",
+                    ),
+                };
+
+            let node_ids = self
+                .db
+                .find_nodes_by_property(label, prop_key, &property_value);
+
+            let mut nodes = Vec::with_capacity(limit);
+            for node_id in node_ids.into_iter().skip(offset).take(limit) {
+                if let Ok(node) = self.db.get_node(node_id) {
+                    nodes.push(self.node_to_response(&node));
+                }
+            }
+
+            return self.success_json(json!({
+                "nodes": nodes,
+                "count": nodes.len(),
+                "offset": offset,
+                "limit": limit
+            }));
+        }
+
+        // Label-only scan
         if let Some(label) = &req.label {
             let builder = crate::query::QueryBuilder::new().scan_label(label);
 
