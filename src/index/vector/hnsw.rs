@@ -102,7 +102,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
 /// Current mapping file format version
-const MAPPING_VERSION: u8 = 1;
+const MAPPING_VERSION: u8 = 2;
 
 /// Maximum number of results that can be requested in a search.
 ///
@@ -1065,12 +1065,22 @@ impl HnswIndex {
         let mut writer = BufWriter::new(file);
 
         // Use Vec iterator instead of DashMap iterator
-        Self::write_mappings_to_writer(&mut writer, mappings.into_iter(), count)
+        Self::write_mappings_to_writer(
+            &mut writer,
+            mappings.into_iter(),
+            count,
+            self.config.quantization,
+        )
     }
 
     /// Helper method to stream mappings to a writer with CRC calculation.
     /// Extracted for testability of error paths.
-    fn write_mappings_to_writer<W, I>(writer: &mut W, mappings_iter: I, count: usize) -> Result<()>
+    fn write_mappings_to_writer<W, I>(
+        writer: &mut W,
+        mappings_iter: I,
+        count: usize,
+        quantization: Quantization,
+    ) -> Result<()>
     where
         W: Write,
         I: Iterator<Item = (NodeId, u64)>,
@@ -1103,6 +1113,15 @@ impl HnswIndex {
         // Write header
         write_and_hash(writer, &mut hasher, MAPPING_MAGIC)?;
         write_and_hash(writer, &mut hasher, &[MAPPING_VERSION])?;
+
+        // Write Quantization (Added in V2)
+        let q_byte = match quantization {
+            Quantization::F32 => 0,
+            Quantization::F16 => 1,
+            Quantization::I8 => 2,
+        };
+        write_and_hash(writer, &mut hasher, &[q_byte])?;
+
         write_and_hash(writer, &mut hasher, &count_u64.to_le_bytes())?;
 
         // Write data directly
@@ -1200,10 +1219,12 @@ impl HnswIndex {
 
 /// Load and verify mappings from a companion file.
 /// Returns (id_mapping, reverse_mapping, max_key) or error if integrity check fails.
-/// Format: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
+/// Format V1: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
+/// Format V2: `[MAGIC:4][VERSION:1][QUANT:1][COUNT:8][DATA:16*count][CRC32:4]`
 #[allow(clippy::type_complexity)]
 fn load_mappings_with_integrity(
     mappings_path: &Path,
+    expected_quantization: Option<Quantization>,
 ) -> Result<(DashMap<NodeId, u64>, DashMap<u64, NodeId>, u64)> {
     let id_mapping = DashMap::new();
     let reverse_mapping = DashMap::new();
@@ -1236,11 +1257,39 @@ fn load_mappings_with_integrity(
 
     // Check version
     let version = file_data[4];
-    if version != MAPPING_VERSION {
+    if version != MAPPING_VERSION && version != 1 {
         return Err(Error::Vector(VectorError::IndexError(format!(
-            "Unsupported mapping file version: {} (expected {})",
+            "Unsupported mapping file version: {} (expected 1 or {})",
             version, MAPPING_VERSION
         ))));
+    }
+
+    // Check Quantization (V2+)
+    let mut header_size = 4 + 1 + 8 + 4; // V1 base size
+    if version >= 2 {
+        header_size += 1; // Add quantization byte
+        let stored_q = file_data[5];
+
+        if let Some(expected) = expected_quantization {
+            let expected_byte = match expected {
+                Quantization::F32 => 0,
+                Quantization::F16 => 1,
+                Quantization::I8 => 2,
+            };
+
+            if stored_q != expected_byte {
+                return Err(Error::Vector(VectorError::IndexError(format!(
+                    "Index quantization mismatch: file has {:?}, config expects {:?}",
+                    match stored_q {
+                        0 => "F32",
+                        1 => "F16",
+                        2 => "I8",
+                        _ => "Unknown",
+                    },
+                    expected
+                ))));
+            }
+        }
     }
 
     // Extract and verify CRC32
@@ -1258,7 +1307,8 @@ fn load_mappings_with_integrity(
     }
 
     // Parse count
-    let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
+    let count_offset = if version == 1 { 5 } else { 6 };
+    let count = u64::from_le_bytes(file_data[count_offset..count_offset + 8].try_into().unwrap()) as usize;
 
     // Verify data size with checked arithmetic
     let data_size = count.checked_mul(16).ok_or_else(|| {
@@ -1266,7 +1316,7 @@ fn load_mappings_with_integrity(
             "Mapping count too large (overflow)".to_string(),
         ))
     })?;
-    let expected_size = data_size.checked_add(4 + 1 + 8 + 4).ok_or_else(|| {
+    let expected_size = data_size.checked_add(header_size).ok_or_else(|| {
         Error::Vector(VectorError::IndexError(
             "Mapping file size too large (overflow)".to_string(),
         ))
@@ -1281,7 +1331,7 @@ fn load_mappings_with_integrity(
     }
 
     // Parse mappings
-    let data_start = 13;
+    let data_start = count_offset + 8;
     let data_end = crc_offset;
     for chunk in file_data[data_start..data_end].chunks_exact(16) {
         let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
@@ -1372,7 +1422,7 @@ impl HnswIndex {
             multi: false,
         };
 
-        let index = Index::new(&options).map_err(|e| {
+        let mut index = Index::new(&options).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to create index for loading: {}",
                 e
@@ -1392,9 +1442,25 @@ impl HnswIndex {
                 )))
             })?;
 
+        // Apply custom metric if configured
+        if let Some(ref custom) = config.custom_metric {
+            let dims = config.dimensions;
+            let distance_fn = Arc::clone(&custom.distance_fn);
+
+            // Create a wrapper that converts usearch's raw pointer API to our safe slice API
+            // SAFETY: usearch guarantees that:
+            // 1. Both pointers are valid and point to `dims` contiguous f32 values
+            // 2. The pointers remain valid for the duration of the function call
+            // 3. The data is properly aligned for f32
+            let metric_wrapper = create_metric_wrapper(dims, distance_fn);
+
+            index.change_metric(metric_wrapper);
+        }
+
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
-        let (id_mapping, reverse_mapping, max_key) = load_mappings_with_integrity(&mappings_path)?;
+        let (id_mapping, reverse_mapping, max_key) =
+            load_mappings_with_integrity(&mappings_path, Some(config.quantization))?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
@@ -1435,7 +1501,8 @@ impl HnswIndex {
 
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
-        let (id_mapping, reverse_mapping, max_key) = load_mappings_with_integrity(&mappings_path)?;
+        let (id_mapping, reverse_mapping, max_key) =
+            load_mappings_with_integrity(&mappings_path, None)?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
@@ -2192,6 +2259,7 @@ mod tests {
             &mut writer,
             mappings.iter().copied(),
             mappings.len(),
+            Quantization::F32,
         );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
@@ -2201,14 +2269,15 @@ mod tests {
         }
 
         // Case 2: Fail during data writing
-        // Magic(4) + Version(1) + Count(8) = 13 bytes header
+        // Magic(4) + Version(1) + Quant(1) + Count(8) = 14 bytes header
         // Data is 16 bytes per item.
         // Fail after header + 1st item (16 bytes) + 1 byte
-        let mut writer = MockFailWriter::new(13 + 16 + 1);
+        let mut writer = MockFailWriter::new(14 + 16 + 1);
         let result = HnswIndex::write_mappings_to_writer(
             &mut writer,
             mappings.iter().copied(),
             mappings.len(),
+            Quantization::F32,
         );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
@@ -2216,14 +2285,15 @@ mod tests {
         }
 
         // Case 3: Fail during CRC writing
-        // Total data size = 13 + 32 = 45 bytes.
+        // Total data size = 14 + 32 = 46 bytes.
         // CRC is 4 bytes.
-        // Fail at 45 + 1 byte (during CRC write)
-        let mut writer = MockFailWriter::new(45 + 1);
+        // Fail at 46 + 1 byte (during CRC write)
+        let mut writer = MockFailWriter::new(46 + 1);
         let result = HnswIndex::write_mappings_to_writer(
             &mut writer,
             mappings.iter().copied(),
             mappings.len(),
+            Quantization::F32,
         );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
@@ -2249,6 +2319,7 @@ mod tests {
             &mut writer,
             mappings.iter().copied(),
             mappings.len(),
+            Quantization::F32,
         );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
