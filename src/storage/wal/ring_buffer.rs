@@ -1207,14 +1207,19 @@ mod tests {
         assert!(buf.is_closed());
     }
 
-    /// Helper to inject wraparound state for testing
-    ///
-    /// # Test Helper
-    ///
-    /// This method is only available in test builds and allows tests to
-    /// set up specific wraparound scenarios.
     #[cfg(test)]
     impl WalRingBuffer {
+        /// Helper to inject wraparound state for testing.
+        ///
+        /// This method is only available in test builds and allows tests to
+        /// set up specific wraparound scenarios by directly manipulating the
+        /// internal write/read positions and slot sequences.
+        ///
+        /// # Safety
+        ///
+        /// This method should only be called on a buffer that is not being
+        /// concurrently accessed. It uses `Ordering::Relaxed` and clears all
+        /// slot entries.
         pub fn set_state_for_wraparound_test(&mut self, write_pos: u64, read_pos: u64) {
             // Set positions
             self.write_pos.store(write_pos, Ordering::Relaxed);
