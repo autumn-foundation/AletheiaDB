@@ -119,7 +119,8 @@ fn test_filtered_search_accepts_slices() -> Result<()> {
 
     // Multiple filtered searches with the same buffer
     for _ in 0..20 {
-        let results = index.search_with_filter(&query_buffer, 5, |id: &NodeId| id.as_u64() % 2 == 0)?;
+        let results =
+            index.search_with_filter(&query_buffer, 5, |id: &NodeId| id.as_u64() % 2 == 0)?;
 
         // Verify only even IDs were returned
         for (node_id, _similarity) in results {

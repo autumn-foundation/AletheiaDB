@@ -62,15 +62,24 @@ fn test_dot_and_magnitudes_correctness_all_lengths() {
 
         assert!(
             (dot_actual - dot_expected).abs() < tolerance,
-            "Len {}: dot mismatch. Expected {}, got {}", len, dot_expected, dot_actual
+            "Len {}: dot mismatch. Expected {}, got {}",
+            len,
+            dot_expected,
+            dot_actual
         );
         assert!(
             (mag_a_actual - mag_a_expected).abs() < tolerance,
-            "Len {}: mag_a mismatch. Expected {}, got {}", len, mag_a_expected, mag_a_actual
+            "Len {}: mag_a mismatch. Expected {}, got {}",
+            len,
+            mag_a_expected,
+            mag_a_actual
         );
         assert!(
             (mag_b_actual - mag_b_expected).abs() < tolerance,
-            "Len {}: mag_b mismatch. Expected {}, got {}", len, mag_b_expected, mag_b_actual
+            "Len {}: mag_b mismatch. Expected {}, got {}",
+            len,
+            mag_b_expected,
+            mag_b_actual
         );
     }
 }
@@ -92,14 +101,22 @@ fn test_squared_diff_sum_correctness_all_lengths() {
         // SIMD FMA accumulation can differ from scalar sum.
         let abs_diff = (actual - expected).abs();
         let max_val = actual.abs().max(expected.abs());
-        let rel_err = if max_val > 1e-6 { abs_diff / max_val } else { 0.0 };
+        let rel_err = if max_val > 1e-6 {
+            abs_diff / max_val
+        } else {
+            0.0
+        };
 
         // Allow up to 2e-6 relative error (approx 20 epsilons accumulated)
         // or 1e-3 absolute error (whichever passes).
         assert!(
             abs_diff < 1e-3 || rel_err < 2e-6,
             "Len {}: squared_diff_sum mismatch. Expected {}, got {}, abs_diff {}, rel_err {}",
-            len, expected, actual, abs_diff, rel_err
+            len,
+            expected,
+            actual,
+            abs_diff,
+            rel_err
         );
     }
 }
@@ -124,7 +141,11 @@ fn test_scale_in_place_correctness_all_lengths() {
         for i in 0..len {
             assert!(
                 (actual[i] - expected[i]).abs() < 1e-6,
-                "Len {}: mismatch at index {}. Expected {}, got {}", len, i, expected[i], actual[i]
+                "Len {}: mismatch at index {}. Expected {}, got {}",
+                len,
+                i,
+                expected[i],
+                actual[i]
             );
         }
     }
@@ -155,17 +176,23 @@ fn test_simd_alignment_agnostic() {
         assert!(
             (dot_actual - dot_expected).abs() < tolerance,
             "Offset {}: dot mismatch with unaligned slice. Expected {}, got {}",
-            offset, dot_expected, dot_actual
+            offset,
+            dot_expected,
+            dot_actual
         );
         assert!(
             (mag_a_actual - mag_a_expected).abs() < tolerance,
             "Offset {}: mag_a mismatch with unaligned slice. Expected {}, got {}",
-            offset, mag_a_expected, mag_a_actual
+            offset,
+            mag_a_expected,
+            mag_a_actual
         );
         assert!(
             (mag_b_actual - mag_b_expected).abs() < tolerance,
             "Offset {}: mag_b mismatch with unaligned slice. Expected {}, got {}",
-            offset, mag_b_expected, mag_b_actual
+            offset,
+            mag_b_expected,
+            mag_b_actual
         );
 
         // 2. Test squared_diff_sum
@@ -173,11 +200,19 @@ fn test_simd_alignment_agnostic() {
         let actual_sq_diff = simd::squared_diff_sum(slice_a, slice_b);
         let abs_diff = (actual_sq_diff - expected_sq_diff).abs();
         let max_val = actual_sq_diff.abs().max(expected_sq_diff.abs());
-        let rel_err = if max_val > 1e-6 { abs_diff / max_val } else { 0.0 };
+        let rel_err = if max_val > 1e-6 {
+            abs_diff / max_val
+        } else {
+            0.0
+        };
         assert!(
             abs_diff < 1e-3 || rel_err < 2e-6,
             "Offset {}: squared_diff_sum mismatch. Expected {}, got {}, abs_diff {}, rel_err {}",
-            offset, expected_sq_diff, actual_sq_diff, abs_diff, rel_err
+            offset,
+            expected_sq_diff,
+            actual_sq_diff,
+            abs_diff,
+            rel_err
         );
 
         // 3. Test scale_in_place
@@ -195,7 +230,10 @@ fn test_simd_alignment_agnostic() {
                 assert!(
                     (act - exp).abs() < 1e-6,
                     "Offset {}: scale_in_place mismatch at index {}. Expected {}, got {}",
-                    offset, i, exp, act
+                    offset,
+                    i,
+                    exp,
+                    act
                 );
             });
     }
