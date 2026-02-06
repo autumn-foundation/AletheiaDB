@@ -1231,19 +1231,24 @@ mod tests {
             //
             // Key insight: For position P, slot[P % capacity] needs sequence == P
             // to be available for writing.
+            //
+            // We initialize the next `capacity` positions starting from write_pos,
+            // ensuring proper handling of wraparound (e.g., u64::MAX -> 0).
             for i in 0..self.capacity {
-                // Calculate what position would naturally write to this slot
-                let base = write_pos / self.capacity as u64 * self.capacity as u64;
-                let slot_write_pos = base.wrapping_add(i as u64);
+                // Calculate the position that will write to this slot next
+                let slot_pos = write_pos.wrapping_add(i as u64);
+
+                // Determine which slot index this position maps to
+                let slot_idx = (slot_pos % self.capacity as u64) as usize;
 
                 // Make slot available for writing at its position
-                self.slots[i]
+                self.slots[slot_idx]
                     .sequence
-                    .store(slot_write_pos, Ordering::Relaxed);
+                    .store(slot_pos, Ordering::Relaxed);
 
                 // Clear entries
                 unsafe {
-                    *self.slots[i].entry.get() = None;
+                    *self.slots[slot_idx].entry.get() = None;
                 }
             }
         }
