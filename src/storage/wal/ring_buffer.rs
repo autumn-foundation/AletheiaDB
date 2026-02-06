@@ -568,18 +568,18 @@ impl WalRingBuffer {
                 }
             } else {
                 // Use wrapping subtraction to handle u64 wraparound correctly
-                // This calculates the "distance" from expected_seq to current_seq in
+                // This calculates the "distance" from current_seq to expected_seq in
                 // modulo 2^64 arithmetic.
                 //
                 // The slot can be in these states:
                 // - seq == expected_seq: Available (handled above)
-                // - seq > expected_seq && seq <= expected_seq + capacity: Full/occupied
-                // - seq > expected_seq + capacity: Reader has advanced, retry
-                let seq_distance = current_seq.wrapping_sub(expected_seq);
+                // - seq < expected_seq: Buffer is full (consumer hasn't caught up)
+                // - seq > expected_seq: Already processed (another producer advanced)
+                let distance_behind = expected_seq.wrapping_sub(current_seq);
 
-                if seq_distance > 0 && seq_distance <= self.capacity as u64 {
-                    // Buffer is full - the slot is still occupied
-                    // The sequence is ahead of expected but within one buffer cycle
+                if distance_behind > 0 && distance_behind <= self.capacity as u64 {
+                    // Buffer is full - the slot is still occupied by a previous cycle
+                    // current_seq is behind expected_seq (from previous wrap cycle)
                     spin_count += 1;
 
                     if spin_count >= current_spin_limit {
@@ -595,8 +595,8 @@ impl WalRingBuffer {
 
                     std::hint::spin_loop();
                 } else {
-                    // seq_distance > capacity: Reader has advanced way past where we expected.
-                    // This shouldn't happen in normal operation. Retry with fresh position.
+                    // current_seq > expected_seq: Another producer already claimed and finished this slot.
+                    // Retry with fresh position.
                     continue;
                 }
             }
@@ -1240,67 +1240,99 @@ mod tests {
     #[test]
     fn test_wraparound_append_no_panic() {
         // Test that appending near u64::MAX doesn't panic due to integer overflow
-        let buf = WalRingBuffer::new(4);
+        let mut buf = WalRingBuffer::new(4);
 
-        // Append a few normal entries first
-        for i in 0..3 {
+        // Set write position to be just before u64::MAX
+        let start_pos = u64::MAX - 2;
+        buf.set_state_for_wraparound_test(start_pos, start_pos);
+
+        // Appending should succeed and wrap around without panicking
+        for i in 0..4 {
             let lsn = LSN(i);
             let entry = PendingEntry::new_async(lsn, vec![]);
-            buf.try_append(entry).expect("Should append normal entries");
+            buf.try_append(entry)
+                .expect("Append should not panic near wraparound");
         }
 
-        // Drain them
-        let entries = buf.drain();
-        assert_eq!(entries.len(), 3);
-
-        // The real test: verify wrapping_add is used (no panic in debug mode)
-        // This is more of a compilation/smoke test since we can't easily
-        // trigger u64::MAX overflow in a test
+        // Verify write position has wrapped
+        let expected_pos = start_pos.wrapping_add(4);
+        assert_eq!(buf.write_pos.load(Ordering::Relaxed), expected_pos);
     }
 
     #[test]
     fn test_wraparound_drain_no_panic() {
         // Test that drain uses wrapping_add (no panic in debug mode)
-        let buf = WalRingBuffer::new(4);
+        let mut buf = WalRingBuffer::new(4);
 
-        // Fill and drain normally
+        // Set read position to be just before u64::MAX
+        let start_pos = u64::MAX - 2;
+        buf.set_state_for_wraparound_test(start_pos, start_pos);
+
+        // Fill the buffer
         for i in 0..4 {
             let lsn = LSN(i);
             let entry = PendingEntry::new_async(lsn, vec![]);
             buf.try_append(entry).expect("Should append");
         }
 
+        // Draining should succeed and wrap around without panicking
         let entries = buf.drain();
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 4, "Should drain all entries near wraparound");
 
-        // The real test is that wrapping_add prevents overflow panics
-        // This is validated at compile/run time, not through explicit overflow
+        // Verify read position has wrapped
+        let expected_pos = start_pos.wrapping_add(4);
+        assert_eq!(buf.read_pos.load(Ordering::Relaxed), expected_pos);
     }
 
     #[test]
     fn test_wraparound_logic() {
         // Test that wrapping arithmetic correctly handles sequence comparisons
-        let buf = WalRingBuffer::new(4);
+        let capacity = 4;
+        let mut buf = WalRingBuffer::new(capacity);
 
-        // Normal operation test
-        for i in 0..10 {
-            let lsn = LSN(i);
+        // Set state to be near u64::MAX to force wraparound
+        let start_pos = u64::MAX - (capacity as u64 / 2);
+        buf.set_state_for_wraparound_test(start_pos, start_pos);
+
+        // 1. Append `capacity` items, which should wrap around u64::MAX
+        for i in 0..capacity {
+            let lsn = LSN(i as u64);
             let entry = PendingEntry::new_async(lsn, vec![i as u8]);
-            match buf.try_append(entry) {
-                Ok(()) => {
-                    // Success - continue
-                }
-                Err(_) => {
-                    // Buffer full - drain and we're done testing
-                    let entries = buf.drain();
-                    assert!(!entries.is_empty(), "Should have entries when full");
-                    break;
-                }
-            }
+            assert!(
+                buf.try_append(entry).is_ok(),
+                "Append should succeed when buffer has space"
+            );
         }
 
-        // This test primarily validates that the code compiles with wrapping_add
-        // and doesn't panic in debug mode. The actual wraparound scenario
-        // at u64::MAX is difficult to test without artificially manipulating state.
+        // 2. Buffer should now be full, next append should fail
+        let full_entry = PendingEntry::new_async(LSN(capacity as u64), vec![]);
+        assert!(
+            buf.try_append(full_entry).is_err(),
+            "Append should fail when buffer is full across wraparound"
+        );
+
+        // 3. Drain all `capacity` items, which should also wrap around
+        let entries = buf.drain();
+        assert_eq!(
+            entries.len(),
+            capacity,
+            "Should drain all appended entries across wraparound"
+        );
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.data, vec![i as u8]);
+        }
+
+        // 4. Buffer should be empty now
+        assert!(
+            buf.drain().is_empty(),
+            "Buffer should be empty after draining"
+        );
+
+        // 5. Test one more append/drain cycle to ensure state is correct
+        let final_entry = PendingEntry::new_async(LSN(100), vec![100]);
+        assert!(buf.try_append(final_entry).is_ok());
+        let final_drained = buf.drain();
+        assert_eq!(final_drained.len(), 1);
+        assert_eq!(final_drained[0].data, vec![100]);
     }
 }
