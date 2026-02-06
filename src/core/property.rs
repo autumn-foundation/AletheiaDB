@@ -629,20 +629,24 @@ impl PropertyValue {
                 let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
                 offset = 5;
 
-                if bytes.len() < offset + len {
+                let required_len = offset.checked_add(len).ok_or_else(|| {
+                    StorageError::CorruptedData("String length overflow".to_string())
+                })?;
+
+                if bytes.len() < required_len {
                     return Err(StorageError::CorruptedData(format!(
                         "Buffer too short for String data: need {} bytes, have {}",
-                        offset + len,
+                        required_len,
                         bytes.len()
                     ))
                     .into());
                 }
 
-                let string_data = &bytes[offset..offset + len];
+                let string_data = &bytes[offset..required_len];
                 let s = std::str::from_utf8(string_data).map_err(|e| {
                     StorageError::CorruptedData(format!("Invalid UTF-8 in String: {}", e))
                 })?;
-                Ok((PropertyValue::String(Arc::from(s)), offset + len))
+                Ok((PropertyValue::String(Arc::from(s)), required_len))
             }
 
             TAG_BYTES => {
@@ -655,17 +659,21 @@ impl PropertyValue {
                 let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
                 offset = 5;
 
-                if bytes.len() < offset + len {
+                let required_len = offset.checked_add(len).ok_or_else(|| {
+                    StorageError::CorruptedData("Bytes length overflow".to_string())
+                })?;
+
+                if bytes.len() < required_len {
                     return Err(StorageError::CorruptedData(format!(
                         "Buffer too short for Bytes data: need {} bytes, have {}",
-                        offset + len,
+                        required_len,
                         bytes.len()
                     ))
                     .into());
                 }
 
-                let byte_data = &bytes[offset..offset + len];
-                Ok((PropertyValue::Bytes(Arc::from(byte_data)), offset + len))
+                let byte_data = &bytes[offset..required_len];
+                Ok((PropertyValue::Bytes(Arc::from(byte_data)), required_len))
             }
 
             TAG_ARRAY => {
@@ -4183,5 +4191,49 @@ mod sentry_tests {
             "Unexpected error message: {}",
             err_msg
         );
+    }
+
+    /// 🎯 Target: PropertyMapBuilder::insert_by_key
+    /// 💣 Risk: In debug builds, inserting an invalid key should panic to catch bugs.
+    /// 🧪 Strategy: Try to insert an invalid key (one not present in the interner).
+    /// 🔬 Verification: Expect panic with "missing from interner" message.
+    #[test]
+    #[cfg(debug_assertions)] // Only runs in debug mode where debug_assert! panics
+    #[should_panic(expected = "missing from interner")]
+    fn test_builder_insert_by_key_panic() {
+        // Create a raw key that definitely doesn't exist in the interner
+        let invalid_key = InternedString::from_raw(u32::MAX);
+        let builder = PropertyMapBuilder::new();
+        // This should trigger debug_assert!(false) inside try_insert_by_key
+        builder.insert_by_key(invalid_key, PropertyValue::Int(1));
+    }
+
+    /// 🎯 Target: PropertyValue equality with NaN
+    /// 💣 Risk: Users might expect NaN == NaN, but IEEE 754 says no.
+    /// 🧪 Strategy: Create PropertyValues with NaN and check equality.
+    /// 🔬 Verification: Ensure they are NOT equal.
+    #[test]
+    fn test_property_value_nan_inequality() {
+        // Dense vector with NaN
+        let dense_nan = PropertyValue::vector(&[f32::NAN]);
+        assert_ne!(
+            dense_nan, dense_nan,
+            "Dense vector with NaN should not equal itself"
+        );
+
+        // Sparse vector with NaN
+        // Note: SparseVec::new returns error for NaN, so we need to construct it carefully or expect error
+        let result = crate::core::vector::SparseVec::new(vec![0], vec![f32::NAN], 10);
+        assert!(result.is_err(), "SparseVec should reject NaN");
+
+        // However, f32::NAN is valid f32. PropertyValue::Float(NaN) is possible.
+        let float_nan = PropertyValue::Float(f64::NAN);
+        assert_ne!(float_nan, float_nan, "Float NaN should not equal itself");
+
+        // Vector property doesn't check for NaN in constructor!
+        // PropertyValue::vector calls PropertyValue::try_vector -> validate_vector_dimensions.
+        // It does NOT check values for NaN.
+        let vec_nan = PropertyValue::vector(&[f32::NAN]);
+        assert_ne!(vec_nan, vec_nan, "Vector with NaN should not equal itself");
     }
 }
