@@ -49,19 +49,43 @@ impl AletheiaDB {
     /// This is a closure-based API that automatically manages the transaction lifecycle.
     /// The transaction is automatically cleaned up after the closure completes.
     ///
+    /// The error type is generic, allowing you to use custom error types that implement
+    /// `From<aletheiadb::Error>` for seamless error conversion with the `?` operator.
+    ///
     /// # Example
     ///
     /// ```ignore
+    /// // With AletheiaDB's error type (default)
     /// let name = db.read(|tx| {
     ///     let node = tx.get_node(node_id)?;
     ///     Ok(node.get_property("name").cloned())
     /// })?;
+    ///
+    /// // With custom error type
+    /// #[derive(Debug)]
+    /// enum RepositoryError {
+    ///     Database(aletheiadb::Error),
+    ///     NotFound,
+    /// }
+    ///
+    /// impl From<aletheiadb::Error> for RepositoryError {
+    ///     fn from(e: aletheiadb::Error) -> Self {
+    ///         RepositoryError::Database(e)
+    ///     }
+    /// }
+    ///
+    /// let name: Result<String, RepositoryError> = db.read(|tx| {
+    ///     let node = tx.get_node(node_id)?; // ? operator works!
+    ///     node.get_property("name")
+    ///         .ok_or(RepositoryError::NotFound)
+    /// });
     /// ```
-    pub fn read<F, T>(&self, f: F) -> Result<T>
+    pub fn read<F, T, E>(&self, f: F) -> std::result::Result<T, E>
     where
-        F: FnOnce(&ReadTransaction) -> Result<T>,
+        F: FnOnce(&ReadTransaction) -> std::result::Result<T, E>,
+        E: From<crate::utils::error::Error>,
     {
-        let tx = self.read_transaction()?;
+        let tx = self.read_transaction().map_err(E::from)?;
         f(&tx)
     }
 
@@ -122,20 +146,34 @@ impl AletheiaDB {
     /// This is a closure-based API that automatically manages the transaction lifecycle.
     /// The transaction is automatically committed on Ok, or rolled back on Err.
     ///
+    /// The error type is generic, allowing you to use custom error types that implement
+    /// `From<aletheiadb::Error>` for seamless error conversion with the `?` operator.
+    ///
     /// # Example
     ///
     /// ```ignore
+    /// // With AletheiaDB's error type (default)
     /// let node_id = db.write(|tx| {
     ///     let id = tx.create_node("Person", props)?;
     ///     tx.create_edge(id, other, "KNOWS", edge_props)?;
     ///     Ok(id)
     /// })?;
+    ///
+    /// // With custom error type
+    /// let node_id: Result<NodeId, RepositoryError> = db.write(|tx| {
+    ///     let id = tx.create_node("Person", props)?; // ? operator works!
+    ///     if !validate_node(id) {
+    ///         return Err(RepositoryError::ValidationFailed);
+    ///     }
+    ///     Ok(id)
+    /// });
     /// ```
-    pub fn write<F, T>(&self, f: F) -> Result<T>
+    pub fn write<F, T, E>(&self, f: F) -> std::result::Result<T, E>
     where
-        F: FnOnce(&mut WriteTransaction) -> Result<T>,
+        F: FnOnce(&mut WriteTransaction) -> std::result::Result<T, E>,
+        E: From<crate::utils::error::Error>,
     {
-        let mut tx = self.write_transaction()?;
+        let mut tx = self.write_transaction().map_err(E::from)?;
         let result = f(&mut tx)?;
 
         // Track mutations for persistence before committing
@@ -143,7 +181,7 @@ impl AletheiaDB {
         let has_edge_writes = tx.has_edge_writes();
         let has_vector_writes = tx.has_vector_writes();
 
-        tx.commit()?; // Ignore commit timestamp for simple write()
+        tx.commit().map_err(E::from)?; // Ignore commit timestamp for simple write()
 
         // Record mutations after successful commit
         if let Some(ref tracker) = self.persistence_tracker {
@@ -166,21 +204,33 @@ impl AletheiaDB {
     /// This is useful for benchmarks and tests that need to query the database
     /// at the exact commit timestamp to verify temporal semantics.
     ///
+    /// The error type is generic, allowing you to use custom error types that implement
+    /// `From<aletheiadb::Error>` for seamless error conversion with the `?` operator.
+    ///
     /// # Example
     ///
     /// ```ignore
+    /// // With AletheiaDB's error type (default)
     /// let (node_id, commit_ts) = db.write_with_timestamp(|tx| {
     ///     tx.create_node("Person", properties)
     /// })?;
     ///
     /// // Query at exact commit timestamp
     /// let node = db.get_node_at_time(node_id, commit_ts, commit_ts)?;
+    ///
+    /// // With custom error type
+    /// let result: Result<(NodeId, Timestamp), RepositoryError> =
+    ///     db.write_with_timestamp(|tx| {
+    ///         let id = tx.create_node("Person", properties)?;
+    ///         Ok(id)
+    ///     });
     /// ```
-    pub fn write_with_timestamp<F, T>(&self, f: F) -> Result<(T, Timestamp)>
+    pub fn write_with_timestamp<F, T, E>(&self, f: F) -> std::result::Result<(T, Timestamp), E>
     where
-        F: FnOnce(&mut WriteTransaction) -> Result<T>,
+        F: FnOnce(&mut WriteTransaction) -> std::result::Result<T, E>,
+        E: From<crate::utils::error::Error>,
     {
-        let mut tx = self.write_transaction()?;
+        let mut tx = self.write_transaction().map_err(E::from)?;
         let result = f(&mut tx)?;
 
         // Track mutations for persistence before committing
@@ -188,7 +238,7 @@ impl AletheiaDB {
         let has_edge_writes = tx.has_edge_writes();
         let has_vector_writes = tx.has_vector_writes();
 
-        let commit_ts = tx.commit_with_timestamp()?;
+        let commit_ts = tx.commit_with_timestamp().map_err(E::from)?;
 
         // Record mutations after successful commit
         if let Some(ref tracker) = self.persistence_tracker {
@@ -210,6 +260,9 @@ impl AletheiaDB {
     /// specific transactions. Useful for bulk loading (Async mode) or
     /// critical operations (Synchronous mode override).
     ///
+    /// The error type is generic, allowing you to use custom error types that implement
+    /// `From<aletheiadb::Error>` for seamless error conversion with the `?` operator.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -218,21 +271,37 @@ impl AletheiaDB {
     /// let db = AletheiaDB::new();
     ///
     /// // Use Async mode for bulk loading (faster but less durable)
-    /// let options = WriteOptions::new()
-    ///     .with_durability(DurabilityMode::async_mode(100));
+    /// let mode = DurabilityMode::async_mode_validated(100)?;
+    /// let options = WriteOptions::new().with_durability(mode);
     ///
+    /// // With AletheiaDB's error type (default)
     /// db.write_with_options(options, |tx| {
     ///     for item in bulk_data {
     ///         tx.create_node("Item", item.into())?;
     ///     }
     ///     Ok(())
     /// })?;
+    ///
+    /// // With custom error type
+    /// let result: Result<(), RepositoryError> = db.write_with_options(options, |tx| {
+    ///     for item in bulk_data {
+    ///         tx.create_node("Item", item.into())?; // ? operator works!
+    ///     }
+    ///     Ok(())
+    /// });
     /// ```
-    pub fn write_with_options<F, T>(&self, options: WriteOptions, f: F) -> Result<T>
+    pub fn write_with_options<F, T, E>(
+        &self,
+        options: WriteOptions,
+        f: F,
+    ) -> std::result::Result<T, E>
     where
-        F: FnOnce(&mut WriteTransaction) -> Result<T>,
+        F: FnOnce(&mut WriteTransaction) -> std::result::Result<T, E>,
+        E: From<crate::utils::error::Error>,
     {
-        let mut tx = self.write_transaction_with_options(options)?;
+        let mut tx = self
+            .write_transaction_with_options(options)
+            .map_err(E::from)?;
         let result = f(&mut tx)?;
 
         // Track mutations for persistence before committing
@@ -240,7 +309,7 @@ impl AletheiaDB {
         let has_edge_writes = tx.has_edge_writes();
         let has_vector_writes = tx.has_vector_writes();
 
-        tx.commit()?; // Ignore commit timestamp for simple write_with_options()
+        tx.commit().map_err(E::from)?; // Ignore commit timestamp for simple write_with_options()
 
         // Record mutations after successful commit
         if let Some(ref tracker) = self.persistence_tracker {

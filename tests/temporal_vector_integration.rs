@@ -4,7 +4,7 @@
 //! historical storage anchors, enabling temporal vector queries.
 
 use aletheiadb::{
-    AletheiaDB, DistanceMetric, HnswConfig, PropertyMapBuilder, ReadOps, WriteOps,
+    AletheiaDB, DistanceMetric, Error, HnswConfig, PropertyMapBuilder, ReadOps, WriteOps,
     index::vector::temporal::TemporalVectorConfig, storage::version::AnchorConfig,
 };
 
@@ -51,7 +51,7 @@ fn test_full_temporal_vector_lifecycle() {
                 .insert_vector("embedding", &new_vector)
                 .build();
             tx.update_node(node_id, new_props)?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update node");
     }
@@ -118,7 +118,7 @@ fn test_multiple_nodes_with_temporal_vectors() {
                     .insert_vector("embedding", &[0.0f32, 1.0, i as f32 * 0.1])
                     .build(),
             )?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update nodes");
     }
@@ -259,7 +259,7 @@ fn test_edge_versions_with_temporal_vectors() {
                     )
                     .build(),
             )?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update edge");
     }
@@ -309,7 +309,7 @@ fn test_vector_snapshot_id_stored_in_anchors() {
                 .insert_vector("embedding", &new_vector)
                 .build();
             tx.update_node(node_id, new_props)?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update node");
     }

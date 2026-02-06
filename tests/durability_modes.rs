@@ -5,7 +5,7 @@
 //! and their interactions including piggybacking.
 
 use aletheiadb::{
-    AletheiaDB, DurabilityMode, GLOBAL_INTERNER, Node, PropertyMapBuilder, WalConfigBuilder,
+    AletheiaDB, DurabilityMode, Error, GLOBAL_INTERNER, Node, PropertyMapBuilder, WalConfigBuilder,
     WriteOps, WriteOptions,
 };
 use std::sync::Arc;
@@ -600,7 +600,7 @@ fn test_write_options_bulk_import_preset_integration() {
                 )?;
                 ids.push(node_id);
             }
-            Ok(ids)
+            Ok::<_, Error>(ids)
         })
         .expect("bulk import write failed");
 

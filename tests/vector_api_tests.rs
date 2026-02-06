@@ -1,4 +1,5 @@
 use aletheiadb::AletheiaDB;
+use aletheiadb::Error;
 use aletheiadb::WriteOps;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
@@ -251,7 +252,7 @@ fn test_transaction_nodes_are_indexed() {
                     .insert_vector("embedding", &[0.0f32, 1.0, 0.0])
                     .build(),
             )?;
-            Ok((d1, d2, d3))
+            Ok::<_, Error>((d1, d2, d3))
         })
         .unwrap();
 

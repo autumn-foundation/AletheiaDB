@@ -4,7 +4,7 @@
 //! including graph traversal, vector search, and temporal queries.
 
 use aletheiadb::{
-    AletheiaDB, DistanceMetric, HnswConfig, NodeId, PropertyMapBuilder, WriteOps,
+    AletheiaDB, DistanceMetric, Error, HnswConfig, NodeId, PropertyMapBuilder, WriteOps,
     query::{QueryBuilder, QueryPlanner, traverse_and_rank},
     storage::{CurrentStorage, version::AnchorConfig},
 };
@@ -467,7 +467,7 @@ fn test_temporal_context_preserved() {
                 .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
                 .build(),
         )?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .expect("Failed to update node");
 
@@ -909,7 +909,7 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
                 .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
                 .build(),
         )?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .expect("Failed to update node");
 
@@ -952,7 +952,7 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
                 .insert_vector("embedding", &[0.0f32, 0.0, 1.0, 0.0])
                 .build(),
         )?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .expect("Failed to update node again");
 

@@ -27,6 +27,7 @@
 //! cargo run --example observability_demo --features observability
 //! ```
 
+use aletheiadb::Error;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 
 #[cfg(feature = "observability")]
@@ -111,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .build(),
             )?;
             println!("  Transaction {}: Created document {:?}", i, node_id);
-            Ok(())
+            Ok::<_, Error>(())
         })?;
     }
 

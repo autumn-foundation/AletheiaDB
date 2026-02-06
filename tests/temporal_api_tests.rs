@@ -1,4 +1,5 @@
 use aletheiadb::AletheiaDB;
+use aletheiadb::Error;
 use aletheiadb::WriteOps;
 use aletheiadb::core::graph::{Edge, Node};
 use aletheiadb::core::id::{EdgeId, NodeId};
@@ -59,7 +60,7 @@ fn test_time_travel_after_deletion() {
     std::thread::sleep(std::time::Duration::from_micros(100));
     db.write(|tx| {
         tx.delete_node(node_id)?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 
@@ -134,7 +135,7 @@ fn test_temporal_index_deletion_integration() {
     std::thread::sleep(std::time::Duration::from_micros(100));
     db.write(|tx| {
         tx.delete_node(node_id)?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 
@@ -312,7 +313,7 @@ fn test_get_nodes_at_time_after_deletion() {
     // Delete node1
     db.write(|tx| {
         tx.delete_node(node1)?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 
@@ -504,7 +505,7 @@ fn test_get_edges_at_time_after_deletion() {
     // Delete edge1
     db.write(|tx| {
         tx.delete_edge(edge1)?;
-        Ok(())
+        Ok::<_, Error>(())
     })
     .unwrap();
 

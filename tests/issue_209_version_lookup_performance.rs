@@ -5,6 +5,7 @@
 //! correct results while improving performance.
 
 use aletheiadb::AletheiaDB;
+use aletheiadb::Error;
 use aletheiadb::WriteOps;
 use aletheiadb::core::property::PropertyMapBuilder;
 use std::time::Instant;
@@ -58,7 +59,7 @@ fn test_version_lookup_correctness_many_versions() {
 
         db.write(|tx| {
             tx.update_node(node_id, props.clone())?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update node");
 
@@ -173,7 +174,7 @@ fn test_version_lookup_performance_scaling() {
 
         db.write(|tx| {
             tx.update_node(node_id, props.clone())?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update node");
 
@@ -285,7 +286,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
         db.write(|tx| {
             tx.update_edge(edge_id, props.clone())?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update edge");
 
@@ -361,7 +362,7 @@ fn test_temporal_index_population() {
 
         db.write(|tx| {
             tx.update_node(node_id, props.clone())?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update node");
     }
@@ -410,7 +411,7 @@ fn test_temporal_index_matches_linear_scan() {
 
         db.write(|tx| {
             tx.update_node(node_id, props.clone())?;
-            Ok(())
+            Ok::<_, Error>(())
         })
         .expect("Failed to update node");
 
