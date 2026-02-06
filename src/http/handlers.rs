@@ -193,11 +193,23 @@ pub async fn handle_query(
             }
 
             // Issue 4: Pagination
+            let limit_val = limit.unwrap_or(100);
+            let offset_val = offset.unwrap_or(0);
+
+            // Prevent deep pagination attacks (CPU DoS)
+            // Use saturating_add to prevent integer overflow bypass
+            let max_deep_pagination = 10_000;
+            if offset_val.saturating_add(limit_val) > max_deep_pagination {
+                return HttpResponse::BadRequest().json(ApiResponse::error(format!(
+                    "Pagination limit exceeded: offset + limit must be <= {}",
+                    max_deep_pagination
+                )));
+            }
+
             if let Some(skip) = offset {
                 builder = builder.skip(skip);
             }
 
-            let limit_val = limit.unwrap_or(100);
             match builder.limit(limit_val).execute(db) {
                 Ok(results) => {
                     let mut nodes = Vec::new();
@@ -239,7 +251,8 @@ pub async fn handle_query(
                     let offset_val = offset.unwrap_or(0);
 
                     // Prevent deep pagination attacks (CPU DoS)
-                    if offset_val + limit_val > max_deep_pagination {
+                    // Use saturating_add to prevent integer overflow bypass
+                    if offset_val.saturating_add(limit_val) > max_deep_pagination {
                         return HttpResponse::BadRequest().json(ApiResponse::error(format!(
                             "Pagination limit exceeded: offset + limit must be <= {}",
                             max_deep_pagination
@@ -330,5 +343,78 @@ mod tests {
             serde_json::from_slice(&body).expect("Response body should be valid JSON");
 
         assert_eq!(json["status"], "healthy");
+    }
+
+    // Warden: Reproduction of integer overflow in FindNeighbors
+    #[actix_rt::test]
+    async fn test_warden_find_neighbors_overflow() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+        let state = web::Data::new(AppState::new(db));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query))
+        ).await;
+
+        // Malicious payload: offset = usize::MAX, limit = 1
+        // offset + limit = usize::MAX + 1 = 0 (wrapped), which is < max_deep_pagination (10000)
+        let payload = json!({
+            "operation": "find_neighbors",
+            "node_id": 1,
+            "offset": usize::MAX,
+            "limit": 1
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+
+        // VULNERABLE: Returns 200 OK because the check was bypassed
+        // SECURE: Should return 400 Bad Request
+
+        assert!(resp.status().is_client_error(), "Should reject overflow attempt");
+        let body = test::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let error = json["error"].as_str().unwrap();
+        assert!(error.contains("Pagination limit exceeded"), "Error: {}", error);
+    }
+
+    // Warden: Check if FindNode allows deep pagination
+    #[actix_rt::test]
+    async fn test_warden_find_node_deep_pagination() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+        let state = web::Data::new(AppState::new(db));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query))
+        ).await;
+
+        // Deep pagination request
+        let payload = json!({
+            "operation": "find_node",
+            "label": "Person",
+            "offset": 100_000,
+            "limit": 10
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+
+        // SECURE: Should return 400 Bad Request
+        assert!(resp.status().is_client_error(), "Should reject deep pagination");
+        let body = test::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let error = json["error"].as_str().unwrap();
+        assert!(error.contains("Pagination limit exceeded"), "Error: {}", error);
     }
 }
