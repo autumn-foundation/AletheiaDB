@@ -121,12 +121,12 @@ fn test_scale_in_place_correctness_all_lengths() {
         simd::scale_in_place(&mut actual, scale);
 
         // Verify element-wise
-        actual.iter().zip(expected.iter()).enumerate().for_each(|(i, (act, exp))| {
+        for i in 0..len {
             assert!(
-                (act - exp).abs() < 1e-6,
-                "Len {}: mismatch at index {}. Expected {}, got {}", len, i, exp, act
+                (actual[i] - expected[i]).abs() < 1e-6,
+                "Len {}: mismatch at index {}. Expected {}, got {}", len, i, expected[i], actual[i]
             );
-        });
+        }
     }
 }
 
@@ -136,23 +136,67 @@ fn test_simd_alignment_agnostic() {
     // Rust Vecs are aligned, but slices into them might not be (if we slice from odd offsets).
     // The implementation uses _mm_loadu_ps (unaligned load), so it should work.
 
-    // Create a buffer larger than needed
-    let buffer: Vec<f32> = (0..200).map(|i| i as f32).collect();
+    // Create buffers larger than needed
+    let buffer_a: Vec<f32> = (0..200).map(|i| (i as f32 * 0.1).sin()).collect();
+    let buffer_b: Vec<f32> = (0..200).map(|i| (i as f32 * 0.1).cos()).collect();
 
     // Test various unaligned offsets
     for offset in 1..8 {
         let len = 100;
-        let slice = &buffer[offset..offset+len];
+        let slice_a = &buffer_a[offset..offset + len];
+        let slice_b = &buffer_b[offset..offset + len];
 
-        // Use the slice as input. slice.as_ptr() will likely be unaligned relative to 32-byte (AVX) boundary.
-        // e.g. f32 is 4 bytes. If buffer is aligned to 32, buffer[1] is at offset 4 (not 32-aligned).
+        // 1. Test dot_and_magnitudes
+        let (dot_expected, mag_a_expected, mag_b_expected) =
+            scalar_dot_and_magnitudes(slice_a, slice_b);
+        let (dot_actual, mag_a_actual, mag_b_actual) = simd::dot_and_magnitudes(slice_a, slice_b);
 
-        let expected_mag = scalar_dot_and_magnitudes(slice, slice).1; // mag_a
-        let actual_mag = simd::dot_and_magnitudes(slice, slice).1;
-
+        let tolerance = 1e-4;
         assert!(
-            (actual_mag - expected_mag).abs() < 1e-4,
-            "Offset {}: magnitude mismatch with unaligned slice", offset
+            (dot_actual - dot_expected).abs() < tolerance,
+            "Offset {}: dot mismatch with unaligned slice. Expected {}, got {}",
+            offset, dot_expected, dot_actual
         );
+        assert!(
+            (mag_a_actual - mag_a_expected).abs() < tolerance,
+            "Offset {}: mag_a mismatch with unaligned slice. Expected {}, got {}",
+            offset, mag_a_expected, mag_a_actual
+        );
+        assert!(
+            (mag_b_actual - mag_b_expected).abs() < tolerance,
+            "Offset {}: mag_b mismatch with unaligned slice. Expected {}, got {}",
+            offset, mag_b_expected, mag_b_actual
+        );
+
+        // 2. Test squared_diff_sum
+        let expected_sq_diff = scalar_squared_diff_sum(slice_a, slice_b);
+        let actual_sq_diff = simd::squared_diff_sum(slice_a, slice_b);
+        let abs_diff = (actual_sq_diff - expected_sq_diff).abs();
+        let max_val = actual_sq_diff.abs().max(expected_sq_diff.abs());
+        let rel_err = if max_val > 1e-6 { abs_diff / max_val } else { 0.0 };
+        assert!(
+            abs_diff < 1e-3 || rel_err < 2e-6,
+            "Offset {}: squared_diff_sum mismatch. Expected {}, got {}, abs_diff {}, rel_err {}",
+            offset, expected_sq_diff, actual_sq_diff, abs_diff, rel_err
+        );
+
+        // 3. Test scale_in_place
+        let mut actual_scaled = slice_a.to_vec();
+        let mut expected_scaled = slice_a.to_vec();
+        let scale = 1.5;
+        simd::scale_in_place(&mut actual_scaled, scale);
+        scalar_scale_in_place(&mut expected_scaled, scale);
+
+        actual_scaled
+            .iter()
+            .zip(expected_scaled.iter())
+            .enumerate()
+            .for_each(|(i, (act, exp))| {
+                assert!(
+                    (act - exp).abs() < 1e-6,
+                    "Offset {}: scale_in_place mismatch at index {}. Expected {}, got {}",
+                    offset, i, exp, act
+                );
+            });
     }
 }
