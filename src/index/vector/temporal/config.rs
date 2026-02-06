@@ -202,7 +202,7 @@ impl Default for TemporalVectorConfig {
 /// # Examples
 ///
 /// ```rust
-/// use gallifreydb::index::vector::temporal::SnapshotStrategy;
+/// use aletheiadb::index::vector::temporal::SnapshotStrategy;
 ///
 /// // Transaction-based (default): snapshot every 10 transactions
 /// let strategy = SnapshotStrategy::TransactionInterval(10);
@@ -265,7 +265,7 @@ pub enum SnapshotStrategy {
 /// # Examples
 ///
 /// ```rust
-/// use gallifreydb::index::vector::temporal::DriftMetric;
+/// use aletheiadb::index::vector::temporal::DriftMetric;
 ///
 /// let metric = DriftMetric::default(); // Cosine
 /// ```

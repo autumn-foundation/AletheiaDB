@@ -6,7 +6,7 @@
 //! - Initialize ID generators to max_id + 1 after recovery completes
 //! - Ensure new operations generate non-conflicting IDs
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},

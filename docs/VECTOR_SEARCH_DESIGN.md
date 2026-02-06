@@ -3,7 +3,7 @@
 > **Status**: Phase 4 Complete (VS-072)
 > **Created**: 2024-12-30
 > **Updated**: 2026-01-14
-> **Goal**: Position GallifreyDB as SUPERRAG - Graph + Vector + Bi-temporal
+> **Goal**: Position AletheiaDB as SUPERRAG - Graph + Vector + Bi-temporal
 >
 > ## Implementation Progress
 >
@@ -18,7 +18,7 @@
 
 ## Executive Summary
 
-Adding vector search to GallifreyDB enables the combination of **graph traversal**, **semantic similarity**, and **bi-temporal tracking**. This enables queries like "What did we know about X that was semantically similar to Y at time T?" - essential for LLM reasoning about knowledge evolution.
+Adding vector search to AletheiaDB enables the combination of **graph traversal**, **semantic similarity**, and **bi-temporal tracking**. This enables queries like "What did we know about X that was semantically similar to Y at time T?" - essential for LLM reasoning about knowledge evolution.
 
 ## Architecture Integration
 
@@ -253,7 +253,7 @@ See [ADR-0022](docs/adr/0022-multi-property-vector-index.md) for complete archit
 
 **Implemented API**:
 ```rust
-impl GallifreyDB {
+impl AletheiaDB {
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()>;
     pub fn is_vector_index_enabled(&self) -> bool;
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>>;
@@ -296,7 +296,7 @@ impl GallifreyDB {
 
 **Key Implementation**:
 ```rust
-// GallifreyDB.enable_temporal_vector_index() registers both:
+// AletheiaDB.enable_temporal_vector_index() registers both:
 pub fn enable_temporal_vector_index(&self, property_name: &str, config: TemporalVectorConfig) -> Result<()> {
     // 1. Create temporal vector index
     self.current.enable_temporal_vector_index(property_name, config)?;
@@ -346,7 +346,7 @@ pub fn enable_temporal_vector_index(&self, property_name: &str, config: Temporal
 
 **Architecture: Dual-Path Design**
 
-The temporal vector index uses a hybrid architecture mirroring GallifreyDB's current/historical storage split:
+The temporal vector index uses a hybrid architecture mirroring AletheiaDB's current/historical storage split:
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -560,8 +560,8 @@ impl TemporalVectorIndex {
 
 **Example 1: Point-in-Time Semantic Search**
 ```rust
-use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 // Configure temporal index
 let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
@@ -590,8 +590,8 @@ let results = index.find_similar_as_of(&query_embedding, 10, timestamp_2023)?;
 
 **Example 2: Knowledge Evolution Tracking**
 ```rust
-use gallifreydb::core::temporal::TimeRange;
-use gallifreydb::index::vector::temporal::DriftMetric;
+use aletheiadb::core::temporal::TimeRange;
+use aletheiadb::index::vector::temporal::DriftMetric;
 
 // Track how "AI Safety" concept embedding evolved
 let reference_embedding = current_ai_safety_embedding;
@@ -630,10 +630,10 @@ for (node_id, drift_score) in drifted_docs {
 
 **Example 4: Integration with Graph Anchors (VS-047)**
 ```rust
-use gallifreydb::GallifreyDB;
-use gallifreydb::PropertyMapBuilder;
+use aletheiadb::AletheiaDB;
+use aletheiadb::PropertyMapBuilder;
 
-let db = GallifreyDB::new();
+let db = AletheiaDB::new();
 
 // Enable temporal vector indexing (registers hooks + observers)
 let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
@@ -735,7 +735,7 @@ The hybrid query API provides three complementary access patterns:
 
 **Layer 1: Direct Functions** (simple patterns)
 ```rust
-use gallifreydb::query::hybrid::{traverse_and_rank, find_similar_as_of};
+use aletheiadb::query::hybrid::{traverse_and_rank, find_similar_as_of};
 
 // Graph + Vector: Find neighbors ranked by similarity
 let results = traverse_and_rank(&db, alice_id, "KNOWS", &query_embedding, 10)?;
@@ -746,8 +746,8 @@ let results = find_similar_as_of(&db, &query_embedding, 10, timestamp)?;
 
 **Layer 2: Fluent Query Builder** (complex compositions)
 ```rust
-use gallifreydb::query::QueryBuilder;
-use gallifreydb::query::ir::Predicate;
+use aletheiadb::query::QueryBuilder;
+use aletheiadb::query::ir::Predicate;
 
 // Graph + Vector: "Who does Alice know that's similar to Bob?"
 let results = db.query()
@@ -776,7 +776,7 @@ let results = db.query()
 
 **Layer 3: Database Convenience Methods** (quick access)
 ```rust
-// Direct convenience methods on GallifreyDB
+// Direct convenience methods on AletheiaDB
 let similar = db.traverse_and_rank(alice_id, "KNOWS", &embedding, 10)?;
 let temporal_similar = db.find_similar_at_time(&embedding, 10, valid_time, tx_time)?;
 ```
@@ -1161,7 +1161,7 @@ rand = "0.8"            # For generating test vectors
 
 ## Open Questions
 
-1. **Embedding generation**: Should GallifreyDB generate embeddings or expect them as input?
+1. **Embedding generation**: Should AletheiaDB generate embeddings or expect them as input?
    - Recommendation: Accept embeddings as input; generation is application-specific
 
 2. **Sparse vectors**: Support for sparse embeddings (e.g., BM25, SPLADE)?

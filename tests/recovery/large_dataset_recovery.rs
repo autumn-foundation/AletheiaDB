@@ -8,7 +8,7 @@
 //! These tests are marked as `#[ignore]` by default because they are resource-intensive.
 //! Run with: `cargo test --test recovery large_dataset -- --ignored`
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId},
@@ -418,7 +418,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
         for i in 1..=node_count {
             wal.append(WalOperation::UpdateNode {
                 node_id: NodeId::new(i).unwrap(),
-                version_id: gallifreydb::core::id::VersionId::new(version_id).unwrap(),
+                version_id: aletheiadb::core::id::VersionId::new(version_id).unwrap(),
                 label: GLOBAL_INTERNER.intern("VersionedNode").unwrap(),
                 properties: PropertyMapBuilder::new()
                     .insert("version", update_round as i64)
@@ -457,7 +457,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
 
     // Each node should be at final version
     let sample_node = current.get_node(NodeId::new(1).unwrap())?;
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     assert!(matches!(
         sample_node.properties.get("version"),
         Some(PropertyValue::Int(v)) if *v == updates_per_node as i64

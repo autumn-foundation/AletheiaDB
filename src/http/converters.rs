@@ -1,6 +1,6 @@
 //! Type conversion utilities for the HTTP API.
 //!
-//! This module provides functions to convert between GallifreyDB's internal types
+//! This module provides functions to convert between AletheiaDB's internal types
 //! (like [`PropertyMap`] and [`PropertyValue`]) and JSON values used in the HTTP API.
 //!
 //! # Safety Limits
@@ -60,7 +60,7 @@ pub fn property_map_to_json(
 ///
 /// # Mappings
 ///
-/// | GallifreyDB Type | JSON Type | Notes |
+/// | AletheiaDB Type | JSON Type | Notes |
 /// |------------------|-----------|-------|
 /// | `Null` | `null` | |
 /// | `Bool` | `boolean` | |
@@ -144,7 +144,7 @@ pub fn json_to_property_map(
 ///
 /// # Mappings
 ///
-/// | JSON Type | GallifreyDB Type | Notes |
+/// | JSON Type | AletheiaDB Type | Notes |
 /// |-----------|------------------|-------|
 /// | `null` | `Null` | |
 /// | `boolean` | `Bool` | |

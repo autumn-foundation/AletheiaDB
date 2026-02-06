@@ -12,7 +12,7 @@
 ## 1. 👤 User Stories
 
 > **As a** Frontend Developer,
-> **I want to** query GallifreyDB using standard JSON/HTTP,
+> **I want to** query AletheiaDB using standard JSON/HTTP,
 > **So that** I can build web applications (React/Vue/Svelte) without needing to link against Rust binaries or write WASM wrappers.
 
 > **As a** Data Scientist,
@@ -20,15 +20,15 @@
 > **So that** I can perform ad-hoc analysis, visualize data, and train models using my preferred toolchain.
 
 > **As a** Microservices Architect,
-> **I want to** treat GallifreyDB as a standalone service,
+> **I want to** treat AletheiaDB as a standalone service,
 > **So that** I can scale it independently and integrate it into a polyglot environment (Go, Node.js, Python services).
 
 ## 2. 🧐 The "So What?" (Business Value)
 
-GallifreyDB is currently a "Library Database" (embedded). This is great for performance but terrible for ecosystem adoption.
+AletheiaDB is currently a "Library Database" (embedded). This is great for performance but terrible for ecosystem adoption.
 
 **The Gap:**
-- **Accessibility**: Currently, you *must* write Rust to use GallifreyDB. This excludes 90% of the developer market (JS/TS, Python).
+- **Accessibility**: Currently, you *must* write Rust to use AletheiaDB. This excludes 90% of the developer market (JS/TS, Python).
 - **Usability**: Debugging data requires writing a Rust test script (`cargo run --example`). Users expect a curl-able endpoint.
 - **Integration**: Cannot easily integrate with existing dashboards (Grafana, Retool) or low-code tools.
 
@@ -53,7 +53,7 @@ GallifreyDB is currently a "Library Database" (embedded). This is great for perf
     -   `GET /api/v1/nodes/:id/edges`: Get incident edges (outgoing/incoming).
 
 3.  **Query & Search**:
-    -   `POST /api/v1/query`: Execute a Cypher/GQL query string. Body: `{"query": "MATCH (n) RETURN n", "params": {}}`.
+    -   `POST /api/v1/query`: Execute a Cypher/AQL query string. Body: `{"query": "MATCH (n) RETURN n", "params": {}}`.
     -   `POST /api/v1/vector/search`: Find similar nodes. Body: `{"vector": [...], "k": 10, "filter": "..."}`.
 
 4.  **Temporal Access**:
@@ -92,5 +92,5 @@ GallifreyDB is currently a "Library Database" (embedded). This is great for perf
 1.  **API Schema**: Define the exact JSON request/response structures (OpenAPI draft).
 2.  **Core Handlers**: Implement `NodeHandler` and `EdgeHandler` in `src/http/handlers.rs`.
 3.  **Query Handler**: Wire up the Query Parser to the HTTP endpoint.
-4.  **Integration**: Ensure `GallifreyDB` instance is shared safely across async web workers (`Arc<GallifreyDB>`).
+4.  **Integration**: Ensure `AletheiaDB` instance is shared safely across async web workers (`Arc<AletheiaDB>`).
 5.  **Verify**: Write an integration test using `reqwest` to hit the API and verify DB changes.

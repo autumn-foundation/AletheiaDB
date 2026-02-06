@@ -1,12 +1,12 @@
 //! Debug test for temporal node lookup issue #306
 
-use gallifreydb::*;
+use aletheiadb::*;
 use std::thread;
 use std::time::Duration;
 
 #[test]
 fn test_temporal_lookup_directly() {
-    let db = GallifreyDB::with_config(storage::version::AnchorConfig {
+    let db = AletheiaDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
     })

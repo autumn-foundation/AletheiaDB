@@ -1,9 +1,9 @@
 // Integration tests for TemporalAdjacencyIndex with HistoricalStorage
 
-use gallifreydb::core::temporal::time;
-use gallifreydb::core::{EdgeId, InternedString, NodeId, PropertyMap, VersionId};
-use gallifreydb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
-use gallifreydb::storage::historical::HistoricalStorage;
+use aletheiadb::core::temporal::time;
+use aletheiadb::core::{EdgeId, InternedString, NodeId, PropertyMap, VersionId};
+use aletheiadb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
+use aletheiadb::storage::historical::HistoricalStorage;
 use std::sync::Arc;
 
 #[test]

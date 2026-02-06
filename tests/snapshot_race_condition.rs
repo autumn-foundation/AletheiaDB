@@ -1,17 +1,17 @@
-use gallifreydb::core::GLOBAL_INTERNER;
+use aletheiadb::core::GLOBAL_INTERNER;
 /// TDD test to detect and fix race condition between snapshot creations
 ///
 /// This test verifies that current and historical snapshots are created
 /// atomically without concurrent writes creating inconsistency.
-use gallifreydb::core::graph::Node;
-use gallifreydb::core::id::{NodeId, VersionId};
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::time;
-use gallifreydb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
-use gallifreydb::storage::current::CurrentStorage;
-use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::snapshot::StorageSnapshot;
-use gallifreydb::storage::wal::LSN;
+use aletheiadb::core::graph::Node;
+use aletheiadb::core::id::{NodeId, VersionId};
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::temporal::time;
+use aletheiadb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
+use aletheiadb::storage::current::CurrentStorage;
+use aletheiadb::storage::historical::HistoricalStorage;
+use aletheiadb::storage::snapshot::StorageSnapshot;
+use aletheiadb::storage::wal::LSN;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::tempdir;

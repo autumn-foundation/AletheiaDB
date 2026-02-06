@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::embeddings::{EmbeddingService, providers::huggingface::*};
+//! use aletheiadb::embeddings::{EmbeddingService, providers::huggingface::*};
 //! use std::sync::Arc;
 //!
 //! let config = HuggingFaceConfig::from_env(

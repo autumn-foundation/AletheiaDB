@@ -1,9 +1,9 @@
 //! Tests for self-loop edge handling in temporal adjacency index.
 
-use gallifreydb::core::id::{EdgeId, NodeId};
-use gallifreydb::core::interning::InternedString;
-use gallifreydb::core::temporal::{TIMESTAMP_MAX, time};
-use gallifreydb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
+use aletheiadb::core::id::{EdgeId, NodeId};
+use aletheiadb::core::interning::InternedString;
+use aletheiadb::core::temporal::{TIMESTAMP_MAX, time};
+use aletheiadb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
 use std::thread;
 use std::time::Duration;
 

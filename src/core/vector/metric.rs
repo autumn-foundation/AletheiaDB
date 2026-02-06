@@ -23,7 +23,7 @@ use std::fmt;
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::DistanceMetric;
+/// use aletheiadb::core::vector::DistanceMetric;
 ///
 /// let a = vec![1.0, 0.0, 0.0];
 /// let b = vec![0.0, 1.0, 0.0];
@@ -140,7 +140,7 @@ impl DistanceMetric {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::DistanceMetric;
+    /// use aletheiadb::core::vector::DistanceMetric;
     ///
     /// let a = vec![1.0, 0.0];
     /// let b = vec![1.0, 0.0];
@@ -175,7 +175,7 @@ impl DistanceMetric {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::DistanceMetric;
+    /// use aletheiadb::core::vector::DistanceMetric;
     ///
     /// let a = vec![1.0, 0.0];
     /// let b = vec![1.0, 0.0];
@@ -198,7 +198,7 @@ impl DistanceMetric {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::DistanceMetric;
+    /// use aletheiadb::core::vector::DistanceMetric;
     ///
     /// assert_eq!(DistanceMetric::Cosine.name(), "cosine");
     /// assert_eq!(DistanceMetric::Euclidean.name(), "euclidean");
@@ -222,7 +222,7 @@ impl DistanceMetric {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::DistanceMetric;
+    /// use aletheiadb::core::vector::DistanceMetric;
     ///
     /// assert!(!DistanceMetric::Cosine.requires_normalized_vectors());
     /// assert!(!DistanceMetric::Euclidean.requires_normalized_vectors());

@@ -1,4 +1,4 @@
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::experimental::temporal_narrative::NarrativeGenerator;
@@ -11,7 +11,7 @@ use std::fmt::Write;
 /// recent history (evolution), and immediate neighborhood. It is designed for
 /// injecting context into LLM prompts.
 pub struct GraphContextBuilder<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
     center_node: NodeId,
     history_limit: usize,
     neighbor_limit: usize,
@@ -19,7 +19,7 @@ pub struct GraphContextBuilder<'a> {
 
 impl<'a> GraphContextBuilder<'a> {
     /// Create a new builder for the given node.
-    pub fn new(db: &'a GallifreyDB, center_node: NodeId) -> Self {
+    pub fn new(db: &'a AletheiaDB, center_node: NodeId) -> Self {
         Self {
             db,
             center_node,
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_graph_context_generation() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // 1. Create Node A (Center)
         let props1 = PropertyMapBuilder::new()

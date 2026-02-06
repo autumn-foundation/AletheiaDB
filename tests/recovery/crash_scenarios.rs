@@ -1,6 +1,6 @@
 //! End-to-end crash scenario tests for recovery validation (Issue #294)
 //!
-//! These tests simulate real crash scenarios to validate that the GallifreyDB
+//! These tests simulate real crash scenarios to validate that the AletheiaDB
 //! recovery system works correctly under various failure conditions:
 //!
 //! 1. **Crash Before Checkpoint**: Recovery from WAL only
@@ -16,9 +16,9 @@
 //! - Pre-checkpoint WAL entries are NOT recovered if a checkpoint exists
 //! - Full checkpoint serialization via index_persistence is not yet integrated
 //!
-//! See: <https://github.com/madmax983/GallifreyDB/issues/XXX> (TODO: create issue)
+//! See: <https://github.com/madmax983/AletheiaDB/issues/XXX> (TODO: create issue)
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},

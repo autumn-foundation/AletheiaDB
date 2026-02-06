@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use gallifreydb::query::parser::Parser;
+    use aletheiadb::query::parser::Parser;
 
     #[test]
     fn test_parser_recursion_at_limit() {

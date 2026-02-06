@@ -132,7 +132,7 @@ The `FindNeighbors` endpoint allocated a `Vec` containing all neighbor nodes bef
 
 **Defense:** Pagination & Zero-Allocation Iterators
 - Enforced strict pagination in `QueryRequest::FindNeighbors` with `limit` (default 100, max 1000) and `offset`.
-- Exposed zero-allocation iterators (`get_outgoing_edges_iter`) in `GallifreyDB` to traverse edges without intermediate allocations.
+- Exposed zero-allocation iterators (`get_outgoing_edges_iter`) in `AletheiaDB` to traverse edges without intermediate allocations.
 - Implemented streaming deduplication and pagination pipeline.
 - Added safety check for deep pagination (`offset + limit <= 10,000`) to prevent CPU DoS.
 

@@ -1,6 +1,6 @@
 # Autonomous Development
 
-GallifreyDB features an **experimental autonomous development workflow** where Claude Code automatically picks up issues, implements solutions, and creates pull requests.
+AletheiaDB features an **experimental autonomous development workflow** where Claude Code automatically picks up issues, implements solutions, and creates pull requests.
 
 ## How It Works
 
@@ -224,7 +224,7 @@ The workflow self-limits to 5 open PRs. Merge or close existing automated PRs to
 ## Future Enhancements
 
 ### Phase 2: Learning from History
-Use **GallifreyDB itself** to track:
+Use **AletheiaDB itself** to track:
 - Which patterns succeeded/failed
 - Common pitfalls by issue type
 - Codebase evolution context
@@ -252,7 +252,7 @@ This is **genuinely experimental** - we're pushing the boundaries of AI-assisted
 1. **Unlock velocity** - Free humans for creative/strategic work
 2. **Maintain momentum** - Progress even when team is busy
 3. **Demonstrate AI capabilities** - Show what's possible in 2026
-4. **Dogfood GallifreyDB** - Use temporal reasoning for software development
+4. **Dogfood AletheiaDB** - Use temporal reasoning for software development
 
 **The vision:** A persistent AI that learns the codebase over time, understands patterns, and makes increasingly sophisticated contributions.
 

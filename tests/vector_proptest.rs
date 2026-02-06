@@ -1,7 +1,7 @@
 //! Property-based tests for vector index invariants.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use proptest::prelude::*;
 
 /// Generate valid vector with given dimensions.

@@ -1,12 +1,12 @@
-# GallifreyDB
+# AletheiaDB
 
-[![CI](https://github.com/madmax983/GallifreyDB/actions/workflows/ci.yml/badge.svg)](https://github.com/madmax983/GallifreyDB/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/madmax983/GallifreyDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/madmax983/GallifreyDB) [![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://madmax983.github.io/GallifreyDB/)
+[![CI](https://github.com/madmax983/AletheiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/madmax983/AletheiaDB/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/madmax983/AletheiaDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/madmax983/AletheiaDB) [![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://madmax983.github.io/AletheiaDB/)
 
 A high-performance bi-temporal graph database in Rust, designed for LLM integration and temporal reasoning.
 
 ## Overview
 
-GallifreyDB tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded in the database). This enables powerful time-traveling queries and historical analysis, making it ideal for LLM applications that need to understand how knowledge evolves over time.
+AletheiaDB tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded in the database). This enables powerful time-traveling queries and historical analysis, making it ideal for LLM applications that need to understand how knowledge evolves over time.
 
 ### Key Features
 
@@ -20,7 +20,7 @@ GallifreyDB tracks both **valid time** (when facts were true in reality) and **t
 - **Vector Search**: HNSW indexing for k-NN semantic search with full temporal versioning
 - **Multi-Property Vector Indexes**: Multiple independent vector properties per database
 - **Hybrid Query API**: Combine graph traversal + vector similarity + bi-temporal queries
-- **Query Language**: Cypher-like GQL with temporal and vector extensions
+- **Query Language**: Cypher-like AQL with temporal and vector extensions
 - **MCP Server**: Model Context Protocol server for LLM integration (Claude, etc.)
 - **Graph Sharding**: Domain-based horizontal scaling with 2PC distributed transactions
 - **Semantic Drift Tracking**: Detect how embeddings evolve over time for knowledge evolution analysis
@@ -41,8 +41,8 @@ GallifreyDB tracks both **valid time** (when facts were true in reality) and **t
 
 ```bash
 # Clone the repository
-git clone https://github.com/madmax983/GallifreyDB
-cd GallifreyDB
+git clone https://github.com/madmax983/AletheiaDB
+cd AletheiaDB
 
 # Install development tools
 cargo install just cargo-llvm-cov
@@ -92,12 +92,12 @@ See `justfile` for all available commands.
 
 ## Feature Flags
 
-GallifreyDB uses Cargo feature flags for optional functionality:
+AletheiaDB uses Cargo feature flags for optional functionality:
 
 ### Default Features
 ```toml
 [dependencies]
-gallifreydb = "0.1"  # Includes config-toml by default
+aletheiadb = "0.1"  # Includes config-toml by default
 ```
 
 | Feature | Description | Default |
@@ -107,7 +107,7 @@ gallifreydb = "0.1"  # Includes config-toml by default
 ### Observability Features
 ```toml
 [dependencies]
-gallifreydb = { version = "0.1", features = ["observability"] }
+aletheiadb = { version = "0.1", features = ["observability"] }
 ```
 
 | Feature | Description | Dependencies |
@@ -120,7 +120,7 @@ gallifreydb = { version = "0.1", features = ["observability"] }
 ### Embedding Provider Features
 ```toml
 [dependencies]
-gallifreydb = { version = "0.1", features = ["embedding-openai"] }
+aletheiadb = { version = "0.1", features = ["embedding-openai"] }
 ```
 
 | Feature | Description | Dependencies |
@@ -137,7 +137,7 @@ gallifreydb = { version = "0.1", features = ["embedding-openai"] }
 ### MCP Server Features
 ```toml
 [dependencies]
-gallifreydb = { version = "0.1", features = ["mcp-server"] }
+aletheiadb = { version = "0.1", features = ["mcp-server"] }
 ```
 
 | Feature | Description | Dependencies |
@@ -147,7 +147,7 @@ gallifreydb = { version = "0.1", features = ["mcp-server"] }
 ### Sharding Features
 ```toml
 [dependencies]
-gallifreydb = { version = "0.1", features = ["sharding-rpc"] }
+aletheiadb = { version = "0.1", features = ["sharding-rpc"] }
 ```
 
 | Feature | Description | Dependencies |
@@ -157,7 +157,7 @@ gallifreydb = { version = "0.1", features = ["sharding-rpc"] }
 ### Experimental Features
 ```toml
 [dependencies]
-gallifreydb = { version = "0.1", features = ["nova"] }
+aletheiadb = { version = "0.1", features = ["nova"] }
 ```
 
 | Feature | Description |
@@ -168,10 +168,10 @@ Note: Tiered storage with Redb cold storage backend is included by default (no f
 
 ## Performance & Benchmarks
 
-GallifreyDB is designed for high performance with minimal temporal overhead. View live benchmark results:
+AletheiaDB is designed for high performance with minimal temporal overhead. View live benchmark results:
 
-- **[📊 Latest Benchmarks](https://madmax983.github.io/GallifreyDB/benchmarks/)** - Comprehensive tables with all metrics
-- **[📈 Historical Trends](https://madmax983.github.io/GallifreyDB/dev/bench/)** - Performance over time with regression tracking
+- **[📊 Latest Benchmarks](https://madmax983.github.io/AletheiaDB/benchmarks/)** - Comprehensive tables with all metrics
+- **[📈 Historical Trends](https://madmax983.github.io/AletheiaDB/dev/bench/)** - Performance over time with regression tracking
 
 ### Current Performance
 
@@ -242,13 +242,13 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 ### Observability (Complete ✅)
 - [x] Structured logging with `tracing`
 - [x] Tracy profiler integration for CPU profiling
-- [x] Honeycomb distributed tracing (via git dependency - [see #271](https://github.com/madmax983/GallifreyDB/issues/271))
-- [x] Prometheus metrics HTTP server (stub - [see #272](https://github.com/madmax983/GallifreyDB/issues/272))
+- [x] Honeycomb distributed tracing (via git dependency - [see #271](https://github.com/madmax983/AletheiaDB/issues/271))
+- [x] Prometheus metrics HTTP server (stub - [see #272](https://github.com/madmax983/AletheiaDB/issues/272))
 - [x] Critical error detection (lock poisons, timestamp violations, WAL checksum failures)
 - [x] Error categorization metrics
 
 ### MCP Server (Complete ✅)
-- [x] Model Context Protocol server binary (`gallifrey-mcp`)
+- [x] Model Context Protocol server binary (`aletheia-mcp`)
 - [x] Node operations (get, create, update, delete, list, count)
 - [x] Edge operations (get, create, update, delete, list, count)
 - [x] Graph traversal (outgoing, incoming, multi-hop)
@@ -281,8 +281,8 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 
 ### In Progress / Planned
 - [ ] Vector Search Phase 5: Streaming and incremental updates
-- [ ] Custom Honeycomb client wrapper ([#271](https://github.com/madmax983/GallifreyDB/issues/271))
-- [ ] Comprehensive Prometheus metrics suite ([#272](https://github.com/madmax983/GallifreyDB/issues/272))
+- [ ] Custom Honeycomb client wrapper ([#271](https://github.com/madmax983/AletheiaDB/issues/271))
+- [ ] Comprehensive Prometheus metrics suite ([#272](https://github.com/madmax983/AletheiaDB/issues/272))
 - [ ] GraphQL/REST API layer
 - [ ] Distributed replication
 
@@ -290,7 +290,7 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 
 ## Architecture
 
-GallifreyDB uses a hybrid storage architecture:
+AletheiaDB uses a hybrid storage architecture:
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -326,10 +326,10 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 ### Basic Graph Operations
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMap, PropertyMapBuilder, WriteOps};
+use aletheiadb::{AletheiaDB, PropertyMap, PropertyMapBuilder, WriteOps};
 
 // Create a new database
-let db = GallifreyDB::new().unwrap();
+let db = AletheiaDB::new().unwrap();
 
 // Create nodes using write transactions
 let alice_id = db.write(|tx| {
@@ -359,7 +359,7 @@ let alice = db.get_node(alice_id)?;
 ### Time-Travel Queries
 
 ```rust
-use gallifreydb::core::temporal::Timestamp;
+use aletheiadb::core::temporal::Timestamp;
 
 // Get node at a specific point in time
 let historical_alice = db.get_node_at_time(
@@ -377,10 +377,10 @@ if let Some(old_alice) = historical_alice {
 ### Vector Search with HNSW
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
-let db = GallifreyDB::new().unwrap();
+let db = AletheiaDB::new().unwrap();
 
 // Enable vector indexing
 db.vector_index("embedding")
@@ -402,8 +402,8 @@ let similar = db.find_similar(doc_id, 10)?;
 ### Hybrid Queries (Graph + Vector + Temporal)
 
 ```rust
-use gallifreydb::query::QueryBuilder;
-use gallifreydb::query::ir::Predicate;
+use aletheiadb::query::QueryBuilder;
+use aletheiadb::query::ir::Predicate;
 
 // Simple: Graph + Vector hybrid
 let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
@@ -432,8 +432,8 @@ See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** f
 ### Semantic Drift Tracking
 
 ```rust
-use gallifreydb::index::vector::temporal::DriftMetric;
-use gallifreydb::core::temporal::TimeRange;
+use aletheiadb::index::vector::temporal::DriftMetric;
+use aletheiadb::core::temporal::TimeRange;
 
 // Find all nodes with significant semantic drift
 let time_range = TimeRange::new(timestamp_2023, timestamp_2024);
@@ -459,7 +459,7 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
-use gallifreydb::experimental::temporal_narrative::NarrativeGenerator;
+use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
 // Generate natural language history of a node
 let generator = NarrativeGenerator::new(&db);
@@ -479,11 +479,11 @@ for event in narrative {
 ### Index Persistence (Fast Cold Starts)
 
 ```rust
-use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
-use gallifreydb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::storage::index_persistence::PersistenceConfig;
 
 // Enable index persistence for 6-30x faster startup
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .persistence(PersistenceConfig {
         enabled: true,
         data_dir: "data/my-database".into(),
@@ -493,7 +493,7 @@ let config = GallifreyDBConfig::builder()
     })
     .build();
 
-let db = GallifreyDB::with_unified_config(config);
+let db = AletheiaDB::with_unified_config(config);
 
 // Indexes automatically persist in background
 // On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
@@ -504,15 +504,15 @@ See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-gui
 ### Configuration
 
 ```rust
-use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
-use gallifreydb::storage::wal::DurabilityMode;
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::storage::wal::DurabilityMode;
 
 // Load from TOML file
-let config = GallifreyDBConfig::from_toml_file("config/production.toml")?;
-let db = GallifreyDB::with_unified_config(config);
+let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
+let db = AletheiaDB::with_unified_config(config);
 
 // Or programmatic configuration
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .num_stripes(64).unwrap()  // High concurrency
         .durability_mode(DurabilityMode::group_commit_default())
@@ -528,7 +528,7 @@ Run the MCP server for LLM integration:
 
 ```bash
 # Start the MCP server (communicates over stdio)
-cargo run --bin gallifrey-mcp --features mcp-server
+cargo run --bin aletheia-mcp --features mcp-server
 ```
 
 Available MCP tools for LLMs:
@@ -539,9 +539,9 @@ Available MCP tools for LLMs:
 - **Temporal**: `get_node_at_time`, `get_edge_at_time`
 - **Hybrid**: `hybrid_query` (combined graph + vector + temporal)
 
-### Query Language (GQL)
+### Query Language (AQL)
 
-GallifreyDB supports a Cypher-like query language with temporal and vector extensions:
+AletheiaDB supports a Cypher-like query language with temporal and vector extensions:
 
 ```cypher
 -- Basic graph query
@@ -578,7 +578,7 @@ See **[docs/query-language-design.md](docs/query-language-design.md)** for compl
 For horizontal scaling with datasets exceeding single-machine capacity:
 
 ```rust
-use gallifreydb::storage::sharding::{
+use aletheiadb::storage::sharding::{
     ShardConfig, ShardDefinition, ShardCoordinator,
 };
 
@@ -603,7 +603,7 @@ See **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** for compl
 For unlimited historical depth with disk-backed cold storage:
 
 ```rust
-use gallifreydb::storage::{
+use aletheiadb::storage::{
     HistoricalStorage, TieredStorage, TieredStorageConfig,
     RedbColdStorage, RedbConfig,
 };
@@ -642,11 +642,11 @@ db.write(|tx| {
 
 ### Embedding Generation (Optional)
 
-GallifreyDB includes an optional embedding generation system for semantic search:
+AletheiaDB includes an optional embedding generation system for semantic search:
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -660,13 +660,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Generate embeddings
     let documents = vec![
-        "GallifreyDB is a bi-temporal graph database",
+        "AletheiaDB is a bi-temporal graph database",
         "It tracks both valid time and transaction time",
     ];
     let embeddings = service.embed_batch(&documents).await?;
 
     // 3. Store with vectors
-    let db = GallifreyDB::new()?;
+    let db = AletheiaDB::new()?;
     for (text, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(
             "Document",
@@ -691,7 +691,7 @@ See **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** for complete documentation.
 
 ### Production Observability (Optional)
 
-GallifreyDB includes comprehensive observability features for production deployments:
+AletheiaDB includes comprehensive observability features for production deployments:
 
 ```bash
 # Enable in Cargo.toml:
@@ -706,14 +706,14 @@ features = [
 **Basic usage:**
 
 ```rust
-use gallifreydb::observability;
+use aletheiadb::observability;
 
 fn main() {
     // Initialize observability (call once at startup)
     let config = observability::Config::from_env();
     observability::init(config);
 
-    let db = gallifreydb::GallifreyDB::new().unwrap();
+    let db = aletheiadb::AletheiaDB::new().unwrap();
 
     // Metrics automatically collected
     // Check for critical errors
@@ -725,9 +725,9 @@ fn main() {
 ```
 
 **Environment Variables:**
-- `RUST_LOG`: Control log level (e.g., `gallifreydb=debug`)
+- `RUST_LOG`: Control log level (e.g., `aletheiadb=debug`)
 - `HONEYCOMB_API_KEY`: Enable Honeycomb tracing
-- `HONEYCOMB_DATASET`: Dataset name (default: "gallifreydb")
+- `HONEYCOMB_DATASET`: Dataset name (default: "aletheiadb")
 - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP endpoint (e.g., "127.0.0.1:9090")
 
 **Critical Metrics** (should NEVER be >0):
@@ -738,8 +738,8 @@ fn main() {
 **Backends:**
 - **Stdout**: Structured JSON logging (always available)
 - **Tracy**: CPU profiling with flamegraphs and zone tracking
-- **Honeycomb**: Distributed tracing for span analysis (⚠️ uses git dependency, [see #271](https://github.com/madmax983/GallifreyDB/issues/271))
-- **Prometheus**: `/metrics` HTTP endpoint (⚠️ stub implementation, [see #272](https://github.com/madmax983/GallifreyDB/issues/272))
+- **Honeycomb**: Distributed tracing for span analysis (⚠️ uses git dependency, [see #271](https://github.com/madmax983/AletheiaDB/issues/271))
+- **Prometheus**: `/metrics` HTTP endpoint (⚠️ stub implementation, [see #272](https://github.com/madmax983/AletheiaDB/issues/272))
 
 Run the demo:
 ```bash

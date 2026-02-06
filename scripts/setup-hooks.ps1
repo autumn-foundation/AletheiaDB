@@ -1,7 +1,7 @@
-# Setup pre-commit hooks for GallifreyDB (PowerShell)
+# Setup pre-commit hooks for AletheiaDB (PowerShell)
 $ErrorActionPreference = "Stop"
 
-Write-Host "🔧 Setting up pre-commit hooks for GallifreyDB..." -ForegroundColor Cyan
+Write-Host "🔧 Setting up pre-commit hooks for AletheiaDB..." -ForegroundColor Cyan
 
 # Check if pre-commit is installed
 if (-not (Get-Command pre-commit -ErrorAction SilentlyContinue)) {

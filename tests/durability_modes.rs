@@ -4,8 +4,8 @@
 //! Tests the three durability modes (Synchronous, Async, GroupCommit)
 //! and their interactions including piggybacking.
 
-use gallifreydb::{
-    DurabilityMode, GLOBAL_INTERNER, GallifreyDB, Node, PropertyMapBuilder, WalConfigBuilder,
+use aletheiadb::{
+    AletheiaDB, DurabilityMode, GLOBAL_INTERNER, Node, PropertyMapBuilder, WalConfigBuilder,
     WriteOps, WriteOptions,
 };
 use std::sync::Arc;
@@ -22,7 +22,7 @@ fn get_label(node: &Node) -> String {
 }
 
 /// Helper to create a database with WAL configured for a specific durability mode.
-fn create_db_with_mode(mode: DurabilityMode) -> GallifreyDB {
+fn create_db_with_mode(mode: DurabilityMode) -> AletheiaDB {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let path = temp_dir.keep();
     let config = WalConfigBuilder::new()
@@ -33,7 +33,7 @@ fn create_db_with_mode(mode: DurabilityMode) -> GallifreyDB {
         .unwrap()
         .durability_mode(mode)
         .build();
-    GallifreyDB::with_wal_config(config).unwrap()
+    AletheiaDB::with_wal_config(config).unwrap()
 }
 
 // =============================================================================
@@ -42,7 +42,7 @@ fn create_db_with_mode(mode: DurabilityMode) -> GallifreyDB {
 
 #[test]
 fn test_synchronous_mode_is_default() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Default mode should be Synchronous
     let node_id = db
@@ -513,7 +513,7 @@ fn test_async_data_flushed_on_shutdown() {
                 flush_interval_ms: 60000, // Very long - won't naturally flush
             })
             .build();
-        let db = GallifreyDB::with_wal_config(config).unwrap();
+        let db = AletheiaDB::with_wal_config(config).unwrap();
 
         let options = WriteOptions {
             durability_mode: Some(DurabilityMode::Async {
@@ -556,7 +556,7 @@ fn test_write_options_default() {
 
 #[test]
 fn test_write_with_options_closure_semantics() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Test that closure can access outer scope
     let prefix = "test_";
@@ -576,7 +576,7 @@ fn test_write_with_options_closure_semantics() {
     let props = &node.properties;
     let name_val = props.get("name").expect("name property should exist");
     let name_str = match name_val {
-        gallifreydb::PropertyValue::String(s) => s.as_ref(),
+        aletheiadb::PropertyValue::String(s) => s.as_ref(),
         _ => panic!("Expected string property"),
     };
     assert_eq!(name_str, "test_node");
@@ -584,7 +584,7 @@ fn test_write_with_options_closure_semantics() {
 
 #[test]
 fn test_write_options_bulk_import_preset_integration() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Use bulk_import preset for fast loading - all writes in ONE transaction
     let node_ids = db
@@ -618,7 +618,7 @@ fn test_write_options_bulk_import_preset_integration() {
 
 #[test]
 fn test_write_options_critical_preset_integration() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Use critical preset for important data
     let node_id = db
@@ -646,7 +646,7 @@ fn test_write_options_critical_preset_integration() {
 
 #[test]
 fn test_preset_methods_mixed_usage() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Use bulk_import for initial data
     let bulk_node = db
@@ -685,12 +685,12 @@ fn test_preset_methods_mixed_usage() {
 
 #[test]
 fn test_error_in_write_with_options_propagates() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
-    let result: Result<(), gallifreydb::Error> =
+    let result: Result<(), aletheiadb::Error> =
         db.write_with_options(WriteOptions::default(), |_tx| {
-            Err(gallifreydb::Error::Storage(
-                gallifreydb::StorageError::InvalidProperty {
+            Err(aletheiadb::Error::Storage(
+                aletheiadb::StorageError::InvalidProperty {
                     key: "test".into(),
                     reason: "intentional failure".into(),
                 },
@@ -699,7 +699,7 @@ fn test_error_in_write_with_options_propagates() {
 
     assert!(result.is_err());
     match result {
-        Err(gallifreydb::Error::Storage(_)) => {}
+        Err(aletheiadb::Error::Storage(_)) => {}
         _ => panic!("Expected storage error"),
     }
 }
@@ -793,7 +793,7 @@ fn test_segment_rotation_with_background_thread() {
         })
         .build();
 
-    let db = GallifreyDB::with_wal_config(config).unwrap();
+    let db = AletheiaDB::with_wal_config(config).unwrap();
 
     // Write enough data to trigger multiple segment rotations
     // Each node with properties is ~100-200 bytes
@@ -832,7 +832,7 @@ fn test_segment_rotation_with_background_thread() {
     // Drop database to trigger final flush and ensure proper cleanup
     drop(db);
 
-    // See issue #365: Add recovery test once GallifreyDB supports WAL replay on open
+    // See issue #365: Add recovery test once AletheiaDB supports WAL replay on open
     // For now, this test verifies:
     // 1. Writes succeed across segment rotation
     // 2. Background thread doesn't crash when segment rotates
@@ -1063,7 +1063,7 @@ fn test_async_batched_graceful_shutdown() {
                 max_batch_size: 10000,
             })
             .build();
-        let db = GallifreyDB::with_wal_config(config).unwrap();
+        let db = AletheiaDB::with_wal_config(config).unwrap();
 
         let options = WriteOptions {
             durability_mode: Some(DurabilityMode::AsyncBatched {
@@ -1207,7 +1207,7 @@ fn test_async_batched_with_segment_rotation() {
         })
         .build();
 
-    let db = GallifreyDB::with_wal_config(config).unwrap();
+    let db = AletheiaDB::with_wal_config(config).unwrap();
 
     let options = WriteOptions {
         durability_mode: Some(DurabilityMode::AsyncBatched {
@@ -1259,14 +1259,14 @@ fn test_async_batched_with_segment_rotation() {
 /// order after a simulated crash (graceful shutdown).
 #[test]
 fn test_recovery_after_concurrent_writes() {
-    use gallifreydb::core::id::NodeId;
-    use gallifreydb::core::property::PropertyMap;
-    use gallifreydb::core::temporal::time;
-    use gallifreydb::storage::wal::concurrent_system::{
+    use aletheiadb::core::id::NodeId;
+    use aletheiadb::core::property::PropertyMap;
+    use aletheiadb::core::temporal::time;
+    use aletheiadb::storage::wal::concurrent_system::{
         ConcurrentWalSystem, ConcurrentWalSystemConfig,
     };
-    use gallifreydb::storage::wal::{LSN, WalOperation};
-    use gallifreydb::storage::wal_reader::read_wal_entries;
+    use aletheiadb::storage::wal::{LSN, WalOperation};
+    use aletheiadb::storage::wal_reader::read_wal_entries;
     use std::collections::HashSet;
     use std::sync::Barrier;
     use tempfile::TempDir;
@@ -1402,14 +1402,14 @@ fn test_recovery_after_concurrent_writes() {
 /// before it can complete. We verify that whatever WAS flushed is correctly ordered.
 #[test]
 fn test_recovery_partial_flush_ordering() {
-    use gallifreydb::core::id::NodeId;
-    use gallifreydb::core::property::PropertyMap;
-    use gallifreydb::core::temporal::time;
-    use gallifreydb::storage::wal::concurrent_system::{
+    use aletheiadb::core::id::NodeId;
+    use aletheiadb::core::property::PropertyMap;
+    use aletheiadb::core::temporal::time;
+    use aletheiadb::storage::wal::concurrent_system::{
         ConcurrentWalSystem, ConcurrentWalSystemConfig,
     };
-    use gallifreydb::storage::wal::{LSN, WalOperation};
-    use gallifreydb::storage::wal_reader::read_wal_entries;
+    use aletheiadb::storage::wal::{LSN, WalOperation};
+    use aletheiadb::storage::wal_reader::read_wal_entries;
     use std::sync::Barrier;
     use tempfile::TempDir;
 

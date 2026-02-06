@@ -21,7 +21,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+//! use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 //!
 //! let config = RedbConfig::default();
 //! let storage = RedbColdStorage::new("data/cold.redb", config)?;

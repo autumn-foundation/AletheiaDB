@@ -5,8 +5,8 @@
 //! - Causality preservation
 //! - Serialization/deserialization
 
-use gallifreydb::core::hlc::HybridTimestamp;
-use gallifreydb::core::temporal::MAX_VALID_TIMESTAMP;
+use aletheiadb::core::hlc::HybridTimestamp;
+use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
 use proptest::prelude::*;
 
 #[test]

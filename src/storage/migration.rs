@@ -22,8 +22,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::storage::migration::{MigrationPolicy, MigrationService};
-//! use gallifreydb::storage::tiered_storage::TieredStorage;
+//! use aletheiadb::storage::migration::{MigrationPolicy, MigrationService};
+//! use aletheiadb::storage::tiered_storage::TieredStorage;
 //! use std::time::Duration;
 //!
 //! let policy = MigrationPolicy::builder()

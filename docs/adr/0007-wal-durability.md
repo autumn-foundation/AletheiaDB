@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, durability
 
 ## Context
@@ -17,7 +17,7 @@ ACID databases require **Durability**: committed transactions must survive crash
    - Fast sequential writes
    - Recover by replaying log
 
-For GallifreyDB:
+For AletheiaDB:
 - Knowledge graphs can have bursty updates
 - Transaction commit latency matters for interactive use
 - Data integrity is critical (LLM reasoning depends on accurate history)

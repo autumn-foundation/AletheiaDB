@@ -40,7 +40,7 @@ fn extract_graph_data(&self, current: &CurrentStorage) -> Result<GraphIndexData>
 
 - OOM failures on databases >10GB
 - Defeats purpose of persistence (enabling larger-than-RAM databases)
-- Incompatible with GallifreyDB's 1.2B node target (256GB+ RAM)
+- Incompatible with AletheiaDB's 1.2B node target (256GB+ RAM)
 
 ## How MVCC Snapshots Solved It
 
@@ -252,7 +252,7 @@ where
 ✅ **Bounded Memory**: ~200MB constant, regardless of DB size
 ✅ **Correctness**: All recovery tests pass
 ✅ **Performance**: Acceptable checkpoint times
-✅ **Scalability**: Supports GallifreyDB's 1.2B node target
+✅ **Scalability**: Supports AletheiaDB's 1.2B node target
 
 ### Evidence
 

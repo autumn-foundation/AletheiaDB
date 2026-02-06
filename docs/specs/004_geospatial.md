@@ -21,20 +21,20 @@
 
 ## 2. 🧐 The "So What?" (Business Value)
 
-GallifreyDB currently masters:
+AletheiaDB currently masters:
 -   **Who/Relational**: Graph (`MATCH (a)-[:KNOWS]->(b)`)
 -   **When**: Temporal (`AS OF 2023`)
 -   **What/Semantic**: Vector (`SIMILAR TO "concept"`)
 
 **The Gap:**
 It misses **Where**. Real-world data almost always has a spatial component.
-Currently, users must query GallifreyDB for IDs, then query PostGIS/Elasticsearch for location, and join in the application. This is:
+Currently, users must query AletheiaDB for IDs, then query PostGIS/Elasticsearch for location, and join in the application. This is:
 1.  **Slow** (network roundtrips, massive data transfer).
 2.  **Complex** (managing two consistency domains).
 3.  **Incomplete** (cannot easily do "3-hop graph traversal *constrained* by spatial bounds").
 
 **ROI:**
--   **Completeness**: completing the "Who, What, Where, When" quadrant makes GallifreyDB a true "Universal Knowledge Engine".
+-   **Completeness**: completing the "Who, What, Where, When" quadrant makes AletheiaDB a true "Universal Knowledge Engine".
 -   **Performance**: Filtering by location *before* traversing or vector ranking massively prunes the search space.
 
 ## 3. ✅ Acceptance Criteria

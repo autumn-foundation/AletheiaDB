@@ -4,16 +4,14 @@
 //! detected and rejected during recovery, preventing crashes from corrupted
 //! WAL files or missing checkpoint data.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::interning::{GLOBAL_INTERNER, InternedString};
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::time;
-use gallifreydb::storage::persistence::{CheckpointConfig, PersistenceManager};
-use gallifreydb::storage::wal::WalOperation;
-use gallifreydb::storage::wal::concurrent_system::{
-    ConcurrentWalSystem, ConcurrentWalSystemConfig,
-};
-use gallifreydb::utils::error::Error;
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::interning::{GLOBAL_INTERNER, InternedString};
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::temporal::time;
+use aletheiadb::storage::persistence::{CheckpointConfig, PersistenceManager};
+use aletheiadb::storage::wal::WalOperation;
+use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use aletheiadb::utils::error::Error;
 use tempfile::TempDir;
 
 /// Test that WAL replay rejects invalid InternedString IDs

@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** core, temporal
 
 ## Context
 
-GallifreyDB's primary goal is enabling LLMs to reason about knowledge evolution over time. To support this, we need to answer questions like:
+AletheiaDB's primary goal is enabling LLMs to reason about knowledge evolution over time. To support this, we need to answer questions like:
 - "What did we know about X at time T?" (historical knowledge state)
 - "When did we learn about X?" (provenance tracking)
 - "How has our understanding of X changed?" (knowledge evolution)

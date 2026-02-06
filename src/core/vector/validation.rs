@@ -29,7 +29,7 @@ use crate::utils::error::{Error, Result, VectorError};
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::validate_vector;
+/// use aletheiadb::core::vector::validate_vector;
 ///
 /// // Valid vector
 /// let v = vec![1.0, 2.0, 3.0];
@@ -93,7 +93,7 @@ pub fn validate_vector(v: &[f32]) -> Result<()> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::check_dimensions_match;
+/// use aletheiadb::core::vector::check_dimensions_match;
 ///
 /// let v1 = vec![1.0, 2.0, 3.0];
 /// let v2 = vec![4.0, 5.0, 6.0];
@@ -142,7 +142,7 @@ pub fn check_dimensions_match(a: &[f32], b: &[f32]) -> Result<()> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::validate_vector_with_bounds;
+/// use aletheiadb::core::vector::validate_vector_with_bounds;
 ///
 /// // Valid vector within bounds
 /// let v = vec![1.0, 2.0, 3.0];

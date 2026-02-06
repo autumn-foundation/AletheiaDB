@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+//! use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 //! use std::sync::Arc;
 //!
 //! let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;

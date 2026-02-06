@@ -1,6 +1,6 @@
 # Observability Performance Benchmarks
 
-This document validates that GallifreyDB's observability infrastructure meets the **<10% overhead** target for critical paths.
+This document validates that AletheiaDB's observability infrastructure meets the **<10% overhead** target for critical paths.
 
 ## Benchmark Methodology
 
@@ -104,13 +104,13 @@ Error categorization adds atomic counter increments on error paths. Since errors
 
 ## Conclusion
 
-✅ **GallifreyDB observability meets performance requirements:**
+✅ **AletheiaDB observability meets performance requirements:**
 
 1. **Critical workload paths**: <10% overhead (actual: -1.0% to 9.1%)
 2. **Query hot paths**: 0% overhead (not instrumented)
 3. **Production-ready**: Validated for deployment with Honeycomb
 
-The observability infrastructure provides comprehensive production visibility while maintaining GallifreyDB's performance targets for bi-temporal graph operations.
+The observability infrastructure provides comprehensive production visibility while maintaining AletheiaDB's performance targets for bi-temporal graph operations.
 
 ## Reproducing Benchmarks
 

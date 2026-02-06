@@ -1,4 +1,4 @@
-//! Core primitives for GallifreyDB.
+//! Core primitives for AletheiaDB.
 //!
 //! This module contains the fundamental types and data structures that
 //! serve as the building blocks for the database engine.

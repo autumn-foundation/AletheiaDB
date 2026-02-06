@@ -1,6 +1,6 @@
-//! # GQL Parser
+//! # AQL Parser
 //!
-//! A recursive descent parser that converts tokenized GQL (Gallifrey Query Language) input into an
+//! A recursive descent parser that converts tokenized AQL (Aletheia Query Language) input into an
 //! Abstract Syntax Tree (AST).
 //!
 //! This module is the entry point for the query compilation pipeline. It takes a raw string query
@@ -8,7 +8,7 @@
 //!
 //! ## Grammar Overview
 //!
-//! The parser supports a Cypher-like syntax with GallifreyDB-specific extensions for:
+//! The parser supports a Cypher-like syntax with AletheiaDB-specific extensions for:
 //!
 //! - **Graph Pattern Matching**: `MATCH (n:Person)-[:KNOWS]->(m)`
 //! - **Vector Search**: `SIMILAR TO $embedding` or `RANK BY SIMILARITY`
@@ -22,7 +22,7 @@
 //! filters by age, and returns the top results.
 //!
 //! ```rust
-//! use gallifreydb::query::parser::Parser;
+//! use aletheiadb::query::parser::Parser;
 //!
 //! let query = "
 //!     AS OF '2024-01-15T10:00:00Z'
@@ -103,7 +103,7 @@ impl From<LexerError> for ParseError {
     }
 }
 
-/// A parser for the GQL query language.
+/// A parser for the AQL query language.
 ///
 /// The `Parser` maintains state (tokens and current position) as it walks through
 /// the input stream. It is designed to be used via the static [`Parser::parse`] method.
@@ -113,14 +113,14 @@ pub struct Parser {
 }
 
 impl Parser {
-    /// Parse a GQL query string into an Abstract Syntax Tree (AST).
+    /// Parse a AQL query string into an Abstract Syntax Tree (AST).
     ///
     /// This is the main entry point for the parser. It tokenizes the input string
-    /// and processes it according to the GQL grammar.
+    /// and processes it according to the AQL grammar.
     ///
     /// # Arguments
     ///
-    /// * `input` - The GQL query string to parse.
+    /// * `input` - The AQL query string to parse.
     ///
     /// # Returns
     ///
@@ -130,7 +130,7 @@ impl Parser {
     /// # Examples
     ///
     /// ```rust
-    /// use gallifreydb::query::parser::Parser;
+    /// use aletheiadb::query::parser::Parser;
     ///
     /// let query = "MATCH (n:Person) RETURN n.name";
     /// match Parser::parse(query) {
@@ -790,7 +790,7 @@ impl Parser {
 
     /// Parse a `RANK BY SIMILARITY` clause.
     ///
-    /// This is an extension to GQL for hybrid search, allowing graph results to be
+    /// This is an extension to AQL for hybrid search, allowing graph results to be
     /// re-ranked based on vector similarity.
     ///
     /// Grammar:

@@ -78,25 +78,23 @@ fn sync_metrics_to_prometheus() {
     let snapshot = crate::observability::METRICS.snapshot();
 
     // Critical error metrics
-    counter!("gallifreydb_lock_poison_total").absolute(snapshot.lock_poison_count);
-    counter!("gallifreydb_timestamp_violations_total").absolute(snapshot.timestamp_violations);
-    counter!("gallifreydb_wal_checksum_failures_total").absolute(snapshot.wal_checksum_failures);
-    counter!("gallifreydb_write_conflicts_total").absolute(snapshot.write_conflicts);
+    counter!("aletheiadb_lock_poison_total").absolute(snapshot.lock_poison_count);
+    counter!("aletheiadb_timestamp_violations_total").absolute(snapshot.timestamp_violations);
+    counter!("aletheiadb_wal_checksum_failures_total").absolute(snapshot.wal_checksum_failures);
+    counter!("aletheiadb_write_conflicts_total").absolute(snapshot.write_conflicts);
 
     // Error categorization metrics
-    counter!("gallifreydb_errors_total", "category" => "storage")
+    counter!("aletheiadb_errors_total", "category" => "storage")
         .absolute(snapshot.error_storage_total);
-    counter!("gallifreydb_errors_total", "category" => "temporal")
+    counter!("aletheiadb_errors_total", "category" => "temporal")
         .absolute(snapshot.error_temporal_total);
-    counter!("gallifreydb_errors_total", "category" => "query")
-        .absolute(snapshot.error_query_total);
-    counter!("gallifreydb_errors_total", "category" => "transaction")
+    counter!("aletheiadb_errors_total", "category" => "query").absolute(snapshot.error_query_total);
+    counter!("aletheiadb_errors_total", "category" => "transaction")
         .absolute(snapshot.error_transaction_total);
-    counter!("gallifreydb_errors_total", "category" => "vector")
+    counter!("aletheiadb_errors_total", "category" => "vector")
         .absolute(snapshot.error_vector_total);
-    counter!("gallifreydb_errors_total", "category" => "io").absolute(snapshot.error_io_total);
-    counter!("gallifreydb_errors_total", "category" => "other")
-        .absolute(snapshot.error_other_total);
+    counter!("aletheiadb_errors_total", "category" => "io").absolute(snapshot.error_io_total);
+    counter!("aletheiadb_errors_total", "category" => "other").absolute(snapshot.error_other_total);
 }
 
 #[cfg(not(feature = "observability-prometheus"))]

@@ -1,8 +1,8 @@
 // Tests for temporal adjacency index persistence
 
-use gallifreydb::core::temporal::time;
-use gallifreydb::core::{EdgeId, InternedString, NodeId, TIMESTAMP_MAX};
-use gallifreydb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
+use aletheiadb::core::temporal::time;
+use aletheiadb::core::{EdgeId, InternedString, NodeId, TIMESTAMP_MAX};
+use aletheiadb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -17,14 +17,14 @@ fn test_save_and_load_empty_index() {
     ));
 
     // Save to disk
-    gallifreydb::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index(
+    aletheiadb::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index(
         &index, &data_dir,
     )
     .unwrap();
 
     // Load from disk
     let loaded_index =
-        gallifreydb::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index(
+        aletheiadb::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index(
             &data_dir,
         )
         .unwrap();
@@ -79,14 +79,14 @@ fn test_save_and_load_index_with_entries() {
         .unwrap();
 
     // Save to disk
-    gallifreydb::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index(
+    aletheiadb::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index(
         &index, &data_dir,
     )
     .unwrap();
 
     // Load from disk
     let loaded_index =
-        gallifreydb::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index(
+        aletheiadb::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index(
             &data_dir,
         )
         .unwrap();
@@ -127,13 +127,13 @@ fn test_save_and_load_preserves_temporal_ranges() {
         .unwrap();
 
     // Save and load
-    gallifreydb::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index(
+    aletheiadb::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index(
         &index, &data_dir,
     )
     .unwrap();
 
     let loaded_index =
-        gallifreydb::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index(
+        aletheiadb::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index(
             &data_dir,
         )
         .unwrap();
@@ -204,13 +204,13 @@ fn test_multiple_nodes_with_edges() {
     }
 
     // Save and load
-    gallifreydb::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index(
+    aletheiadb::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index(
         &index, &data_dir,
     )
     .unwrap();
 
     let loaded_index =
-        gallifreydb::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index(
+        aletheiadb::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index(
             &data_dir,
         )
         .unwrap();

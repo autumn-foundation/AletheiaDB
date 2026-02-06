@@ -7,7 +7,7 @@ use crate::utils::error::Result;
 
 #[test]
 fn test_create_node() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let props = PropertyMapBuilder::new()
         .insert("name", "Alice")
@@ -28,7 +28,7 @@ fn test_create_node() {
 
 #[test]
 fn test_create_edge() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let alice = db
         .create_node("Person", PropertyMapBuilder::new().build())
@@ -55,7 +55,7 @@ fn test_create_edge() {
 
 #[test]
 fn test_graph_traversal() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let n0 = db
         .create_node("Person", PropertyMapBuilder::new().build())
@@ -81,7 +81,7 @@ fn test_graph_traversal() {
 
 #[test]
 fn test_iterator_access() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let n0 = db
         .create_node("Person", PropertyMapBuilder::new().build())
@@ -118,7 +118,7 @@ fn test_iterator_access() {
 
 #[test]
 fn test_historical_stats() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     db.create_node("Person", PropertyMapBuilder::new().build())
         .unwrap();
@@ -134,7 +134,7 @@ fn test_historical_stats() {
 
 #[test]
 fn test_closure_based_write_api() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Use closure-based API for multiple operations
     let (node_id, edge_id) = db
@@ -173,7 +173,7 @@ fn test_closure_based_write_api() {
 
 #[test]
 fn test_closure_based_read_api() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let node_id = db
         .create_node(
@@ -198,7 +198,7 @@ fn test_closure_based_read_api() {
 
 #[test]
 fn test_explicit_write_transaction() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let mut tx = db.write_transaction().unwrap();
     let n1 = tx
@@ -229,7 +229,7 @@ fn test_explicit_write_transaction() {
 
 #[test]
 fn test_explicit_read_transaction() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let node_id = db
         .create_node(
@@ -247,7 +247,7 @@ fn test_explicit_read_transaction() {
 
 #[test]
 fn test_transaction_atomicity() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create a valid node first
     let valid_node = db
@@ -279,7 +279,7 @@ fn test_transaction_atomicity() {
 
 #[test]
 fn test_transaction_rollback_on_error() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Closure returns an error - should auto-rollback
     let result: Result<()> = db.write(|tx| {
@@ -301,7 +301,7 @@ fn test_transaction_rollback_on_error() {
 
 #[test]
 fn test_multiple_transactions() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Transaction 1
     let n1 = db
@@ -323,7 +323,7 @@ fn test_multiple_transactions() {
 
 #[test]
 fn test_snapshot_isolation() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let node_id = db
         .create_node(
@@ -370,15 +370,15 @@ fn test_snapshot_isolation() {
 
 #[test]
 fn test_new_returns_result() {
-    // GallifreyDB::new() should return Result<Self> and succeed with default config
-    let result = GallifreyDB::new();
+    // AletheiaDB::new() should return Result<Self> and succeed with default config
+    let result = AletheiaDB::new();
     assert!(result.is_ok(), "new() should succeed with default config");
 }
 
 #[test]
 fn test_with_config_returns_result() {
-    // GallifreyDB::with_config() should return Result<Self>
-    let result = GallifreyDB::with_config(crate::core::version::AnchorConfig::default());
+    // AletheiaDB::with_config() should return Result<Self>
+    let result = AletheiaDB::with_config(crate::core::version::AnchorConfig::default());
     assert!(
         result.is_ok(),
         "with_config() should succeed with default config"
@@ -387,9 +387,9 @@ fn test_with_config_returns_result() {
 
 #[test]
 fn test_with_wal_config_returns_result() {
-    // GallifreyDB::with_wal_config() should return Result<Self>
+    // AletheiaDB::with_wal_config() should return Result<Self>
     let wal_config = crate::config::WalConfig::default();
-    let result = GallifreyDB::with_wal_config(wal_config);
+    let result = AletheiaDB::with_wal_config(wal_config);
     assert!(
         result.is_ok(),
         "with_wal_config() should succeed with default config"
@@ -398,8 +398,8 @@ fn test_with_wal_config_returns_result() {
 
 #[test]
 fn test_with_full_config_returns_result() {
-    // GallifreyDB::with_full_config() should return Result<Self>
-    let result = GallifreyDB::with_full_config(
+    // AletheiaDB::with_full_config() should return Result<Self>
+    let result = AletheiaDB::with_full_config(
         crate::core::version::AnchorConfig::default(),
         crate::config::WalConfig::default(),
     );
@@ -411,9 +411,9 @@ fn test_with_full_config_returns_result() {
 
 #[test]
 fn test_with_unified_config_returns_result() {
-    // GallifreyDB::with_unified_config() should return Result<Self>
-    let config = crate::config::GallifreyDBConfig::default();
-    let result = GallifreyDB::with_unified_config(config);
+    // AletheiaDB::with_unified_config() should return Result<Self>
+    let config = crate::config::AletheiaDBConfig::default();
+    let result = AletheiaDB::with_unified_config(config);
     assert!(
         result.is_ok(),
         "with_unified_config() should succeed with default config"
@@ -434,7 +434,7 @@ fn test_wal_creation_failure_propagates_error() {
         .wal_dir(invalid_wal_dir)
         .build();
 
-    let result = GallifreyDB::with_wal_config(wal_config);
+    let result = AletheiaDB::with_wal_config(wal_config);
 
     // Should return Err instead of panicking
     assert!(
@@ -464,7 +464,7 @@ fn test_unified_config_wal_failure_propagates_error() {
     // so any attempt to create subdirectories under it will fail
     let invalid_wal_dir = PathBuf::from("/dev/null/wal");
 
-    let config = crate::config::GallifreyDBConfigBuilder::new()
+    let config = crate::config::AletheiaDBConfigBuilder::new()
         .wal(
             crate::config::WalConfigBuilder::new()
                 .wal_dir(invalid_wal_dir)
@@ -472,7 +472,7 @@ fn test_unified_config_wal_failure_propagates_error() {
         )
         .build();
 
-    let result = GallifreyDB::with_unified_config(config);
+    let result = AletheiaDB::with_unified_config(config);
 
     // Should return Err instead of panicking
     assert!(
@@ -486,10 +486,10 @@ fn test_unified_config_wal_failure_propagates_error() {
 // ========================================================================
 
 #[test]
-fn test_gallifreydb_is_vector_index_enabled_for() {
+fn test_aletheiadb_is_vector_index_enabled_for() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Initially no index should be enabled
     assert!(!db.is_vector_index_enabled());
@@ -513,8 +513,8 @@ fn test_gallifreydb_is_vector_index_enabled_for() {
 }
 
 #[test]
-fn test_gallifreydb_default_durability() {
-    let db = GallifreyDB::new().unwrap();
+fn test_aletheiadb_default_durability() {
+    let db = AletheiaDB::new().unwrap();
 
     // Default durability should exist and be valid
     let _durability = db.default_durability();
@@ -523,7 +523,7 @@ fn test_gallifreydb_default_durability() {
 
 #[test]
 fn test_get_edge_source_and_target() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes
     let alice = db
@@ -554,7 +554,7 @@ fn test_get_edge_source_and_target() {
 
 #[test]
 fn test_get_node_at_valid_time() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create backdated node
     let mut tx = db.write_transaction().unwrap();
@@ -577,7 +577,7 @@ fn test_get_node_at_valid_time() {
 
 #[test]
 fn test_get_node_at_transaction_time() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node
     let props = PropertyMapBuilder::new().insert("name", "Alice").build();
@@ -591,7 +591,7 @@ fn test_get_node_at_transaction_time() {
 
 #[test]
 fn test_get_node_history_returns_all_versions() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create and update a node
     let props1 = PropertyMapBuilder::new().insert("name", "Alice").build();
@@ -614,7 +614,7 @@ fn test_get_node_history_returns_all_versions() {
 
 #[test]
 fn test_get_node_at_version() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create and update a node
     let props1 = PropertyMapBuilder::new().insert("name", "Alice").build();
@@ -643,7 +643,7 @@ fn test_get_node_at_version() {
 
 #[test]
 fn test_diff_node_versions() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node
     let props1 = PropertyMapBuilder::new()
@@ -680,7 +680,7 @@ fn test_diff_node_versions() {
 
 #[test]
 fn test_get_edge_history_returns_all_versions() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes
     let alice = db
@@ -703,7 +703,7 @@ fn test_get_edge_history_returns_all_versions() {
 
 #[test]
 fn test_diff_edge_versions() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create nodes
     let alice = db
@@ -745,7 +745,7 @@ fn test_full_bitemporal_workflow() {
     use crate::core::hlc::HybridTimestamp;
     use crate::core::temporal::time;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // === PART 1: Backdated Write ===
     let jan_1 = HybridTimestamp::new(1_704_067_200_000_000, 0).unwrap(); // 2024-01-01
@@ -845,7 +845,7 @@ fn test_find_similar_as_of_in() {
     use crate::index::vector::temporal::{SnapshotStrategy, TemporalVectorConfig};
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable temporal vector index with immediate snapshot strategy
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
@@ -878,7 +878,7 @@ fn test_find_similar_as_of_in() {
 
 #[test]
 fn test_find_nodes_by_property_facade() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let alice_id = db
         .create_node(
@@ -927,7 +927,7 @@ fn test_find_nodes_by_property_facade() {
 
 #[test]
 fn test_find_nodes_by_property_facade_cross_label() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let person_id = db
         .create_node(

@@ -4,13 +4,13 @@
 //! are testing what they claim to test, specifically around anchor creation
 //! and delta reconstruction.
 //!
-//! **Timestamp Semantics**: GallifreyDB uses wallclock microsecond timestamps
+//! **Timestamp Semantics**: AletheiaDB uses wallclock microsecond timestamps
 //! for tx_time and valid_time. These tests capture actual timestamps after
 //! updates and use them for queries, ensuring we're testing real time-travel
 //! functionality.
 
-use gallifreydb::api::transaction::WriteOps;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use aletheiadb::api::transaction::WriteOps;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 /// Test that anchors are created at expected positions with default anchor_interval=10
 ///
@@ -20,7 +20,7 @@ use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 /// - Verifying correct historical state reconstruction
 #[test]
 fn test_anchor_creation_matches_benchmark_assumptions() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create initial node
     let node_id = db
@@ -85,7 +85,7 @@ fn test_anchor_creation_matches_benchmark_assumptions() {
 /// validation requires deeper investigation of get_node_at_time semantics.
 #[test]
 fn test_delta_reconstruction_produces_correct_state() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let node_id = db
         .create_node(
@@ -186,7 +186,7 @@ fn test_delta_reconstruction_produces_correct_state() {
 /// which requires explicit closing of previous versions before adding new ones.
 #[test]
 fn test_multiple_updates_same_transaction() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let node_id = db
         .create_node(
@@ -263,7 +263,7 @@ fn test_performance_targets_benchmark_runtime() {
     let start = Instant::now();
 
     // Simulate the benchmark setup (without criterion overhead)
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let node_id = db
         .create_node(
             "Person",

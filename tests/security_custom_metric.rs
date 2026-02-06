@@ -1,9 +1,9 @@
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{
     DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, Quantization, VectorIndex,
 };
-use gallifreydb::utils::error::VectorError;
-use gallifreydb::utils::{Error, Result};
+use aletheiadb::utils::error::VectorError;
+use aletheiadb::utils::{Error, Result};
 
 #[test]
 fn test_custom_metric_with_quantization_crash() -> Result<()> {

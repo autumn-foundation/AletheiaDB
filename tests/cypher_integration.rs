@@ -1,13 +1,13 @@
 #![cfg(feature = "cypher")]
 
-use gallifreydb::GallifreyDB;
+use aletheiadb::AletheiaDB;
 // Macros with #[macro_export] are exported at the crate root
 #[allow(unused_imports)]
-use gallifreydb::params;
+use aletheiadb::params;
 
 #[test]
 fn test_cypher_api_surface() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Test basic cypher query
     let results = db.cypher("MATCH (n:Person) RETURN n");
@@ -15,7 +15,7 @@ fn test_cypher_api_surface() {
 
     // Test query with params
     // We expect params! to be available when feature is enabled
-    let params_map = gallifreydb::params! {
+    let params_map = aletheiadb::params! {
         "name" => "Alice",
         "age" => 30,
     };

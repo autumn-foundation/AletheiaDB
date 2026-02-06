@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-GallifreyDB is currently in pre-1.0 development. We provide security updates for the latest released version.
+AletheiaDB is currently in pre-1.0 development. We provide security updates for the latest released version.
 
 | Version | Supported          |
 | ------- | ------------------ |
@@ -11,7 +11,7 @@ GallifreyDB is currently in pre-1.0 development. We provide security updates for
 
 ## Reporting a Vulnerability
 
-We take the security of GallifreyDB seriously. If you discover a security vulnerability, please follow responsible disclosure practices.
+We take the security of AletheiaDB seriously. If you discover a security vulnerability, please follow responsible disclosure practices.
 
 ### How to Report
 
@@ -20,7 +20,7 @@ We take the security of GallifreyDB seriously. If you discover a security vulner
 Instead, please report security issues privately:
 
 1. **Email**: Send details to [security contact - TBD]
-2. **GitHub Security Advisory**: Use GitHub's [private vulnerability reporting](https://github.com/madmax983/GallifreyDB/security/advisories/new)
+2. **GitHub Security Advisory**: Use GitHub's [private vulnerability reporting](https://github.com/madmax983/AletheiaDB/security/advisories/new)
 
 ### What to Include
 
@@ -68,7 +68,7 @@ Please include as much of the following information as possible:
 
 ### Known Limitations (Pre-1.0)
 
-GallifreyDB is under active development. Be aware of these limitations:
+AletheiaDB is under active development. Be aware of these limitations:
 
 - **No Encryption at Rest**: Data is not encrypted on disk (planned for 1.0)
 - **Limited Access Control**: Basic authentication only (enhanced ACLs planned)
@@ -100,13 +100,13 @@ We do not currently have a bug bounty program. Security researchers who report v
 
 ## Security Hall of Fame
 
-We recognize and thank security researchers who help keep GallifreyDB secure:
+We recognize and thank security researchers who help keep AletheiaDB secure:
 
 _No security reports received yet._
 
 ## Contact
 
-For security concerns: [TBD - set up security@gallifreydb.io or similar]
+For security concerns: [TBD - set up security@aletheiadb.io or similar]
 
 For general questions: Create a public GitHub issue
 

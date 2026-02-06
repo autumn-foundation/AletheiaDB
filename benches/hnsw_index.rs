@@ -9,10 +9,10 @@
 
 mod common;
 
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::hnsw::{HnswConfig, HnswIndex};
+use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::hnsw::{HnswConfig, HnswIndex};
-use gallifreydb::index::vector::{DistanceMetric, VectorIndex};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 

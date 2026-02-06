@@ -2,7 +2,7 @@
 
 **Status:** Accepted (Implemented)
 **Date:** 2026-01-09
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, durability, performance, concurrency
 **Supersedes:** Extends ADR-0007, ADR-0012
 

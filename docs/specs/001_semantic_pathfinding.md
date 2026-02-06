@@ -27,7 +27,7 @@ Real-world reasoning often requires traversing a graph but staying "in context".
 - *Semantic Pathfinding* with query "Manufacturing" forces the traversal to prefer nodes related to supply chain/tech, avoiding the "Pixar" detour.
 
 **ROI:**
-- **Differentiation:** Positions GallifreyDB as a "Reasoning Engine", not just a storage engine.
+- **Differentiation:** Positions AletheiaDB as a "Reasoning Engine", not just a storage engine.
 - **Utility:** Directly improves RAG accuracy by filtering "hallucination-inducing" noise from retrieved subgraphs.
 
 ## 3. ✅ Acceptance Criteria

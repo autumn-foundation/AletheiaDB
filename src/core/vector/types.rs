@@ -24,7 +24,7 @@ use std::fmt;
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::VectorDimension;
+/// use aletheiadb::core::vector::VectorDimension;
 ///
 /// fn check_dimensions(vec: &[f32], expected: VectorDimension) -> bool {
 ///     vec.len() == expected.as_usize()
@@ -42,7 +42,7 @@ impl VectorDimension {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::VectorDimension;
+    /// use aletheiadb::core::vector::VectorDimension;
     ///
     /// let dim = VectorDimension::new(1536);
     /// assert_eq!(dim.as_usize(), 1536);
@@ -57,7 +57,7 @@ impl VectorDimension {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::VectorDimension;
+    /// use aletheiadb::core::vector::VectorDimension;
     ///
     /// let dim = VectorDimension::new(384);
     /// let size: usize = dim.as_usize();

@@ -1,15 +1,15 @@
 //! AST to IR Converter
 //!
-//! This module converts parsed GQL (Gallifrey Query Language) queries from their
+//! This module converts parsed AQL (Aletheia Query Language) queries from their
 //! Abstract Syntax Tree (AST) representation into the internal `Query` type that
 //! can be executed by the query planner and executor.
 //!
 //! # Architecture
 //!
-//! The query processing pipeline in GallifreyDB follows this flow:
+//! The query processing pipeline in AletheiaDB follows this flow:
 //!
 //! ```text
-//! GQL String → [Parser] → AST → [Converter] → Query → [Planner] → PhysicalPlan → [Executor] → Results
+//! AQL String → [Parser] → AST → [Converter] → Query → [Planner] → PhysicalPlan → [Executor] → Results
 //! ```
 //!
 //! This module handles the **Converter** step, bridging the gap between the
@@ -17,15 +17,15 @@
 //!
 //! # Quick Start
 //!
-//! The simplest way to execute a GQL query is using the [`parse_query`] function:
+//! The simplest way to execute a AQL query is using the [`parse_query`] function:
 //!
 //! ```rust
-//! use gallifreydb::query::{parse_query, QueryPlanner};
-//! use gallifreydb::query::planner::Statistics;
-//! use gallifreydb::storage::CurrentStorage;
+//! use aletheiadb::query::{parse_query, QueryPlanner};
+//! use aletheiadb::query::planner::Statistics;
+//! use aletheiadb::storage::CurrentStorage;
 //! use std::sync::Arc;
 //!
-//! // Parse and convert a GQL query
+//! // Parse and convert a AQL query
 //! let query = parse_query("MATCH (n:Person) WHERE n.age > 21 RETURN n LIMIT 10")
 //!     .expect("Failed to parse query");
 //!
@@ -42,8 +42,8 @@
 //! and improve performance through query caching:
 //!
 //! ```rust
-//! use gallifreydb::query::{parse_query_with_params, ParameterValue};
-//! use gallifreydb::query::ir::PredicateValue;
+//! use aletheiadb::query::{parse_query_with_params, ParameterValue};
+//! use aletheiadb::query::ir::PredicateValue;
 //! use std::collections::HashMap;
 //! use std::sync::Arc;
 //!
@@ -127,8 +127,8 @@
 //! For more control, use [`AstConverter`] directly:
 //!
 //! ```rust
-//! use gallifreydb::query::{Parser, AstConverter, ParameterValue};
-//! use gallifreydb::core::NodeId;
+//! use aletheiadb::query::{Parser, AstConverter, ParameterValue};
+//! use aletheiadb::core::NodeId;
 //!
 //! // Parse the query
 //! let ast = Parser::parse("FIND SIMILAR TO ($node) LIMIT 5")
@@ -152,7 +152,7 @@
 //! - **Syntax errors**: Propagated from the parser
 //!
 //! ```rust
-//! use gallifreydb::query::parse_query;
+//! use aletheiadb::query::parse_query;
 //!
 //! // Missing parameter error
 //! let result = parse_query("SIMILAR TO $missing LIMIT 10");
@@ -204,7 +204,7 @@ use super::plan::{QueryHints, TemporalContext};
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::query::{Parser, AstConverter};
+/// use aletheiadb::query::{Parser, AstConverter};
 ///
 /// let ast = Parser::parse("MATCH (n:Person) WHERE n.age > 21 RETURN n").unwrap();
 /// let converter = AstConverter::new();
@@ -218,7 +218,7 @@ use super::plan::{QueryHints, TemporalContext};
 /// Use [`bind`](Self::bind) to set parameter values before conversion:
 ///
 /// ```rust
-/// use gallifreydb::query::{Parser, AstConverter, ParameterValue};
+/// use aletheiadb::query::{Parser, AstConverter, ParameterValue};
 /// use std::sync::Arc;
 ///
 /// let ast = Parser::parse("SIMILAR TO $embedding LIMIT 10").unwrap();
@@ -234,20 +234,20 @@ use super::plan::{QueryHints, TemporalContext};
 pub struct AstConverter {
     /// Parameter bindings for the query.
     ///
-    /// Parameters are referenced in GQL using `$name` syntax and must be
+    /// Parameters are referenced in AQL using `$name` syntax and must be
     /// bound before conversion.
     parameters: HashMap<String, ParameterValue>,
 }
 
 /// Parameter values that can be bound to a query.
 ///
-/// GQL queries can reference parameters using the `$name` syntax. These
+/// AQL queries can reference parameters using the `$name` syntax. These
 /// parameters must be bound to actual values before the query can be
 /// converted and executed.
 ///
 /// # Parameter Types
 ///
-/// | Type | GQL Usage | Example |
+/// | Type | AQL Usage | Example |
 /// |------|-----------|---------|
 /// | `NodeId` | `FIND SIMILAR TO ($node)` | Reference to a specific node |
 /// | `Embedding` | `SIMILAR TO $embedding` | Vector for k-NN search |
@@ -256,9 +256,9 @@ pub struct AstConverter {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::query::ParameterValue;
-/// use gallifreydb::query::ir::PredicateValue;
-/// use gallifreydb::core::NodeId;
+/// use aletheiadb::query::ParameterValue;
+/// use aletheiadb::query::ir::PredicateValue;
+/// use aletheiadb::core::NodeId;
 /// use std::sync::Arc;
 ///
 /// // Node ID parameter
@@ -300,7 +300,7 @@ impl AstConverter {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::query::AstConverter;
+    /// use aletheiadb::query::AstConverter;
     ///
     /// let converter = AstConverter::new();
     /// ```
@@ -318,8 +318,8 @@ impl AstConverter {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::query::{AstConverter, ParameterValue};
-    /// use gallifreydb::query::ir::PredicateValue;
+    /// use aletheiadb::query::{AstConverter, ParameterValue};
+    /// use aletheiadb::query::ir::PredicateValue;
     /// use std::collections::HashMap;
     ///
     /// let mut params = HashMap::new();
@@ -333,7 +333,7 @@ impl AstConverter {
 
     /// Bind a parameter value by name.
     ///
-    /// Parameters in GQL are referenced with the `$name` syntax. This method
+    /// Parameters in AQL are referenced with the `$name` syntax. This method
     /// associates a name with a concrete value.
     ///
     /// Returns `&mut Self` for method chaining.
@@ -341,8 +341,8 @@ impl AstConverter {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::query::{AstConverter, ParameterValue};
-    /// use gallifreydb::core::NodeId;
+    /// use aletheiadb::query::{AstConverter, ParameterValue};
+    /// use aletheiadb::core::NodeId;
     /// use std::sync::Arc;
     ///
     /// let mut converter = AstConverter::new();
@@ -371,7 +371,7 @@ impl AstConverter {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::query::{Parser, AstConverter};
+    /// use aletheiadb::query::{Parser, AstConverter};
     ///
     /// let ast = Parser::parse("MATCH (n:Person) RETURN n LIMIT 10").unwrap();
     /// let converter = AstConverter::new();
@@ -855,14 +855,14 @@ impl Default for AstConverter {
     }
 }
 
-/// Parse a GQL query string and convert it to a Query.
+/// Parse a AQL query string and convert it to a Query.
 ///
-/// This is the simplest way to convert a GQL string into an executable query.
+/// This is the simplest way to convert a AQL string into an executable query.
 /// It combines parsing and conversion in a single step.
 ///
 /// # Arguments
 ///
-/// * `gql` - A GQL query string (e.g., `"MATCH (n:Person) RETURN n"`)
+/// * `gql` - A AQL query string (e.g., `"MATCH (n:Person) RETURN n"`)
 ///
 /// # Returns
 ///
@@ -872,7 +872,7 @@ impl Default for AstConverter {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::query::parse_query;
+/// use aletheiadb::query::parse_query;
 ///
 /// // Simple node scan
 /// let query = parse_query("MATCH (n:Person) RETURN n").unwrap();
@@ -892,11 +892,11 @@ impl Default for AstConverter {
 /// # Errors
 ///
 /// Returns an error for:
-/// - Syntax errors in the GQL string
+/// - Syntax errors in the AQL string
 /// - Unbound parameters (use [`parse_query_with_params`] for parameterized queries)
 ///
 /// ```rust
-/// use gallifreydb::query::parse_query;
+/// use aletheiadb::query::parse_query;
 ///
 /// // Syntax error
 /// let result = parse_query("MATCH (n:Person RETURN n"); // Missing closing paren
@@ -916,7 +916,7 @@ pub fn parse_query(gql: &str) -> Result<Query> {
     converter.convert(&ast)
 }
 
-/// Parse a GQL query string with parameters and convert it to a Query.
+/// Parse a AQL query string with parameters and convert it to a Query.
 ///
 /// Use this function when your query contains parameter references (`$name`).
 /// Parameters allow dynamic values without string concatenation, which:
@@ -927,7 +927,7 @@ pub fn parse_query(gql: &str) -> Result<Query> {
 ///
 /// # Arguments
 ///
-/// * `gql` - A GQL query string with parameter references
+/// * `gql` - A AQL query string with parameter references
 /// * `params` - A map of parameter names to values
 ///
 /// # Returns
@@ -938,7 +938,7 @@ pub fn parse_query(gql: &str) -> Result<Query> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::query::{parse_query_with_params, ParameterValue};
+/// use aletheiadb::query::{parse_query_with_params, ParameterValue};
 /// use std::collections::HashMap;
 /// use std::sync::Arc;
 ///
@@ -968,7 +968,7 @@ pub fn parse_query(gql: &str) -> Result<Query> {
 /// # Errors
 ///
 /// Returns an error if:
-/// - The GQL string has syntax errors
+/// - The AQL string has syntax errors
 /// - A referenced parameter is not in the `params` map
 /// - A parameter has the wrong type for its context
 pub fn parse_query_with_params(

@@ -36,10 +36,10 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::index::vector::distributed::{
+//! use aletheiadb::index::vector::distributed::{
 //!     DistributedVectorIndex, DistributedVectorConfig, VectorNodeConfig
 //! };
-//! use gallifreydb::index::vector::{DistanceMetric, VectorIndex};
+//! use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
 //!
 //! // Define cluster topology
 //! let config = DistributedVectorConfig::new(384, DistanceMetric::Cosine)

@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2026-01-20
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** core, temporal, distributed
 
 ## Context
 
-GallifreyDB's bi-temporal model uses timestamps to track both valid time (when facts are true) and transaction time (when facts are recorded). The initial implementation used simple `i64` microsecond timestamps, which worked for single-node deployments but had critical limitations for distributed systems:
+AletheiaDB's bi-temporal model uses timestamps to track both valid time (when facts are true) and transaction time (when facts are recorded). The initial implementation used simple `i64` microsecond timestamps, which worked for single-node deployments but had critical limitations for distributed systems:
 
 ### Problems with Simple Timestamps
 
@@ -34,9 +34,9 @@ GallifreyDB's bi-temporal model uses timestamps to track both valid time (when f
    - Same-timestamp transactions break snapshot consistency
    - No way to determine which version to read
 
-### Why This Matters for GallifreyDB
+### Why This Matters for AletheiaDB
 
-GallifreyDB's LLM integration use case requires:
+AletheiaDB's LLM integration use case requires:
 - **Temporal reasoning about concurrent events**: "What did we know when we recorded X?"
 - **Causal consistency**: "Did we know A before we recorded B?"
 - **Distributed operation**: Future horizontal scaling across multiple nodes

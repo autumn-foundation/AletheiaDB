@@ -279,8 +279,8 @@ impl BiTemporalInterval {
     ///
     /// # Example
     /// ```
-    /// use gallifreydb::core::temporal::BiTemporalInterval;
-    /// use gallifreydb::core::hlc::HybridTimestamp;
+    /// use aletheiadb::core::temporal::BiTemporalInterval;
+    /// use aletheiadb::core::hlc::HybridTimestamp;
     ///
     /// // Record today that Alice joined the company last month
     /// let last_month = HybridTimestamp::new(1704067200_000_000, 0).unwrap();

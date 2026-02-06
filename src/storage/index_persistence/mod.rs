@@ -1,4 +1,4 @@
-//! Comprehensive index persistence layer for GallifreyDB.
+//! Comprehensive index persistence layer for AletheiaDB.
 //!
 //! This module provides persistence for all index types:
 //! - Vector indexes (HNSW via usearch)
@@ -26,7 +26,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use gallifreydb::storage::index_persistence::{
+//! use aletheiadb::storage::index_persistence::{
 //!     IndexPersistenceManager, PersistenceConfig, IndexManifest
 //! };
 //!
@@ -247,7 +247,7 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 /// # Examples
 ///
 /// ```ignore
-/// use gallifreydb::storage::index_persistence::load_indexes_parallel;
+/// use aletheiadb::storage::index_persistence::load_indexes_parallel;
 ///
 /// let (graph, temporal, vector) = load_indexes_parallel(
 ///     &graph_path,

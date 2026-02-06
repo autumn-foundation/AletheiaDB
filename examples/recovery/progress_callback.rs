@@ -9,9 +9,9 @@
 //! - Displaying progress with a visual progress bar
 //!
 //! **Note:** This example uses internal recovery APIs and simulates progress tracking.
-//! In future versions, GallifreyDB will provide a high-level API with progress callbacks:
+//! In future versions, AletheiaDB will provide a high-level API with progress callbacks:
 //! ```ignore
-//! let db = GallifreyDB::recover_with_progress("/data/mydb", |progress| {
+//! let db = AletheiaDB::recover_with_progress("/data/mydb", |progress| {
 //!     println!("{}% complete ({}/{})",
 //!              progress.percent, progress.completed, progress.total);
 //! })?;
@@ -59,20 +59,20 @@
 //! ✅ Recovery completed with progress tracking!
 //! ```
 
-use gallifreydb::core::{
+use aletheiadb::core::{
     id::{EdgeId, NodeId},
     interning::GLOBAL_INTERNER,
     property::PropertyMapBuilder,
     temporal::time,
 };
-use gallifreydb::storage::{
+use aletheiadb::storage::{
     persistence::{CheckpointConfig, PersistenceManager},
     wal::{
         LSN, WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
-use gallifreydb::utils::error::Result;
+use aletheiadb::utils::error::Result;
 use std::io::Write;
 use std::time::Instant;
 use tempfile::TempDir;

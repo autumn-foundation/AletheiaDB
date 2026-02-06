@@ -44,14 +44,14 @@
 //! # Examples
 //!
 //! ```rust
-//! use gallifreydb::index::VectorIndex;
-//! use gallifreydb::core::id::NodeId;
+//! use aletheiadb::index::VectorIndex;
+//! use aletheiadb::core::id::NodeId;
 //!
 //! fn search_similar_documents(
 //!     index: &impl VectorIndex,
 //!     query_embedding: &[f32],
 //!     limit: usize
-//! ) -> gallifreydb::utils::Result<Vec<(NodeId, f32)>> {
+//! ) -> aletheiadb::utils::Result<Vec<(NodeId, f32)>> {
 //!     // Find top-k most similar documents
 //!     let results = index.search(query_embedding, limit)?;
 //!
@@ -68,7 +68,7 @@
 //!     query: &[f32],
 //!     allowed_ids: &[NodeId],
 //!     k: usize
-//! ) -> gallifreydb::utils::Result<Vec<(NodeId, f32)>> {
+//! ) -> aletheiadb::utils::Result<Vec<(NodeId, f32)>> {
 //!     // Search only within a subset of nodes
 //!     index.search_with_filter(query, k, |id| allowed_ids.contains(id))
 //! }
@@ -76,7 +76,7 @@
 //!
 //! # Implementation
 //!
-//! GallifreyDB implements this trait using HNSW (Hierarchical Navigable Small World)
+//! AletheiaDB implements this trait using HNSW (Hierarchical Navigable Small World)
 //! via the `usearch` crate. This implementation provides:
 //!
 //! - **High Performance**: 100µs-1ms typical query latency
@@ -199,7 +199,7 @@ impl DistanceMetric {
     /// # Example
     ///
     /// ```
-    /// use gallifreydb::index::vector::DistanceMetric;
+    /// use aletheiadb::index::vector::DistanceMetric;
     ///
     /// assert_eq!(DistanceMetric::Cosine.to_u8(), 0);
     /// assert_eq!(DistanceMetric::Euclidean.to_u8(), 1);
@@ -228,7 +228,7 @@ impl DistanceMetric {
     /// # Example
     ///
     /// ```
-    /// use gallifreydb::index::vector::DistanceMetric;
+    /// use aletheiadb::index::vector::DistanceMetric;
     ///
     /// assert_eq!(DistanceMetric::from_u8(0).unwrap(), DistanceMetric::Cosine);
     /// assert_eq!(DistanceMetric::from_u8(1).unwrap(), DistanceMetric::Euclidean);
@@ -258,7 +258,7 @@ impl DistanceMetric {
 /// Trait for vector indexes supporting approximate k-nearest neighbor search.
 ///
 /// This trait abstracts over different vector index implementations, allowing
-/// GallifreyDB to support multiple ANN (Approximate Nearest Neighbor) algorithms
+/// AletheiaDB to support multiple ANN (Approximate Nearest Neighbor) algorithms
 /// while maintaining a consistent query interface.
 ///
 /// # Invariants
@@ -316,10 +316,10 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```rust
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::core::id::NodeId;
-    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let node_id = NodeId::new(123).unwrap();
     /// let embedding = vec![0.1, 0.2, 0.3, 0.4];
@@ -345,10 +345,10 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```rust
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::core::id::NodeId;
-    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let node_id = NodeId::new(123).unwrap();
     /// index.remove(node_id)?;
@@ -383,9 +383,9 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```rust
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
     /// let results = index.search(&query, 10)?;
@@ -433,11 +433,11 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```rust
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::core::id::NodeId;
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::core::id::NodeId;
     /// # use std::collections::HashSet;
-    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
     /// let allowed = HashSet::from([NodeId::new(1).unwrap(), NodeId::new(5).unwrap(), NodeId::new(10).unwrap()]);
@@ -461,9 +461,9 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```rust
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// println!("Index contains {} vectors", index.len());
     /// # Ok(())
@@ -479,9 +479,9 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```rust
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let dims = index.dimensions();
     /// println!("This index accepts {}-dimensional vectors", dims);
@@ -509,9 +509,9 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```rust
-    /// # use gallifreydb::index::{VectorIndex, DistanceMetric};
-    /// # use gallifreydb::index::vector::HnswIndexBuilder;
-    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::{VectorIndex, DistanceMetric};
+    /// # use aletheiadb::index::vector::HnswIndexBuilder;
+    /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// match index.distance_metric() {
     ///     DistanceMetric::Cosine => println!("Using cosine similarity"),
@@ -534,9 +534,9 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```rust
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// if index.is_empty() {
     ///     println!("No vectors indexed yet");

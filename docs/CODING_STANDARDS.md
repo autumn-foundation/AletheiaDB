@@ -1,6 +1,6 @@
 # Rust Coding Standards
 
-This document defines coding standards and best practices for GallifreyDB development.
+This document defines coding standards and best practices for AletheiaDB development.
 
 ## Type Safety
 
@@ -388,7 +388,7 @@ use proptest::prelude::*;
 proptest! {
     #[test]
     fn temporal_consistency(operations: Vec<Operation>) {
-        let mut db = GallifreyDB::new();
+        let mut db = AletheiaDB::new();
         for op in operations {
             let _ = db.apply(op);
         }
@@ -423,7 +423,7 @@ src/
 
 ```rust
 // Public API - exposed to users
-pub struct GallifreyDB { ... }
+pub struct AletheiaDB { ... }
 
 // Internal - other modules can use
 pub(crate) struct CurrentIndexes { ... }

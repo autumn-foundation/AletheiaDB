@@ -24,7 +24,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use gallifreydb::storage::checkpoint::{CheckpointManager, CheckpointConfig};
+//! use aletheiadb::storage::checkpoint::{CheckpointManager, CheckpointConfig};
 //!
 //! // Create checkpoint manager
 //! let config = CheckpointConfig::default().data_dir("data/mydb");

@@ -1,4 +1,4 @@
-//! Tests for the GallifreyDB MCP server.
+//! Tests for the AletheiaDB MCP server.
 //!
 //! These tests verify the MCP server functionality including:
 //! - Server initialization and info
@@ -13,14 +13,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::core::PropertyMapBuilder;
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 
-use super::server::GallifreyMcpServer;
+use super::server::AletheiaMcpServer;
 use super::tools::*;
 
 /// Helper to create a test database with some sample data.
-fn create_test_db() -> Arc<GallifreyDB> {
-    let db = GallifreyDB::new().expect("Failed to create database");
+fn create_test_db() -> Arc<AletheiaDB> {
+    let db = AletheiaDB::new().expect("Failed to create database");
     Arc::new(db)
 }
 
@@ -28,8 +28,8 @@ fn create_test_db() -> Arc<GallifreyDB> {
 use rmcp::ServerHandler;
 
 /// Helper to create a test server.
-fn create_test_server() -> GallifreyMcpServer {
-    GallifreyMcpServer::new(create_test_db())
+fn create_test_server() -> AletheiaMcpServer {
+    AletheiaMcpServer::new(create_test_db())
 }
 
 /// Helper to parse JSON response and check for errors.
@@ -67,7 +67,7 @@ fn test_server_with_existing_db() {
         )
         .expect("Failed to create node");
 
-    let server = GallifreyMcpServer::new(db);
+    let server = AletheiaMcpServer::new(db);
     assert_eq!(server.db().node_count(), 1);
 }
 
@@ -402,7 +402,7 @@ mod node_tests {
 mod edge_tests {
     use super::*;
 
-    fn create_two_nodes(server: &GallifreyMcpServer) -> (u64, u64) {
+    fn create_two_nodes(server: &AletheiaMcpServer) -> (u64, u64) {
         let node1 = server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: Some({
@@ -699,7 +699,7 @@ mod edge_tests {
 mod traversal_tests {
     use super::*;
 
-    fn create_graph(server: &GallifreyMcpServer) -> Vec<u64> {
+    fn create_graph(server: &AletheiaMcpServer) -> Vec<u64> {
         // Create a simple graph: A -> B -> C -> D
         let nodes: Vec<u64> = (0..4)
             .map(|i| {
@@ -1522,7 +1522,7 @@ mod server_handler_tests {
 
         assert!(info.instructions.is_some());
         let instructions = info.instructions.unwrap();
-        assert!(instructions.contains("GallifreyDB"));
+        assert!(instructions.contains("AletheiaDB"));
         assert!(instructions.contains("bi-temporal"));
     }
 
@@ -1957,7 +1957,7 @@ mod temporal_extended_tests {
 mod traversal_extended_tests {
     use super::*;
 
-    fn create_bidirectional_graph(server: &GallifreyMcpServer) -> Vec<u64> {
+    fn create_bidirectional_graph(server: &AletheiaMcpServer) -> Vec<u64> {
         // Create nodes: A <-> B <-> C
         let nodes: Vec<u64> = (0..3)
             .map(|i| {

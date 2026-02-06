@@ -1,6 +1,6 @@
 # Hybrid Query Guide
 
-This guide covers GallifreyDB's hybrid query API, which combines **graph traversal**, **vector similarity**, and **bi-temporal queries** into a unified interface.
+This guide covers AletheiaDB's hybrid query API, which combines **graph traversal**, **vector similarity**, and **bi-temporal queries** into a unified interface.
 
 ## Overview
 
@@ -14,11 +14,11 @@ Hybrid queries enable powerful patterns like:
 ### Prerequisites
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 // Create database with vector indexing
-let db = GallifreyDB::new();
+let db = AletheiaDB::new();
 let config = HnswConfig::new(384, DistanceMetric::Cosine);
 db.enable_vector_index("embedding", config)?;
 ```
@@ -27,7 +27,7 @@ db.enable_vector_index("embedding", config)?;
 
 **1. Direct Functions** (simple patterns)
 ```rust
-use gallifreydb::query::hybrid::{traverse_and_rank, find_similar_as_of};
+use aletheiadb::query::hybrid::{traverse_and_rank, find_similar_as_of};
 
 // Graph + Vector: Find neighbors ranked by similarity
 let results = traverse_and_rank(&db, alice_id, "KNOWS", &query_embedding, 10)?;
@@ -179,7 +179,7 @@ Add time-travel capabilities:
 Refine your results:
 
 ```rust
-use gallifreydb::query::ir::Predicate;
+use aletheiadb::query::ir::Predicate;
 
 // Property predicates
 .filter(Predicate::eq("name", "Alice"))
@@ -485,7 +485,7 @@ Predicate::gt("score", 0.5f64)        // f64
 ### Common Errors
 
 ```rust
-use gallifreydb::utils::error::{Error, StorageError, VectorError};
+use aletheiadb::utils::error::{Error, StorageError, VectorError};
 
 match results.next() {
     Some(Ok(row)) => { /* process row */ }
@@ -530,7 +530,7 @@ db.query().find_similar_with_metric(&emb, 10, DistanceMetric::DotProduct)
 ### Optimizer Hints
 
 ```rust
-use gallifreydb::query::plan::IndexHint;
+use aletheiadb::query::plan::IndexHint;
 
 db.query()
     .start(node_id)

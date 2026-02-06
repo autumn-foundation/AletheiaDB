@@ -6,7 +6,7 @@
 
 ## Overview
 
-GallifreyDB's sharding system enables horizontal scalability when your dataset exceeds single-machine capacity. It uses **domain-based partitioning** with **edge replication** to maintain query performance while distributing data across multiple machines.
+AletheiaDB's sharding system enables horizontal scalability when your dataset exceeds single-machine capacity. It uses **domain-based partitioning** with **edge replication** to maintain query performance while distributing data across multiple machines.
 
 **Key Features:**
 - **Domain-based partitioning**: Nodes partitioned by label/type for data locality
@@ -26,7 +26,7 @@ GallifreyDB's sharding system enables horizontal scalability when your dataset e
 ### Basic Setup
 
 ```rust
-use gallifreydb::storage::sharding::{
+use aletheiadb::storage::sharding::{
     ShardConfig, ShardDefinition, ShardCoordinator, ShardId,
 };
 
@@ -48,7 +48,7 @@ assert_eq!(shard, ShardId::new(0).unwrap());
 ### Simple Query Routing
 
 ```rust
-use gallifreydb::storage::sharding::ShardRouter;
+use aletheiadb::storage::sharding::ShardRouter;
 
 let router = ShardRouter::new(&config);
 
@@ -73,7 +73,7 @@ for step in plan.steps() {
 ### Shard Configuration
 
 ```rust
-use gallifreydb::storage::sharding::{
+use aletheiadb::storage::sharding::{
     ShardConfig, ShardDefinition, ShardDiscovery, RebalanceConfig,
 };
 use std::time::Duration;
@@ -105,7 +105,7 @@ let config = ShardConfig {
 ### Connection Pool Configuration
 
 ```rust
-use gallifreydb::storage::sharding::{PoolConfig, ConnectionPool};
+use aletheiadb::storage::sharding::{PoolConfig, ConnectionPool};
 use std::time::Duration;
 
 let pool_config = PoolConfig {
@@ -122,7 +122,7 @@ let pool = ConnectionPool::new(shard_id, pool_config);
 ### Circuit Breaker Configuration
 
 ```rust
-use gallifreydb::storage::sharding::{CircuitBreakerConfig, CircuitBreaker};
+use aletheiadb::storage::sharding::{CircuitBreakerConfig, CircuitBreaker};
 use std::time::Duration;
 
 let cb_config = CircuitBreakerConfig {
@@ -137,7 +137,7 @@ let circuit_breaker = CircuitBreaker::new(cb_config);
 ### Query Executor Configuration
 
 ```rust
-use gallifreydb::storage::sharding::{ExecutorConfig, QueryExecutor};
+use aletheiadb::storage::sharding::{ExecutorConfig, QueryExecutor};
 use std::time::Duration;
 
 let executor_config = ExecutorConfig {
@@ -157,7 +157,7 @@ let executor = QueryExecutor::new(executor_config);
 Queries within a domain are routed to a single shard for maximum performance.
 
 ```rust
-use gallifreydb::storage::sharding::{ShardRouter, QueryExecutor, DistributedQuery};
+use aletheiadb::storage::sharding::{ShardRouter, QueryExecutor, DistributedQuery};
 
 // Route node lookup
 let shard = router.route_node("Person");
@@ -175,7 +175,7 @@ let result = executor.execute(&query, &clients)?;
 Multi-hop queries that cross domain boundaries use scatter-gather execution.
 
 ```rust
-use gallifreydb::storage::sharding::{
+use aletheiadb::storage::sharding::{
     DistributedQuery, AggregationStrategy, QueryExecutor,
 };
 
@@ -206,7 +206,7 @@ let places = executor.execute(&step2, &clients)?;
 Write operations spanning multiple shards use Two-Phase Commit.
 
 ```rust
-use gallifreydb::storage::sharding::{
+use aletheiadb::storage::sharding::{
     DistributedTransaction, ShardCoordinator, PersistentCommitLog,
 };
 
@@ -234,7 +234,7 @@ match coordinator.execute_distributed(&tx, &commit_log).await {
 Queries that aggregate data across shards use appropriate aggregation strategies.
 
 ```rust
-use gallifreydb::storage::sharding::{DistributedQuery, AggregationStrategy};
+use aletheiadb::storage::sharding::{DistributedQuery, AggregationStrategy};
 
 // Count all nodes across all shards
 let count_query = DistributedQuery::new()
@@ -264,7 +264,7 @@ let exists_query = DistributedQuery::new()
 Move data between shards without downtime using the migration executor.
 
 ```rust
-use gallifreydb::storage::sharding::{
+use aletheiadb::storage::sharding::{
     MigrationExecutor, MigrationConfig, DualWriteRouter,
 };
 
@@ -312,7 +312,7 @@ executor.complete(migration_id)?;
 During migration, the dual-write router ensures writes go to both old and new locations.
 
 ```rust
-use gallifreydb::storage::sharding::DualWriteRouter;
+use aletheiadb::storage::sharding::DualWriteRouter;
 
 let router = DualWriteRouter::new();
 
@@ -333,7 +333,7 @@ assert_eq!(targets, vec![ShardId::new(0).unwrap()]);
 Automatic rebalancing monitors shard sizes and triggers migrations when imbalanced.
 
 ```rust
-use gallifreydb::storage::sharding::{RebalanceManager, MigrationPlan};
+use aletheiadb::storage::sharding::{RebalanceManager, MigrationPlan};
 
 let manager = RebalanceManager::new(rebalance_config);
 
@@ -420,7 +420,7 @@ for (shard, ids) in by_shard {
 ### Metrics
 
 ```rust
-use gallifreydb::storage::sharding::{ShardMetrics, PoolStats, ExecutorStats};
+use aletheiadb::storage::sharding::{ShardMetrics, PoolStats, ExecutorStats};
 
 // Shard-level metrics
 let metrics = coordinator.get_shard_metrics(shard_id)?;
@@ -447,7 +447,7 @@ println!("  Errors: {}", exec_stats.error_count);
 ### Commit Log Inspection
 
 ```rust
-use gallifreydb::storage::sharding::PersistentCommitLog;
+use aletheiadb::storage::sharding::PersistentCommitLog;
 
 let log = PersistentCommitLog::open("data/commit_log")?;
 
@@ -468,7 +468,7 @@ println!("  Current LSN: {}", stats.current_lsn);
 ### Circuit Breaker State
 
 ```rust
-use gallifreydb::storage::sharding::CircuitState;
+use aletheiadb::storage::sharding::CircuitState;
 
 let state = circuit_breaker.state();
 match state {
@@ -483,7 +483,7 @@ match state {
 ### Common Errors
 
 ```rust
-use gallifreydb::storage::sharding::{NetworkError, ExecutorError, MigrationError};
+use aletheiadb::storage::sharding::{NetworkError, ExecutorError, MigrationError};
 
 // Network errors
 match client.query(query_id, data) {

@@ -1,6 +1,6 @@
-//! Abstract Syntax Tree for GQL (Gallifrey Query Language)
+//! Abstract Syntax Tree for AQL (Aletheia Query Language)
 //!
-//! This module defines the AST types that represent parsed GQL queries.
+//! This module defines the AST types that represent parsed AQL queries.
 //! The AST is produced by the parser and consumed by the query planner
 //! to generate a logical query plan.
 
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::index::vector::DistanceMetric;
 
-/// A complete GQL query.
+/// A complete AQL query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryAst {
     /// Optional temporal clause (AS OF or BETWEEN)

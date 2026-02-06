@@ -7,14 +7,14 @@
 
 #![allow(deprecated)]
 
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 // Users have to find and import this to make sense of their data?
-use gallifreydb::{GLOBAL_INTERNER, WriteOps};
+use aletheiadb::{GLOBAL_INTERNER, WriteOps};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🗣️ Echo is trying to debug a node...");
 
-    let db = GallifreyDB::new()?;
+    let db = AletheiaDB::new()?;
 
     // Create a node
     let node_id = db.write(|tx| {

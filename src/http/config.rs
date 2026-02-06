@@ -193,7 +193,7 @@ impl ServerConfigBuilder {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::http::{ServerConfig, CorsConfig};
+    /// use aletheiadb::http::{ServerConfig, CorsConfig};
     ///
     /// let config = ServerConfig::builder()
     ///     .port(8080)

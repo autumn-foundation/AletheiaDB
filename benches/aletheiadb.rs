@@ -1,4 +1,4 @@
-//! Benchmarks for GallifreyDB with temporal queries.
+//! Benchmarks for AletheiaDB with temporal queries.
 //!
 //! These benchmarks test:
 //! - Fast path: Current state queries (should match current_state.rs performance)
@@ -10,20 +10,20 @@
 
 mod common;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::{
-    GallifreyDB, NodeId, PropertyMapBuilder, WalConfigBuilder, WriteOps,
+use aletheiadb::{
+    AletheiaDB, NodeId, PropertyMapBuilder, WalConfigBuilder, WriteOps,
     storage::wal::DurabilityMode,
 };
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 /// Create a test database configured for benchmarking (Async mode, no waiting).
-fn create_benchmark_db() -> GallifreyDB {
+fn create_benchmark_db() -> AletheiaDB {
     let wal_config = WalConfigBuilder::new()
         .durability_mode(DurabilityMode::Async {
             flush_interval_ms: 100,
         })
         .build();
-    GallifreyDB::with_wal_config(wal_config).unwrap()
+    AletheiaDB::with_wal_config(wal_config).unwrap()
 }
 
 /// Create a test database with versioned history.
@@ -32,7 +32,7 @@ fn create_benchmark_db() -> GallifreyDB {
 fn create_versioned_graph(
     node_count: usize,
     versions_per_node: usize,
-) -> (GallifreyDB, Vec<NodeId>) {
+) -> (AletheiaDB, Vec<NodeId>) {
     let db = create_benchmark_db();
     let mut node_ids = Vec::new();
 
@@ -78,7 +78,7 @@ fn create_versioned_graph(
 
 /// Benchmark node creation (with versioning overhead).
 fn bench_node_creation_with_versioning(c: &mut Criterion) {
-    c.bench_function("gallifreydb_node_creation", |b| {
+    c.bench_function("aletheiadb_node_creation", |b| {
         b.iter_batched(
             create_benchmark_db,
             |db| {
@@ -96,7 +96,7 @@ fn bench_node_creation_with_versioning(c: &mut Criterion) {
 
 /// Benchmark edge creation (with versioning overhead).
 fn bench_edge_creation_with_versioning(c: &mut Criterion) {
-    c.bench_function("gallifreydb_edge_creation", |b| {
+    c.bench_function("aletheiadb_edge_creation", |b| {
         b.iter_batched(
             || {
                 let db = create_benchmark_db();
@@ -120,7 +120,7 @@ fn bench_edge_creation_with_versioning(c: &mut Criterion) {
 
 /// Benchmark current state queries (fast path).
 fn bench_current_state_queries(c: &mut Criterion) {
-    let mut group = c.benchmark_group("gallifreydb_fast_path");
+    let mut group = c.benchmark_group("aletheiadb_fast_path");
 
     for graph_size in [100, 1000, 10000] {
         let (db, node_ids) = create_versioned_graph(graph_size, 1);
@@ -147,7 +147,7 @@ fn bench_current_state_queries(c: &mut Criterion) {
 /// `current_state::bench_single_hop_traversal` for raw storage performance
 /// without API layer overhead.
 fn bench_api_single_hop_traversal(c: &mut Criterion) {
-    let mut group = c.benchmark_group("gallifreydb_single_hop");
+    let mut group = c.benchmark_group("aletheiadb_single_hop");
 
     for graph_size in [100, 1000, 10000] {
         let (db, node_ids) = create_versioned_graph(graph_size, 1);
@@ -177,7 +177,7 @@ fn bench_api_multi_hop_traversal(c: &mut Criterion) {
     let (db, node_ids) = create_versioned_graph(1000, 1);
     let start_node = node_ids[0];
 
-    c.bench_function("gallifreydb_3_hop_traversal", |b| {
+    c.bench_function("aletheiadb_3_hop_traversal", |b| {
         b.iter(|| {
             let mut visited = 0;
 
@@ -273,14 +273,14 @@ fn bench_degree_queries(c: &mut Criterion) {
     let (db, node_ids) = create_versioned_graph(1000, 1);
     let node_id = node_ids[0];
 
-    c.bench_function("gallifreydb_out_degree", |b| {
+    c.bench_function("aletheiadb_out_degree", |b| {
         b.iter(|| {
             let degree = db.out_degree(black_box(node_id));
             black_box(degree)
         });
     });
 
-    c.bench_function("gallifreydb_in_degree", |b| {
+    c.bench_function("aletheiadb_in_degree", |b| {
         b.iter(|| {
             let degree = db.in_degree(black_box(node_id));
             black_box(degree)
@@ -297,7 +297,7 @@ fn bench_api_labeled_traversal(c: &mut Criterion) {
     let (db, node_ids) = create_versioned_graph(1000, 1);
     let node_id = node_ids[0];
 
-    c.bench_function("gallifreydb_labeled_traversal", |b| {
+    c.bench_function("aletheiadb_labeled_traversal", |b| {
         b.iter(|| {
             let edges = db.get_outgoing_edges_with_label(black_box(node_id), "LINKS_TO");
             black_box(edges)
@@ -309,7 +309,7 @@ fn bench_api_labeled_traversal(c: &mut Criterion) {
 fn bench_stats(c: &mut Criterion) {
     let (db, _) = create_versioned_graph(1000, 1);
 
-    c.bench_function("gallifreydb_historical_stats", |b| {
+    c.bench_function("aletheiadb_historical_stats", |b| {
         b.iter(|| {
             let stats = db.historical_stats();
             black_box(stats)
@@ -319,7 +319,7 @@ fn bench_stats(c: &mut Criterion) {
 
 /// Benchmark batch node creation.
 fn bench_batch_operations(c: &mut Criterion) {
-    let mut group = c.benchmark_group("gallifreydb_batch");
+    let mut group = c.benchmark_group("aletheiadb_batch");
 
     for batch_size in [10, 100, 1000] {
         group.bench_with_input(
@@ -327,7 +327,7 @@ fn bench_batch_operations(c: &mut Criterion) {
             &batch_size,
             |b, &size| {
                 b.iter_batched(
-                    || GallifreyDB::new().unwrap(),
+                    || AletheiaDB::new().unwrap(),
                     |db| {
                         for i in 0..size {
                             let props = PropertyMapBuilder::new().insert("id", i as i64).build();

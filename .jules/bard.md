@@ -12,9 +12,9 @@
 **Confusion:** Historical versions retrieved from storage (not currently in memory) may have `created_by_tx` set to `TxId(0)`. This is because the creating transaction ID is not currently preserved in the historical storage format to save space.
 **Clarification:** Updated `VersionMetadata` documentation to explicitly state this behavior.
 
-## 2024-05-25 - GallifreyDB Default Configuration
-**Confusion:** `GallifreyDB::new()` documentation did not specify whether it creates an in-memory or disk-based database. It defaults to disk-based storage at `./gallifreydb/wal`, which could surprise users expecting an ephemeral in-memory instance.
-**Clarification:** Updated `GallifreyDB::new()` documentation to explicitly state the default disk-based configuration and point to `with_unified_config` for customization.
+## 2024-05-25 - AletheiaDB Default Configuration
+**Confusion:** `AletheiaDB::new()` documentation did not specify whether it creates an in-memory or disk-based database. It defaults to disk-based storage at `./aletheiadb/wal`, which could surprise users expecting an ephemeral in-memory instance.
+**Clarification:** Updated `AletheiaDB::new()` documentation to explicitly state the default disk-based configuration and point to `with_unified_config` for customization.
 
 ## 2024-05-25 - WAL Entry Binary Format
 **Confusion:** The on-disk binary format of `WalEntry` was only documented in code comments within the serialization logic, making it hard to understand the storage format without deep diving into implementation details.
@@ -22,4 +22,4 @@
 
 ## 2024-05-26 - HTTP JSON Conversion Limits
 **Confusion:** The HTTP API's JSON conversion logic enforces a recursion depth limit (100) to prevent stack overflow attacks, but this behavior was undocumented and could surprise developers working with deeply nested data.
-**Clarification:** Added documentation to `src/http/converters.rs` explicitly stating the recursion limit and detailing the type mappings between GallifreyDB types and JSON types.
+**Clarification:** Added documentation to `src/http/converters.rs` explicitly stating the recursion limit and detailing the type mappings between AletheiaDB types and JSON types.

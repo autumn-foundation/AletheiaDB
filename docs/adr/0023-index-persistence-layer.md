@@ -2,14 +2,14 @@
 
 **Status:** Accepted (Implemented)
 **Date:** 2026-01-15
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, persistence, indexes, durability
 **Supersedes:** None
 **Related:** ADR-0007 (WAL Durability), ADR-0011 (Vector Search Integration)
 
 ## Context
 
-GallifreyDB currently maintains all indexes in memory, which works well for development and testing but has several critical limitations for production use:
+AletheiaDB currently maintains all indexes in memory, which works well for development and testing but has several critical limitations for production use:
 
 **Problems with Memory-Only Indexes:**
 1. **Cold Start Performance**: Database startup requires rebuilding all indexes from WAL, which can take minutes to hours for large databases

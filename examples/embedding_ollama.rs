@@ -1,4 +1,4 @@
-//! Example: Using Ollama local embeddings with GallifreyDB
+//! Example: Using Ollama local embeddings with AletheiaDB
 //!
 //! This example demonstrates using Ollama for local embedding generation.
 //!
@@ -16,9 +16,9 @@
 
 #![cfg(feature = "embedding-ollama")]
 
-use gallifreydb::embeddings::EmbeddingService;
-use gallifreydb::embeddings::providers::ollama::*;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use aletheiadb::embeddings::EmbeddingService;
+use aletheiadb::embeddings::providers::ollama::*;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -54,9 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         duration.as_millis() as f64 / documents.len() as f64
     );
 
-    // 3. Store in GallifreyDB
-    println!("💾 Storing in GallifreyDB...");
-    let db = GallifreyDB::new()?;
+    // 3. Store in AletheiaDB
+    println!("💾 Storing in AletheiaDB...");
+    let db = AletheiaDB::new()?;
 
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(

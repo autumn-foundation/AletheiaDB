@@ -11,7 +11,7 @@
 #![cfg(feature = "http-server")]
 
 use actix_web::{App, test};
-use gallifreydb::http::{ServerConfig, configure_app, create_app, health_check};
+use aletheiadb::http::{ServerConfig, configure_app, create_app, health_check};
 use serde_json::Value;
 
 /// Test that health endpoint returns 200 OK with {"status": "healthy"}
@@ -190,7 +190,7 @@ mod shutdown_tests {
     /// Test that server can be gracefully shut down
     #[actix_rt::test]
     async fn test_graceful_shutdown_signal() {
-        use gallifreydb::http::create_server;
+        use aletheiadb::http::create_server;
 
         let config = ServerConfig::new(0); // Use port 0 for random available port
         let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -228,15 +228,15 @@ mod shutdown_tests {
 
 #[cfg(test)]
 mod state_tests {
-    use gallifreydb::GallifreyDB;
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::http::AppState;
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::http::AppState;
     use std::sync::Arc;
 
-    /// Test that AppState can be created with an Arc<GallifreyDB>
+    /// Test that AppState can be created with an Arc<AletheiaDB>
     #[test]
     fn test_app_state_creation() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
         let state = AppState::new(db.clone());
 
         // Verify we can access the database through the state
@@ -246,7 +246,7 @@ mod state_tests {
     /// Test that AppState implements Clone for actix-web sharing
     #[test]
     fn test_app_state_is_clone() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
         let state = AppState::new(db.clone());
 
         // Clone should work
@@ -266,7 +266,7 @@ mod state_tests {
     /// Test multiple concurrent reads succeed without blocking
     #[actix_rt::test]
     async fn test_app_state_concurrent_reads() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
 
         // Pre-populate with some nodes
         for i in 0..100 {
@@ -301,7 +301,7 @@ mod state_tests {
     /// Test multiple concurrent writes succeed without data races
     #[actix_rt::test]
     async fn test_app_state_concurrent_writes() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
         let state = AppState::new(db);
 
         // Spawn 10 concurrent write tasks, each creating 10 nodes
@@ -337,7 +337,7 @@ mod state_tests {
     /// Test mixed concurrent reads and writes don't block each other
     #[actix_rt::test]
     async fn test_app_state_mixed_concurrent_operations() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
         let state = AppState::new(db);
 
         let mut handles = vec![];
@@ -385,7 +385,7 @@ mod state_tests {
     /// Test that heavy concurrent load doesn't cause deadlocks
     #[actix_rt::test]
     async fn test_no_deadlock_under_load() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
         let state = AppState::new(db);
 
         // Spawn many tasks doing mixed operations
@@ -429,10 +429,10 @@ mod state_tests {
         assert_eq!(state.db().node_count(), 200);
     }
 
-    /// Test that From<Arc<GallifreyDB>> is implemented for convenience
+    /// Test that From<Arc<AletheiaDB>> is implemented for convenience
     #[test]
     fn test_app_state_from_arc() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
         let state: AppState = db.into();
 
         // Should be usable immediately

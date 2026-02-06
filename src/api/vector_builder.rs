@@ -1,4 +1,4 @@
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::TemporalVectorConfig;
 use crate::utils::error::Result;
@@ -12,12 +12,12 @@ use crate::utils::error::Result;
 /// # Example
 ///
 /// ```rust,no_run
-/// use gallifreydb::GallifreyDB;
-/// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-/// use gallifreydb::index::vector::temporal::TemporalVectorConfig;
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+/// use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let db = GallifreyDB::new()?;
+/// let db = AletheiaDB::new()?;
 ///
 /// // Create a basic vector index
 /// db.vector_index("embedding")
@@ -34,7 +34,7 @@ use crate::utils::error::Result;
 /// # }
 /// ```
 pub struct VectorIndexBuilder<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
     property_name: String,
     hnsw_config: Option<HnswConfig>,
     temporal_config: Option<TemporalVectorConfig>,
@@ -42,7 +42,7 @@ pub struct VectorIndexBuilder<'a> {
 
 impl<'a> VectorIndexBuilder<'a> {
     /// Create a new builder for the specified property.
-    pub fn new(db: &'a GallifreyDB, property_name: String) -> Self {
+    pub fn new(db: &'a AletheiaDB, property_name: String) -> Self {
         VectorIndexBuilder {
             db,
             property_name,
@@ -63,10 +63,10 @@ impl<'a> VectorIndexBuilder<'a> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine).with_capacity(10000))
     ///     .enable()?;
@@ -91,12 +91,12 @@ impl<'a> VectorIndexBuilder<'a> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+    /// use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .temporal(TemporalVectorConfig {
@@ -128,10 +128,10 @@ impl<'a> VectorIndexBuilder<'a> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// // This will fail - no HNSW config
     /// let result = db.vector_index("embedding").enable();
     /// assert!(result.is_err());

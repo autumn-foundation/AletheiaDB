@@ -1,13 +1,13 @@
 use crate::api::vector_builder::VectorIndexBuilder;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
 use crate::utils::error::Result;
 use std::sync::Arc;
 
-impl GallifreyDB {
+impl AletheiaDB {
     /// Enable vector indexing for a specific property.
     ///
     /// Once enabled, nodes with the specified property will be automatically
@@ -21,7 +21,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
     ///
     /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
     /// db.enable_vector_index("embedding", config)?;
@@ -61,8 +61,8 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// use gallifreydb::index::vector::HnswConfig;
+    /// use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
+    /// use aletheiadb::index::vector::HnswConfig;
     ///
     /// let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
     /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
@@ -167,7 +167,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// let db = GallifreyDB::new();
+    /// let db = AletheiaDB::new();
     /// // Enable temporal indexes for two properties
     /// db.vector_index("embedding1").hnsw(config1).temporal(temporal_config).enable()?;
     /// db.vector_index("embedding2").hnsw(config2).temporal(temporal_config).enable()?;
@@ -193,7 +193,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
     ///
     /// // Basic vector index
     /// db.vector_index("embedding")
@@ -593,7 +593,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::core::temporal::TimeRange;
+    /// use aletheiadb::core::temporal::TimeRange;
     ///
     /// // Track how a document's embedding changed from its original version
     /// let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
@@ -648,7 +648,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::core::temporal::TimeRange;
+    /// use aletheiadb::core::temporal::TimeRange;
     ///
     /// let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
     /// let evolution = db.semantic_evolution_in("content_embedding", node_id, time_range)?;
@@ -698,8 +698,8 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::core::temporal::TimeRange;
-    /// use gallifreydb::index::vector::temporal::DriftMetric;
+    /// use aletheiadb::core::temporal::TimeRange;
+    /// use aletheiadb::index::vector::temporal::DriftMetric;
     ///
     /// let time_range = TimeRange::new(start_ts.into(), end_ts.into()).unwrap();
     /// let drifted = db.find_drift_in(

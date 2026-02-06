@@ -8,7 +8,7 @@ use std::time::Duration;
 
 /// Durability mode controlling when data is synced to disk.
 ///
-/// GallifreyDB supports four durability modes, each offering different
+/// AletheiaDB supports four durability modes, each offering different
 /// tradeoffs between latency, throughput, and durability guarantees:
 ///
 /// - [`Synchronous`](DurabilityMode::Synchronous): Maximum durability, fsync per commit
@@ -25,7 +25,7 @@ use std::time::Duration;
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::{WalConfigBuilder, DurabilityMode};
+/// use aletheiadb::{WalConfigBuilder, DurabilityMode};
 ///
 /// // High-throughput ACID mode with 10ms batching
 /// let config = WalConfigBuilder::new()
@@ -112,10 +112,10 @@ pub enum DurabilityMode {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, DurabilityMode};
+    /// use aletheiadb::{AletheiaDB, DurabilityMode};
     ///
     /// let mode = DurabilityMode::async_batched_validated(10, 100)?;
-    /// let db = GallifreyDB::with_mode(mode);
+    /// let db = AletheiaDB::with_mode(mode);
     ///
     /// // Writes return in <100µs (no fsync wait)
     /// let node_id = db.write(|tx| {
@@ -299,7 +299,7 @@ impl DurabilityMode {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::storage::wal::DurabilityMode;
+    /// use aletheiadb::storage::wal::DurabilityMode;
     ///
     /// // Create with custom parameters
     /// let mode = DurabilityMode::async_batched_validated(10, 100)?;
@@ -361,12 +361,12 @@ impl DurabilityMode {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WalConfigBuilder, DurabilityMode};
+    /// use aletheiadb::{AletheiaDB, WalConfigBuilder, DurabilityMode};
     ///
     /// let config = WalConfigBuilder::new()
     ///     .durability_mode(DurabilityMode::async_batched_default())
     ///     .build();
-    /// let db = GallifreyDB::with_wal_config(config);
+    /// let db = AletheiaDB::with_wal_config(config);
     /// ```
     pub const fn async_batched_default() -> Self {
         DurabilityMode::AsyncBatched {
@@ -388,12 +388,12 @@ impl DurabilityMode {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WalConfigBuilder, DurabilityMode};
+    /// use aletheiadb::{AletheiaDB, WalConfigBuilder, DurabilityMode};
     ///
     /// let wal_config = WalConfigBuilder::new()
     ///     .durability_mode(DurabilityMode::fast())
     ///     .build();
-    /// let db = GallifreyDB::with_wal_config(wal_config);
+    /// let db = AletheiaDB::with_wal_config(wal_config);
     /// ```
     pub const fn fast() -> Self {
         DurabilityMode::GroupCommit {
@@ -458,9 +458,9 @@ impl DurabilityMode {
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::{GallifreyDB, WriteOptions, DurabilityMode};
+/// use aletheiadb::{AletheiaDB, WriteOptions, DurabilityMode};
 ///
-/// let db = GallifreyDB::new();
+/// let db = AletheiaDB::new();
 ///
 /// // Use Async mode for this bulk insert
 /// let options = WriteOptions::new()
@@ -521,9 +521,9 @@ impl WriteOptions {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WriteOptions};
+    /// use aletheiadb::{AletheiaDB, WriteOptions};
     ///
-    /// let db = GallifreyDB::new();
+    /// let db = AletheiaDB::new();
     ///
     /// // Use bulk_import preset for high-throughput loading
     /// db.write_with_options(WriteOptions::bulk_import(), |tx| {
@@ -559,9 +559,9 @@ impl WriteOptions {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WriteOptions};
+    /// use aletheiadb::{AletheiaDB, WriteOptions};
     ///
-    /// let db = GallifreyDB::new();
+    /// let db = AletheiaDB::new();
     ///
     /// // Use critical preset for important data
     /// db.write_with_options(WriteOptions::critical(), |tx| {

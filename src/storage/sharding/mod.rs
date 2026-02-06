@@ -32,7 +32,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::storage::sharding::{ShardConfig, ShardCoordinator, ShardDefinition};
+//! use aletheiadb::storage::sharding::{ShardConfig, ShardCoordinator, ShardDefinition};
 //!
 //! let config = ShardConfig::new(vec![
 //!     ShardDefinition::new(0, "shard0:9000", vec!["Person", "User"]),

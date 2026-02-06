@@ -5,13 +5,13 @@
 //! These tests verify that HistoricalStorage can reconstruct properties
 //! from version chains even when some versions have been migrated to cold storage.
 
-use gallifreydb::PropertyMapBuilder;
-use gallifreydb::core::GLOBAL_INTERNER;
-use gallifreydb::core::id::{NodeId, VersionId};
-use gallifreydb::core::temporal::time;
-use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
-use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
+use aletheiadb::PropertyMapBuilder;
+use aletheiadb::core::GLOBAL_INTERNER;
+use aletheiadb::core::id::{NodeId, VersionId};
+use aletheiadb::core::temporal::time;
+use aletheiadb::storage::historical::HistoricalStorage;
+use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+use aletheiadb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
 

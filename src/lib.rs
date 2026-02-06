@@ -1,6 +1,6 @@
-//! GallifreyDB - A high-performance bi-temporal graph database.
+//! AletheiaDB - A high-performance bi-temporal graph database.
 //!
-//! GallifreyDB tracks both **valid time** (when facts were true in reality) and
+//! AletheiaDB tracks both **valid time** (when facts were true in reality) and
 //! **transaction time** (when facts were recorded in the database). This enables
 //! powerful time-traveling queries and historical analysis.
 //!
@@ -24,11 +24,11 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use gallifreydb::{GallifreyDB, properties, WriteOps};
-//! use gallifreydb::core::temporal::time;
+//! use aletheiadb::{AletheiaDB, properties, WriteOps};
+//! use aletheiadb::core::temporal::time;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = GallifreyDB::new()?;
+//! let db = AletheiaDB::new()?;
 //!
 //! // Create a node
 //! let alice = db.create_node("Person", properties! {
@@ -90,7 +90,7 @@ pub mod http;
 
 // Re-export commonly used types at the crate root
 pub use config::{
-    ConfigError, GallifreyDBConfig, GallifreyDBConfigBuilder, HistoricalConfig,
+    AletheiaDBConfig, AletheiaDBConfigBuilder, ConfigError, HistoricalConfig,
     HistoricalConfigBuilder, VectorIndexConfig, VectorIndexConfigBuilder, WalConfig,
     WalConfigBuilder,
 };
@@ -103,7 +103,7 @@ pub use core::{
 pub use api::{
     ReadOps, ReadTransaction, TxId, TxState, VectorIndexBuilder, WriteOps, WriteTransaction,
 };
-pub use db::GallifreyDB;
+pub use db::AletheiaDB;
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
     vector::{DistanceMetric, HnswConfig},

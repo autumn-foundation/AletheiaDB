@@ -1,7 +1,7 @@
 //! SQL Parser wrapper for sqlparser-rs.
 //!
 //! This module provides a thin wrapper around sqlparser-rs that handles
-//! GallifreyDB-specific SQL dialect configuration.
+//! AletheiaDB-specific SQL dialect configuration.
 
 use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
@@ -9,9 +9,9 @@ use sqlparser::parser::Parser;
 
 use super::error::SqlError;
 
-/// SQL Parser for GallifreyDB.
+/// SQL Parser for AletheiaDB.
 ///
-/// Wraps sqlparser-rs with configuration appropriate for GallifreyDB's
+/// Wraps sqlparser-rs with configuration appropriate for AletheiaDB's
 /// SQL:2011 temporal extensions.
 pub struct SqlParser;
 
@@ -30,7 +30,7 @@ impl SqlParser {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use gallifreydb::sql::SqlParser;
+    /// use aletheiadb::sql::SqlParser;
     ///
     /// let stmt = SqlParser::parse("SELECT * FROM nodes WHERE label = 'Person'")?;
     /// ```

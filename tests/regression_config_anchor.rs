@@ -1,6 +1,6 @@
-use gallifreydb::config::{GallifreyDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
-use gallifreydb::storage::index_persistence::PersistenceConfig;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder, WriteOps};
+use aletheiadb::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+use aletheiadb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 use tempfile::tempdir;
 
 #[test]
@@ -10,7 +10,7 @@ fn test_reproduce_config_gap() {
 
     // Create config with disabled persistence
     // NOW: We CAN set anchor_interval here!
-    let config = GallifreyDBConfig::builder()
+    let config = AletheiaDBConfig::builder()
         .wal(WalConfigBuilder::new().wal_dir(wal_dir).build())
         .historical(
             HistoricalConfigBuilder::new()
@@ -24,7 +24,7 @@ fn test_reproduce_config_gap() {
         })
         .build();
 
-    let db = GallifreyDB::with_unified_config(config).unwrap();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
 
     // Create a node (Version 1 - Anchor)
     let node_id = db

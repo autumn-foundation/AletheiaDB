@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** core, api
 
 ## Context
@@ -15,7 +15,7 @@ Graph databases store properties on nodes and edges. The property type system mu
 4. **Serialization**: Easy to persist and transfer
 5. **Future extensibility**: Support new types (e.g., vectors for embeddings)
 
-Key considerations for GallifreyDB:
+Key considerations for AletheiaDB:
 - LLM integration benefits from structured metadata
 - Embeddings will be stored as properties (vector search)
 - Properties may be large (document content) or small (timestamps)

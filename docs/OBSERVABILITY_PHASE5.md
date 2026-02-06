@@ -111,7 +111,7 @@ use opentelemetry::{trace::Tracer, global};
 pub fn execute_distributed_query(
     trace_context: Option<TraceContext>,
 ) -> Result<QueryResult> {
-    let tracer = global::tracer("gallifreydb");
+    let tracer = global::tracer("aletheiadb");
 
     let span = if let Some(ctx) = trace_context {
         // Continue existing trace

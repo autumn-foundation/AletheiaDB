@@ -3,12 +3,12 @@
 **Version:** 1.0
 **Status:** Specification
 **Created:** 2026-01-20
-**Issue:** [#86](https://github.com/madmax983/GallifreyDB/issues/86) (VS-080)
+**Issue:** [#86](https://github.com/madmax983/AletheiaDB/issues/86) (VS-080)
 **Related:** [Phase 5: Persistence & Performance](VECTOR_SEARCH_DESIGN.md#phase-5-persistence--performance)
 
 ## Executive Summary
 
-This document specifies the `.vidx` file format for persisting vector indexes in GallifreyDB. The format enables fast cold starts by storing HNSW indexes and their metadata to disk, eliminating the need for full WAL replay on database restart.
+This document specifies the `.vidx` file format for persisting vector indexes in AletheiaDB. The format enables fast cold starts by storing HNSW indexes and their metadata to disk, eliminating the need for full WAL replay on database restart.
 
 **Key Design Goals:**
 - **Fast Loading**: Memory-mapped access for multi-GB indexes
@@ -212,9 +212,9 @@ if computed != stored {
 
 ### 4.1 Purpose
 
-Maps GallifreyDB `NodeId` ↔ usearch internal keys. Required because:
+Maps AletheiaDB `NodeId` ↔ usearch internal keys. Required because:
 - usearch uses contiguous integer keys (0, 1, 2, ...)
-- GallifreyDB uses 64-bit `NodeId` (can be sparse)
+- AletheiaDB uses 64-bit `NodeId` (can be sparse)
 - Enables node lookup without scanning entire index
 
 ### 4.2 File Structure
@@ -229,7 +229,7 @@ Maps GallifreyDB `NodeId` ↔ usearch internal keys. Required because:
 │ │ count: u64                   # Number of mappings   │ │
 │ │ mappings: Vec<VectorMapping>                        │ │
 │ │   ┌───────────────────────────────────────────────┐ │ │
-│ │   │ node_id: u64          # GallifreyDB NodeId    │ │ │
+│ │   │ node_id: u64          # AletheiaDB NodeId    │ │ │
 │ │   │ usearch_key: u64      # usearch internal key  │ │ │
 │ │   └───────────────────────────────────────────────┘ │ │
 │ │ deleted_ids: Vec<u64>        # Soft-deleted nodes  │ │
@@ -259,7 +259,7 @@ Maps GallifreyDB `NodeId` ↔ usearch internal keys. Required because:
 **Mapping Entry**:
 ```rust
 struct VectorMapping {
-    node_id: u64,       // GallifreyDB node ID
+    node_id: u64,       // AletheiaDB node ID
     usearch_key: u64,   // usearch internal key
 }
 ```
@@ -857,8 +857,8 @@ Before loading an index, validate:
 ### 13.1 Save Index
 
 ```rust
-use gallifreydb::storage::index_persistence::vector::*;
-use gallifreydb::index::vector::HnswIndex;
+use aletheiadb::storage::index_persistence::vector::*;
+use aletheiadb::index::vector::HnswIndex;
 
 // Create index
 let index = HnswIndex::new(384, DistanceMetric::Cosine)?;
@@ -951,7 +951,7 @@ let snapshot = HnswIndex::load(&snapshot_path)?;
 | Vector Meta | GVEC | "GVEC" | 0x47 0x56 0x45 0x43 |
 | Mappings | GMAP | "GMAP" | 0x47 0x4D 0x41 0x50 |
 
-**Pattern**: All GallifreyDB index files start with "G" (0x47)
+**Pattern**: All AletheiaDB index files start with "G" (0x47)
 
 ## 16. Appendix: Size Reference Table
 

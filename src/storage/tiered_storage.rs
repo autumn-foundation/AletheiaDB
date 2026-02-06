@@ -31,8 +31,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
-//! use gallifreydb::storage::redb_cold_storage::RedbColdStorage;
+//! use aletheiadb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
+//! use aletheiadb::storage::redb_cold_storage::RedbColdStorage;
 //! use std::sync::Arc;
 //!
 //! // Create tiered storage

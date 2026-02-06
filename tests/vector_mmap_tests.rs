@@ -1,7 +1,7 @@
 //! Tests for memory-mapped index persistence.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{
     DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, StorageMode, VectorIndex,
 };
 use tempfile::TempDir;

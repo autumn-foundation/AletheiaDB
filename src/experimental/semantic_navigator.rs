@@ -4,7 +4,7 @@
 //! as the heuristic and cost function. It enables finding "semantically smooth" paths
 //! between concepts.
 
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::vector::cosine_similarity;
 use crate::utils::{Error, Result};
@@ -13,7 +13,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 /// A navigator that finds semantically meaningful paths through the graph.
 pub struct SemanticNavigator<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -44,7 +44,7 @@ impl PartialOrd for State {
 
 impl<'a> SemanticNavigator<'a> {
     /// Create a new SemanticNavigator.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_semantic_path_linear() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // A -> B -> C
         // Vectors:
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_missing_vector_fail() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let a = db
             .create_node("Node", PropertyMapBuilder::new().build())
             .unwrap();

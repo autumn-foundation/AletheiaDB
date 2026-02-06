@@ -1,7 +1,7 @@
 //! Performance benchmarks for database recovery operations.
 //!
 //! These benchmarks measure recovery time across various scenarios to ensure
-//! GallifreyDB meets its performance targets for system restart and disaster recovery.
+//! AletheiaDB meets its performance targets for system restart and disaster recovery.
 //!
 //! ## Benchmark Scenarios
 //!
@@ -20,20 +20,18 @@
 
 mod common;
 
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::temporal::time;
+use aletheiadb::index::vector::DistanceMetric;
+use aletheiadb::index::vector::hnsw::HnswConfig;
+use aletheiadb::storage::current::CurrentStorage;
+use aletheiadb::storage::historical::HistoricalStorage;
+use aletheiadb::storage::wal::WalOperation;
+use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use aletheiadb::storage::{CheckpointManager, UnifiedCheckpointConfig};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::time;
-use gallifreydb::index::vector::DistanceMetric;
-use gallifreydb::index::vector::hnsw::HnswConfig;
-use gallifreydb::storage::current::CurrentStorage;
-use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::wal::WalOperation;
-use gallifreydb::storage::wal::concurrent_system::{
-    ConcurrentWalSystem, ConcurrentWalSystemConfig,
-};
-use gallifreydb::storage::{CheckpointManager, UnifiedCheckpointConfig};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -193,7 +191,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
             let update_count = (i / 2) + 1; // How many times has this been updated
             WalOperation::UpdateNode {
                 node_id: NodeId::new(node_id).unwrap(),
-                version_id: gallifreydb::core::id::VersionId::new((update_count + 1) as u64)
+                version_id: aletheiadb::core::id::VersionId::new((update_count + 1) as u64)
                     .unwrap(),
                 label: GLOBAL_INTERNER.intern("WalNode").unwrap(),
                 properties: PropertyMapBuilder::new()

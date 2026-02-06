@@ -117,7 +117,7 @@ pub type Result<T> = std::result::Result<T, IndexPersistenceError>;
 Create `src/storage/index_persistence/mod.rs`:
 
 ```rust
-//! Comprehensive index persistence layer for GallifreyDB.
+//! Comprehensive index persistence layer for AletheiaDB.
 //!
 //! This module provides persistence for all index types:
 //! - Vector indexes (HNSW via usearch)
@@ -538,7 +538,7 @@ pub struct VectorMappingsData {
 /// Single vector ID mapping.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct VectorMapping {
-    /// GallifreyDB node ID
+    /// AletheiaDB node ID
     pub node_id: u64,
     /// usearch internal key
     pub usearch_key: u64,
@@ -1911,14 +1911,14 @@ pub mod api;
 pub use api::{PersistenceConfig, PersistenceStats, PersistenceStatus, IndexStatus, VectorIndexStatus};
 ```
 
-**Step 3: Add to GallifreyDBConfig**
+**Step 3: Add to AletheiaDBConfig**
 
-In `src/config.rs`, add after the existing config fields (find the `GallifreyDBConfig` struct):
+In `src/config.rs`, add after the existing config fields (find the `AletheiaDBConfig` struct):
 
 ```rust
 use crate::storage::index_persistence::PersistenceConfig;
 
-// In GallifreyDBConfig struct, add:
+// In AletheiaDBConfig struct, add:
     /// Index persistence configuration
     pub persistence: PersistenceConfig,
 
@@ -1959,12 +1959,12 @@ Create `tests/index_persistence.rs`:
 ```rust
 //! Integration tests for index persistence.
 
-use gallifreydb::storage::index_persistence::{
+use aletheiadb::storage::index_persistence::{
     formats::*, graph::*, loader::IndexPersistenceManager, manifest::*, strings::*, temporal::*,
     vector::*, IndexPersistenceError, GRAPH_MAGIC, INTERNER_MAGIC, MANIFEST_MAGIC, TEMPORAL_MAGIC,
     VECTOR_META_MAGIC,
 };
-use gallifreydb::core::GLOBAL_INTERNER;
+use aletheiadb::core::GLOBAL_INTERNER;
 use tempfile::tempdir;
 
 #[test]
@@ -2128,7 +2128,7 @@ git commit -m "test: add integration tests for index persistence cycle"
 Update the module doc comment in `src/storage/index_persistence/mod.rs`:
 
 ```rust
-//! Comprehensive index persistence layer for GallifreyDB.
+//! Comprehensive index persistence layer for AletheiaDB.
 //!
 //! This module provides persistence for all index types using bitcode serialization:
 //! - **Vector indexes**: HNSW via usearch native format + bitcode metadata
@@ -2163,7 +2163,7 @@ Update the module doc comment in `src/storage/index_persistence/mod.rs`:
 //! # Example
 //!
 //! ```no_run
-//! use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+//! use aletheiadb::storage::index_persistence::IndexPersistenceManager;
 //!
 //! let manager = IndexPersistenceManager::new("data");
 //!
@@ -2232,7 +2232,7 @@ This implementation plan covers:
 **Estimated lines of code**: ~1500
 
 After completing this plan, the next steps would be:
-1. Integrate with `GallifreyDB` struct for automatic persistence
+1. Integrate with `AletheiaDB` struct for automatic persistence
 2. Add trigger hooks for index-specific persistence policies
 3. Implement memory-mapped loading with copy-on-write
 4. Add recovery logic (rebuild from WAL on corruption)

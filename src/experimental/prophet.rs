@@ -6,21 +6,21 @@
 //! # The Algorithm
 //! Score(A, B) = AdamicAdar(A, B) * (1.0 + VectorSimilarity(A, B))
 
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::utils::Result;
 use std::collections::HashSet;
 
 /// The Prophet predicts the future (connections).
 pub struct Prophet<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
     /// Optional vector property override.
     property_name: Option<String>,
 }
 
 impl<'a> Prophet<'a> {
     /// Create a new Prophet.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self {
             db,
             property_name: None,
@@ -185,7 +185,7 @@ mod tests {
         // B -> D, C -> D
         // Prophet should predict A -> D.
 
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let props = PropertyMapBuilder::new().build();
 
         let a = db.create_node("Node", props.clone()).unwrap();
@@ -216,7 +216,7 @@ mod tests {
         // But A and D have similar vectors, A and E do not.
         // D should score higher than E.
 
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
         db.enable_vector_index("embedding", config).unwrap();
 

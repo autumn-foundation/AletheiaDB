@@ -7,9 +7,9 @@
 //! - [ ] Integration tests using public API
 //! - [ ] Document API in rustdoc
 
-use gallifreydb::{
+use aletheiadb::{
+    AletheiaDB,
     DistanceMetric,
-    GallifreyDB,
     HnswConfig,
     NodeId,
     PropertyMapBuilder,
@@ -22,8 +22,8 @@ use gallifreydb::{
 };
 
 /// Helper to create a test database with vector indexing enabled.
-fn create_test_db() -> GallifreyDB {
-    let db = GallifreyDB::new().unwrap();
+fn create_test_db() -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -32,7 +32,7 @@ fn create_test_db() -> GallifreyDB {
 
 /// Helper to create a social graph for testing.
 /// Returns (alice_id, bob_id, carol_id)
-fn create_social_graph(db: &GallifreyDB) -> (NodeId, NodeId, NodeId) {
+fn create_social_graph(db: &AletheiaDB) -> (NodeId, NodeId, NodeId) {
     let alice = db
         .create_node(
             "Person",
@@ -189,10 +189,10 @@ fn test_shortcut_traverse_and_rank() {
 
 #[test]
 fn test_lib_rs_reexports_query_types() {
-    // ACCEPTANCE: These types must be re-exported from gallifreydb crate root
+    // ACCEPTANCE: These types must be re-exported from aletheiadb crate root
     // This test compiles only if the re-exports exist
 
-    let _builder: Option<QueryBuilder<gallifreydb::query::builder::state::Initial>> = None;
+    let _builder: Option<QueryBuilder<aletheiadb::query::builder::state::Initial>> = None;
     let _query: Option<Query> = None;
     let _executor: Option<QueryExecutor> = None;
     let _planner: Option<QueryPlanner> = None;
@@ -264,7 +264,7 @@ fn test_public_api_temporal_graph_query() {
     let (alice, _bob, _carol) = create_social_graph(&db);
 
     // ACCEPTANCE: Public API must support temporal queries
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
     let query = db
         .query()
         .as_of(timestamp, timestamp)
@@ -284,7 +284,7 @@ fn test_public_api_full_hybrid_query() {
     let (alice, bob, carol) = create_social_graph(&db);
 
     // ACCEPTANCE: Public API must support full hybrid (Temporal+Graph+Vector)
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
     let embedding = [0.9f32, 0.1, 0.0, 0.0]; // Bob's embedding
 
     let query = db
@@ -371,7 +371,7 @@ fn test_vs_069_complete_acceptance() {
     // 3. lib.rs re-exports work (imports at top of file) ✓
 
     // 4. Integration tests using public API ✓
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
     let query = builder
         .as_of(timestamp, timestamp)
         .start(alice)
@@ -403,7 +403,7 @@ fn test_find_similar_with_k_zero() {
 
 #[test]
 fn test_find_similar_nonexistent_node() {
-    use gallifreydb::NodeId;
+    use aletheiadb::NodeId;
 
     let db = create_test_db();
     let _graph = create_social_graph(&db);

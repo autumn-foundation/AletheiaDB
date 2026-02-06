@@ -6,7 +6,7 @@
 //! - Dispatches to appropriate operation handlers (stubbed initially)
 //! - Handles errors gracefully (corrupt entries, invalid IDs)
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},

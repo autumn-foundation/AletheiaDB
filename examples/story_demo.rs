@@ -19,16 +19,16 @@
 //!
 //! ```toml
 //! [dependencies]
-//! gallifreydb = { version = "0.1", features = ["nova"] }
+//! aletheiadb = { version = "0.1", features = ["nova"] }
 //! ```
 
-use gallifreydb::GallifreyDB;
-use gallifreydb::PropertyMapBuilder;
-use gallifreydb::WriteOps;
-use gallifreydb::experimental::temporal_narrative::NarrativeGenerator;
+use aletheiadb::AletheiaDB;
+use aletheiadb::PropertyMapBuilder;
+use aletheiadb::WriteOps;
+use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = GallifreyDB::new()?;
+    let db = AletheiaDB::new()?;
 
     // 1. Create Node
     let props1 = PropertyMapBuilder::new()

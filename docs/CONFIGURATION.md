@@ -1,6 +1,6 @@
-# GallifreyDB Configuration Guide
+# AletheiaDB Configuration Guide
 
-This document describes the unified configuration system for GallifreyDB, including WAL, historical storage, vector indexes, and index persistence.
+This document describes the unified configuration system for AletheiaDB, including WAL, historical storage, vector indexes, and index persistence.
 
 ## Table of Contents
 
@@ -13,7 +13,7 @@ This document describes the unified configuration system for GallifreyDB, includ
 
 ## Overview
 
-GallifreyDB provides a unified configuration system via `GallifreyDBConfig` that consolidates all settings:
+AletheiaDB provides a unified configuration system via `AletheiaDBConfig` that consolidates all settings:
 
 - **WAL Configuration**: Write-ahead log durability, concurrency, performance
 - **Historical Storage**: Version limits, reconstruction depth, caching
@@ -25,24 +25,24 @@ GallifreyDB provides a unified configuration system via `GallifreyDBConfig` that
 ### Basic Example
 
 ```rust
-use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 
 // Use default configuration
-let db = GallifreyDB::new();
+let db = AletheiaDB::new();
 
 // Or load from builder
-let config = GallifreyDBConfig::builder().build();
-let db = GallifreyDB::with_unified_config(config);
+let config = AletheiaDBConfig::builder().build();
+let db = AletheiaDB::with_unified_config(config);
 ```
 
 ### Complete Example
 
 ```rust
-use gallifreydb::{GallifreyDB, config::{GallifreyDBConfig, WalConfigBuilder, HistoricalConfigBuilder}};
-use gallifreydb::storage::wal::DurabilityMode;
-use gallifreydb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::{AletheiaDB, config::{AletheiaDBConfig, WalConfigBuilder, HistoricalConfigBuilder}};
+use aletheiadb::storage::wal::DurabilityMode;
+use aletheiadb::storage::index_persistence::PersistenceConfig;
 
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .num_stripes(32).unwrap()               // 32 concurrent append stripes
         .stripe_capacity(2048).unwrap()          // 2048 entries per stripe
@@ -63,7 +63,7 @@ let config = GallifreyDBConfig::builder()
     })
     .build();
 
-let db = GallifreyDB::with_unified_config(config);
+let db = AletheiaDB::with_unified_config(config);
 ```
 
 ## TOML Configuration Files
@@ -101,10 +101,10 @@ use_mmap = true
 ```
 
 ```rust
-use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 
-let config = GallifreyDBConfig::from_toml_file("config/production.toml")?;
-let db = GallifreyDB::with_unified_config(config);
+let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
+let db = AletheiaDB::with_unified_config(config);
 ```
 
 ### Durability Mode Configuration
@@ -252,7 +252,7 @@ PersistenceConfig {
 Balanced for local development:
 
 ```rust
-let db = GallifreyDB::new();  // Uses defaults
+let db = AletheiaDB::new();  // Uses defaults
 ```
 
 **Characteristics:**
@@ -265,7 +265,7 @@ let db = GallifreyDB::new();  // Uses defaults
 Optimized for memory-constrained environments:
 
 ```rust
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .num_stripes(4).unwrap()
         .stripe_capacity(256).unwrap()
@@ -289,7 +289,7 @@ let config = GallifreyDBConfig::builder()
 Optimized for cloud VMs with ample resources:
 
 ```rust
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .num_stripes(64).unwrap()
         .stripe_capacity(4096).unwrap()
@@ -326,7 +326,7 @@ let config = GallifreyDBConfig::builder()
 Optimized for batch data imports:
 
 ```rust
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .num_stripes(64).unwrap()
         .stripe_capacity(8192).unwrap()
@@ -358,7 +358,7 @@ Enable TOML configuration file support:
 
 ```toml
 [dependencies]
-gallifreydb = "0.1.0"  # config-toml enabled by default
+aletheiadb = "0.1.0"  # config-toml enabled by default
 ```
 
 **Adds:**
@@ -375,7 +375,7 @@ gallifreydb = "0.1.0"  # config-toml enabled by default
 
 ```toml
 [dependencies]
-gallifreydb = { version = "0.1.0", default-features = false }
+aletheiadb = { version = "0.1.0", default-features = false }
 ```
 
 This reduces compile time and binary size when only using programmatic configuration.
@@ -385,7 +385,7 @@ This reduces compile time and binary size when only using programmatic configura
 All builder methods validate inputs and return `Result<Self, ConfigError>`:
 
 ```rust
-use gallifreydb::config::{WalConfigBuilder, ConfigError};
+use aletheiadb::config::{WalConfigBuilder, ConfigError};
 
 // This will error with ConfigError::InvalidValue
 let result = WalConfigBuilder::new()

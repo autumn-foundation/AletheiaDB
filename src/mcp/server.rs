@@ -1,6 +1,6 @@
-//! GallifreyDB MCP Server implementation.
+//! AletheiaDB MCP Server implementation.
 //!
-//! This module implements the MCP server that exposes GallifreyDB functionality
+//! This module implements the MCP server that exposes AletheiaDB functionality
 //! through the Model Context Protocol.
 
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ use crate::core::temporal::time;
 use crate::core::{
     EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder, PropertyValue, Timestamp,
 };
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 
@@ -55,22 +55,22 @@ const DEFAULT_VECTOR_K: usize = 10;
 /// Default transaction time placeholder string.
 const TRANSACTION_TIME_NOW: &str = "now";
 
-/// GallifreyDB MCP Server.
+/// AletheiaDB MCP Server.
 ///
-/// Exposes GallifreyDB's graph, vector, and temporal capabilities through MCP.
+/// Exposes AletheiaDB's graph, vector, and temporal capabilities through MCP.
 #[derive(Clone)]
-pub struct GallifreyMcpServer {
-    db: Arc<GallifreyDB>,
+pub struct AletheiaMcpServer {
+    db: Arc<AletheiaDB>,
 }
 
-impl GallifreyMcpServer {
-    /// Create a new MCP server wrapping a GallifreyDB instance.
-    pub fn new(db: Arc<GallifreyDB>) -> Self {
+impl AletheiaMcpServer {
+    /// Create a new MCP server wrapping a AletheiaDB instance.
+    pub fn new(db: Arc<AletheiaDB>) -> Self {
         Self { db }
     }
 
     /// Get a reference to the underlying database.
-    pub fn db(&self) -> &Arc<GallifreyDB> {
+    pub fn db(&self) -> &Arc<AletheiaDB> {
         &self.db
     }
 
@@ -244,7 +244,7 @@ impl GallifreyMcpServer {
     }
 
     // ========================================================================
-    // Helper methods for converting between GallifreyDB and MCP types
+    // Helper methods for converting between AletheiaDB and MCP types
     // ========================================================================
 
     fn interned_to_string(&self, interned: crate::core::InternedString) -> String {
@@ -1667,14 +1667,14 @@ fn make_input_schema<T: rmcp::schemars::JsonSchema>()
 }
 
 /// Implement the MCP ServerHandler trait.
-impl ServerHandler for GallifreyMcpServer {
+impl ServerHandler for AletheiaMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
-                "GallifreyDB MCP Server - A bi-temporal graph database with vector search. \
+                "AletheiaDB MCP Server - A bi-temporal graph database with vector search. \
                  Use the provided tools to query and manipulate graph data with full \
                  temporal versioning and vector similarity search capabilities."
                     .to_string(),

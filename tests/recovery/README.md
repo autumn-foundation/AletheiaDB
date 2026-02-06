@@ -1,6 +1,6 @@
 # Recovery Test Suite
 
-This directory contains comprehensive integration tests for GallifreyDB's WAL (Write-Ahead Log) replay and recovery system.
+This directory contains comprehensive integration tests for AletheiaDB's WAL (Write-Ahead Log) replay and recovery system.
 
 ## Overview
 
@@ -191,7 +191,7 @@ Special version entries created during deletion that mark when an entity was del
 Atomic counters for NodeId, EdgeId, and VersionId. After recovery, generators must be initialized to `max_observed_id + 1` to prevent ID conflicts with existing entities.
 
 ### Bi-temporal Semantics
-GallifreyDB tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded). Recovery must preserve both temporal dimensions.
+AletheiaDB tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded). Recovery must preserve both temporal dimensions.
 
 ## Testing Strategy
 

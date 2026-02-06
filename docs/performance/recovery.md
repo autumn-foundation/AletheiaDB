@@ -1,10 +1,10 @@
 # Recovery Performance Benchmarks
 
-This document provides performance benchmarks and analysis for GallifreyDB recovery operations.
+This document provides performance benchmarks and analysis for AletheiaDB recovery operations.
 
 ## Overview
 
-Database recovery is a critical operation that occurs during system startup or after a crash. GallifreyDB's recovery system is designed to restore database state quickly and reliably from persisted checkpoints and WAL (Write-Ahead Log) entries.
+Database recovery is a critical operation that occurs during system startup or after a crash. AletheiaDB's recovery system is designed to restore database state quickly and reliably from persisted checkpoints and WAL (Write-Ahead Log) entries.
 
 ## Performance Targets
 
@@ -105,7 +105,7 @@ Vector-indexed recovery completes in approximately 53 milliseconds for 10,000 no
 
 ### Checkpoint-Based Recovery
 
-GallifreyDB uses a unified checkpoint system that persists:
+AletheiaDB uses a unified checkpoint system that persists:
 - **Graph structure**: Nodes, edges, and adjacency information
 - **Temporal data**: Historical versions and bi-temporal intervals
 - **Vector indexes**: HNSW indexes for similarity search
@@ -217,13 +217,13 @@ Recovery is I/O-bound. SSDs provide 5-10x faster recovery than HDDs.
 cargo build --release --features tracy
 
 # Run with Tracy profiler
-./target/release/gallifreydb
+./target/release/aletheiadb
 ```
 
 ### 3. Adjust Checkpoint Frequency
 More frequent checkpoints reduce WAL replay time:
 ```rust
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .checkpoint_interval(Duration::from_secs(300)) // 5 minutes
     .min_wal_entries(10_000)
     .build();

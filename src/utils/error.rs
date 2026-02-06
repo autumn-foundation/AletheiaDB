@@ -1,4 +1,4 @@
-//! Error types for GallifreyDB.
+//! Error types for AletheiaDB.
 //!
 //! This module defines all error types that can occur during database operations.
 //! Errors are organized by category for clarity.
@@ -8,10 +8,10 @@ use crate::core::temporal::Timestamp;
 use std::fmt;
 use std::io;
 
-/// Result type alias using GallifreyDB's Error type.
+/// Result type alias using AletheiaDB's Error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Main error type for all GallifreyDB operations.
+/// Main error type for all AletheiaDB operations.
 #[derive(Debug)]
 pub enum Error {
     /// Storage-related errors.

@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-01-26
 **Implemented:** 2026-01-26
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** index, performance, concurrency
 **Supersedes:** ADR-0005 (partially - evolves CSR format with incremental updates)
 

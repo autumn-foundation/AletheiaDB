@@ -1,4 +1,4 @@
-# GallifreyDB Architecture & Development Guidelines
+# AletheiaDB Architecture & Development Guidelines
 
 ## ⚠️ CRITICAL: NEVER COMMIT DIRECTLY TO TRUNK ⚠️
 
@@ -16,7 +16,7 @@ This is enforced by a pre-commit hook that will block direct commits to trunk.
 
 ## Project Overview
 
-GallifreyDB is a high-performance bi-temporal graph database written in Rust. It tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded in the database), while maintaining performance comparable to regular graph databases for current-state queries.
+AletheiaDB is a high-performance bi-temporal graph database written in Rust. It tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded in the database), while maintaining performance comparable to regular graph databases for current-state queries.
 
 **Primary Use Case - LLM Integration**: Enable reasoning LLMs to query not just current knowledge, but see how that knowledge evolved over time. This allows LLMs to understand temporal context, track when facts changed, reason about causality, and detect contradictions through provenance tracking.
 
@@ -132,10 +132,10 @@ Fast cold starts by loading indexes from disk instead of WAL replay.
 
 **Quick Start:**
 ```rust
-use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
-use gallifreydb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::storage::index_persistence::PersistenceConfig;
 
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .persistence(PersistenceConfig {
         enabled: true,
         data_dir: "data/my-database".into(),
@@ -144,7 +144,7 @@ let config = GallifreyDBConfig::builder()
     })
     .build();
 
-let db = GallifreyDB::with_unified_config(config);
+let db = AletheiaDB::with_unified_config(config);
 ```
 
 **See [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md) for complete guide.**
@@ -155,10 +155,10 @@ Dense vector embeddings as first-class properties with HNSW k-NN search for sema
 
 **Quick Start:**
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
-let db = GallifreyDB::new();
+let db = AletheiaDB::new();
 
 // Enable vector indexing
 db.vector_index("embedding")
@@ -194,7 +194,7 @@ Unified API combining **graph traversal + vector similarity + bi-temporal querie
 
 **Quick Start:**
 ```rust
-use gallifreydb::query::QueryBuilder;
+use aletheiadb::query::QueryBuilder;
 
 // Simple: Graph + Vector hybrid
 let results = db.traverse_and_rank(alice_id, "KNOWS", &bob_embedding, 10)?;
@@ -229,7 +229,7 @@ Three-tier storage architecture for unlimited historical depth while preserving 
 
 **Quick Start:**
 ```rust
-use gallifreydb::storage::{
+use aletheiadb::storage::{
     TieredStorage, TieredStorageConfig,
     RedbColdStorage, RedbConfig,
 };
@@ -257,12 +257,12 @@ historical.set_tiered_storage(Arc::new(tiered));
 
 ### MCP Server (AI Agent Integration)
 
-Model Context Protocol server enabling LLMs to interact with GallifreyDB.
+Model Context Protocol server enabling LLMs to interact with AletheiaDB.
 
 **Quick Start:**
 ```bash
 # Run the MCP server (communicates over stdio)
-cargo run --bin gallifrey-mcp --features mcp-server
+cargo run --bin aletheia-mcp --features mcp-server
 ```
 
 **Available Tools:**
@@ -277,16 +277,16 @@ cargo run --bin gallifrey-mcp --features mcp-server
 
 **Programmatic Usage:**
 ```rust
-use gallifreydb::mcp::GallifreyMcpServer;
-use gallifreydb::GallifreyDB;
+use aletheiadb::mcp::AletheiaMcpServer;
+use aletheiadb::AletheiaDB;
 use std::sync::Arc;
 
-let db = Arc::new(GallifreyDB::new()?);
-let server = GallifreyMcpServer::new(db);
+let db = Arc::new(AletheiaDB::new()?);
+let server = AletheiaMcpServer::new(db);
 server.serve_stdio().await?;
 ```
 
-### Query Language (GQL)
+### Query Language (AQL)
 
 Cypher-like query language with temporal and vector extensions.
 
@@ -329,7 +329,7 @@ Domain-based horizontal scaling for datasets exceeding single-machine capacity.
 
 **Quick Start:**
 ```rust
-use gallifreydb::storage::sharding::{
+use aletheiadb::storage::sharding::{
     ShardConfig, ShardDefinition, ShardCoordinator,
 };
 
@@ -359,21 +359,21 @@ Optional embedding providers via feature flags (OpenAI, HuggingFace, Ollama, ONN
 
 ## Configuration
 
-GallifreyDB uses a unified configuration system for WAL, historical storage, vector indexes, and persistence.
+AletheiaDB uses a unified configuration system for WAL, historical storage, vector indexes, and persistence.
 
 **Quick Start:**
 ```rust
-use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 
 // Default configuration
-let db = GallifreyDB::new();
+let db = AletheiaDB::new();
 
 // Load from TOML file
-let config = GallifreyDBConfig::from_toml_file("config/production.toml")?;
-let db = GallifreyDB::with_unified_config(config);
+let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
+let db = AletheiaDB::with_unified_config(config);
 
 // Programmatic configuration
-let config = GallifreyDBConfig::builder()
+let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .num_stripes(32).unwrap()
         .durability_mode(DurabilityMode::group_commit_default())
@@ -492,7 +492,7 @@ pub fn hot_path_function() {
 
 ## LLM Integration
 
-GallifreyDB is designed for LLM integration with temporal query patterns:
+AletheiaDB is designed for LLM integration with temporal query patterns:
 
 **Natural Language-Like Queries:**
 ```rust

@@ -1,4 +1,4 @@
-use gallifreydb::core::property::{MAX_RECURSION_DEPTH, PropertyValue};
+use aletheiadb::core::property::{MAX_RECURSION_DEPTH, PropertyValue};
 
 #[test]
 fn test_deeply_nested_serialization_recursion_limit() {

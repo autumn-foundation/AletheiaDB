@@ -1,6 +1,6 @@
-use gallifreydb::storage::wal::group_commit::GroupCommitCoordinator;
-use gallifreydb::utils::Error;
-use gallifreydb::utils::StorageError;
+use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+use aletheiadb::utils::Error;
+use aletheiadb::utils::StorageError;
 use std::sync::{Arc, Barrier};
 use std::thread;
 

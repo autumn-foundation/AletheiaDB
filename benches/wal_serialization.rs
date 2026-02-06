@@ -5,8 +5,7 @@
 //!
 //! Expected improvement: 100-500ns reduction per entry with buffer reuse.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::{
+use aletheiadb::{
     core::{
         PropertyMapBuilder,
         id::{EdgeId, NodeId, VersionId},
@@ -18,6 +17,7 @@ use gallifreydb::{
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use tempfile::TempDir;
 
 /// Helper to create a WAL instance for benchmarking

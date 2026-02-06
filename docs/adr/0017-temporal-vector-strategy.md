@@ -3,12 +3,12 @@
 **Status:** Implemented
 **Date:** 2026-01-05
 **Updated:** 2026-01-08 (Delta snapshot optimization)
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** index, vector, temporal
 
 ## Context
 
-With Phase 2 complete (HNSW index for current-state vector search), we now need to enable temporal vector queries - the ability to perform semantic similarity searches at any point in time. This is critical for GallifreyDB's SUPERRAG vision: enabling LLMs to reason about how knowledge evolved semantically over time.
+With Phase 2 complete (HNSW index for current-state vector search), we now need to enable temporal vector queries - the ability to perform semantic similarity searches at any point in time. This is critical for AletheiaDB's SUPERRAG vision: enabling LLMs to reason about how knowledge evolved semantically over time.
 
 ### Use Cases
 
@@ -26,14 +26,14 @@ With Phase 2 complete (HNSW index for current-state vector search), we now need 
 
 ### Existing Architecture Patterns
 
-GallifreyDB's hybrid storage architecture provides a proven pattern:
+AletheiaDB's hybrid storage architecture provides a proven pattern:
 - **Current Storage**: Optimized for zero-overhead current-state queries
 - **Historical Storage**: Uses anchor+delta compression (every 10 versions)
 - **Immutable history**: Historical data never changes, enabling aggressive caching
 
 ## Decision
 
-We will implement a **snapshot-based temporal vector index strategy** that mirrors GallifreyDB's existing anchor+delta pattern, adapted for HNSW indexes.
+We will implement a **snapshot-based temporal vector index strategy** that mirrors AletheiaDB's existing anchor+delta pattern, adapted for HNSW indexes.
 
 ### Architecture: Dual-Path Vector Indexing
 
@@ -563,7 +563,7 @@ Transaction → Vector Change → Check Strategy → Create Snapshot?
 ### Public API
 
 ```rust
-impl GallifreyDB {
+impl AletheiaDB {
     /// Enable temporal vector indexing
     pub fn enable_temporal_vector_index(
         &self,
@@ -734,7 +734,7 @@ for (timestamp, results) in history {
 
 4. **Integration**:
    - ✅ Seamless integration with existing checkpoint mechanism
-   - ✅ Clear API following GallifreyDB conventions
+   - ✅ Clear API following AletheiaDB conventions
    - ✅ Comprehensive documentation and examples
 
 ## References

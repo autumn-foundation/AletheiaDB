@@ -63,7 +63,7 @@ pub struct CheckpointConfig {
 impl Default for CheckpointConfig {
     fn default() -> Self {
         CheckpointConfig {
-            checkpoint_dir: PathBuf::from("gallifreydb/checkpoints"),
+            checkpoint_dir: PathBuf::from("aletheiadb/checkpoints"),
             checkpoint_interval: Duration::from_secs(300), // 5 minutes
             min_wal_entries: 1000,
             checkpoints_to_retain: 5,
@@ -2177,7 +2177,7 @@ mod tests {
         // Verify all default values
         assert_eq!(
             config.checkpoint_dir,
-            PathBuf::from("gallifreydb/checkpoints")
+            PathBuf::from("aletheiadb/checkpoints")
         );
         assert_eq!(config.checkpoint_interval, Duration::from_secs(300));
         assert_eq!(config.min_wal_entries, 1000);
