@@ -84,6 +84,7 @@ use std::fmt;
 use self::simd::{dot_and_magnitudes, dot_product_sum, scale_in_place, squared_diff_sum};
 
 // Sparse vector implementation (kept separate due to size)
+/// Sparse vector implementation.
 pub mod sparse;
 pub use sparse::*;
 
