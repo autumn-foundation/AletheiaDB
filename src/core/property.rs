@@ -4215,7 +4215,7 @@ mod sentry_tests {
     #[test]
     fn test_property_value_nan_inequality() {
         // Dense vector with NaN
-        let dense_nan = PropertyValue::vector(&[f32::NAN]);
+        let dense_nan = PropertyValue::vector([f32::NAN]);
         assert_ne!(
             dense_nan, dense_nan,
             "Dense vector with NaN should not equal itself"
@@ -4233,7 +4233,7 @@ mod sentry_tests {
         // Vector property doesn't check for NaN in constructor!
         // PropertyValue::vector calls PropertyValue::try_vector -> validate_vector_dimensions.
         // It does NOT check values for NaN.
-        let vec_nan = PropertyValue::vector(&[f32::NAN]);
+        let vec_nan = PropertyValue::vector([f32::NAN]);
         assert_ne!(vec_nan, vec_nan, "Vector with NaN should not equal itself");
     }
 }
