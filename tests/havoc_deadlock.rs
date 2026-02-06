@@ -1,6 +1,6 @@
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::VectorIndex;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -89,7 +89,7 @@ fn run_deadlock_stress_test() {
             for _ in 0..ITERATIONS {
                 // Filter that accesses node ID (reverse mapping)
                 // We access the node ID to force the closure to actually do something with the mapping
-                let result = index.search_with_filter(&query, 10, |id| id.as_u64() % 2 == 0);
+                let result = index.search_with_filter(&query, 10, |id: &NodeId| id.as_u64() & 1 == 0);
                 if result.is_ok() {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }

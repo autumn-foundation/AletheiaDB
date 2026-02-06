@@ -1,5 +1,5 @@
-use gallifreydb::core::PropertyValue;
-use gallifreydb::core::property::MAX_VECTOR_DIMENSIONS;
+use aletheiadb::core::PropertyValue;
+use aletheiadb::core::property::MAX_VECTOR_DIMENSIONS;
 use proptest::prelude::*;
 
 const TAG_VECTOR: u8 = 7;

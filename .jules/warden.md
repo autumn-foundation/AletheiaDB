@@ -164,3 +164,17 @@ Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed t
 
 **Verification:** Regression Test
 Added `tests/warden_vector_safety.rs` which attempts to insert and serialize oversized vectors using the `try_` methods. Verified that they now return `VectorError::DimensionTooLarge` instead of crashing the test runner.
+
+## 2026-02-19 - FindNode DoS Lockdown
+
+**Threat:** Memory Exhaustion (DoS) in FindNode
+The `FindNode` HTTP endpoint accepted an unbounded `limit` parameter from the user. This was passed directly to the query executor, which could potentially attempt to collect a massive number of results into a `Vec` before serialization, leading to Out Of Memory (OOM) crashes.
+
+**Defense:** Global Result Limits
+- Defined `MAX_RESULT_LIMIT = 1000` and `MAX_PAGINATION_LIMIT = 10,000` constants in `src/http/handlers.rs`.
+- Enforced these limits on `FindNode`: `limit` is capped at `MAX_RESULT_LIMIT`, and `offset + limit` must not exceed `MAX_PAGINATION_LIMIT`.
+- Standardized `FindNeighbors` to use these shared constants.
+
+**Verification:** Reproduction Test
+Added `tests/warden_dos_find_node.rs` which requests 2000 nodes when 1500 exist.
+- Verified that the response is capped at 1000 nodes, confirming the defense is active.

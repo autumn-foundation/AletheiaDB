@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
+/// Maximum number of results to return in a single query.
+const MAX_RESULT_LIMIT: usize = 1_000;
+
+/// Maximum allowable sum of offset + limit to prevent CPU DoS via deep pagination.
+const MAX_PAGINATION_LIMIT: usize = 10_000;
+
 /// Health check response structure.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -197,7 +203,18 @@ pub async fn handle_query(
                 builder = builder.skip(skip);
             }
 
-            let limit_val = limit.unwrap_or(100);
+            // Safety limits to prevent DoS
+            let limit_val = limit.unwrap_or(100).min(MAX_RESULT_LIMIT);
+            let offset_val = offset.unwrap_or(0);
+
+            // Prevent deep pagination attacks (CPU DoS)
+            if offset_val.saturating_add(limit_val) > MAX_PAGINATION_LIMIT {
+                return HttpResponse::BadRequest().json(ApiResponse::error(format!(
+                    "Pagination limit exceeded: offset + limit must be <= {}",
+                    MAX_PAGINATION_LIMIT
+                )));
+            }
+
             match builder.limit(limit_val).execute(db) {
                 Ok(results) => {
                     let mut nodes = Vec::new();
@@ -232,17 +249,14 @@ pub async fn handle_query(
             match NodeId::new(node_id) {
                 Ok(nid) => {
                     // Safety limits to prevent DoS
-                    let max_limit = 1000;
-                    let max_deep_pagination = 10_000;
-
-                    let limit_val = limit.unwrap_or(100).min(max_limit);
+                    let limit_val = limit.unwrap_or(100).min(MAX_RESULT_LIMIT);
                     let offset_val = offset.unwrap_or(0);
 
                     // Prevent deep pagination attacks (CPU DoS)
-                    if offset_val + limit_val > max_deep_pagination {
+                    if offset_val.saturating_add(limit_val) > MAX_PAGINATION_LIMIT {
                         return HttpResponse::BadRequest().json(ApiResponse::error(format!(
                             "Pagination limit exceeded: offset + limit must be <= {}",
-                            max_deep_pagination
+                            MAX_PAGINATION_LIMIT
                         )));
                     }
 
