@@ -2,14 +2,14 @@
 //!
 //! Issue #334: Make the over-fetch heuristic adaptive based on actual filter pass rates.
 
-use gallifreydb::GallifreyDB;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::AletheiaDB;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
 #[test]
 fn test_adaptive_overfetch_learns_from_sparse_labels() {
     // Create database with vector index
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
@@ -59,7 +59,7 @@ fn test_adaptive_overfetch_learns_from_sparse_labels() {
 #[test]
 fn test_adaptive_overfetch_learns_from_dense_labels() {
     // Create database with vector index
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
@@ -102,7 +102,7 @@ fn test_adaptive_overfetch_learns_from_dense_labels() {
 #[test]
 fn test_adaptive_overfetch_embedding_search() {
     // Test adaptive over-fetch with find_similar_by_embedding_with_label
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
@@ -142,7 +142,7 @@ fn test_adaptive_overfetch_embedding_search() {
 #[test]
 fn test_adaptive_overfetch_respects_max_cap() {
     // Ensure adaptive strategy doesn't exceed reasonable bounds
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
@@ -181,7 +181,7 @@ fn test_adaptive_overfetch_respects_max_cap() {
 #[test]
 fn test_adaptive_overfetch_varying_distributions() {
     // Test adaptive over-fetch with varying label distributions
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
@@ -221,7 +221,7 @@ fn test_adaptive_overfetch_varying_distributions() {
 #[test]
 fn test_adaptive_overfetch_statistics_tracking() {
     // Verify that statistics are being tracked correctly
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
@@ -289,7 +289,7 @@ fn test_adaptive_overfetch_concurrent_safety() {
     use std::sync::Arc;
     use std::thread;
 
-    let db = Arc::new(GallifreyDB::new().unwrap());
+    let db = Arc::new(AletheiaDB::new().unwrap());
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 

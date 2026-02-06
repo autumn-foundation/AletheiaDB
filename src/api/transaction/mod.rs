@@ -1,4 +1,4 @@
-//! Transaction support for GallifreyDB
+//! Transaction support for AletheiaDB
 //!
 //! This module provides MVCC (Multi-Version Concurrency Control) transactions
 //! with Snapshot Isolation level.
@@ -12,11 +12,11 @@
 //!
 //! **Closure-based (recommended)**:
 //! ```rust,no_run
-//! # use gallifreydb::{GallifreyDB, PropertyMapBuilder, properties};
-//! # use gallifreydb::core::NodeId;
-//! # use gallifreydb::api::transaction::{ReadOps, WriteOps};
+//! # use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
+//! # use aletheiadb::core::NodeId;
+//! # use aletheiadb::api::transaction::{ReadOps, WriteOps};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let db = GallifreyDB::new()?;
+//! # let db = AletheiaDB::new()?;
 //! # let id = NodeId::new(1)?;
 //! # let other = NodeId::new(2)?;
 //! # let props = PropertyMapBuilder::new().build();
@@ -43,11 +43,11 @@
 //!
 //! **Explicit handles**:
 //! ```rust,no_run
-//! # use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-//! # use gallifreydb::core::NodeId;
-//! # use gallifreydb::api::transaction::WriteOps;
+//! # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+//! # use aletheiadb::core::NodeId;
+//! # use aletheiadb::api::transaction::WriteOps;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let db = GallifreyDB::new()?;
+//! # let db = AletheiaDB::new()?;
 //! # let n1 = NodeId::new(1)?;
 //! # let n2 = NodeId::new(2)?;
 //! # let props = PropertyMapBuilder::new().build();
@@ -381,10 +381,10 @@ pub trait WriteOps: ReadOps {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::{GallifreyDB, properties};
-    /// # use gallifreydb::api::transaction::WriteOps;
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::WriteOps;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = GallifreyDB::new()?;
+    /// # let db = AletheiaDB::new()?;
     /// # let properties = properties! { "name" => "DeleteMe" };
     /// let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node("Person", properties)?;
@@ -412,7 +412,7 @@ pub trait WriteOps: ReadOps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GallifreyDB;
+    use crate::AletheiaDB;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
 
@@ -423,14 +423,14 @@ mod tests {
             // Trait bound check - if this compiles, the method exists
         }
 
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let mut tx = db.write_transaction().unwrap();
         assert_write_ops(&mut tx);
     }
 
     #[test]
     fn test_create_node_default_delegates_to_with_valid_time() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let mut tx = db.write_transaction().unwrap();
 
         // Both should work identically when valid_from is None
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn test_create_node_with_backdated_valid_time() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let mut tx = db.write_transaction().unwrap();
 
         // Create node with valid_time = 1 hour ago
@@ -482,7 +482,7 @@ mod tests {
             // Trait bound check
         }
 
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let mut tx = db.write_transaction().unwrap();
         assert_write_ops(&mut tx);
     }
@@ -493,7 +493,7 @@ mod tests {
             // Trait bound check
         }
 
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let mut tx = db.write_transaction().unwrap();
         assert_write_ops(&mut tx);
     }
@@ -504,7 +504,7 @@ mod tests {
             // Trait bound check
         }
 
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
         let mut tx = db.write_transaction().unwrap();
         assert_write_ops(&mut tx);
     }

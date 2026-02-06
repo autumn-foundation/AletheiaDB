@@ -1,19 +1,19 @@
-//! GallifreyDB HTTP Server Binary
+//! AletheiaDB HTTP Server Binary
 //!
-//! This binary launches the GallifreyDB HTTP server, providing a REST API
+//! This binary launches the AletheiaDB HTTP server, providing a REST API
 //! for interacting with the database.
 //!
 //! # Usage
 //!
 //! ```bash
 //! # Run with default settings (port 8080, restrictive CORS)
-//! cargo run --bin gallifrey-server --features http-server
+//! cargo run --bin aletheia-server --features http-server
 //!
 //! # Run with custom port
-//! GALLIFREYDB_PORT=3000 cargo run --bin gallifrey-server --features http-server
+//! GALLIFREYDB_PORT=3000 cargo run --bin aletheia-server --features http-server
 //!
 //! # Run with permissive CORS (development only!)
-//! GALLIFREYDB_CORS_PERMISSIVE=true cargo run --bin gallifrey-server --features http-server
+//! GALLIFREYDB_CORS_PERMISSIVE=true cargo run --bin aletheia-server --features http-server
 //!
 //! # Health check
 //! curl http://localhost:8080/status
@@ -41,7 +41,7 @@
 //! The server handles SIGTERM and SIGINT signals for graceful shutdown,
 //! allowing in-flight requests to complete before terminating.
 
-use gallifreydb::http::{CorsConfig, ServerConfig, run_server};
+use aletheiadb::http::{CorsConfig, ServerConfig, run_server};
 use std::env;
 
 /// Parse port from environment variable with warning on invalid values.

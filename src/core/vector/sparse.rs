@@ -30,7 +30,7 @@ use crate::utils::error::{Error, Result, VectorError};
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::SparseVec;
+/// use aletheiadb::core::vector::SparseVec;
 ///
 /// // Sparse vector: [0.0, 1.5, 0.0, 0.0, 2.3, 0.0, 0.0, 0.8]
 /// let sparse = SparseVec::new(
@@ -106,7 +106,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// // Valid sparse vector
     /// let sparse = SparseVec::new(vec![0, 2, 5], vec![1.0, 2.0, 3.0], 10).unwrap();
@@ -201,7 +201,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let sparse = SparseVec::new(vec![1, 3, 5], vec![1.0, 2.0, 3.0], 10).unwrap();
     /// assert_eq!(sparse.nnz(), 3);
@@ -216,7 +216,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let sparse = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
     /// assert_eq!(sparse.dimension(), 100);
@@ -233,7 +233,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let sparse = SparseVec::new(vec![5, 1, 3], vec![1.0, 2.0, 3.0], 10).unwrap();
     /// // Indices are sorted during construction
@@ -251,7 +251,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let sparse = SparseVec::new(vec![5, 1, 3], vec![1.0, 2.0, 3.0], 10).unwrap();
     /// let indices = sparse.indices();
@@ -272,7 +272,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let sparse = SparseVec::new(vec![1, 3], vec![1.5, 2.5], 5).unwrap();
     /// let dense = sparse.to_dense();
@@ -294,7 +294,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let sparse = SparseVec::new(vec![0, 1, 2], vec![1.0, 2.0, 2.0], 5).unwrap();
     /// // magnitude² = 1² + 2² + 2² = 1 + 4 + 4 = 9
@@ -309,7 +309,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let sparse = SparseVec::new(vec![0, 1], vec![3.0, 4.0], 5).unwrap();
     /// // magnitude = sqrt(3² + 4²) = sqrt(9 + 16) = 5.0
@@ -336,7 +336,7 @@ impl SparseVec {
     /// # Example
     ///
     /// ```rust
-    /// use gallifreydb::core::vector::SparseVec;
+    /// use aletheiadb::core::vector::SparseVec;
     ///
     /// let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
     /// let b = SparseVec::new(vec![0, 2], vec![1.0000001, 2.0000001], 5).unwrap();
@@ -395,7 +395,7 @@ impl SparseVec {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::{SparseVec, sparse_dot_product};
+/// use aletheiadb::core::vector::{SparseVec, sparse_dot_product};
 ///
 /// // Sparse vectors: [1, 0, 2, 0, 0] and [0, 0, 3, 0, 4]
 /// let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
@@ -466,7 +466,7 @@ pub fn sparse_dot_product(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::{SparseVec, sparse_cosine_similarity};
+/// use aletheiadb::core::vector::{SparseVec, sparse_cosine_similarity};
 ///
 /// let a = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
 /// let b = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
@@ -525,7 +525,7 @@ pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::{SparseVec, sparse_squared_euclidean_distance};
+/// use aletheiadb::core::vector::{SparseVec, sparse_squared_euclidean_distance};
 ///
 /// let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
 /// let b = SparseVec::new(vec![], vec![], 5).unwrap(); // Zero vector
@@ -574,7 +574,7 @@ pub fn sparse_squared_euclidean_distance(a: &SparseVec, b: &SparseVec) -> Result
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::{SparseVec, sparse_euclidean_distance};
+/// use aletheiadb::core::vector::{SparseVec, sparse_euclidean_distance};
 ///
 /// let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
 /// let b = SparseVec::new(vec![], vec![], 5).unwrap(); // Zero vector

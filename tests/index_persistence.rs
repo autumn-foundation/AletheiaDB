@@ -1,28 +1,28 @@
 #![cfg(test)]
 #![allow(deprecated)]
 
-use gallifreydb::PropertyMapBuilder;
-use gallifreydb::core::GLOBAL_INTERNER;
-use gallifreydb::core::id::{NodeId, VersionId};
-use gallifreydb::core::property::PropertyValue;
-use gallifreydb::core::temporal::BiTemporalInterval;
-use gallifreydb::storage::index_persistence::formats::{
+use aletheiadb::PropertyMapBuilder;
+use aletheiadb::core::GLOBAL_INTERNER;
+use aletheiadb::core::id::{NodeId, VersionId};
+use aletheiadb::core::property::PropertyValue;
+use aletheiadb::core::temporal::BiTemporalInterval;
+use aletheiadb::storage::index_persistence::formats::{
     IndexManifest, PersistedEdge, PersistedNode, PersistedPropertyMap,
 };
-use gallifreydb::storage::index_persistence::graph::{
+use aletheiadb::storage::index_persistence::graph::{
     new_graph_index_data, persist_property_map, restore_property_map, save_graph_index,
 };
-use gallifreydb::storage::index_persistence::temporal::{
+use aletheiadb::storage::index_persistence::temporal::{
     convert_node_version, load_temporal_index, new_temporal_index_data, restore_node_version,
     save_temporal_index,
 };
-use gallifreydb::storage::index_persistence::vector::{
+use aletheiadb::storage::index_persistence::vector::{
     new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
 };
-use gallifreydb::storage::index_persistence::{
+use aletheiadb::storage::index_persistence::{
     IndexPersistenceManager, formats::PersistedHnswConfig,
 };
-use gallifreydb::storage::version::{NodeVersion, PropertyDelta, VersionData};
+use aletheiadb::storage::version::{NodeVersion, PropertyDelta, VersionData};
 use std::sync::Mutex;
 use tempfile::tempdir;
 
@@ -232,13 +232,13 @@ fn test_indexes_exist_detection() {
 }
 
 // ============================================================================
-// GallifreyDB Integration Tests
+// AletheiaDB Integration Tests
 // ============================================================================
 
-use gallifreydb::storage::index_persistence::PersistenceConfig;
-use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+use aletheiadb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 
-/// Test that GallifreyDB can persist indexes to disk (MVP - Phase 1).
+/// Test that AletheiaDB can persist indexes to disk (MVP - Phase 1).
 ///
 /// This test verifies:
 /// 1. persist_indexes() successfully saves all index data
@@ -256,7 +256,7 @@ fn test_db_persist_indexes_mvp() {
 
     // Phase 1: Create database, add data, persist indexes
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -265,7 +265,7 @@ fn test_db_persist_indexes_mvp() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         // Add some nodes
         let node1_id = db
@@ -310,7 +310,7 @@ fn test_db_persist_indexes_mvp() {
 
     // Phase 2: Verify index files were created
     {
-        use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+        use aletheiadb::storage::index_persistence::IndexPersistenceManager;
 
         let manager = IndexPersistenceManager::new(&data_dir);
 
@@ -333,7 +333,7 @@ fn test_db_persist_indexes_mvp() {
         assert_eq!(manifest.version, 1, "Manifest version should be 1");
 
         // Verify strings were saved (we interned "Person", "name", "age", "Bob", "Alice", "KNOWS")
-        use gallifreydb::core::GLOBAL_INTERNER;
+        use aletheiadb::core::GLOBAL_INTERNER;
         let person_str = GLOBAL_INTERNER.intern("Person").unwrap();
         assert_eq!(
             GLOBAL_INTERNER.resolve(person_str).unwrap().as_ref(),
@@ -366,7 +366,7 @@ fn test_full_persistence_lifecycle() {
 
     // Phase 1: Create database, add data, persist
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -375,7 +375,7 @@ fn test_full_persistence_lifecycle() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         // Add nodes with properties
         node1_id = db
@@ -426,7 +426,7 @@ fn test_full_persistence_lifecycle() {
 
     // Phase 2: Restart database and verify data was restored
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -435,7 +435,7 @@ fn test_full_persistence_lifecycle() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         // Verify counts
         assert_eq!(db.node_count(), 2, "Should have restored 2 nodes from disk");
@@ -497,7 +497,7 @@ fn test_full_persistence_lifecycle() {
     }
 }
 
-/// Test automatic persistence integration with GallifreyDB.
+/// Test automatic persistence integration with AletheiaDB.
 ///
 /// This test validates:
 /// 1. Automatic persistence triggers based on mutation thresholds
@@ -509,11 +509,9 @@ fn test_automatic_persistence_integration() {
     // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::GallifreyDB;
-    use gallifreydb::config::GallifreyDBConfig;
-    use gallifreydb::storage::index_persistence::{
-        PersistenceConfig, formats::PersistencePolicies,
-    };
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::config::AletheiaDBConfig;
+    use aletheiadb::storage::index_persistence::{PersistenceConfig, formats::PersistencePolicies};
 
     println!("\n=== Automatic Persistence Integration Test ===");
 
@@ -531,21 +529,21 @@ fn test_automatic_persistence_integration() {
         data_dir: data_dir.clone(),
         load_on_startup: true,
         policies: PersistencePolicies {
-            graph: gallifreydb::storage::index_persistence::formats::GraphPersistencePolicy {
+            graph: aletheiadb::storage::index_persistence::formats::GraphPersistencePolicy {
                 on_adjacency_rebuild: true,
                 mutation_threshold: 1, // Persist after 1 graph mutation (for testing)
                 time_interval_secs: 3600, // Or after 1 hour
             },
-            vector: gallifreydb::storage::index_persistence::formats::VectorPersistencePolicy {
+            vector: aletheiadb::storage::index_persistence::formats::VectorPersistencePolicy {
                 mutation_threshold: 10,
                 time_interval_secs: 3600,
             },
-            temporal: gallifreydb::storage::index_persistence::formats::TemporalPersistencePolicy {
+            temporal: aletheiadb::storage::index_persistence::formats::TemporalPersistencePolicy {
                 version_threshold: 10,
                 anchor_threshold: 5,
                 time_interval_secs: 3600,
             },
-            strings: gallifreydb::storage::index_persistence::formats::StringPersistencePolicy {
+            strings: aletheiadb::storage::index_persistence::formats::StringPersistencePolicy {
                 new_strings_threshold: 10,
                 time_interval_secs: 3600,
             },
@@ -553,11 +551,11 @@ fn test_automatic_persistence_integration() {
         use_mmap: false,
     };
 
-    let config = GallifreyDBConfig::builder()
+    let config = AletheiaDBConfig::builder()
         .persistence(persistence_config)
         .build();
 
-    let db = GallifreyDB::with_unified_config(config).unwrap();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
 
     // Create test data - enough to trigger automatic persistence
     println!("Creating 10 nodes to trigger automatic persistence...");
@@ -631,11 +629,11 @@ fn test_automatic_persistence_integration() {
         use_mmap: false,
     };
 
-    let config = GallifreyDBConfig::builder()
+    let config = AletheiaDBConfig::builder()
         .persistence(persistence_config)
         .build();
 
-    let db2 = GallifreyDB::with_unified_config(config).unwrap();
+    let db2 = AletheiaDB::with_unified_config(config).unwrap();
 
     // Verify all nodes were restored
     println!("Verifying restored data...");
@@ -675,12 +673,12 @@ fn test_automatic_persistence_integration() {
         use_mmap: false,
     };
 
-    let config = GallifreyDBConfig::builder()
+    let config = AletheiaDBConfig::builder()
         .persistence(persistence_config)
         .build();
 
     // This should not panic - should start with empty database
-    let db3 = GallifreyDB::with_unified_config(config).unwrap();
+    let db3 = AletheiaDB::with_unified_config(config).unwrap();
 
     // Verify database started (even if empty due to corruption)
     let test_node = db3
@@ -747,9 +745,9 @@ fn test_compression_reduces_file_size() {
     // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::storage::index_persistence::PersistedNode;
-    use gallifreydb::storage::index_persistence::graph::{
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::storage::index_persistence::PersistedNode;
+    use aletheiadb::storage::index_persistence::graph::{
         load_graph_index, new_graph_index_data, persist_property_map, save_graph_index,
         save_graph_index_compressed,
     };
@@ -825,9 +823,9 @@ fn test_compression_reduces_file_size() {
 fn test_parallel_loading_is_faster() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::storage::index_persistence::PersistedNode;
-    use gallifreydb::storage::index_persistence::graph::{
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::storage::index_persistence::PersistedNode;
+    use aletheiadb::storage::index_persistence::graph::{
         load_graph_index, new_graph_index_data, persist_property_map, save_graph_index_compressed,
     };
     use std::time::Instant;
@@ -888,7 +886,7 @@ fn test_parallel_loading_is_faster() {
 
     // Use the library's parallel loading function
     // For this test, we'll load the same graph multiple times to demonstrate parallelism
-    use gallifreydb::storage::index_persistence::load_indexes_parallel;
+    use aletheiadb::storage::index_persistence::load_indexes_parallel;
 
     // Load three indexes in parallel by calling the function three times concurrently
     use std::thread;
@@ -932,9 +930,9 @@ fn test_parallel_loading_is_faster() {
 fn test_memory_mapped_loading() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::storage::index_persistence::PersistedNode;
-    use gallifreydb::storage::index_persistence::graph::{
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::storage::index_persistence::PersistedNode;
+    use aletheiadb::storage::index_persistence::graph::{
         load_graph_index, new_graph_index_data, persist_property_map, save_graph_index_compressed,
     };
 
@@ -968,7 +966,7 @@ fn test_memory_mapped_loading() {
     let regular_data = load_graph_index(&graph_path).unwrap();
 
     // Load using memory-mapped loading (this will fail - function doesn't exist yet)
-    use gallifreydb::storage::index_persistence::graph::load_graph_index_mmap;
+    use aletheiadb::storage::index_persistence::graph::load_graph_index_mmap;
     let mmap_data = load_graph_index_mmap(&graph_path).unwrap();
 
     // Verify both methods produce identical results
@@ -994,12 +992,12 @@ fn test_memory_mapped_loading() {
 fn test_delta_encoding_reduces_incremental_save_size() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::storage::index_persistence::graph::{
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::storage::index_persistence::graph::{
         load_graph_index, load_graph_index_with_delta, new_graph_index_data, persist_property_map,
         save_graph_index_compressed, save_graph_index_delta,
     };
-    use gallifreydb::storage::index_persistence::{PersistedEdge, PersistedNode};
+    use aletheiadb::storage::index_persistence::{PersistedEdge, PersistedNode};
 
     let dir = tempdir().unwrap();
 
@@ -1361,9 +1359,9 @@ fn test_malformed_manifest_handling() {
 fn test_truncated_file_detection() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::storage::index_persistence::PersistedNode;
-    use gallifreydb::storage::index_persistence::graph::{
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::storage::index_persistence::PersistedNode;
+    use aletheiadb::storage::index_persistence::graph::{
         load_graph_index, new_graph_index_data, persist_property_map, save_graph_index,
     };
 
@@ -1407,15 +1405,15 @@ fn test_truncated_file_detection() {
 fn test_invalid_id_detection() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::PersistenceConfig;
-    use gallifreydb::{GallifreyDB, PropertyMapBuilder, config::GallifreyDBConfig};
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::{AletheiaDB, PropertyMapBuilder, config::AletheiaDBConfig};
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
 
     // Create database with data
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1424,7 +1422,7 @@ fn test_invalid_id_detection() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         // Add node
         db.create_node(
@@ -1438,8 +1436,8 @@ fn test_invalid_id_detection() {
     }
 
     // Manually corrupt the graph file with invalid IDs
-    use gallifreydb::storage::index_persistence::IndexPersistenceManager;
-    use gallifreydb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
+    use aletheiadb::storage::index_persistence::IndexPersistenceManager;
+    use aletheiadb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
 
     let manager = IndexPersistenceManager::new(&data_dir);
     let graph_path = manager.graph_path().join("adjacency.idx");
@@ -1448,7 +1446,7 @@ fn test_invalid_id_detection() {
 
     // Add node with invalid ID (exceeding MAX_VALID_ID would be u64::MAX - 1000+)
     // For this test, we'll just create a node with a very large ID
-    use gallifreydb::storage::index_persistence::PersistedNode;
+    use aletheiadb::storage::index_persistence::PersistedNode;
     graph_data.nodes.push(PersistedNode {
         id: u64::MAX - 500, // Very large ID
         label_idx: 1,
@@ -1461,7 +1459,7 @@ fn test_invalid_id_detection() {
 
     // Try to load - should handle gracefully
     // Note: Current implementation may skip invalid IDs during restoration
-    let config = GallifreyDBConfig::builder()
+    let config = AletheiaDBConfig::builder()
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),
@@ -1471,7 +1469,7 @@ fn test_invalid_id_detection() {
         .build();
 
     // Should not panic, may log warnings
-    let _db = GallifreyDB::with_unified_config(config).unwrap();
+    let _db = AletheiaDB::with_unified_config(config).unwrap();
 
     println!("✓ Invalid ID detection test passed");
 }
@@ -1481,15 +1479,15 @@ fn test_invalid_id_detection() {
 fn test_missing_interner_entries() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::PersistenceConfig;
-    use gallifreydb::{GallifreyDB, PropertyMapBuilder, config::GallifreyDBConfig};
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::{AletheiaDB, PropertyMapBuilder, config::AletheiaDBConfig};
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
 
     // Create database with data
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1498,7 +1496,7 @@ fn test_missing_interner_entries() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         db.create_node(
             "Person",
@@ -1510,12 +1508,12 @@ fn test_missing_interner_entries() {
     }
 
     // Delete the string interner file to simulate corruption
-    use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+    use aletheiadb::storage::index_persistence::IndexPersistenceManager;
     let manager = IndexPersistenceManager::new(&data_dir);
     std::fs::remove_file(manager.interner_path()).unwrap();
 
     // Try to load - should handle missing interner gracefully
-    let config = GallifreyDBConfig::builder()
+    let config = AletheiaDBConfig::builder()
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),
@@ -1525,7 +1523,7 @@ fn test_missing_interner_entries() {
         .build();
 
     // Should not panic - may start with empty DB or skip invalid entries
-    let db = GallifreyDB::with_unified_config(config).unwrap();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
 
     // Verify database is functional even if data was lost
     let node_id = db
@@ -1549,11 +1547,11 @@ fn test_missing_interner_entries() {
 fn test_corrupted_property_data() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::storage::index_persistence::graph::{
+    use aletheiadb::PropertyMapBuilder;
+    use aletheiadb::storage::index_persistence::graph::{
         load_graph_index, new_graph_index_data, persist_property_map, save_graph_index,
     };
-    use gallifreydb::storage::index_persistence::{PersistedNode, PersistedPropertyMap};
+    use aletheiadb::storage::index_persistence::{PersistedNode, PersistedPropertyMap};
 
     let dir = tempdir().unwrap();
 
@@ -1602,15 +1600,15 @@ fn test_corrupted_property_data() {
 fn test_multiple_restoration_errors() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::PersistenceConfig;
-    use gallifreydb::{GallifreyDB, PropertyMapBuilder, config::GallifreyDBConfig};
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::{AletheiaDB, PropertyMapBuilder, config::AletheiaDBConfig};
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
 
     // Create database with multiple nodes
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1619,7 +1617,7 @@ fn test_multiple_restoration_errors() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         // Add several nodes
         for i in 0..10 {
@@ -1637,8 +1635,8 @@ fn test_multiple_restoration_errors() {
     }
 
     // Corrupt the graph file to simulate various errors
-    use gallifreydb::storage::index_persistence::IndexPersistenceManager;
-    use gallifreydb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
+    use aletheiadb::storage::index_persistence::IndexPersistenceManager;
+    use aletheiadb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
 
     let manager = IndexPersistenceManager::new(&data_dir);
     let graph_path = manager.graph_path().join("adjacency.idx");
@@ -1646,7 +1644,7 @@ fn test_multiple_restoration_errors() {
     let mut graph_data = load_graph_index(&graph_path).unwrap();
 
     // Add nodes with various invalid states
-    use gallifreydb::storage::index_persistence::PersistedNode;
+    use aletheiadb::storage::index_persistence::PersistedNode;
 
     // Node with invalid label index (non-existent string)
     graph_data.nodes.push(PersistedNode {
@@ -1671,7 +1669,7 @@ fn test_multiple_restoration_errors() {
 
     // Load and verify it handles multiple errors gracefully
     // With our new logging, this should print warnings for each skipped node
-    let config = GallifreyDBConfig::builder()
+    let config = AletheiaDBConfig::builder()
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),
@@ -1680,7 +1678,7 @@ fn test_multiple_restoration_errors() {
         })
         .build();
 
-    let db = GallifreyDB::with_unified_config(config).unwrap();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
 
     // Should have loaded the valid nodes (10) and skipped the invalid ones (2)
     // Note: Exact count may vary depending on restoration logic
@@ -1726,9 +1724,9 @@ fn test_vector_index_persistence() {
     println!("\nPhase 1: Creating database with vector index...");
 
     {
-        use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+        use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1737,7 +1735,7 @@ fn test_vector_index_persistence() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         // Enable vector index for "embedding" property
         db.vector_index("embedding")
@@ -1804,7 +1802,7 @@ fn test_vector_index_persistence() {
     println!("\nPhase 2: Verifying vector index files...");
 
     {
-        use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+        use aletheiadb::storage::index_persistence::IndexPersistenceManager;
 
         let manager = IndexPersistenceManager::new(&data_dir);
 
@@ -1839,7 +1837,7 @@ fn test_vector_index_persistence() {
         println!("✓ All vector index files exist on disk");
 
         // Verify metadata content
-        use gallifreydb::storage::index_persistence::vector::load_vector_meta;
+        use aletheiadb::storage::index_persistence::vector::load_vector_meta;
         let meta = load_vector_meta(&meta_path).unwrap();
         assert_eq!(meta.property_name, "embedding");
         assert_eq!(meta.dimensions, 384);
@@ -1848,7 +1846,7 @@ fn test_vector_index_persistence() {
         println!("✓ Vector metadata is correct (384 dimensions, 3 vectors)");
 
         // Verify mappings content
-        use gallifreydb::storage::index_persistence::vector::load_vector_mappings;
+        use aletheiadb::storage::index_persistence::vector::load_vector_mappings;
         let mappings = load_vector_mappings(&mappings_path).unwrap();
         assert_eq!(mappings.count, 3);
         assert_eq!(mappings.mappings.len(), 3);
@@ -1863,7 +1861,7 @@ fn test_vector_index_persistence() {
     println!("\nPhase 3: Restarting database and verifying restoration...");
 
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1872,7 +1870,7 @@ fn test_vector_index_persistence() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         println!("✓ Database restarted, loading indexes...");
 
@@ -1926,14 +1924,14 @@ fn test_vector_index_persistence() {
 /// can be persisted and restored correctly.
 #[test]
 fn test_temporal_version_round_trip() {
-    use gallifreydb::core::id::{EdgeId, NodeId, VersionId};
-    use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
-    use gallifreydb::storage::index_persistence::formats::PersistedVersionType;
-    use gallifreydb::storage::index_persistence::temporal::{
+    use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+    use aletheiadb::storage::index_persistence::formats::PersistedVersionType;
+    use aletheiadb::storage::index_persistence::temporal::{
         convert_edge_version, convert_node_version, load_temporal_index, restore_edge_version,
         restore_node_version,
     };
-    use gallifreydb::storage::version::{EdgeVersion, NodeVersion, VersionData};
+    use aletheiadb::storage::version::{EdgeVersion, NodeVersion, VersionData};
 
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
@@ -2126,7 +2124,7 @@ fn test_temporal_persistence_with_database() {
     println!("\nPhase 1: Creating database with nodes and edges...");
 
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -2135,7 +2133,7 @@ fn test_temporal_persistence_with_database() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         // Create nodes (each node creation creates a temporal version)
         node1_id = db
@@ -2186,7 +2184,7 @@ fn test_temporal_persistence_with_database() {
     println!("\nPhase 2: Verifying temporal index file...");
 
     {
-        use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+        use aletheiadb::storage::index_persistence::IndexPersistenceManager;
 
         let manager = IndexPersistenceManager::new(&data_dir);
         let temporal_path = manager.temporal_path().join("versions.idx");
@@ -2200,7 +2198,7 @@ fn test_temporal_persistence_with_database() {
         println!("✓ Temporal index file exists");
 
         // Load and verify temporal data
-        use gallifreydb::storage::index_persistence::temporal::load_temporal_index;
+        use aletheiadb::storage::index_persistence::temporal::load_temporal_index;
         let temporal_data = load_temporal_index(&temporal_path).unwrap();
 
         println!(
@@ -2227,7 +2225,7 @@ fn test_temporal_persistence_with_database() {
     println!("\nPhase 3: Restarting database and verifying restoration...");
 
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -2236,7 +2234,7 @@ fn test_temporal_persistence_with_database() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         println!("✓ Database restarted with load_on_startup=true");
 
@@ -2405,13 +2403,13 @@ fn test_delta_removed_properties_persistence() {
 /// and version heads point to the latest (highest tx_time) version.
 #[test]
 fn test_version_chain_reconstruction() {
-    use gallifreydb::core::id::{NodeId, VersionId};
-    use gallifreydb::core::interning::GLOBAL_INTERNER;
-    use gallifreydb::storage::historical::HistoricalStorage;
-    use gallifreydb::storage::index_persistence::formats::{
+    use aletheiadb::core::id::{NodeId, VersionId};
+    use aletheiadb::core::interning::GLOBAL_INTERNER;
+    use aletheiadb::storage::historical::HistoricalStorage;
+    use aletheiadb::storage::index_persistence::formats::{
         NodeVersionEntry, PersistedPropertyMap, PersistedVersionType,
     };
-    use gallifreydb::storage::index_persistence::temporal::{
+    use aletheiadb::storage::index_persistence::temporal::{
         new_temporal_index_data, restore_into_historical_storage,
     };
 
@@ -2570,9 +2568,9 @@ fn test_version_chain_reconstruction() {
 /// 5. Load manifest and verify LSN matches WAL LSN (not 0)
 #[test]
 fn test_persist_indexes_uses_actual_wal_lsn() {
-    use gallifreydb::GallifreyDB;
-    use gallifreydb::config::GallifreyDBConfig;
-    use gallifreydb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::config::AletheiaDBConfig;
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
 
     // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
@@ -2580,7 +2578,7 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
 
-    let config = GallifreyDBConfig::builder()
+    let config = AletheiaDBConfig::builder()
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),
@@ -2589,7 +2587,7 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
         })
         .build();
 
-    let db = GallifreyDB::with_unified_config(config).unwrap();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
 
     // Create multiple nodes and edges to advance WAL LSN significantly
     let mut node_ids = Vec::new();
@@ -2659,10 +2657,10 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
 fn test_parallel_loading_with_vectors() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::formats::PersistedHnswConfig;
-    use gallifreydb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
-    use gallifreydb::storage::index_persistence::load_indexes_parallel;
-    use gallifreydb::storage::index_persistence::vector::{
+    use aletheiadb::storage::index_persistence::formats::PersistedHnswConfig;
+    use aletheiadb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
+    use aletheiadb::storage::index_persistence::load_indexes_parallel;
+    use aletheiadb::storage::index_persistence::vector::{
         new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
     };
 
@@ -2732,10 +2730,10 @@ fn test_parallel_loading_with_vectors() {
 fn test_parallel_loading_error_propagation() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::formats::PersistedHnswConfig;
-    use gallifreydb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
-    use gallifreydb::storage::index_persistence::load_indexes_parallel;
-    use gallifreydb::storage::index_persistence::vector::{
+    use aletheiadb::storage::index_persistence::formats::PersistedHnswConfig;
+    use aletheiadb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
+    use aletheiadb::storage::index_persistence::load_indexes_parallel;
+    use aletheiadb::storage::index_persistence::vector::{
         new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
     };
 
@@ -2797,7 +2795,7 @@ fn test_parallel_loading_error_propagation() {
 fn test_parallel_loading_graph_error() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::load_indexes_parallel;
+    use aletheiadb::storage::index_persistence::load_indexes_parallel;
     use tempfile::tempdir;
 
     let dir = tempdir().unwrap();

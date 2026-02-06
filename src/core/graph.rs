@@ -1,6 +1,6 @@
 //! Core graph structures for nodes and edges.
 //!
-//! This module defines the fundamental graph elements that make up GallifreyDB's
+//! This module defines the fundamental graph elements that make up AletheiaDB's
 //! current state. These structures are optimized for the "hot path" - fast access
 //! to current data without temporal overhead.
 

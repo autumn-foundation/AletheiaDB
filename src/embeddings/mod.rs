@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+//! use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 //! use std::sync::Arc;
 //!
 //! let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
@@ -63,7 +63,7 @@ pub use service::EmbeddingService;
 /// # Example Implementation
 ///
 /// ```ignore
-/// use gallifreydb::embeddings::{EmbeddingProvider, EmbeddingError};
+/// use aletheiadb::embeddings::{EmbeddingProvider, EmbeddingError};
 /// use async_trait::async_trait;
 ///
 /// struct MyProvider { /* fields */ }
@@ -312,10 +312,10 @@ impl std::fmt::Display for EmbeddingError {
 #[cfg(feature = "embeddings")]
 impl std::error::Error for EmbeddingError {}
 
-/// Convert `EmbeddingError` to GallifreyDB's main `Error` type.
+/// Convert `EmbeddingError` to AletheiaDB's main `Error` type.
 ///
 /// This allows embedding errors to be used with the `?` operator in
-/// functions that return `Result<T, gallifreydb::utils::Error>`.
+/// functions that return `Result<T, aletheiadb::utils::Error>`.
 #[cfg(feature = "embeddings")]
 impl From<EmbeddingError> for crate::utils::Error {
     fn from(e: EmbeddingError) -> Self {

@@ -1,6 +1,6 @@
-# GallifreyDB Development Workflow
+# AletheiaDB Development Workflow
 
-This document describes the complete development workflow for GallifreyDB, including worktree management, quality checks, testing, profiling, and the feature development process.
+This document describes the complete development workflow for AletheiaDB, including worktree management, quality checks, testing, profiling, and the feature development process.
 
 ## Table of Contents
 
@@ -165,7 +165,7 @@ Write tests before implementation:
 ```rust
 #[test]
 fn test_traverse_and_rank_basic() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new();
 
     // Setup: create graph with embeddings
     let alice = db.create_node("Person", props! { "name" => "Alice" })?;
@@ -244,7 +244,7 @@ See [TESTING.md](../TESTING.md) for detailed testing instructions.
 
 ### Coverage Requirements
 
-GallifreyDB enforces strict code coverage thresholds:
+AletheiaDB enforces strict code coverage thresholds:
 - **Minimum 85% line coverage** (current: 86.45%)
 - **Minimum 88% function coverage** (current: 89.10%)
 - **Minimum 88% region coverage** (current: 88.91%)

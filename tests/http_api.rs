@@ -1,15 +1,15 @@
 #[cfg(feature = "http-server")]
 mod tests {
     use actix_web::{App, test, web};
-    use gallifreydb::GallifreyDB;
-    use gallifreydb::http::{AppState, configure_app};
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::http::{AppState, configure_app};
     use serde_json::json;
     use std::sync::Arc;
 
     #[actix_rt::test]
     async fn test_query_endpoint() {
         // Setup DB and App
-        let db = Arc::new(GallifreyDB::new().expect("Failed to create DB"));
+        let db = Arc::new(AletheiaDB::new().expect("Failed to create DB"));
         let state = AppState::new(db.clone());
 
         let app = test::init_service(
@@ -102,10 +102,10 @@ mod tests {
 
         // Create edge directly
         db.create_edge(
-            gallifreydb::core::NodeId::new(node_id).unwrap(),
-            gallifreydb::core::NodeId::new(bob_id).unwrap(),
+            aletheiadb::core::NodeId::new(node_id).unwrap(),
+            aletheiadb::core::NodeId::new(bob_id).unwrap(),
             "KNOWS",
-            gallifreydb::core::PropertyMap::new(),
+            aletheiadb::core::PropertyMap::new(),
         )
         .unwrap();
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_error_cases() {
-        let db = Arc::new(GallifreyDB::new().expect("Failed to create DB"));
+        let db = Arc::new(AletheiaDB::new().expect("Failed to create DB"));
         let state = AppState::new(db.clone());
         let app = test::init_service(
             App::new()
@@ -176,7 +176,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_deduplication_and_pagination() {
-        let db = Arc::new(GallifreyDB::new().expect("Failed to create DB"));
+        let db = Arc::new(AletheiaDB::new().expect("Failed to create DB"));
         let state = AppState::new(db.clone());
         let app = test::init_service(
             App::new()
@@ -189,7 +189,7 @@ mod tests {
         for i in 0..5 {
             db.create_node(
                 "PaginationTest",
-                gallifreydb::core::PropertyMapBuilder::new()
+                aletheiadb::core::PropertyMapBuilder::new()
                     .insert("idx", i as i64)
                     .build(),
             )
@@ -214,16 +214,16 @@ mod tests {
 
         // Test Neighbor Deduplication
         let n1 = db
-            .create_node("N1", gallifreydb::core::PropertyMap::new())
+            .create_node("N1", aletheiadb::core::PropertyMap::new())
             .unwrap();
         let n2 = db
-            .create_node("N2", gallifreydb::core::PropertyMap::new())
+            .create_node("N2", aletheiadb::core::PropertyMap::new())
             .unwrap();
 
         // Create bidirectional edge (conceptually two edges in directed graph)
-        db.create_edge(n1, n2, "KNOWS", gallifreydb::core::PropertyMap::new())
+        db.create_edge(n1, n2, "KNOWS", aletheiadb::core::PropertyMap::new())
             .unwrap();
-        db.create_edge(n2, n1, "KNOWS", gallifreydb::core::PropertyMap::new())
+        db.create_edge(n2, n1, "KNOWS", aletheiadb::core::PropertyMap::new())
             .unwrap();
 
         let neighbors_req = json!({

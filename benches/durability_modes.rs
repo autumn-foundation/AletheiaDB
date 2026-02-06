@@ -13,16 +13,16 @@
 
 mod common;
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
-};
-use gallifreydb::{
-    GallifreyDB, WalConfigBuilder, WriteOps, WriteOptions,
+use aletheiadb::{
+    AletheiaDB, WalConfigBuilder, WriteOps, WriteOptions,
     core::{PropertyMapBuilder, interning::GLOBAL_INTERNER, temporal::time},
     storage::wal::{
         DurabilityMode, WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
+};
+use criterion::{
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use std::sync::Arc;
 use std::thread;
@@ -34,7 +34,7 @@ use tempfile::TempDir;
 /// alive for the duration of the benchmark to prevent the directory from
 /// being cleaned up prematurely. When the guard is dropped, the directory
 /// is automatically cleaned up.
-fn create_db_with_mode(mode: DurabilityMode) -> (GallifreyDB, TempDir) {
+fn create_db_with_mode(mode: DurabilityMode) -> (AletheiaDB, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
     let config = WalConfigBuilder::new()
         .wal_dir(temp_dir.path().to_path_buf())
@@ -44,7 +44,7 @@ fn create_db_with_mode(mode: DurabilityMode) -> (GallifreyDB, TempDir) {
         .unwrap()
         .durability_mode(mode)
         .build();
-    let db = GallifreyDB::with_wal_config(config).unwrap();
+    let db = AletheiaDB::with_wal_config(config).unwrap();
     (db, temp_dir)
 }
 
@@ -646,22 +646,22 @@ fn bench_wal_append(c: &mut Criterion) {
             b.iter(|| {
                 let operation = match *op_type {
                     "create_node" => WalOperation::CreateNode {
-                        node_id: black_box(gallifreydb::core::id::NodeId::new(1).unwrap()),
+                        node_id: black_box(aletheiadb::core::id::NodeId::new(1).unwrap()),
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
                     },
                     "create_edge" => WalOperation::CreateEdge {
-                        edge_id: black_box(gallifreydb::core::id::EdgeId::new(1).unwrap()),
-                        source: gallifreydb::core::id::NodeId::new(1).unwrap(),
-                        target: gallifreydb::core::id::NodeId::new(2).unwrap(),
+                        edge_id: black_box(aletheiadb::core::id::EdgeId::new(1).unwrap()),
+                        source: aletheiadb::core::id::NodeId::new(1).unwrap(),
+                        target: aletheiadb::core::id::NodeId::new(2).unwrap(),
                         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
                     },
                     _ => WalOperation::UpdateNode {
-                        node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
-                        version_id: gallifreydb::core::id::VersionId::new(2).unwrap(),
+                        node_id: aletheiadb::core::id::NodeId::new(1).unwrap(),
+                        version_id: aletheiadb::core::id::VersionId::new(2).unwrap(),
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
@@ -695,7 +695,7 @@ fn bench_wal_throughput(c: &mut Criterion) {
                 let start_lsn = wal.current_lsn();
                 for i in 0..1000 {
                     let operation = WalOperation::CreateNode {
-                        node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
+                        node_id: aletheiadb::core::id::NodeId::new(i).unwrap(),
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
@@ -741,7 +741,7 @@ fn bench_wal_with_sync(c: &mut Criterion) {
 
             b.iter(|| {
                 let operation = WalOperation::CreateNode {
-                    node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
+                    node_id: aletheiadb::core::id::NodeId::new(1).unwrap(),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     valid_from: time::now(),

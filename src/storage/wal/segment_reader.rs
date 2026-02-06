@@ -26,7 +26,7 @@ use crate::utils::error::{Error, Result, StorageError};
 
 use super::{LSN, WalEntry, WalOperation};
 
-/// Magic bytes identifying a GallifreyDB WAL segment file.
+/// Magic bytes identifying a AletheiaDB WAL segment file.
 const WAL_MAGIC: [u8; 4] = *b"GWAL";
 
 /// Current WAL format version.

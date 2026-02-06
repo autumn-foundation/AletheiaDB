@@ -1,17 +1,17 @@
-# GallifreyDB Architecture
+# AletheiaDB Architecture
 
 > A high-performance bi-temporal graph database designed for LLM knowledge evolution tracking
 
 ## Overview
 
-GallifreyDB combines three powerful concepts:
+AletheiaDB combines three powerful concepts:
 - **Graph Database**: Nodes and edges with property storage
 - **Bi-Temporal Tracking**: Valid time + transaction time
 - **LLM Integration**: Enabling AI reasoning about knowledge evolution
 
 ```mermaid
 graph TB
-    subgraph "GallifreyDB Architecture"
+    subgraph "AletheiaDB Architecture"
         API["API Layer<br/>Read/Write Transactions"]
         QE["Query Engine<br/>Graph + Temporal + Vector"]
 
@@ -409,10 +409,10 @@ graph LR
 ## Module Organization
 
 ```
-gallifreydb/
+aletheiadb/
 ├── src/
 │   ├── lib.rs              # Public exports
-│   ├── db.rs               # GallifreyDB orchestrator
+│   ├── db.rs               # AletheiaDB orchestrator
 │   │
 │   ├── core/               # Core primitives
 │   │   ├── id.rs           # NodeId, EdgeId, VersionId

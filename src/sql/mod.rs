@@ -1,4 +1,4 @@
-//! SQL:2011 Temporal Syntax Support for GallifreyDB
+//! SQL:2011 Temporal Syntax Support for AletheiaDB
 //!
 //! This module provides SQL query language support with SQL:2011 temporal extensions,
 //! enabling developers to query the database using familiar SQL syntax while maintaining
@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! gallifreydb = { version = "0.1", features = ["sql"] }
+//! aletheiadb = { version = "0.1", features = ["sql"] }
 //! ```
 //!
 //! # Architecture
@@ -22,7 +22,7 @@
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use gallifreydb::sql::parse_sql;
+//! use aletheiadb::sql::parse_sql;
 //!
 //! // Basic query
 //! let query = parse_sql("SELECT * FROM nodes WHERE label = 'Person' LIMIT 10")?;

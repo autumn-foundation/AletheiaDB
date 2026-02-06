@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-01-01 (Proposed), 2026-01-22 (Accepted)
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, scalability, distributed
 
 ## Context
@@ -19,7 +19,7 @@ When the current-state dataset exceeds single-machine RAM (even with tiered stor
 - **Distributed transactions**: Writes spanning shards need coordination
 - **Rebalancing**: Moving data between shards is expensive
 
-**GallifreyDB-Specific Considerations:**
+**AletheiaDB-Specific Considerations:**
 - Bi-temporal data must maintain consistency across shards
 - Time-travel queries may need to reconstruct state across shards
 - LLM queries often traverse relationships (multi-hop patterns)
@@ -549,7 +549,7 @@ The implementation includes comprehensive test coverage:
 
 ### Neutral
 
-- Each shard is a full GallifreyDB instance with tiered storage
+- Each shard is a full AletheiaDB instance with tiered storage
 - Bi-temporal semantics preserved within and across shards
 - WAL per shard, no global WAL needed
 
@@ -594,8 +594,8 @@ Shard by relationship depth from "anchor" nodes.
 
 ## References
 
-- GitHub Issues: [#123](https://github.com/madmax983/GallifreyDB/issues/123), [#124](https://github.com/madmax983/GallifreyDB/issues/124), [#125](https://github.com/madmax983/GallifreyDB/issues/125), [#126](https://github.com/madmax983/GallifreyDB/issues/126)
-- Project: [GallifreyDB Scalability Roadmap](https://github.com/users/madmax983/projects/4)
+- GitHub Issues: [#123](https://github.com/madmax983/AletheiaDB/issues/123), [#124](https://github.com/madmax983/AletheiaDB/issues/124), [#125](https://github.com/madmax983/AletheiaDB/issues/125), [#126](https://github.com/madmax983/AletheiaDB/issues/126)
+- Project: [AletheiaDB Scalability Roadmap](https://github.com/users/madmax983/projects/4)
 - ADR-0013: Tiered Storage Architecture (prerequisite)
 - Facebook TAO: [Paper](https://www.usenix.org/system/files/conference/atc13/atc13-bronson.pdf)
 - Google Spanner: [Paper](https://research.google/pubs/pub39966/)

@@ -25,11 +25,11 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use gallifreydb::index::vector::sparse::{SparseVectorIndex, SparseIndexConfig, ScoringMethod};
-//! use gallifreydb::core::id::NodeId;
-//! use gallifreydb::core::vector::SparseVec;
+//! use aletheiadb::index::vector::sparse::{SparseVectorIndex, SparseIndexConfig, ScoringMethod};
+//! use aletheiadb::core::id::NodeId;
+//! use aletheiadb::core::vector::SparseVec;
 //!
-//! # fn example() -> gallifreydb::utils::Result<()> {
+//! # fn example() -> aletheiadb::utils::Result<()> {
 //! // Create an index for 10,000-dimensional sparse vectors
 //! let index = SparseVectorIndex::new(SparseIndexConfig {
 //!     dimensions: 10_000,
@@ -1037,8 +1037,8 @@ struct SparseIndexData {
 /// # Example
 ///
 /// ```rust,no_run
-/// use gallifreydb::index::vector::sparse::hybrid_fusion;
-/// use gallifreydb::core::id::NodeId;
+/// use aletheiadb::index::vector::sparse::hybrid_fusion;
+/// use aletheiadb::core::id::NodeId;
 ///
 /// let dense_results = vec![
 ///     (NodeId::new(1).unwrap(), 0.95),
@@ -1110,8 +1110,8 @@ pub fn hybrid_fusion(
 /// # Example
 ///
 /// ```rust,no_run
-/// use gallifreydb::index::vector::sparse::reciprocal_rank_fusion;
-/// use gallifreydb::core::id::NodeId;
+/// use aletheiadb::index::vector::sparse::reciprocal_rank_fusion;
+/// use aletheiadb::core::id::NodeId;
 ///
 /// let dense_results = vec![
 ///     (NodeId::new(1).unwrap(), 0.95),

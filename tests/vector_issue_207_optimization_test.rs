@@ -4,8 +4,8 @@
 //! where a NodeId exists in id_mapping but the corresponding usearch key doesn't exist
 //! in the usearch index (e.g., during recovery or after explicit removal).
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 
 /// Test that demonstrates the optimization for Issue #207.
 ///

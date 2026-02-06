@@ -3,13 +3,13 @@
 //! Tests the `find_semantic_drift()` API with realistic scenarios involving
 //! multiple documents with varying drift levels over time.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::temporal::TimeRange;
-use gallifreydb::index::vector::temporal::{
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::temporal::TimeRange;
+use aletheiadb::index::vector::temporal::{
     DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-use gallifreydb::utils::Result;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::utils::Result;
 
 /// Creates a normalized vector from raw values.
 fn normalize(v: &[f32]) -> Vec<f32> {

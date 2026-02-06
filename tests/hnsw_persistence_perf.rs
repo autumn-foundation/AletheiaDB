@@ -1,7 +1,7 @@
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::hnsw::HnswConfig;
-use gallifreydb::index::vector::hnsw::HnswIndex;
-use gallifreydb::index::vector::{DistanceMetric, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::hnsw::HnswConfig;
+use aletheiadb::index::vector::hnsw::HnswIndex;
+use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
 use std::time::Instant;
 use tempfile::tempdir;
 

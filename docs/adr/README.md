@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADRs)
 
-This directory contains Architecture Decision Records (ADRs) for GallifreyDB.
+This directory contains Architecture Decision Records (ADRs) for AletheiaDB.
 
 ## What is an ADR?
 

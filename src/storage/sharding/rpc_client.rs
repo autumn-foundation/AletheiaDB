@@ -10,13 +10,13 @@
 //!
 //! ```toml
 //! [dependencies]
-//! gallifreydb = { version = "0.1", features = ["sharding-rpc"] }
+//! aletheiadb = { version = "0.1", features = ["sharding-rpc"] }
 //! ```
 //!
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::storage::sharding::rpc_client::{HttpShardClient, RpcConfig};
+//! use aletheiadb::storage::sharding::rpc_client::{HttpShardClient, RpcConfig};
 //!
 //! let config = RpcConfig {
 //!     endpoint: "http://shard0:9000".to_string(),

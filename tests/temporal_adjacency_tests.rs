@@ -1,6 +1,6 @@
-use gallifreydb::core::temporal::time;
-use gallifreydb::core::{EdgeId, InternedString, NodeId, TIMESTAMP_MAX};
-use gallifreydb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
+use aletheiadb::core::temporal::time;
+use aletheiadb::core::{EdgeId, InternedString, NodeId, TIMESTAMP_MAX};
+use aletheiadb::index::temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
 
 #[test]
 fn test_insert_single_edge() {

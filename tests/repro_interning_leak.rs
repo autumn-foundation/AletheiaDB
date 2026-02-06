@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use gallifreydb::core::interning::GLOBAL_INTERNER;
-    use gallifreydb::core::property::PropertyMap;
+    use aletheiadb::core::interning::GLOBAL_INTERNER;
+    use aletheiadb::core::property::PropertyMap;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);

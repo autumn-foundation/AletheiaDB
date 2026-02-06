@@ -350,7 +350,7 @@ pub fn create_checkpoint(...) {
 
 **Rejected because**:
 - Blocks all writes for 10-15 seconds
-- Defeats GallifreyDB's high-throughput design
+- Defeats AletheiaDB's high-throughput design
 - MVCC snapshots are better: writes continue during checkpoint
 
 ## Conclusion

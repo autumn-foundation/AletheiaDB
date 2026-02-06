@@ -8,13 +8,13 @@
 
 mod common;
 
+use aletheiadb::AletheiaDB;
+use aletheiadb::api::transaction::WriteOps;
+use aletheiadb::core::id::{NodeId, VersionId};
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+use aletheiadb::index::temporal::TemporalIndexes;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::GallifreyDB;
-use gallifreydb::api::transaction::WriteOps;
-use gallifreydb::core::id::{NodeId, VersionId};
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
-use gallifreydb::index::temporal::TemporalIndexes;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -553,10 +553,9 @@ fn bench_concurrent_time_travel_reads(c: &mut Criterion) {
                                 s.spawn(move |_| {
                                     // Each thread performs 25 queries (total work per iter scales with threads)
                                     for i in 0..25 {
-                                        let node_id = gallifreydb::core::id::NodeId::new(
-                                            (i % 100) as u64 + 1,
-                                        )
-                                        .unwrap();
+                                        let node_id =
+                                            aletheiadb::core::id::NodeId::new((i % 100) as u64 + 1)
+                                                .unwrap();
                                         // Pick a valid timestamp
                                         let timestamp = 1000 + (i as i64 * 100);
 
@@ -584,7 +583,7 @@ fn bench_concurrent_time_travel_reads(c: &mut Criterion) {
 fn bench_cache_hit_rate(c: &mut Criterion) {
     // Setup ONCE
     let db = setup_database_with_versions(10);
-    let node_id = gallifreydb::core::id::NodeId::new(1).unwrap();
+    let node_id = aletheiadb::core::id::NodeId::new(1).unwrap();
     let timestamp = 1000;
 
     // Warm up the cache manually (optional, but ensures we measure hits)
@@ -621,7 +620,7 @@ fn bench_cache_miss(c: &mut Criterion) {
             let i = counter.fetch_add(1, Ordering::Relaxed);
             let id_to_read = (i % node_count as u64) + 1;
 
-            let node_id = gallifreydb::core::id::NodeId::new(id_to_read).unwrap();
+            let node_id = aletheiadb::core::id::NodeId::new(id_to_read).unwrap();
             let timestamp = 1000; // First version
 
             let result = db.get_node_at_time(
@@ -635,8 +634,8 @@ fn bench_cache_miss(c: &mut Criterion) {
 }
 
 /// Setup helper: Create a database with `count` versioned nodes.
-fn setup_database_with_versions(count: usize) -> GallifreyDB {
-    let db = GallifreyDB::new().unwrap();
+fn setup_database_with_versions(count: usize) -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
 
     // Batch writes if possible, otherwise individual
     for i in 0..count {

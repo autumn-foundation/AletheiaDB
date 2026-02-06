@@ -1,14 +1,14 @@
 # Query Pipeline Guide
 
-This guide covers the complete GQL (Gallifrey Query Language) pipeline from parsing to execution.
+This guide covers the complete AQL (Gallifrey Query Language) pipeline from parsing to execution.
 
 ## Overview
 
-GallifreyDB provides a full query pipeline for executing Cypher-like queries with extensions for vector search and bi-temporal queries:
+AletheiaDB provides a full query pipeline for executing Cypher-like queries with extensions for vector search and bi-temporal queries:
 
 ```
 ┌─────────────┐     ┌───────────┐     ┌───────────┐     ┌─────────┐     ┌──────────┐
-│ GQL String  │ ──► │  Parser   │ ──► │ Converter │ ──► │ Planner │ ──► │ Executor │
+│ AQL String  │ ──► │  Parser   │ ──► │ Converter │ ──► │ Planner │ ──► │ Executor │
 │             │     │           │     │           │     │         │     │          │
 │ "MATCH..."  │     │ QueryAst  │     │  Query    │     │ Plan    │     │ Results  │
 └─────────────┘     └───────────┘     └───────────┘     └─────────┘     └──────────┘
@@ -19,8 +19,8 @@ GallifreyDB provides a full query pipeline for executing Cypher-like queries wit
 ### Basic Query Execution
 
 ```rust
-use gallifreydb::query::{parse_query, QueryPlanner, QueryExecutor, Statistics};
-use gallifreydb::storage::{CurrentStorage, HistoricalStorage};
+use aletheiadb::query::{parse_query, QueryPlanner, QueryExecutor, Statistics};
+use aletheiadb::storage::{CurrentStorage, HistoricalStorage};
 use std::sync::{Arc, RwLock};
 
 // 1. Parse and convert the query
@@ -183,24 +183,24 @@ RETURN n SKIP 20 LIMIT 10  -- Results 21-30
 
 ## Pipeline Components
 
-### Parser (`gallifreydb::query::Parser`)
+### Parser (`aletheiadb::query::Parser`)
 
-Converts GQL strings to AST:
+Converts AQL strings to AST:
 
 ```rust
-use gallifreydb::query::Parser;
+use aletheiadb::query::Parser;
 
 let ast = Parser::parse("MATCH (n:Person) RETURN n")?;
 println!("Source: {:?}", ast.source);
 println!("Return: {:?}", ast.return_clause);
 ```
 
-### Converter (`gallifreydb::query::AstConverter`)
+### Converter (`aletheiadb::query::AstConverter`)
 
 Converts AST to Query (sequence of operations):
 
 ```rust
-use gallifreydb::query::{Parser, AstConverter, ParameterValue};
+use aletheiadb::query::{Parser, AstConverter, ParameterValue};
 
 let ast = Parser::parse("SIMILAR TO $emb LIMIT 10")?;
 
@@ -210,13 +210,13 @@ converter.bind("emb", ParameterValue::Embedding(embedding));
 let query = converter.convert(&ast)?;
 ```
 
-### Planner (`gallifreydb::query::QueryPlanner`)
+### Planner (`aletheiadb::query::QueryPlanner`)
 
 Optimizes and creates physical execution plan:
 
 ```rust
-use gallifreydb::query::{QueryPlanner, Statistics};
-use gallifreydb::storage::CurrentStorage;
+use aletheiadb::query::{QueryPlanner, Statistics};
+use aletheiadb::storage::CurrentStorage;
 
 let storage = Arc::new(CurrentStorage::new());
 let stats = Arc::new(Statistics::default());
@@ -228,12 +228,12 @@ let plan = planner.plan(query)?;
 println!("{}", plan.explain());
 ```
 
-### Executor (`gallifreydb::query::QueryExecutor`)
+### Executor (`aletheiadb::query::QueryExecutor`)
 
 Executes physical plans:
 
 ```rust
-use gallifreydb::query::QueryExecutor;
+use aletheiadb::query::QueryExecutor;
 
 let executor = QueryExecutor::new(current_storage, historical_storage);
 let results = executor.execute(&plan)?;
@@ -276,7 +276,7 @@ let query = converter.convert(&ast)?;
 ### Parse Errors
 
 ```rust
-use gallifreydb::query::parse_query;
+use aletheiadb::query::parse_query;
 
 match parse_query("MATCH (n:Person RETURN n") {
     Ok(_) => unreachable!(),
@@ -322,8 +322,8 @@ let result = planner.plan(query);
 ## Complete Example
 
 ```rust
-use gallifreydb::GallifreyDB;
-use gallifreydb::query::{
+use aletheiadb::AletheiaDB;
+use aletheiadb::query::{
     parse_query_with_params, ParameterValue,
     QueryPlanner, QueryExecutor, Statistics
 };
@@ -331,7 +331,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn search_similar_documents(
-    db: &GallifreyDB,
+    db: &AletheiaDB,
     query_embedding: Vec<f32>,
     min_score: f64,
     limit: usize,

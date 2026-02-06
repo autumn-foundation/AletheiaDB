@@ -1,9 +1,9 @@
 use crate::api::transaction::{TxIdGenerator, TxVisibilityManager};
-use crate::config::GallifreyDBConfig;
+use crate::config::AletheiaDBConfig;
 use crate::core::id::IdGenerator;
 use crate::core::temporal::time;
 use crate::core::version::AnchorConfig;
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;
 use crate::query::planner::Statistics;
 use crate::storage::current::CurrentStorage;
@@ -16,13 +16,13 @@ use crate::utils::error::Result;
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
-impl GallifreyDB {
+impl AletheiaDB {
     /// Create a new empty database with default configuration.
     ///
     /// # Configuration
     ///
     /// This creates a **disk-based** database with:
-    /// - **WAL directory**: `./gallifreydb/wal` (relative to current working directory)
+    /// - **WAL directory**: `./aletheiadb/wal` (relative to current working directory)
     /// - **Durability**: Group Commit (ACID compliant)
     /// - **History**: Anchor interval 10
     ///
@@ -55,19 +55,19 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WalConfigBuilder, DurabilityMode};
+    /// use aletheiadb::{AletheiaDB, WalConfigBuilder, DurabilityMode};
     ///
     /// // High-throughput ACID mode with group commit
     /// let wal_config = WalConfigBuilder::new()
     ///     .durability_mode(DurabilityMode::group_commit(10, 200))
     ///     .build();
-    /// let db = GallifreyDB::with_wal_config(wal_config)?;
+    /// let db = AletheiaDB::with_wal_config(wal_config)?;
     ///
     /// // Bulk loading mode with async durability
     /// let wal_config = WalConfigBuilder::new()
     ///     .durability_mode(DurabilityMode::async_mode(100))
     ///     .build();
-    /// let db = GallifreyDB::with_wal_config(wal_config)?;
+    /// let db = AletheiaDB::with_wal_config(wal_config)?;
     /// ```
     pub fn with_wal_config(wal_config: crate::config::WalConfig) -> Result<Self> {
         Self::with_full_config(AnchorConfig::default(), wal_config)
@@ -75,7 +75,7 @@ impl GallifreyDB {
 
     /// Create a new database with unified configuration.
     ///
-    /// This method accepts a [`GallifreyDBConfig`] which consolidates all configuration
+    /// This method accepts a [`AletheiaDBConfig`] which consolidates all configuration
     /// settings for the database, including WAL, historical storage, and vector indexes.
     ///
     /// # Errors
@@ -85,17 +85,17 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, config::WalConfigBuilder};
+    /// use aletheiadb::{AletheiaDB, config::AletheiaDBConfig, config::WalConfigBuilder};
     ///
-    /// let config = GallifreyDBConfig::builder()
+    /// let config = AletheiaDBConfig::builder()
     ///     .wal(WalConfigBuilder::new()
     ///         .with_validated(32, 2048, 64 * 1024, 64 * 1024 * 1024, 10, 10).unwrap()
     ///         .build())
     ///     .build();
     ///
-    /// let db = GallifreyDB::with_unified_config(config)?;
+    /// let db = AletheiaDB::with_unified_config(config)?;
     /// ```
-    pub fn with_unified_config(config: GallifreyDBConfig) -> Result<Self> {
+    pub fn with_unified_config(config: AletheiaDBConfig) -> Result<Self> {
         let durability_mode = config.wal.durability_mode;
 
         // Create ConcurrentWalSystem config from unified WalConfig
@@ -136,7 +136,7 @@ impl GallifreyDB {
             None
         };
 
-        let mut db = GallifreyDB {
+        let mut db = AletheiaDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
                 config.historical,
@@ -241,7 +241,7 @@ impl GallifreyDB {
         let wal = ConcurrentWalSystem::new(wal_system_config)?;
         let wal = Arc::new(wal);
 
-        let db = GallifreyDB {
+        let db = AletheiaDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::with_config(anchor_config))),
             temporal_indexes: Arc::new(TemporalIndexes::new()),
@@ -295,16 +295,16 @@ impl GallifreyDB {
     ///
     /// # Returns
     ///
-    /// Returns a `GallifreyDB` instance with restored configuration, or an error
+    /// Returns a `AletheiaDB` instance with restored configuration, or an error
     /// if the checkpoint cannot be loaded or the vector index cannot be restored.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::GallifreyDB;
+    /// use aletheiadb::AletheiaDB;
     /// use std::path::Path;
     ///
-    /// let db = GallifreyDB::open(Path::new("gallifreydb/checkpoints/latest.gfry"))?;
+    /// let db = AletheiaDB::open(Path::new("aletheiadb/checkpoints/latest.gfry"))?;
     /// ```
     pub fn open<P: AsRef<std::path::Path>>(checkpoint_path: P) -> Result<Self> {
         use crate::storage::persistence::Checkpoint;

@@ -2,11 +2,11 @@ use crate::api::transaction::WriteOps;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::{PropertyMap, PropertyValue};
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
 use crate::utils::error::Result;
 
-impl GallifreyDB {
+impl AletheiaDB {
     /// Create a node with the given label and properties.
     ///
     /// This is a convenience method that internally uses a write transaction.
@@ -15,7 +15,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::PropertyMapBuilder;
+    /// use aletheiadb::PropertyMapBuilder;
     ///
     /// let node_id = db.create_node(
     ///     "Person",
@@ -36,7 +36,7 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::PropertyMapBuilder;
+    /// use aletheiadb::PropertyMapBuilder;
     ///
     /// let edge_id = db.create_edge(
     ///     source_id,

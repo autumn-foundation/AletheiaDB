@@ -4,12 +4,12 @@
 //! After optimization (returning DashMap guards), iteration is ~46% faster
 //! when edge data is accessed without taking ownership.
 
+use aletheiadb::core::graph::Edge;
+use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::index::current::CurrentIndexes;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::core::graph::Edge;
-use gallifreydb::core::id::{EdgeId, NodeId, VersionId};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::index::current::CurrentIndexes;
 
 fn bench_iter_edges(c: &mut Criterion) {
     let indexes = CurrentIndexes::new();

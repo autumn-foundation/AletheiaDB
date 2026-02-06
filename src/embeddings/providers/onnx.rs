@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::embeddings::{EmbeddingService, providers::onnx::*};
+//! use aletheiadb::embeddings::{EmbeddingService, providers::onnx::*};
 //! use std::sync::Arc;
 //!
 //! let config = OnnxConfig::default(); // Uses all-MiniLM-L6-v2

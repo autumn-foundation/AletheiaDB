@@ -23,7 +23,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use gallifreydb::storage::snapshot::StorageSnapshot;
+//! use aletheiadb::storage::snapshot::StorageSnapshot;
 //!
 //! // Create snapshot at specific LSN
 //! let snapshot = current.create_snapshot(lsn);

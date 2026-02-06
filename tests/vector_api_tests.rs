@@ -1,11 +1,11 @@
-use gallifreydb::GallifreyDB;
-use gallifreydb::WriteOps;
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::index::vector::temporal::{
+use aletheiadb::AletheiaDB;
+use aletheiadb::WriteOps;
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::index::vector::temporal::{
     DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
 };
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use std::sync::Arc;
 use std::thread;
 
@@ -13,7 +13,7 @@ use std::thread;
 
 #[test]
 fn test_enable_vector_index() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -26,7 +26,7 @@ fn test_enable_vector_index() {
 
 #[test]
 fn test_find_similar_basic() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -80,7 +80,7 @@ fn test_find_similar_basic() {
 
 #[test]
 fn test_find_similar_with_label() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -125,7 +125,7 @@ fn test_find_similar_with_label() {
 
 #[test]
 fn test_vector_index_not_enabled() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node with vector
     let node_id = db
@@ -143,7 +143,7 @@ fn test_vector_index_not_enabled() {
 
 #[test]
 fn test_vector_index_with_euclidean_distance() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index with Euclidean distance
     let config = HnswConfig::new(3, DistanceMetric::Euclidean).with_capacity(100);
@@ -189,7 +189,7 @@ fn test_vector_index_with_euclidean_distance() {
 
 #[test]
 fn test_vector_index_with_large_k() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -224,7 +224,7 @@ fn test_vector_index_with_large_k() {
 /// were missing from the HNSW index, causing find_similar to return empty results.
 #[test]
 fn test_transaction_nodes_are_indexed() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -267,7 +267,7 @@ fn test_transaction_nodes_are_indexed() {
 
 #[test]
 fn test_find_similar_by_embedding() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -317,7 +317,7 @@ fn test_find_similar_by_embedding() {
 
 #[test]
 fn test_find_similar_by_embedding_with_label() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -366,7 +366,7 @@ fn test_find_similar_by_embedding_with_label() {
 
 #[test]
 fn test_find_similar_by_embedding_dimension_mismatch() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index with 3 dimensions
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -391,7 +391,7 @@ fn test_find_similar_by_embedding_dimension_mismatch() {
 
 #[test]
 fn test_find_similar_empty_database() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index but don't add any nodes
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -406,7 +406,7 @@ fn test_find_similar_empty_database() {
 
 #[test]
 fn test_find_similar_k_zero() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index and add some nodes
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -429,7 +429,7 @@ fn test_find_similar_k_zero() {
 
 #[test]
 fn test_concurrent_vector_indexing() {
-    let db = Arc::new(GallifreyDB::new().unwrap());
+    let db = Arc::new(AletheiaDB::new().unwrap());
 
     // Enable vector index
     let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(1000);
@@ -491,7 +491,7 @@ fn test_concurrent_vector_indexing() {
 
 #[test]
 fn test_find_similar_with_missing_property() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index on "embedding" property
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -540,7 +540,7 @@ fn test_find_similar_with_missing_property() {
 /// Test basic builder pattern for enabling vector index.
 #[test]
 fn test_vector_index_builder_basic() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Builder pattern API
     db.vector_index("embedding")
@@ -555,7 +555,7 @@ fn test_vector_index_builder_basic() {
 /// Test builder pattern with multiple properties.
 #[test]
 fn test_vector_index_builder_multiple_properties() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable two indexes via builder
     db.vector_index("title_embedding")
@@ -580,7 +580,7 @@ fn test_vector_index_builder_multiple_properties() {
 /// Test builder pattern without calling hnsw() fails.
 #[test]
 fn test_vector_index_builder_missing_hnsw_fails() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Calling enable() without hnsw() should fail
     let result = db.vector_index("embedding").enable();
@@ -593,7 +593,7 @@ fn test_vector_index_builder_missing_hnsw_fails() {
 /// both enable_vector_index() and enable_temporal_vector_index().
 #[test]
 fn test_vector_index_builder_with_temporal() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     // Single call enables both current and temporal indexing
@@ -619,7 +619,7 @@ fn test_vector_index_builder_with_temporal() {
 /// Test builder creates working index that can be searched.
 #[test]
 fn test_vector_index_builder_functional() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     db.vector_index("embedding")
         .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
@@ -655,7 +655,7 @@ fn test_vector_index_builder_functional() {
 /// Test re-enabling same property via builder fails.
 #[test]
 fn test_vector_index_builder_same_property_twice_fails() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     db.vector_index("embedding")
         .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
@@ -681,7 +681,7 @@ fn test_vector_index_builder_same_property_twice_fails() {
 /// Test find_similar_in() with explicit property specification.
 #[test]
 fn test_find_similar_in_explicit_property() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable two different indexes
     db.vector_index("title_embedding")
@@ -732,7 +732,7 @@ fn test_find_similar_in_explicit_property() {
 /// Test search_vectors_in() with explicit property specification.
 #[test]
 fn test_search_vectors_in_explicit_property() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     db.vector_index("embedding")
         .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
@@ -768,7 +768,7 @@ fn test_search_vectors_in_explicit_property() {
 /// Test find_similar_in() with non-existent property fails.
 #[test]
 fn test_find_similar_in_nonexistent_property_fails() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     db.vector_index("embedding")
         .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
@@ -797,7 +797,7 @@ fn test_find_similar_in_nonexistent_property_fails() {
 /// Test find_similar_as_of_in() with explicit property specification.
 #[test]
 fn test_find_similar_as_of_in_explicit_property() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     // Enable temporal vector index for a specific property
@@ -825,7 +825,7 @@ fn test_find_similar_as_of_in_explicit_property() {
         .unwrap();
 
     // Get a timestamp after the node was created
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
 
     // Query with property-specific temporal search
     let query = vec![0.9f32, 0.1, 0.0, 0.0];
@@ -840,7 +840,7 @@ fn test_find_similar_as_of_in_explicit_property() {
 /// Test find_similar_as_of_in() with wrong property fails.
 #[test]
 fn test_find_similar_as_of_in_wrong_property_fails() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     // Enable temporal index for "embedding" property
@@ -856,7 +856,7 @@ fn test_find_similar_as_of_in_wrong_property_fails() {
         .enable()
         .expect("Should enable temporal index");
 
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
     let query = vec![1.0f32, 0.0, 0.0, 0.0];
 
     // Query with WRONG property name should fail
@@ -870,7 +870,7 @@ fn test_find_similar_as_of_in_wrong_property_fails() {
 /// Test find_similar_as_of_in() when temporal index not enabled.
 #[test]
 fn test_find_similar_as_of_in_no_temporal_index() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Only enable regular HNSW index, not temporal
     db.vector_index("embedding")
@@ -878,7 +878,7 @@ fn test_find_similar_as_of_in_no_temporal_index() {
         .enable()
         .unwrap();
 
-    let timestamp = gallifreydb::core::temporal::time::now();
+    let timestamp = aletheiadb::core::temporal::time::now();
     let query = vec![1.0f32, 0.0, 0.0, 0.0];
 
     // Temporal query should fail when temporal index not enabled
@@ -892,9 +892,9 @@ fn test_find_similar_as_of_in_no_temporal_index() {
 /// Test track_drift_in() with explicit property name.
 #[test]
 fn test_track_drift_in_explicit_property() {
-    use gallifreydb::core::temporal::TimeRange;
+    use aletheiadb::core::temporal::TimeRange;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     // Enable temporal vector index for a specific property
@@ -937,9 +937,9 @@ fn test_track_drift_in_explicit_property() {
 /// Test track_drift_in() with wrong property fails.
 #[test]
 fn test_track_drift_in_wrong_property_fails() {
-    use gallifreydb::core::temporal::TimeRange;
+    use aletheiadb::core::temporal::TimeRange;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     // Enable temporal index for "embedding" property
@@ -970,9 +970,9 @@ fn test_track_drift_in_wrong_property_fails() {
 /// Test track_drift_in() when temporal index not enabled.
 #[test]
 fn test_track_drift_in_no_temporal_index() {
-    use gallifreydb::core::temporal::TimeRange;
+    use aletheiadb::core::temporal::TimeRange;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Only enable regular HNSW index, not temporal
     db.vector_index("embedding")
@@ -995,9 +995,9 @@ fn test_track_drift_in_no_temporal_index() {
 /// Test semantic_evolution_in() with explicit property name.
 #[test]
 fn test_semantic_evolution_in_explicit_property() {
-    use gallifreydb::core::temporal::TimeRange;
+    use aletheiadb::core::temporal::TimeRange;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     db.vector_index("content_embedding")
@@ -1031,9 +1031,9 @@ fn test_semantic_evolution_in_explicit_property() {
 /// Test semantic_evolution_in() with wrong property fails.
 #[test]
 fn test_semantic_evolution_in_wrong_property_fails() {
-    use gallifreydb::core::temporal::TimeRange;
+    use aletheiadb::core::temporal::TimeRange;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     db.vector_index("embedding")
@@ -1061,9 +1061,9 @@ fn test_semantic_evolution_in_wrong_property_fails() {
 /// Test find_drift_in() with explicit property name.
 #[test]
 fn test_find_drift_in_explicit_property() {
-    use gallifreydb::core::temporal::TimeRange;
+    use aletheiadb::core::temporal::TimeRange;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     db.vector_index("content_embedding")
@@ -1097,9 +1097,9 @@ fn test_find_drift_in_explicit_property() {
 /// Test find_drift_in() with wrong property fails.
 #[test]
 fn test_find_drift_in_wrong_property_fails() {
-    use gallifreydb::core::temporal::TimeRange;
+    use aletheiadb::core::temporal::TimeRange;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
     db.vector_index("embedding")
@@ -1131,9 +1131,9 @@ fn test_find_drift_in_wrong_property_fails() {
 /// This is the critical test for multi-property temporal support.
 #[test]
 fn test_multi_property_temporal_indexes() {
-    use gallifreydb::core::temporal::TimeRange;
+    use aletheiadb::core::temporal::TimeRange;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable temporal index for FIRST property
     let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
@@ -1185,7 +1185,7 @@ fn test_multi_property_temporal_indexes() {
         "title_embedding",
         &query,
         10,
-        gallifreydb::core::temporal::time::now(),
+        aletheiadb::core::temporal::time::now(),
     );
     assert!(
         result1.is_ok(),
@@ -1198,7 +1198,7 @@ fn test_multi_property_temporal_indexes() {
         "content_embedding",
         &query,
         10,
-        gallifreydb::core::temporal::time::now(),
+        aletheiadb::core::temporal::time::now(),
     );
     assert!(
         result2.is_ok(),
@@ -1224,7 +1224,7 @@ fn test_multi_property_temporal_indexes() {
 /// Test that temporal queries on non-existent property fail gracefully.
 #[test]
 fn test_temporal_query_nonexistent_property() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable temporal index for one property
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
@@ -1246,7 +1246,7 @@ fn test_temporal_query_nonexistent_property() {
         "nonexistent_property",
         &query,
         10,
-        gallifreydb::core::temporal::time::now(),
+        aletheiadb::core::temporal::time::now(),
     );
 
     assert!(
@@ -1261,7 +1261,7 @@ fn test_temporal_query_nonexistent_property() {
 fn test_temporal_config_without_hnsw_config() {
     // Test that TemporalVectorConfig can be created without hnsw_config
     // when a vector index already exists
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable vector index first
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
@@ -1281,7 +1281,7 @@ fn test_temporal_config_without_hnsw_config() {
 fn test_temporal_config_without_hnsw_config_requires_existing_index() {
     // Test that TemporalVectorConfig without hnsw_config fails
     // when no vector index exists
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Try to enable temporal vector index WITHOUT providing hnsw_config
     // AND without an existing vector index - this should fail
@@ -1311,7 +1311,7 @@ fn test_temporal_config_default_temporal_only() {
 #[test]
 fn test_list_temporal_vector_indexes() {
     // Test the list_temporal_vector_indexes method
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Initially empty
     assert!(db.list_temporal_vector_indexes().is_empty());
@@ -1359,7 +1359,7 @@ fn test_list_temporal_vector_indexes() {
 #[test]
 fn test_concurrent_vector_operations_with_multiple_properties() {
     // Test concurrent operations across multiple vector properties
-    let db = Arc::new(GallifreyDB::new().unwrap());
+    let db = Arc::new(AletheiaDB::new().unwrap());
 
     // Enable two vector indexes for different properties
     let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
@@ -1445,8 +1445,8 @@ fn test_concurrent_vector_operations_with_multiple_properties() {
 }
 
 #[test]
-fn test_gallifreydb_is_vector_index_enabled_for() {
-    let db = GallifreyDB::new().unwrap();
+fn test_aletheiadb_is_vector_index_enabled_for() {
+    let db = AletheiaDB::new().unwrap();
 
     // Initially no index should be enabled
     assert!(!db.is_vector_index_enabled());
@@ -1472,10 +1472,10 @@ fn test_gallifreydb_is_vector_index_enabled_for() {
 #[test]
 fn test_max_vector_properties_limit() {
     // Test that the maximum number of vector properties is enforced
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-    use gallifreydb::storage::DEFAULT_MAX_VECTOR_PROPERTIES;
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+    use aletheiadb::storage::DEFAULT_MAX_VECTOR_PROPERTIES;
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable indexes up to the limit
     for i in 0..DEFAULT_MAX_VECTOR_PROPERTIES {

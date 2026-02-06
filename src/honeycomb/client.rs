@@ -26,7 +26,7 @@ pub const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// User-Agent header value.
 /// Used when the `honeycomb` feature is enabled for HTTP requests.
 #[allow(dead_code)]
-pub const USER_AGENT: &str = concat!("gallifreydb-honeycomb/", env!("CARGO_PKG_VERSION"));
+pub const USER_AGENT: &str = concat!("aletheiadb-honeycomb/", env!("CARGO_PKG_VERSION"));
 
 /// Response from a batch transmission.
 ///
@@ -182,7 +182,7 @@ impl RetryConfig {
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::honeycomb::{Client, Config, Event};
+/// use aletheiadb::honeycomb::{Client, Config, Event};
 ///
 /// let config = Config::new("api-key", "dataset");
 /// let client = Client::new(config).unwrap();
@@ -973,7 +973,7 @@ mod tests {
 
     #[test]
     fn test_user_agent_constant() {
-        assert!(USER_AGENT.starts_with("gallifreydb-honeycomb/"));
+        assert!(USER_AGENT.starts_with("aletheiadb-honeycomb/"));
     }
 
     // =====================================================

@@ -84,7 +84,7 @@ jobs:
           # CI runs (push/PR): performance_targets only for fast feedback on key metrics
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Running ALL benchmarks (weekly/manual run)..."
-            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench gallifreydb --bench hnsw_index --bench performance_targets --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity"
+            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench aletheiadb --bench hnsw_index --bench performance_targets --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity"
           else
             echo "Running PERFORMANCE TARGETS benchmark only (CI run)..."
             # Performance targets: lightweight benchmark verifying key performance metrics
@@ -122,7 +122,7 @@ jobs:
         uses: benchmark-action/github-action-benchmark@v1
         if: github.event_name != 'pull_request'
         with:
-          name: GallifreyDB Benchmarks
+          name: AletheiaDB Benchmarks
           tool: 'customSmallerIsBetter'
           output-file-path: benchmark-data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}

@@ -11,13 +11,13 @@
 
 mod common;
 
+use aletheiadb::PropertyMapBuilder;
+use aletheiadb::core::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, hnsw::HnswConfig};
+use aletheiadb::query::builder::QueryBuilder;
+use aletheiadb::query::planner::{QueryPlanner, Statistics};
+use aletheiadb::storage::CurrentStorage;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::PropertyMapBuilder;
-use gallifreydb::core::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, hnsw::HnswConfig};
-use gallifreydb::query::builder::QueryBuilder;
-use gallifreydb::query::planner::{QueryPlanner, Statistics};
-use gallifreydb::storage::CurrentStorage;
 use std::sync::Arc;
 
 /// Create a test graph for query benchmarks
@@ -85,8 +85,8 @@ fn bench_planning_overhead(c: &mut Criterion) {
         b.iter(|| {
             let query = QueryBuilder::new()
                 .scan_label("Person")
-                .filter(gallifreydb::query::ir::Predicate::eq("active", true))
-                .filter(gallifreydb::query::ir::Predicate::gt("score", 50i64))
+                .filter(aletheiadb::query::ir::Predicate::eq("active", true))
+                .filter(aletheiadb::query::ir::Predicate::gt("score", 50i64))
                 .limit(10)
                 .build();
             let _plan = planner.plan(query).unwrap();
@@ -105,7 +105,7 @@ fn bench_explain(c: &mut Criterion) {
     // Create a complex query plan
     let query = QueryBuilder::new()
         .scan_label("Person")
-        .filter(gallifreydb::query::ir::Predicate::eq("active", true))
+        .filter(aletheiadb::query::ir::Predicate::eq("active", true))
         .traverse("KNOWS")
         .limit(10)
         .build();
@@ -121,7 +121,7 @@ fn bench_explain(c: &mut Criterion) {
 
 /// Benchmark cost estimation
 fn bench_cost_estimation(c: &mut Criterion) {
-    use gallifreydb::query::planner::{CostModel, physical::PhysicalOp};
+    use aletheiadb::query::planner::{CostModel, physical::PhysicalOp};
 
     let _storage = create_test_graph(100);
     let stats = Arc::new(Statistics::default());
@@ -146,12 +146,12 @@ fn bench_cost_estimation(c: &mut Criterion) {
             input: Box::new(PhysicalOp::NodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
             }),
-            direction: gallifreydb::query::ir::Direction::Outgoing,
+            direction: aletheiadb::query::ir::Direction::Outgoing,
             label: Some("KNOWS".to_string()),
             depth: 2,
             temporal_context: None,
         }),
-        predicate: gallifreydb::query::ir::Predicate::eq("active", true),
+        predicate: aletheiadb::query::ir::Predicate::eq("active", true),
     };
 
     group.bench_function("complex_nested", |b| {

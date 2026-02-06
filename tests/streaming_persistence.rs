@@ -21,12 +21,12 @@
 //!
 //! This gives developers better test coverage locally while ensuring fast, reliable CI.
 
-use gallifreydb::core::GLOBAL_INTERNER;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
-use gallifreydb::storage::current::CurrentStorage;
-use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::wal::LSN;
+use aletheiadb::core::GLOBAL_INTERNER;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
+use aletheiadb::storage::current::CurrentStorage;
+use aletheiadb::storage::historical::HistoricalStorage;
+use aletheiadb::storage::wal::LSN;
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -132,7 +132,7 @@ fn test_streaming_checkpoint_recovery_correctness() {
         .unwrap();
 
     // Recover and verify all data is correct
-    use gallifreydb::storage::wal::concurrent_system::{
+    use aletheiadb::storage::wal::concurrent_system::{
         ConcurrentWalSystem, ConcurrentWalSystemConfig,
     };
     let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
@@ -194,7 +194,7 @@ fn test_streaming_works_with_edges() {
     assert!(stats.edge_count < expected_max);
 
     // Recovery should preserve all edges
-    use gallifreydb::storage::wal::concurrent_system::{
+    use aletheiadb::storage::wal::concurrent_system::{
         ConcurrentWalSystem, ConcurrentWalSystemConfig,
     };
     let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
@@ -225,8 +225,8 @@ fn test_streaming_with_temporal_versions() {
 
         // Add multiple versions for each node
         for v in 0..versions_per_node {
-            use gallifreydb::core::id::VersionId;
-            use gallifreydb::core::temporal::time::now;
+            use aletheiadb::core::id::VersionId;
+            use aletheiadb::core::temporal::time::now;
 
             let version_id = VersionId::new((i * 10 + v) as u64 + 1000).unwrap();
             let timestamp = now();
@@ -261,7 +261,7 @@ fn test_streaming_with_temporal_versions() {
     assert!(stats.version_count > expected_min_versions);
 
     // Recovery should restore all versions
-    use gallifreydb::storage::wal::concurrent_system::{
+    use aletheiadb::storage::wal::concurrent_system::{
         ConcurrentWalSystem, ConcurrentWalSystemConfig,
     };
     let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));
@@ -341,7 +341,7 @@ fn test_streaming_preserves_version_ids() {
         .unwrap();
 
     // Recover and verify version IDs are preserved
-    use gallifreydb::storage::wal::concurrent_system::{
+    use aletheiadb::storage::wal::concurrent_system::{
         ConcurrentWalSystem, ConcurrentWalSystemConfig,
     };
     let wal_config = ConcurrentWalSystemConfig::new(dir.path().join("wal"));

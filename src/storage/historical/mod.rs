@@ -103,7 +103,7 @@ impl RetentionPolicy {
 /// # Examples
 ///
 /// ```ignore
-/// use gallifreydb::storage::historical::PreAnchorHook;
+/// use aletheiadb::storage::historical::PreAnchorHook;
 /// use std::sync::Arc;
 ///
 /// let hook: PreAnchorHook = Arc::new(|entity_type, entity_id, timestamp, properties| {
@@ -312,8 +312,8 @@ impl HistoricalStorage {
     ///
     /// # Example
     /// ```ignore
-    /// use gallifreydb::config::{HistoricalConfig, HistoricalConfigBuilder};
-    /// use gallifreydb::storage::historical::HistoricalStorage;
+    /// use aletheiadb::config::{HistoricalConfig, HistoricalConfigBuilder};
+    /// use aletheiadb::storage::historical::HistoricalStorage;
     ///
     /// let config = HistoricalConfigBuilder::new()
     ///     .max_versions_per_entity(5000).unwrap()
@@ -410,13 +410,13 @@ impl HistoricalStorage {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::storage::historical::HistoricalStorage;
-    /// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::core::observer::{StorageObserver, StorageEvent};
     /// # use std::sync::Arc;
     /// struct VectorIndexObserver;
     ///
     /// impl StorageObserver for VectorIndexObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> gallifreydb::utils::Result<()> {
+    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
     ///         match event {
     ///             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
     ///                 println!("Anchor {} created at {}", version_id, timestamp);
@@ -458,7 +458,7 @@ impl HistoricalStorage {
     ///
     /// # Example
     /// ```ignore
-    /// use gallifreydb::storage::historical::PreAnchorHook;
+    /// use aletheiadb::storage::historical::PreAnchorHook;
     /// use std::sync::Arc;
     ///
     /// let hook: PreAnchorHook = Arc::new(|_entity_type, _entity_id, timestamp, _properties| {
@@ -498,7 +498,7 @@ impl HistoricalStorage {
     ///
     /// # Example
     /// ```ignore
-    /// use gallifreydb::storage::historical::PreAnchorHook;
+    /// use aletheiadb::storage::historical::PreAnchorHook;
     /// use std::sync::Arc;
     ///
     /// let hook: PreAnchorHook = Arc::new(|_entity_type, _entity_id, timestamp, _properties| {
@@ -1392,9 +1392,9 @@ impl HistoricalStorage {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::storage::historical::HistoricalStorage;
-    /// use gallifreydb::storage::tiered_storage::TieredStorage;
-    /// use gallifreydb::storage::redb_cold_storage::RedbColdStorage;
+    /// use aletheiadb::storage::historical::HistoricalStorage;
+    /// use aletheiadb::storage::tiered_storage::TieredStorage;
+    /// use aletheiadb::storage::redb_cold_storage::RedbColdStorage;
     ///
     /// let mut historical = HistoricalStorage::new();
     /// let cold = RedbColdStorage::with_default_config("data/cold.redb")?;
@@ -2523,7 +2523,7 @@ impl HistoricalStorage {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
     /// let storage = HistoricalStorage::new();
     /// // ... perform some operations ...
     /// let metrics = storage.cache_metrics();
@@ -2561,7 +2561,7 @@ impl HistoricalStorage {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
     /// let storage = HistoricalStorage::new();
     /// // ... perform some operations ...
     /// if let Some(hit_rate) = storage.cache_hit_rate() {
@@ -2588,7 +2588,7 @@ impl HistoricalStorage {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
     /// let storage = HistoricalStorage::new();
     /// // ... perform some operations ...
     ///
@@ -3123,7 +3123,7 @@ impl HistoricalStats {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
     /// let storage = HistoricalStorage::new();
     /// // ... perform operations ...
     /// let stats = storage.stats();

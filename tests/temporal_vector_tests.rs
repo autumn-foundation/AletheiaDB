@@ -1,9 +1,9 @@
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::temporal::TimeRange;
-use gallifreydb::index::VectorIndex;
-use gallifreydb::index::vector::temporal::*;
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-use gallifreydb::utils::Result;
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::temporal::TimeRange;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::temporal::*;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::utils::Result;
 
 fn create_test_index() -> Result<TemporalVectorIndex> {
     let config = TemporalVectorConfig {

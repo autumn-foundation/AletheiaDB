@@ -8,7 +8,7 @@
 //!
 //! # Architecture
 //!
-//! GallifreyDB uses a **Concurrent WAL with Striped Lock-Free Ring Buffers** for
+//! AletheiaDB uses a **Concurrent WAL with Striped Lock-Free Ring Buffers** for
 //! high-throughput write operations while maintaining ACID compliance.
 //!
 //! ```text
@@ -55,7 +55,7 @@
 //! ## Single Operations
 //!
 //! ```ignore
-//! use gallifreydb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+//! use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 //!
 //! let config = ConcurrentWalSystemConfig::new("data/wal");
 //! let wal = ConcurrentWalSystem::new(config)?;
@@ -76,7 +76,7 @@
 //! significant performance improvements:
 //!
 //! ```ignore
-//! use gallifreydb::storage::wal::{WalOperation, ConcurrentWalSystem};
+//! use aletheiadb::storage::wal::{WalOperation, ConcurrentWalSystem};
 //!
 //! // Create multiple operations (e.g., from a transaction)
 //! let operations = vec![

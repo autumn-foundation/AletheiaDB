@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::honeycomb::{Config, Client, Event};
+//! use aletheiadb::honeycomb::{Config, Client, Event};
 //!
 //! let config = Config::default()
 //!     .with_api_key("your-api-key")
@@ -25,7 +25,7 @@
 //! let client = Client::new(config);
 //!
 //! let mut event = Event::new();
-//! event.add_field("message", "Hello from GallifreyDB!");
+//! event.add_field("message", "Hello from AletheiaDB!");
 //! event.add_field("duration_ms", 42);
 //!
 //! client.send(event).await?;

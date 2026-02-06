@@ -1,10 +1,10 @@
 //! Integration tests for vector storage functionality (Phase 1).
 //!
 //! These tests verify end-to-end vector property handling through the
-//! GallifreyDB API, including storage, retrieval, versioning, and
+//! AletheiaDB API, including storage, retrieval, versioning, and
 //! temporal queries.
 
-use gallifreydb::{GallifreyDB, PropertyMapBuilder, WriteOps};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 
 // ============================================================
 // Helper Functions
@@ -17,7 +17,7 @@ fn generate_embedding(dim: usize, seed: f32) -> Vec<f32> {
 
 /// Sleep briefly to ensure timestamps differ between operations.
 ///
-/// GallifreyDB uses `time::now()` for transaction timestamps. Operations
+/// AletheiaDB uses `time::now()` for transaction timestamps. Operations
 /// executed within the same millisecond may receive identical timestamps,
 /// which can affect version ordering. This helper ensures sufficient time
 /// passes between operations for distinct timestamps.
@@ -40,7 +40,7 @@ fn advance_time() {
 /// use approximate equality with an epsilon tolerance.
 #[test]
 fn test_create_node_with_vector_and_retrieve() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node with embedding
     let embedding = vec![0.1f32, 0.2, 0.3, 0.4, 0.5];
@@ -65,7 +65,7 @@ fn test_create_node_with_vector_and_retrieve() {
 
 #[test]
 fn test_update_vector_property_creates_version() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node with initial embedding
     let embedding_v1 = vec![0.1f32, 0.2, 0.3];
@@ -113,7 +113,7 @@ fn test_update_vector_property_creates_version() {
 
 #[test]
 fn test_multiple_nodes_with_vectors_isolation() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create multiple nodes with different embeddings
     let embedding_a = vec![1.0f32, 0.0, 0.0];
@@ -220,7 +220,7 @@ fn test_multiple_nodes_with_vectors_isolation() {
 
 #[test]
 fn test_edge_with_vector_property() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create two nodes
     let node_a = db
@@ -266,7 +266,7 @@ fn test_edge_with_vector_property() {
 
 #[test]
 fn test_update_edge_vector_property() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let node_a = db
         .create_node("Entity", PropertyMapBuilder::new().build())
@@ -331,7 +331,7 @@ fn test_update_edge_vector_property() {
 
 #[test]
 fn test_large_vector_1000_dimensions() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     const DIMENSIONS: usize = 1000;
     let large_embedding = generate_embedding(DIMENSIONS, 0.0);
@@ -357,7 +357,7 @@ fn test_large_vector_1000_dimensions() {
 
 #[test]
 fn test_very_large_vector_4096_dimensions() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // 4096 dimensions (larger than typical embedding models)
     const DIMENSIONS: usize = 4096;
@@ -392,7 +392,7 @@ macro_rules! test_embedding_dimension {
     ($test_name:ident, $dim:expr, $model:expr, $label:expr) => {
         #[test]
         fn $test_name() {
-            let db = GallifreyDB::new().unwrap();
+            let db = AletheiaDB::new().unwrap();
             const DIMENSIONS: usize = $dim;
             let embedding = generate_embedding(DIMENSIONS, 0.0);
 
@@ -459,7 +459,7 @@ test_embedding_dimension!(
 
 #[test]
 fn test_multiple_vector_updates_version_chain() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node with initial embedding
     let embedding_v1 = vec![0.1f32, 0.2, 0.3];
@@ -527,7 +527,7 @@ fn test_multiple_vector_updates_version_chain() {
 
 #[test]
 fn test_historical_stats_with_vectors() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node and update it multiple times
     let node_id = db
@@ -576,7 +576,7 @@ fn test_historical_stats_with_vectors() {
 
 #[test]
 fn test_empty_vector() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     let empty_vec: Vec<f32> = vec![];
     let node_id = db
@@ -597,7 +597,7 @@ fn test_empty_vector() {
 
 #[test]
 fn test_node_with_multiple_embeddings() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Node with multiple embedding fields (e.g., from different models)
     let text_embedding = vec![0.1f32, 0.2, 0.3, 0.4];
@@ -637,7 +637,7 @@ fn test_node_with_multiple_embeddings() {
 
 #[test]
 fn test_graph_with_mixed_properties_and_vectors() {
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Create a small knowledge graph with embeddings
     let alice = db
@@ -695,10 +695,10 @@ fn test_graph_with_mixed_properties_and_vectors() {
 // ============================================================
 
 /// Helper function to create a database with vector index enabled.
-fn setup_indexed_db(dimensions: usize) -> GallifreyDB {
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+fn setup_indexed_db(dimensions: usize) -> AletheiaDB {
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(100);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -711,9 +711,9 @@ fn setup_indexed_db(dimensions: usize) -> GallifreyDB {
 
 #[test]
 fn test_enable_vector_index() {
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Index should not be enabled initially
     assert!(!db.is_vector_index_enabled());
@@ -728,9 +728,9 @@ fn test_enable_vector_index() {
 
 #[test]
 fn test_double_enable_vector_index_fails() {
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable index once
     let config = HnswConfig::new(384, DistanceMetric::Cosine);
@@ -1127,9 +1127,9 @@ fn test_deleted_nodes_not_in_similarity_results() {
 /// not just one.
 #[test]
 fn test_delete_node_removes_from_multiple_indexes() {
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new().unwrap();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable multiple vector indexes
     let config1 = HnswConfig::new(64, DistanceMetric::Cosine).with_capacity(100);
@@ -1255,9 +1255,9 @@ fn test_node_without_vector_property_not_indexed() {
 
 #[test]
 fn test_find_similar_on_non_indexed_db_fails() {
-    use gallifreydb::core::id::NodeId;
+    use aletheiadb::core::id::NodeId;
 
-    let db = GallifreyDB::new().unwrap(); // No index enabled
+    let db = AletheiaDB::new().unwrap(); // No index enabled
 
     let node_id = NodeId::new(1).unwrap();
     let result = db.find_similar(node_id, 10);
@@ -1268,7 +1268,7 @@ fn test_find_similar_on_non_indexed_db_fails() {
 
 #[test]
 fn test_find_similar_with_invalid_node_id_fails() {
-    use gallifreydb::core::id::NodeId;
+    use aletheiadb::core::id::NodeId;
 
     let db = setup_indexed_db(128);
 

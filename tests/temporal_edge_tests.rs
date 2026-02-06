@@ -6,13 +6,13 @@
 //! - Temporal interval closing for edges
 //! - Edge version chain integrity
 
-use gallifreydb::*;
+use aletheiadb::*;
 use std::thread;
 use std::time::Duration;
 
 #[test]
 fn test_temporal_edge_lookup_basic() {
-    let db = GallifreyDB::with_config(storage::version::AnchorConfig {
+    let db = AletheiaDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
     })
@@ -164,7 +164,7 @@ fn test_temporal_edge_lookup_basic() {
 
 #[test]
 fn test_temporal_edge_multiple_updates() {
-    let db = GallifreyDB::with_config(storage::version::AnchorConfig {
+    let db = AletheiaDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
     })
@@ -280,7 +280,7 @@ fn test_temporal_edge_multiple_updates() {
 
 #[test]
 fn test_temporal_edge_interval_closing() {
-    let db = GallifreyDB::with_config(storage::version::AnchorConfig {
+    let db = AletheiaDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
     })
@@ -409,7 +409,7 @@ fn test_temporal_edge_interval_closing() {
 
 #[test]
 fn test_temporal_edge_version_chain_integrity() {
-    let db = GallifreyDB::with_config(storage::version::AnchorConfig {
+    let db = AletheiaDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
     })
@@ -499,7 +499,7 @@ fn test_temporal_edge_version_chain_integrity() {
 
 #[test]
 fn test_temporal_edge_anchor_delta_pattern() {
-    let db = GallifreyDB::with_config(storage::version::AnchorConfig {
+    let db = AletheiaDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 3, // Create anchor every 3 versions
         max_delta_chain: 10,
     })
@@ -586,7 +586,7 @@ fn test_temporal_edge_anchor_delta_pattern() {
 
 #[test]
 fn test_temporal_edge_with_vector_properties() {
-    let db = GallifreyDB::with_config(storage::version::AnchorConfig {
+    let db = AletheiaDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
     })

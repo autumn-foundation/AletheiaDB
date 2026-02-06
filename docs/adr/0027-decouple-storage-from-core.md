@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2026-01-27
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** architecture, storage, core, modularity
 
 ## Context
 
-GallifreyDB's initial monolithic architecture placed both core business logic (graph topology, query execution, temporal reasoning) and storage implementation (WAL, page management, serialization) within the same compilation unit.
+AletheiaDB's initial monolithic architecture placed both core business logic (graph topology, query execution, temporal reasoning) and storage implementation (WAL, page management, serialization) within the same compilation unit.
 
 As the system has grown, several issues have emerged:
 
@@ -18,7 +18,7 @@ As the system has grown, several issues have emerged:
 
 ## Decision
 
-We will **decouple the storage logic from the core domain** by moving all persistence-related code into a dedicated `storage` module (intended to become a separate crate `gallifreydb-storage`).
+We will **decouple the storage logic from the core domain** by moving all persistence-related code into a dedicated `storage` module (intended to become a separate crate `aletheiadb-storage`).
 
 The architectural boundary will be defined by a set of **Storage Traits** located in the `core` module:
 
@@ -77,7 +77,7 @@ Keep the code in the same module but use feature flags (e.g., `feature = "redb"`
 
 Split storage into a completely separate service accessed via gRPC.
 
-*   **Why not:** Introduces network latency unacceptable for the "Performance First" principle (<1µs traversal target). GallifreyDB is designed as an embedded database first.
+*   **Why not:** Introduces network latency unacceptable for the "Performance First" principle (<1µs traversal target). AletheiaDB is designed as an embedded database first.
 
 ## Implementation Notes
 

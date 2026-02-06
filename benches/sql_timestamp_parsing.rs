@@ -7,9 +7,9 @@
 //! - No regressions in parsing logic
 
 #[cfg(feature = "sql")]
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use aletheiadb::sql::TemporalClause;
 #[cfg(feature = "sql")]
-use gallifreydb::sql::TemporalClause;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 #[cfg(feature = "sql")]
 fn bench_timestamp_parsing(c: &mut Criterion) {

@@ -1,4 +1,4 @@
-//! Utility modules for GallifreyDB.
+//! Utility modules for AletheiaDB.
 
 pub mod error;
 

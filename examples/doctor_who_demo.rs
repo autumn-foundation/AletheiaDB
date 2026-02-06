@@ -1,5 +1,5 @@
 #![allow(deprecated)]
-//! Doctor Who Demo - A fun exploration of GallifreyDB's bi-temporal capabilities
+//! Doctor Who Demo - A fun exploration of AletheiaDB's bi-temporal capabilities
 //!
 //! This demo creates a knowledge graph about the Doctor Who universe,
 //! perfect for demonstrating temporal versioning since:
@@ -9,8 +9,8 @@
 //!
 //! Run with: cargo run --example doctor_who_demo
 
-use gallifreydb::{
-    GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
+use aletheiadb::{
+    AletheiaDB, GLOBAL_INTERNER, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
     WriteOps,
 };
 use std::collections::HashMap;
@@ -26,8 +26,8 @@ fn label_str(label: InternedString) -> String {
 }
 
 /// Helper to format property values nicely
-fn format_value(value: &gallifreydb::PropertyValue) -> String {
-    use gallifreydb::PropertyValue;
+fn format_value(value: &aletheiadb::PropertyValue) -> String {
+    use aletheiadb::PropertyValue;
     match value {
         PropertyValue::Null => "null".to_string(),
         PropertyValue::Bool(b) => b.to_string(),
@@ -104,7 +104,7 @@ macro_rules! props {
 /// Stores node IDs and temporal events for easy reference
 struct DemoData {
     nodes: HashMap<String, NodeId>,
-    db: GallifreyDB,
+    db: AletheiaDB,
     /// Track all Doctor regenerations with timestamps for time-travel demos
     regenerations: Vec<RegenerationEvent>,
     /// When the database was first populated
@@ -116,7 +116,7 @@ impl DemoData {
     fn new() -> Result<Self> {
         Ok(Self {
             nodes: HashMap::new(),
-            db: GallifreyDB::new()?,
+            db: AletheiaDB::new()?,
             regenerations: Vec::new(),
             creation_time: now_timestamp(),
         })
@@ -767,7 +767,7 @@ fn update_doctor_incarnation(
             .properties
             .get("regeneration_count")
             .and_then(|v| {
-                if let gallifreydb::PropertyValue::Int(n) = v {
+                if let aletheiadb::PropertyValue::Int(n) = v {
                     Some(*n)
                 } else {
                     None

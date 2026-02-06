@@ -1,10 +1,10 @@
 # Vector Search Integration Guide
 
-> Guide for integrating vector search capabilities into GallifreyDB applications
+> Guide for integrating vector search capabilities into AletheiaDB applications
 
 ## Overview
 
-GallifreyDB provides built-in HNSW (Hierarchical Navigable Small World) indexing for fast k-nearest neighbor (k-NN) search on vector embeddings. This enables semantic similarity search, recommendation systems, and RAG (Retrieval-Augmented Generation) workflows while maintaining full bi-temporal versioning of your vector data.
+AletheiaDB provides built-in HNSW (Hierarchical Navigable Small World) indexing for fast k-nearest neighbor (k-NN) search on vector embeddings. This enables semantic similarity search, recommendation systems, and RAG (Retrieval-Augmented Generation) workflows while maintaining full bi-temporal versioning of your vector data.
 
 **Key Features:**
 - Store dense vector embeddings as first-class properties
@@ -16,11 +16,11 @@ GallifreyDB provides built-in HNSW (Hierarchical Navigable Small World) indexing
 
 ## Prerequisites
 
-Add GallifreyDB to your `Cargo.toml`:
+Add AletheiaDB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-gallifreydb = "0.1"
+aletheiadb = "0.1"
 ```
 
 ## Quick Start
@@ -28,11 +28,11 @@ gallifreydb = "0.1"
 ### 1. Enable Vector Indexing
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new();
 
     // Enable vector indexing on "embedding" property
     // 384 dimensions, cosine similarity, capacity for 10,000 vectors
@@ -105,12 +105,12 @@ let similar_docs = db.find_similar_with_label(doc_id, "Document", 10)?;
 ## Complete Example: Document Similarity Search
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Create database and enable vector index
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new();
 
     let config = HnswConfig::new(384, DistanceMetric::Cosine)
         .with_capacity(1000);
@@ -161,15 +161,15 @@ fn generate_embedding(text: &str) -> Vec<f32> {
 
 ## Multi-Property Vector Indexes
 
-GallifreyDB supports multiple vector properties per database, each with independent HNSW indexes. This enables use cases like storing different embedding types (title vs content) or multi-modal embeddings (text vs image).
+AletheiaDB supports multiple vector properties per database, each with independent HNSW indexes. This enables use cases like storing different embedding types (title vs content) or multi-modal embeddings (text vs image).
 
 ### Enabling Multiple Vector Indexes
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
-let db = GallifreyDB::new();
+let db = AletheiaDB::new();
 
 // Enable separate indexes for different properties
 db.vector_index("title_embedding")
@@ -426,8 +426,8 @@ Configure your index dimensions based on your embedding model:
 ## Error Handling
 
 ```rust
-use gallifreydb::utils::VectorError;
-use gallifreydb::Error;
+use aletheiadb::utils::VectorError;
+use aletheiadb::Error;
 
 match db.find_similar(node_id, 10) {
     Ok(results) => {
@@ -475,7 +475,7 @@ let config = HnswConfig::new(384, DistanceMetric::Cosine);
 ### 3. Normalize Vectors for Cosine Similarity
 
 ```rust
-use gallifreydb::core::vector::normalize;
+use aletheiadb::core::vector::normalize;
 
 // If using cosine metric, normalize embeddings for optimal performance
 let mut embedding = get_embedding_from_model();
@@ -533,10 +533,10 @@ tx.commit()?;  // Single commit for all operations
 
 ## API Reference
 
-### GallifreyDB Methods
+### AletheiaDB Methods
 
 ```rust
-impl GallifreyDB {
+impl AletheiaDB {
     /// Enable vector indexing on a specific property (builder pattern)
     pub fn vector_index(&self, property_name: &str) -> VectorIndexBuilder;
 

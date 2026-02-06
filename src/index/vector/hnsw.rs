@@ -14,7 +14,7 @@
 //!
 //! # Performance Characteristics
 //!
-//! Based on usearch benchmarks and GallifreyDB testing:
+//! Based on usearch benchmarks and AletheiaDB testing:
 //! - **Add operation**: 1-10us per vector (depends on M, ef_construction)
 //! - **Search operation**: 100us-1ms for k=10 (depends on index size, ef_search, dimensions)
 //! - **Memory usage**: ~(dimensions + M) * 4 bytes per vector (less with quantization)
@@ -49,11 +49,11 @@
 //! # Examples
 //!
 //! ```rust,no_run
-//! use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization};
-//! use gallifreydb::index::VectorIndex;
-//! use gallifreydb::core::id::NodeId;
+//! use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization};
+//! use aletheiadb::index::VectorIndex;
+//! use aletheiadb::core::id::NodeId;
 //!
-//! # fn example() -> gallifreydb::utils::Result<()> {
+//! # fn example() -> aletheiadb::utils::Result<()> {
 //! // Create an index for 384-dimensional embeddings using cosine similarity
 //! let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine)
 //!     .m(16)                    // 16 connections per node

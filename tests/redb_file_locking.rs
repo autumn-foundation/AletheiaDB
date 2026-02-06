@@ -5,18 +5,18 @@
 //! These tests verify that RedbColdStorage can be safely reopened after
 //! the database is dropped, even when a background persistence thread is running.
 
-use gallifreydb::GallifreyDB;
-use gallifreydb::PropertyMapBuilder;
-use gallifreydb::config::GallifreyDBConfig;
-use gallifreydb::storage::index_persistence::PersistenceConfig;
-use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
-use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
+use aletheiadb::AletheiaDB;
+use aletheiadb::PropertyMapBuilder;
+use aletheiadb::config::AletheiaDBConfig;
+use aletheiadb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+use aletheiadb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Test that Redb file can be reopened after database shutdown with background thread.
 ///
-/// This is the core issue: When GallifreyDB has a background persistence thread,
+/// This is the core issue: When AletheiaDB has a background persistence thread,
 /// dropping the database signals shutdown but doesn't wait for the thread to finish.
 /// The background thread holds Arc references to TieredStorage → RedbColdStorage,
 /// which keeps the Redb database file locked. When we try to reopen the same file,
@@ -38,7 +38,7 @@ fn test_reopen_redb_after_shutdown_with_background_thread() {
 
     // Phase 1: Create database with persistence enabled (spawns background thread)
     {
-        let config = GallifreyDBConfig::builder()
+        let config = AletheiaDBConfig::builder()
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -47,7 +47,7 @@ fn test_reopen_redb_after_shutdown_with_background_thread() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config).unwrap();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
 
         // Create Redb cold storage
         let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();

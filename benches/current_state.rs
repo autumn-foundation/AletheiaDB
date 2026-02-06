@@ -15,10 +15,10 @@
 
 mod common;
 
+use aletheiadb::core::id::IdGenerator;
+use aletheiadb::core::interning::StringInterner;
+use aletheiadb::{CurrentStorage, PropertyMapBuilder};
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::IdGenerator;
-use gallifreydb::core::interning::StringInterner;
-use gallifreydb::{CurrentStorage, PropertyMapBuilder};
 use std::sync::Arc;
 use std::thread;
 
@@ -68,7 +68,7 @@ fn bench_single_hop_traversal(c: &mut Criterion) {
 
     for graph_size in [100, 1000, 10000] {
         let storage = create_test_graph(graph_size, 10);
-        let first_node = gallifreydb::NodeId::new(0).unwrap();
+        let first_node = aletheiadb::NodeId::new(0).unwrap();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_nodes", graph_size)),
@@ -91,7 +91,7 @@ fn bench_single_hop_traversal(c: &mut Criterion) {
 /// Target: <100µs per operation
 fn bench_multi_hop_traversal(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let start_node = gallifreydb::NodeId::new(0).unwrap();
+    let start_node = aletheiadb::NodeId::new(0).unwrap();
 
     c.bench_function("3_hop_traversal", |b| {
         b.iter(|| {
@@ -123,7 +123,7 @@ fn bench_multi_hop_traversal(c: &mut Criterion) {
 /// Target: <100ns per operation
 fn bench_node_lookup(c: &mut Criterion) {
     let storage = create_test_graph(10000, 10);
-    let node_id = gallifreydb::NodeId::new(5000).unwrap();
+    let node_id = aletheiadb::NodeId::new(5000).unwrap();
 
     c.bench_function("node_lookup", |b| {
         b.iter(|| {
@@ -136,7 +136,7 @@ fn bench_node_lookup(c: &mut Criterion) {
 /// Benchmark edge lookup by ID.
 fn bench_edge_lookup(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let edge_id = gallifreydb::EdgeId::new(5000).unwrap();
+    let edge_id = aletheiadb::EdgeId::new(5000).unwrap();
 
     c.bench_function("edge_lookup", |b| {
         b.iter(|| {
@@ -149,7 +149,7 @@ fn bench_edge_lookup(c: &mut Criterion) {
 /// Benchmark labeled edge traversal.
 fn bench_labeled_traversal(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0).unwrap();
+    let node_id = aletheiadb::NodeId::new(0).unwrap();
 
     c.bench_function("labeled_traversal", |b| {
         b.iter(|| {
@@ -208,7 +208,7 @@ fn bench_edge_creation(c: &mut Criterion) {
 /// Benchmark graph degree queries.
 fn bench_degree_queries(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0).unwrap();
+    let node_id = aletheiadb::NodeId::new(0).unwrap();
 
     c.bench_function("out_degree", |b| {
         b.iter(|| {
@@ -228,7 +228,7 @@ fn bench_degree_queries(c: &mut Criterion) {
 /// Benchmark finding neighbors (targets of outgoing edges).
 fn bench_find_neighbors(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0).unwrap();
+    let node_id = aletheiadb::NodeId::new(0).unwrap();
 
     c.bench_function("find_neighbors", |b| {
         b.iter(|| {
@@ -567,7 +567,7 @@ fn bench_string_hot_path(c: &mut Criterion) {
 ///
 /// Target: Competitive with get_nodes_by_label + manual filter
 fn bench_find_nodes_by_property(c: &mut Criterion) {
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
 
     let mut group = c.benchmark_group("find_nodes_by_property");
 
@@ -608,7 +608,7 @@ fn bench_find_nodes_by_property(c: &mut Criterion) {
 
 /// Benchmark property lookup vs manual label scan + filter.
 fn bench_property_lookup_vs_scan(c: &mut Criterion) {
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
 
     let storage = CurrentStorage::new();
     for i in 0..1000 {
@@ -656,17 +656,17 @@ fn bench_property_lookup_vs_scan(c: &mut Criterion) {
 /// accessing CurrentIndexes rather than going through CurrentStorage.
 /// Target: Eliminate 100-500ns allocation overhead.
 fn bench_get_outgoing_allocation_overhead(c: &mut Criterion) {
-    use gallifreydb::core::graph::Edge;
-    use gallifreydb::core::id::{EdgeId, VersionId};
-    use gallifreydb::core::interning::GLOBAL_INTERNER;
-    use gallifreydb::index::current::CurrentIndexes;
+    use aletheiadb::core::graph::Edge;
+    use aletheiadb::core::id::{EdgeId, VersionId};
+    use aletheiadb::core::interning::GLOBAL_INTERNER;
+    use aletheiadb::index::current::CurrentIndexes;
 
     let mut group = c.benchmark_group("get_outgoing_allocation");
 
     // Create a test graph at the index level with varying degrees
     for out_degree in [1, 10, 100] {
         let indexes = CurrentIndexes::new();
-        let node_id = gallifreydb::NodeId::new(0).unwrap();
+        let node_id = aletheiadb::NodeId::new(0).unwrap();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert edges to create adjacency list
@@ -675,7 +675,7 @@ fn bench_get_outgoing_allocation_overhead(c: &mut Criterion) {
                 EdgeId::new(i).unwrap(),
                 knows,
                 node_id,
-                gallifreydb::NodeId::new(i + 1).unwrap(),
+                aletheiadb::NodeId::new(i + 1).unwrap(),
                 PropertyMapBuilder::new().build(),
                 VersionId::new(1).unwrap(),
             );

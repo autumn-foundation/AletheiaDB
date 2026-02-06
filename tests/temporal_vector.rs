@@ -7,13 +7,13 @@
 //! - Time-range vector queries
 //! - Snapshot pruning with retention policies
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::temporal::{TimeRange, time};
-use gallifreydb::index::vector::temporal::{
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::temporal::{TimeRange, time};
+use aletheiadb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-use gallifreydb::utils::Result;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::utils::Result;
 use std::time::Duration;
 
 /// Helper to create a test temporal vector index with default config
@@ -559,7 +559,7 @@ fn test_empty_evolution_for_nonexistent_node() -> Result<()> {
 
 #[test]
 fn test_drift_calculation_with_normalized_vectors() -> Result<()> {
-    use gallifreydb::core::vector::normalize;
+    use aletheiadb::core::vector::normalize;
 
     let index = create_test_index()?;
 

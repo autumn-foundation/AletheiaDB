@@ -1,7 +1,7 @@
 //! Stress tests for concurrent vector index operations.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use std::sync::Arc;
 use std::thread;
 

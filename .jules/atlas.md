@@ -36,7 +36,7 @@
 ## 2024-05-23 - Splitting the God Object in src/db.rs
 **Tangle:** `src/db.rs` was a 3500-line "God Object" responsible for everything from configuration and transaction management to vector indexing, temporal queries, and admin operations. This violated the Single Responsibility Principle and made navigation difficult.
 **Blueprint:** Refactored `src/db.rs` into a `src/db/` module directory.
-1. Kept the core `GallifreyDB` struct definition in `mod.rs`.
+1. Kept the core `AletheiaDB` struct definition in `mod.rs`.
 2. Extracted implementations into cohesive submodules:
    - `config.rs`: Initialization and configuration.
    - `transaction.rs`: Transaction lifecycle management.

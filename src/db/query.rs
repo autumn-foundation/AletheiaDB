@@ -1,12 +1,12 @@
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
-use crate::db::GallifreyDB;
+use crate::db::AletheiaDB;
 use crate::query::builder::state::Initial;
 use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults};
 use crate::utils::error::Result;
 use std::sync::Arc;
 
-impl GallifreyDB {
+impl AletheiaDB {
     /// Create a new query builder for constructing hybrid queries.
     ///
     /// This is the entry point for the fluent query API that enables

@@ -1,11 +1,11 @@
 [package]
-name = "gallifreydb"
+name = "aletheiadb"
 version = "0.1.0"
 edition = "2024"
-authors = ["GallifreyDB Contributors"]
+authors = ["AletheiaDB Contributors"]
 description = "A high-performance bi-temporal graph database for LLM integration"
 license = "MIT"
-repository = "https://github.com/yourusername/gallifreydb"
+repository = "https://github.com/yourusername/aletheiadb"
 keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations"]
 
@@ -244,9 +244,9 @@ required-features = []
 
 # High-level API - includes transaction overhead and API layer
 [[bench]]
-name = "gallifreydb"
+name = "aletheiadb"
 harness = false
-path = "benches/gallifreydb.rs"
+path = "benches/aletheiadb.rs"
 required-features = []
 
 # Storage layer benchmarks
@@ -351,13 +351,13 @@ required-features = []
 
 # MCP server binary
 [[bin]]
-name = "gallifrey-mcp"
+name = "aletheia-mcp"
 path = "src/bin/mcp_server.rs"
 required-features = ["mcp-server"]
 
 # HTTP server binary (Issue #465)
 [[bin]]
-name = "gallifrey-server"
+name = "aletheia-server"
 path = "src/bin/server.rs"
 required-features = ["http-server"]
 

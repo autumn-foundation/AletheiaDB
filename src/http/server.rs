@@ -50,7 +50,7 @@ impl ShutdownHandle {
 ///
 /// ```ignore
 /// use actix_web::App;
-/// use gallifreydb::http::configure_app;
+/// use aletheiadb::http::configure_app;
 ///
 /// let app = App::new().configure(configure_app);
 /// ```
@@ -152,7 +152,7 @@ pub fn create_app() -> App<
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::http::{ServerConfig, CorsConfig, create_server};
+/// use aletheiadb::http::{ServerConfig, CorsConfig, create_server};
 ///
 /// let config = ServerConfig::builder()
 ///     .port(8080)
@@ -202,7 +202,7 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::http::{ServerConfig, CorsConfig, run_server};
+/// use aletheiadb::http::{ServerConfig, CorsConfig, run_server};
 ///
 /// #[actix_web::main]
 /// async fn main() -> std::io::Result<()> {
@@ -217,7 +217,7 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     let bind_address = config.bind_address();
     let cors_config = config.cors().clone();
 
-    eprintln!("Starting GallifreyDB HTTP server on {}", bind_address);
+    eprintln!("Starting AletheiaDB HTTP server on {}", bind_address);
     if cors_config.is_permissive() {
         eprintln!(
             "WARNING: CORS is configured in permissive mode (any origin allowed). \

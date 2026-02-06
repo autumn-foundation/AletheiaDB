@@ -1,6 +1,6 @@
-//! Tool definitions for the GallifreyDB MCP server.
+//! Tool definitions for the AletheiaDB MCP server.
 //!
-//! This module defines all the MCP tools that expose GallifreyDB functionality
+//! This module defines all the MCP tools that expose AletheiaDB functionality
 //! to LLM clients. Each tool is defined with JSON Schema-compatible request types.
 
 use rmcp::schemars::{self, JsonSchema};

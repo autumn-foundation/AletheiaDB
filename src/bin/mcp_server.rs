@@ -1,13 +1,13 @@
-//! GallifreyDB MCP Server binary.
+//! AletheiaDB MCP Server binary.
 //!
-//! This binary exposes GallifreyDB's bi-temporal graph database capabilities
+//! This binary exposes AletheiaDB's bi-temporal graph database capabilities
 //! through the Model Context Protocol (MCP), enabling LLMs like Claude to
 //! interact with the database.
 //!
 //! # Usage
 //!
 //! ```bash
-//! cargo run --bin gallifrey-mcp --features mcp-server
+//! cargo run --bin aletheia-mcp --features mcp-server
 //! ```
 //!
 //! The server communicates over stdio using the MCP protocol.
@@ -51,16 +51,16 @@ use std::sync::Arc;
 
 use rmcp::{ServiceExt, transport::stdio};
 
-use gallifreydb::GallifreyDB;
-use gallifreydb::mcp::GallifreyMcpServer;
+use aletheiadb::AletheiaDB;
+use aletheiadb::mcp::AletheiaMcpServer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize the database
-    let db = GallifreyDB::new()?;
+    let db = AletheiaDB::new()?;
 
     // Create the MCP server
-    let server = GallifreyMcpServer::new(Arc::new(db));
+    let server = AletheiaMcpServer::new(Arc::new(db));
 
     // Serve over stdio using the MCP protocol
     let service = server.serve(stdio()).await?;

@@ -7,7 +7,7 @@
 //! - Closing previous version's transaction_time (bi-temporal semantics)
 //! - Version metadata creation for updates
 
-use gallifreydb::{
+use aletheiadb::{
     GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
@@ -71,7 +71,7 @@ fn test_replay_update_node_basic() -> Result<()> {
     assert_eq!(current.node_count(), 1);
     let node = current.get_node(node_id)?;
     assert!(node.has_label_str("Person"));
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     assert!(
         matches!(node.properties.get("name"), Some(PropertyValue::String(s)) if s.as_ref() == "Alice")
     );
@@ -176,7 +176,7 @@ fn test_replay_update_node_with_vector() -> Result<()> {
 
     // Then: Node has updated vector
     let node = current.get_node(node_id)?;
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     if let Some(PropertyValue::Vector(vec)) = node.properties.get("embedding") {
         assert_eq!(vec.len(), 4);
         assert_eq!(&vec[..], &embedding_v2[..]);
@@ -228,7 +228,7 @@ fn test_replay_multiple_updates_same_node() -> Result<()> {
 
     // Then: Current storage has final value
     let node = current.get_node(node_id)?;
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     assert!(matches!(
         node.properties.get("count"),
         Some(PropertyValue::Int(5))
@@ -302,7 +302,7 @@ fn test_replay_update_edge_basic() -> Result<()> {
 
     // Then: Current storage has updated edge
     let edge = current.get_edge(edge_id)?;
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     assert!(matches!(
         edge.properties.get("since"),
         Some(PropertyValue::Int(2020))
@@ -430,7 +430,7 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
     // Then: Current storage has 3 nodes with correct values
     assert_eq!(current.node_count(), 3);
 
-    use gallifreydb::core::property::PropertyValue;
+    use aletheiadb::core::property::PropertyValue;
     let node1 = current.get_node(NodeId::new(1).unwrap())?;
     assert!(matches!(
         node1.properties.get("value"),

@@ -9,13 +9,13 @@
 
 mod common;
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::temporal::TimeRange;
-use gallifreydb::index::vector::temporal::{
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::temporal::TimeRange;
+use aletheiadb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 
 /// Helper to create a test temporal index

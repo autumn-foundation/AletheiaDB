@@ -41,11 +41,11 @@
 //! # Examples
 //!
 //! ```rust,no_run
-//! use gallifreydb::index::vector::sharded::{ShardedVectorIndex, ShardedVectorConfig, ShardingStrategy};
-//! use gallifreydb::index::vector::{HnswConfig, DistanceMetric, VectorIndex};
-//! use gallifreydb::core::id::NodeId;
+//! use aletheiadb::index::vector::sharded::{ShardedVectorIndex, ShardedVectorConfig, ShardingStrategy};
+//! use aletheiadb::index::vector::{HnswConfig, DistanceMetric, VectorIndex};
+//! use aletheiadb::core::id::NodeId;
 //!
-//! # fn example() -> gallifreydb::utils::Result<()> {
+//! # fn example() -> aletheiadb::utils::Result<()> {
 //! // Create a sharded index with 4 shards
 //! let config = ShardedVectorConfig::new(4)
 //!     .with_hnsw_config(HnswConfig::new(384, DistanceMetric::Cosine))
@@ -365,9 +365,9 @@ impl ShardedVectorIndex {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use gallifreydb::index::vector::sharded::ShardedVectorIndex;
-    /// # use gallifreydb::index::vector::DistanceMetric;
-    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::vector::sharded::ShardedVectorIndex;
+    /// # use aletheiadb::index::vector::DistanceMetric;
+    /// # fn example() -> aletheiadb::utils::Result<()> {
     /// let index = ShardedVectorIndex::with_defaults(128, DistanceMetric::Cosine, 4)?;
     /// // ... add vectors ...
     /// let vectors_to_move = index.estimate_rebalance_cost()?;

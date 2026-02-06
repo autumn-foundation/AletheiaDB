@@ -42,7 +42,7 @@ use crate::utils::error::Result;
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::cosine_similarity;
+/// use aletheiadb::core::vector::cosine_similarity;
 ///
 /// // Identical vectors have similarity 1.0
 /// let a = vec![1.0, 0.0, 0.0];
@@ -170,7 +170,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::cosine_similarity_normalized;
+/// use aletheiadb::core::vector::cosine_similarity_normalized;
 ///
 /// // Pre-normalize vectors
 /// let a = vec![1.0, 0.0, 0.0];  // Already unit length
@@ -272,7 +272,7 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::squared_euclidean_distance;
+/// use aletheiadb::core::vector::squared_euclidean_distance;
 ///
 /// // Distance from origin
 /// let a = vec![3.0, 4.0];
@@ -337,7 +337,7 @@ pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::euclidean_distance;
+/// use aletheiadb::core::vector::euclidean_distance;
 ///
 /// // Classic 3-4-5 right triangle
 /// let a = vec![0.0, 0.0];
@@ -404,7 +404,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::dot_product;
+/// use aletheiadb::core::vector::dot_product;
 ///
 /// // Basic dot product
 /// let a = vec![1.0, 2.0, 3.0];
@@ -468,7 +468,7 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> Result<f32> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::magnitude;
+/// use aletheiadb::core::vector::magnitude;
 ///
 /// // Classic 3-4-5 right triangle
 /// let v = vec![3.0, 4.0];
@@ -508,7 +508,7 @@ pub fn magnitude(v: &[f32]) -> f32 {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::squared_magnitude;
+/// use aletheiadb::core::vector::squared_magnitude;
 ///
 /// let v = vec![3.0, 4.0];
 /// let sq_mag = squared_magnitude(&v);
@@ -538,7 +538,7 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::{normalize, magnitude};
+/// use aletheiadb::core::vector::{normalize, magnitude};
 ///
 /// let v = vec![3.0, 4.0];
 /// let unit = normalize(&v);
@@ -598,7 +598,7 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::{normalize_in_place, magnitude};
+/// use aletheiadb::core::vector::{normalize_in_place, magnitude};
 ///
 /// let mut v = vec![3.0, 4.0];
 /// normalize_in_place(&mut v);
@@ -647,7 +647,7 @@ pub fn normalize_in_place(v: &mut [f32]) {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::{is_normalized, normalize};
+/// use aletheiadb::core::vector::{is_normalized, normalize};
 ///
 /// let v = vec![3.0, 4.0];
 /// assert!(!is_normalized(&v, 1e-6));
@@ -678,7 +678,7 @@ pub fn is_normalized(v: &[f32], tolerance: f32) -> bool {
 /// # Example
 ///
 /// ```rust
-/// use gallifreydb::core::vector::{is_normalized_default, normalize};
+/// use aletheiadb::core::vector::{is_normalized_default, normalize};
 ///
 /// let v = vec![3.0, 4.0];
 /// assert!(!is_normalized_default(&v));

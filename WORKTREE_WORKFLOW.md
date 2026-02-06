@@ -74,7 +74,7 @@ just worktree-new fix/version-chain-ordering
 Worktrees are created in the `agents/` directory:
 
 ```
-gallifreydb/
+aletheiadb/
 ├── agents/
 │   ├── feature-my-feature/     # Worktree for feature/my-feature
 │   ├── fix-memory-leak/        # Worktree for fix/memory-leak
@@ -95,7 +95,7 @@ just worktree-new feature/add-compression
 
 # Output:
 # Setting up worktree for branch: feature/add-compression
-# Location: /path/to/gallifreydb/agents/feature-add-compression
+# Location: /path/to/aletheiadb/agents/feature-add-compression
 # Fetching latest from origin...
 # Creating worktree and branch...
 # Worktree created successfully!

@@ -9,17 +9,17 @@
 
 mod common;
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::api::transaction::WriteOps;
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::vector::cosine_similarity;
-use gallifreydb::db::GallifreyDB;
-use gallifreydb::index::vector::temporal::{
+use aletheiadb::api::transaction::WriteOps;
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::vector::cosine_similarity;
+use aletheiadb::db::AletheiaDB;
+use aletheiadb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
 };
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-use gallifreydb::query::hybrid::{find_similar_as_of, traverse_and_rank};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::query::hybrid::{find_similar_as_of, traverse_and_rank};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::cmp::Ordering;
 
 // ============================================================================
@@ -58,8 +58,8 @@ fn gen_clustered_vector(dim: usize, cluster_id: usize, variance: f32) -> Vec<f32
 /// This creates a structured graph where all nodes have similar
 /// connectivity, representing knowledge graphs or databases with
 /// predictable relationship patterns.
-fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> GallifreyDB {
-    let db = GallifreyDB::new().unwrap();
+fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config).unwrap();
 
@@ -96,8 +96,8 @@ fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> Gallifr
 /// - 75% regular nodes (5 edges each)
 ///
 /// Uses clustered embeddings to simulate semantic similarity within communities.
-fn build_power_law_graph(node_count: usize, dim: usize) -> GallifreyDB {
-    let db = GallifreyDB::new().unwrap();
+fn build_power_law_graph(node_count: usize, dim: usize) -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config).unwrap();
 
@@ -143,8 +143,8 @@ fn build_power_law_graph(node_count: usize, dim: usize) -> GallifreyDB {
 ///
 /// This represents minimalist graphs where connections are selective,
 /// such as expert networks or curated knowledge bases.
-fn build_sparse_graph(node_count: usize, dim: usize) -> GallifreyDB {
-    let db = GallifreyDB::new().unwrap();
+fn build_sparse_graph(node_count: usize, dim: usize) -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config).unwrap();
 
@@ -182,8 +182,8 @@ fn build_temporal_graph_core(
     node_count: usize,
     snapshot_count: usize,
     dim: usize,
-) -> (GallifreyDB, Vec<i64>) {
-    let db = GallifreyDB::new().unwrap();
+) -> (AletheiaDB, Vec<i64>) {
+    let db = AletheiaDB::new().unwrap();
     let hnsw_config = HnswConfig::new(dim, DistanceMetric::Cosine);
     let temporal_config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
@@ -239,7 +239,7 @@ fn build_temporal_graph(
     node_count: usize,
     snapshot_count: usize,
     dim: usize,
-) -> (GallifreyDB, Vec<i64>) {
+) -> (AletheiaDB, Vec<i64>) {
     build_temporal_graph_core(node_count, snapshot_count, dim)
 }
 
@@ -252,7 +252,7 @@ fn build_temporal_graph_with_edges(
     snapshot_count: usize,
     fan_out: usize,
     dim: usize,
-) -> (GallifreyDB, Vec<i64>) {
+) -> (AletheiaDB, Vec<i64>) {
     let (db, timestamps) = build_temporal_graph_core(node_count, snapshot_count, dim);
 
     // Create edges (deterministic fan-out) after all nodes exist
@@ -278,7 +278,7 @@ fn build_temporal_graph_with_edges(
 // ============================================================================
 
 /// Type alias for graph builder functions to reduce complexity.
-type GraphBuilder = Box<dyn Fn(usize, usize) -> GallifreyDB>;
+type GraphBuilder = Box<dyn Fn(usize, usize) -> AletheiaDB>;
 
 /// Benchmark traverse_and_rank across different scales and topologies.
 ///

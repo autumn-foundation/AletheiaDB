@@ -2,7 +2,7 @@
 
 **Status:** Accepted (Partially Superseded)
 **Date:** 2026-01-22
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, scalability, performance
 
 > **Note:** The cold storage backend decision in this ADR has been superseded by
@@ -11,7 +11,7 @@
 
 ## Context
 
-GallifreyDB achieves exceptional read performance (22-24ns node lookup, 52-71ns traversal) through pure in-memory storage. However, this limits dataset size to available RAM:
+AletheiaDB achieves exceptional read performance (22-24ns node lookup, 52-71ns traversal) through pure in-memory storage. However, this limits dataset size to available RAM:
 
 **Current Constraints:**
 - 64GB RAM → ~300M nodes with properties
@@ -24,7 +24,7 @@ GallifreyDB achieves exceptional read performance (22-24ns node lookup, 52-71ns 
 - Accept higher latency for historical/time-travel queries
 - Enable cost-effective storage of years of temporal history
 
-The bi-temporal nature of GallifreyDB creates a natural hot/cold split:
+The bi-temporal nature of AletheiaDB creates a natural hot/cold split:
 - **Current state**: Frequently accessed, performance-critical
 - **Historical versions**: Infrequently accessed, acceptable higher latency
 
@@ -366,8 +366,8 @@ This allows users to opt-in to the additional dependency.
 
 ## References
 
-- GitHub Issues: [#119](https://github.com/madmax983/GallifreyDB/issues/119), [#120](https://github.com/madmax983/GallifreyDB/issues/120), [#121](https://github.com/madmax983/GallifreyDB/issues/121), [#122](https://github.com/madmax983/GallifreyDB/issues/122)
-- Project: [GallifreyDB Scalability Roadmap](https://github.com/users/madmax983/projects/4)
+- GitHub Issues: [#119](https://github.com/madmax983/AletheiaDB/issues/119), [#120](https://github.com/madmax983/AletheiaDB/issues/120), [#121](https://github.com/madmax983/AletheiaDB/issues/121), [#122](https://github.com/madmax983/AletheiaDB/issues/122)
+- Project: [AletheiaDB Scalability Roadmap](https://github.com/users/madmax983/projects/4)
 - RocksDB: [Documentation](https://rocksdb.org/docs/)
 - ADR-0001: Hybrid Storage Architecture (foundation for this design)
 - ADR-0004: Anchor+Delta Compression (compression strategy)

@@ -1,10 +1,10 @@
 # Scalability Architecture
 
-This document describes GallifreyDB's scalability architecture, including tiered storage for datasets larger than RAM and horizontal sharding for distributed deployments.
+This document describes AletheiaDB's scalability architecture, including tiered storage for datasets larger than RAM and horizontal sharding for distributed deployments.
 
 ## Scalability Strategy Overview
 
-GallifreyDB uses a two-phase scalability approach:
+AletheiaDB uses a two-phase scalability approach:
 
 ```mermaid
 graph TB

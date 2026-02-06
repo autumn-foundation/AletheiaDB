@@ -6,9 +6,9 @@
 //! This validates that the fix from commit 9df8517 (P2-1) correctly addresses
 //! issue #22's requirements.
 
-use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::core::property::{PropertyMapBuilder, PropertyValue};
-use gallifreydb::storage::version::PropertyDelta;
+use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+use aletheiadb::storage::version::PropertyDelta;
 
 #[test]
 fn test_property_delta_uses_interned_strings() {

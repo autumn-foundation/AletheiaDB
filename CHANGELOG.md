@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to GallifreyDB will be documented in this file.
+All notable changes to AletheiaDB will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -36,7 +36,7 @@ let timestamp: Timestamp = 1000.into();
 let later: Timestamp = (100 + timestamp.wallclock()).into();
 
 // Or use the From trait:
-use gallifreydb::core::temporal::Timestamp;
+use aletheiadb::core::temporal::Timestamp;
 let timestamp = Timestamp::from(1000);
 ```
 
@@ -188,7 +188,7 @@ db.query()
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on contributing to GallifreyDB.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on contributing to AletheiaDB.
 
 ## References
 

@@ -1,6 +1,6 @@
 # Issue #232 Allocation Analysis
 
-**Issue:** [perf(hnsw): Vec allocation on every add() and search() call](https://github.com/madmax983/GallifreyDB/issues/232)
+**Issue:** [perf(hnsw): Vec allocation on every add() and search() call](https://github.com/madmax983/AletheiaDB/issues/232)
 **Date Filed:** 2026-01-05
 **Analysis Date:** 2026-01-25
 **Status:** ✅ **RESOLVED** (by usearch migration on 2026-01-14)
@@ -20,7 +20,7 @@ The current implementation:
 | Date | Event |
 |------|-------|
 | 2026-01-05 | Issue #232 filed, identifying allocations in `hnsw_rs` implementation |
-| 2026-01-14 | **Migration to `usearch`** completed ([PR #403](https://github.com/madmax983/GallifreyDB/pull/403)) |
+| 2026-01-14 | **Migration to `usearch`** completed ([PR #403](https://github.com/madmax983/AletheiaDB/pull/403)) |
 | 2026-01-25 | TDD analysis confirms issue resolved |
 
 ## Problem Statement (Historical)
@@ -349,7 +349,7 @@ cargo test --test hnsw_allocation_tests -- --nocapture
 
 ## References
 
-- Issue #232: https://github.com/madmax983/GallifreyDB/issues/232
-- PR #403 (usearch migration): https://github.com/madmax983/GallifreyDB/pull/403
+- Issue #232: https://github.com/madmax983/AletheiaDB/issues/232
+- PR #403 (usearch migration): https://github.com/madmax983/AletheiaDB/pull/403
 - usearch repository: https://github.com/unum-cloud/usearch
-- GallifreyDB fork: https://github.com/madmax983/USearch (branch: fix/rust-move-semantics)
+- AletheiaDB fork: https://github.com/madmax983/USearch (branch: fix/rust-move-semantics)

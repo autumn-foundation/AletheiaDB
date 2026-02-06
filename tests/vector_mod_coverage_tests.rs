@@ -1,6 +1,6 @@
 //! Additional tests for vector mod.rs code coverage.
 
-use gallifreydb::index::vector::{
+use aletheiadb::index::vector::{
     CustomMetric, DistanceMetric, Quantization, StorageMode, TemporalSearchResults,
 };
 use std::path::PathBuf;
@@ -207,7 +207,7 @@ fn test_distance_metric_clone_copy() {
 
 #[test]
 fn test_temporal_search_results_type() {
-    use gallifreydb::core::id::NodeId;
+    use aletheiadb::core::id::NodeId;
 
     // Verify the type alias works correctly
     // Timestamp is a type alias for i64 (milliseconds since epoch)

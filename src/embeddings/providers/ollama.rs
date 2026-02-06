@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::embeddings::{EmbeddingService, providers::ollama::*};
+//! use aletheiadb::embeddings::{EmbeddingService, providers::ollama::*};
 //! use std::sync::Arc;
 //!
 //! let config = OllamaConfig::nomic_embed_text();

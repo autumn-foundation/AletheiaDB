@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** core, type-safety
 
 ## Context
@@ -88,7 +88,7 @@ impl IdGenerator {
 
 #### Why SeqCst is Required
 
-GallifreyDB's MVCC snapshot isolation (ADR-0003) depends on **globally consistent ordering** of ID generation and visibility across threads. Specifically:
+AletheiaDB's MVCC snapshot isolation (ADR-0003) depends on **globally consistent ordering** of ID generation and visibility across threads. Specifically:
 
 1. **Cross-Thread Visibility**: When thread A commits a transaction with ID `T`, all other threads must observe the same global ordering of ID allocation. This ensures snapshot isolation guarantees hold across concurrent transactions.
 
@@ -131,7 +131,7 @@ read_snapshot(snapshot_id); // Correctly excludes thread A's commit
 
 #### Performance Trade-offs
 
-| Ordering | Latency | Guarantees | Suitable for GallifreyDB? |
+| Ordering | Latency | Guarantees | Suitable for AletheiaDB? |
 |----------|---------|------------|---------------------------|
 | `Relaxed` | ~1 ns | Atomicity only | **No** - breaks snapshot isolation |
 | `AcqRel` | ~3-5 ns | Atomicity + happens-before | **No** - insufficient for global ordering |
@@ -168,7 +168,7 @@ self.counter.fetch_add(1, Ordering::Relaxed) // INCORRECT
 
 #### Implementation References
 
-See `src/core/id.rs:261` for the actual implementation with detailed safety comments. The decision to use `SeqCst` is also discussed in [issue #21](https://github.com/madmax983/GallifreyDB/issues/21).
+See `src/core/id.rs:261` for the actual implementation with detailed safety comments. The decision to use `SeqCst` is also discussed in [issue #21](https://github.com/madmax983/AletheiaDB/issues/21).
 
 ### Type-Safe API
 

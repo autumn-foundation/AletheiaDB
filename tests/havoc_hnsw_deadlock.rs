@@ -1,10 +1,10 @@
-use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 
-use gallifreydb::core::id::NodeId;
+use aletheiadb::core::id::NodeId;
 
 /// 👺 HAVOC DEADLOCK REGRESSION TEST (Fixed in PR #751)
 ///

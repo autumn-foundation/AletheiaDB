@@ -27,7 +27,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use gallifreydb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+//! use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 //!
 //! let config = ConcurrentWalSystemConfig::new("data/wal");
 //! let wal = ConcurrentWalSystem::new(config)?;
@@ -481,7 +481,7 @@ impl ConcurrentWalSystem {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::storage::wal::{WalOperation, ConcurrentWalSystem};
+    /// use aletheiadb::storage::wal::{WalOperation, ConcurrentWalSystem};
     ///
     /// let ops = vec![
     ///     WalOperation::CreateNode { /* ... */ },

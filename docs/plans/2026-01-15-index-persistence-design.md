@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-This document describes the design of GallifreyDB's comprehensive index persistence layer, which enables fast cold starts (<5s for 1M nodes) by persisting all index types to disk using bitcode serialization with CRC32 integrity validation and atomic writes.
+This document describes the design of AletheiaDB's comprehensive index persistence layer, which enables fast cold starts (<5s for 1M nodes) by persisting all index types to disk using bitcode serialization with CRC32 integrity validation and atomic writes.
 
 **Key Features:**
 - ✅ All index types supported (vector, graph, temporal, strings)
@@ -356,7 +356,7 @@ pub struct VectorMappingsData {
 }
 
 pub struct VectorMapping {
-    node_id: u64,                // GallifreyDB node ID
+    node_id: u64,                // AletheiaDB node ID
     usearch_key: u64,            // Usearch internal key
 }
 ```
@@ -502,7 +502,7 @@ pub fn restore_property_value(persisted: &PersistedPropertyValue) -> Result<Prop
 ### Basic Persistence
 
 ```rust
-use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+use aletheiadb::storage::index_persistence::IndexPersistenceManager;
 
 let manager = IndexPersistenceManager::new("data");
 manager.ensure_directories()?;
@@ -522,7 +522,7 @@ if manager.indexes_exist() {
 ### Full Persistence Cycle
 
 ```rust
-use gallifreydb::storage::index_persistence::{
+use aletheiadb::storage::index_persistence::{
     IndexPersistenceManager,
     graph::{save_graph_index, new_graph_index_data},
     temporal::{save_temporal_index, new_temporal_index_data},

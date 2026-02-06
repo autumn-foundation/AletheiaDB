@@ -33,8 +33,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 
-use gallifreydb::{
-    DistanceMetric, GallifreyDB, HnswConfig, PropertyMapBuilder, ReadOps, WriteOps,
+use aletheiadb::{
+    AletheiaDB, DistanceMetric, HnswConfig, PropertyMapBuilder, ReadOps, WriteOps,
     query::traverse_and_rank, storage::version::AnchorConfig,
 };
 
@@ -50,8 +50,8 @@ const TEST_VECTOR_DIM: usize = 4;
 // =============================================================================
 
 /// Helper to create a test database with vector indexing enabled.
-fn create_test_db() -> GallifreyDB {
-    let db = GallifreyDB::new().unwrap();
+fn create_test_db() -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(TEST_VECTOR_DIM, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -59,8 +59,8 @@ fn create_test_db() -> GallifreyDB {
 }
 
 /// Helper to create a test database with temporal configuration.
-fn create_temporal_test_db() -> GallifreyDB {
-    let db = GallifreyDB::with_config(AnchorConfig {
+fn create_temporal_test_db() -> AletheiaDB {
+    let db = AletheiaDB::with_config(AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
     })
@@ -474,7 +474,7 @@ mod traverse_and_rank_tests {
 
 mod temporal_vector_tests {
     use super::*;
-    use gallifreydb::core::temporal::time::now;
+    use aletheiadb::core::temporal::time::now;
 
     /// Test temporal query returns historical vector state
     #[test]
@@ -657,8 +657,8 @@ mod temporal_vector_tests {
 
 mod full_hybrid_tests {
     use super::*;
-    use gallifreydb::core::temporal::time::now;
-    use gallifreydb::query::Predicate;
+    use aletheiadb::core::temporal::time::now;
+    use aletheiadb::query::Predicate;
 
     /// Test complete hybrid: temporal + graph + vector + filter
     #[test]
@@ -1783,7 +1783,7 @@ mod edge_case_tests {
     #[test]
     fn test_filter_matches_nothing() {
         let db = create_test_db();
-        use gallifreydb::query::Predicate;
+        use aletheiadb::query::Predicate;
 
         let center = db
             .create_node(

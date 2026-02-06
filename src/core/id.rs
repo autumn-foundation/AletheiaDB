@@ -255,7 +255,7 @@ impl IdGenerator {
     /// 2. Correctness is prioritized over micro-optimizations in ID allocation
     /// 3. The cost is per-ID, not per-operation on the graph
     ///
-    /// See [issue #21](https://github.com/madmax983/GallifreyDB/issues/21) for context.
+    /// See [issue #21](https://github.com/madmax983/AletheiaDB/issues/21) for context.
     #[inline]
     pub fn next(&self) -> Result<u64, StorageError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -317,7 +317,7 @@ impl IdGenerator {
     /// # Example: Metrics Collection
     ///
     /// ```rust
-    /// # use gallifreydb::core::id::IdGenerator;
+    /// # use aletheiadb::core::id::IdGenerator;
     /// let generator = IdGenerator::new();
     ///
     /// // In a metrics reporting loop (runs every second)
@@ -332,7 +332,7 @@ impl IdGenerator {
     /// # Example: When NOT to Use
     ///
     /// ```rust
-    /// # use gallifreydb::core::id::IdGenerator;
+    /// # use aletheiadb::core::id::IdGenerator;
     /// let generator = IdGenerator::new();
     ///
     /// // ❌ WRONG: Using approximate for snapshot isolation
@@ -356,9 +356,9 @@ impl IdGenerator {
     ///
     /// # Cross-Reference
     ///
-    /// See [ADR-0009](https://github.com/madmax983/GallifreyDB/blob/main/docs/adr/0009-strong-id-types.md)
+    /// See [ADR-0009](https://github.com/madmax983/AletheiaDB/blob/main/docs/adr/0009-strong-id-types.md)
     /// for discussion of memory ordering in ID generation and
-    /// [issue #198](https://github.com/madmax983/GallifreyDB/issues/198) for the
+    /// [issue #198](https://github.com/madmax983/AletheiaDB/issues/198) for the
     /// motivation behind this method.
     #[inline]
     pub fn current_approximate(&self) -> u64 {

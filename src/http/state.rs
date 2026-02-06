@@ -1,23 +1,23 @@
 //! Application state for HTTP server
 //!
-//! This module provides `AppState` for sharing GallifreyDB across actix-web handlers.
-//! Following the pattern established in the MCP server, we use `Arc<GallifreyDB>`
-//! without an outer RwLock since GallifreyDB already provides interior mutability.
+//! This module provides `AppState` for sharing AletheiaDB across actix-web handlers.
+//! Following the pattern established in the MCP server, we use `Arc<AletheiaDB>`
+//! without an outer RwLock since AletheiaDB already provides interior mutability.
 //!
 //! # Thread Safety
 //!
-//! GallifreyDB is designed for concurrent access:
+//! AletheiaDB is designed for concurrent access:
 //! - Core collections use DashMap (lock-free concurrent HashMap)
 //! - Indexes use RwLock for read-heavy workloads
 //! - WAL uses striped locking for write throughput
 //!
-//! Therefore, wrapping in `Arc<RwLock<GallifreyDB>>` would add unnecessary
+//! Therefore, wrapping in `Arc<RwLock<AletheiaDB>>` would add unnecessary
 //! global contention and reduce performance.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::{GallifreyDB, http::AppState};
+//! use aletheiadb::{AletheiaDB, http::AppState};
 //! use actix_web::{web, App, HttpServer, HttpResponse};
 //! use std::sync::Arc;
 //!
@@ -32,7 +32,7 @@
 //!
 //! #[actix_web::main]
 //! async fn main() -> std::io::Result<()> {
-//!     let db = Arc::new(GallifreyDB::new().unwrap());
+//!     let db = Arc::new(AletheiaDB::new().unwrap());
 //!     let app_state = AppState::new(db);
 //!
 //!     HttpServer::new(move || {
@@ -46,21 +46,21 @@
 //! }
 //! ```
 
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use std::sync::Arc;
 
 /// Application state shared across actix-web handlers
 ///
-/// Wraps `Arc<GallifreyDB>` for type-safe sharing. GallifreyDB is already
+/// Wraps `Arc<AletheiaDB>` for type-safe sharing. AletheiaDB is already
 /// thread-safe via interior mutability (DashMap, RwLock, Mutex), so no
 /// additional locking is needed.
 ///
 /// # Example
 /// ```
-/// use gallifreydb::{GallifreyDB, http::AppState};
+/// use aletheiadb::{AletheiaDB, http::AppState};
 /// use std::sync::Arc;
 ///
-/// let db = Arc::new(GallifreyDB::new().unwrap());
+/// let db = Arc::new(AletheiaDB::new().unwrap());
 /// let state = AppState::new(db);
 ///
 /// // Clone for sharing across handlers
@@ -68,40 +68,40 @@ use std::sync::Arc;
 /// ```
 #[derive(Clone)]
 pub struct AppState {
-    db: Arc<GallifreyDB>,
+    db: Arc<AletheiaDB>,
 }
 
 impl AppState {
     /// Create new application state with the given database
-    pub fn new(db: Arc<GallifreyDB>) -> Self {
+    pub fn new(db: Arc<AletheiaDB>) -> Self {
         Self { db }
     }
 
     /// Get a reference to the database
     ///
-    /// Returns a reference to the GallifreyDB instance, dereferencing the Arc
+    /// Returns a reference to the AletheiaDB instance, dereferencing the Arc
     /// for convenient method calls in HTTP handlers.
     ///
     /// # Design Note
     ///
-    /// This returns `&GallifreyDB` rather than `&Arc<GallifreyDB>` (unlike
-    /// `GallifreyMcpServer::db()`). Both approaches work due to `Deref` coercion,
+    /// This returns `&AletheiaDB` rather than `&Arc<AletheiaDB>` (unlike
+    /// `AletheiaMcpServer::db()`). Both approaches work due to `Deref` coercion,
     /// but this design is more ergonomic for HTTP handlers where direct method
     /// calls are common. Use `db_arc()` if you need the `Arc` itself.
-    pub fn db(&self) -> &GallifreyDB {
+    pub fn db(&self) -> &AletheiaDB {
         &self.db
     }
 
-    /// Get the Arc<GallifreyDB> directly
+    /// Get the Arc<AletheiaDB> directly
     ///
     /// Useful when you need to clone the Arc or pass it to other components.
-    pub fn db_arc(&self) -> Arc<GallifreyDB> {
+    pub fn db_arc(&self) -> Arc<AletheiaDB> {
         self.db.clone()
     }
 }
 
-impl From<Arc<GallifreyDB>> for AppState {
-    fn from(db: Arc<GallifreyDB>) -> Self {
+impl From<Arc<AletheiaDB>> for AppState {
+    fn from(db: Arc<AletheiaDB>) -> Self {
         Self::new(db)
     }
 }
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn test_app_state_clone_shares_db() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
         let state = AppState::new(db.clone());
         let state2 = state.clone();
 
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_from_impl() {
-        let db = Arc::new(GallifreyDB::new().unwrap());
+        let db = Arc::new(AletheiaDB::new().unwrap());
         let state: AppState = db.clone().into();
 
         assert!(Arc::ptr_eq(&db, &state.db_arc()));

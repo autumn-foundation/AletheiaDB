@@ -3,7 +3,7 @@
 //! These tests use mock providers to test the embedding pipeline without
 //! requiring API keys or external dependencies.
 
-use gallifreydb::embeddings::{EmbeddingError, EmbeddingProvider, EmbeddingService};
+use aletheiadb::embeddings::{EmbeddingError, EmbeddingProvider, EmbeddingService};
 use async_trait::async_trait;
 use std::sync::Arc;
 

@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-01-28
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, architecture, simplification
 
 ## Context
@@ -38,7 +38,7 @@ This decision refines ADR-0027 by favoring **concrete modularity** (separate mod
 
 ### Negative
 
--   **Reduced Pluggability:** Swapping the storage engine now requires code changes rather than just a configuration switch. However, given GallifreyDB's embedded nature, supporting multiple distinct storage engines simultaneously is a non-goal (YAGNI).
+-   **Reduced Pluggability:** Swapping the storage engine now requires code changes rather than just a configuration switch. However, given AletheiaDB's embedded nature, supporting multiple distinct storage engines simultaneously is a non-goal (YAGNI).
 -   **Tight Coupling:** The system is now explicitly coupled to `redb`. If `redb` becomes unmaintained, replacing it will be harder (though still manageable due to module boundaries).
 
 ## Compliance

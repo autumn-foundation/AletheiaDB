@@ -1,6 +1,6 @@
 # Testing, Coverage, and Profiling Guide
 
-This document explains how to use the testing, coverage, and profiling tools for GallifreyDB.
+This document explains how to use the testing, coverage, and profiling tools for AletheiaDB.
 
 ## Prerequisites
 
@@ -101,7 +101,7 @@ proptest! {
 
 ### Coverage Thresholds
 
-GallifreyDB enforces minimum coverage thresholds:
+AletheiaDB enforces minimum coverage thresholds:
 - **80%** line coverage
 - **75%** function coverage
 - **70%** branch coverage
@@ -172,7 +172,7 @@ Tracy is a real-time profiler for detailed performance analysis.
 
 1. Download Tracy profiler GUI from [releases](https://github.com/wolfpld/tracy/releases)
 2. Run the Tracy profiler application
-3. Build and run GallifreyDB with Tracy enabled:
+3. Build and run AletheiaDB with Tracy enabled:
 
 ```bash
 # Build with Tracy support

@@ -10,7 +10,7 @@
 //! # The Hook
 //! "Find me every sensor that failed with the same stuttering pattern as Sensor X."
 
-use crate::GallifreyDB;
+use crate::AletheiaDB;
 use crate::core::history::EntityHistory;
 use crate::core::id::NodeId;
 use crate::core::temporal::time;
@@ -126,13 +126,13 @@ impl Resonator for ActivityDensityResonator {
 
 /// The Echo Chamber finds resonant nodes.
 pub struct EchoChamber<'a> {
-    db: &'a GallifreyDB,
+    db: &'a AletheiaDB,
     resonator: Box<dyn Resonator>,
 }
 
 impl<'a> EchoChamber<'a> {
     /// Create a new EchoChamber with default settings.
-    pub fn new(db: &'a GallifreyDB) -> Self {
+    pub fn new(db: &'a AletheiaDB) -> Self {
         Self {
             db,
             resonator: Box::new(ActivityDensityResonator::default()),
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_echo_chamber_integration() {
-        let db = GallifreyDB::new().unwrap();
+        let db = AletheiaDB::new().unwrap();
 
         // Define a "Now" for our test universe
         let now_wallclock = time::now().wallclock();

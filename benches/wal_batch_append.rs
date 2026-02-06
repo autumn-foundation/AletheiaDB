@@ -11,8 +11,7 @@
 //!
 //! Target: 20-50% throughput improvement for batch sizes > 10
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::{
+use aletheiadb::{
     core::{PropertyMapBuilder, id::NodeId, interning::GLOBAL_INTERNER, temporal::time},
     storage::wal::{
         WalOperation,
@@ -20,6 +19,7 @@ use gallifreydb::{
         durability::DurabilityMode,
     },
 };
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use tempfile::TempDir;
 
 /// Helper to create a WAL instance for benchmarking

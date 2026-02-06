@@ -1,11 +1,11 @@
-//! Vector utilities for GallifreyDB.
+//! Vector utilities for AletheiaDB.
 //!
 //! This module provides types and functions for working with dense vectors
 //! (embeddings) used in semantic search and similarity operations.
 //!
 //! # Overview
 //!
-//! GallifreyDB supports storing vectors as property values on nodes via
+//! AletheiaDB supports storing vectors as property values on nodes via
 //! [`crate::core::PropertyValue::Vector`]. This module provides the utilities needed
 //! to work with those vectors effectively:
 //!
@@ -19,8 +19,8 @@
 //! # Usage
 //!
 //! ```rust
-//! use gallifreydb::core::vector::VectorDimension;
-//! use gallifreydb::core::PropertyValue;
+//! use aletheiadb::core::vector::VectorDimension;
+//! use aletheiadb::core::PropertyValue;
 //!
 //! // Create a vector property
 //! let embedding: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
@@ -35,7 +35,7 @@
 //!
 //! # Design Notes
 //!
-//! Vectors in GallifreyDB are stored as `Arc<[f32]>` within [`crate::core::PropertyValue::Vector`].
+//! Vectors in AletheiaDB are stored as `Arc<[f32]>` within [`crate::core::PropertyValue::Vector`].
 //! This design enables:
 //!
 //! - **Efficient cloning**: Multiple versions can share the same vector data

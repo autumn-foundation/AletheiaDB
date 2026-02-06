@@ -15,8 +15,8 @@
 //! For a search that examines 1,000 candidate nodes, eliminating validation
 //! saves ~1-2 microseconds total.
 
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
 
 /// Test that verifies search_with_filter works correctly and efficiently
 /// when examining many nodes.
