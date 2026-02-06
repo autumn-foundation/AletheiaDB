@@ -67,6 +67,47 @@ impl AletheiaDB {
         self.current.get_edge(edge_id)
     }
 
+    /// Scan all nodes with a specific label, returning an iterator over node IDs.
+    ///
+    /// This method provides efficient iteration over all nodes matching a given label/type.
+    /// Useful for operations that need to process all entities of a certain type.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - The label/type to filter by (e.g., "Person", "Product", "Event")
+    ///
+    /// # Returns
+    ///
+    /// An iterator yielding `NodeId` for all nodes with the specified label.
+    ///
+    /// # Performance
+    ///
+    /// - **Time**: O(n) scan of all nodes with efficient label filtering
+    /// - **Space**: O(1) - lazy iterator, no allocation
+    /// - **Comparison**: Uses interned string pointer equality (very fast)
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Process all Person nodes
+    /// for node_id in db.scan_nodes_by_label("Person") {
+    ///     let node = db.get_node(node_id)?;
+    ///     println!("Person: {:?}", node.properties.get("name"));
+    /// }
+    ///
+    /// // Count nodes by label
+    /// let person_count = db.scan_nodes_by_label("Person").count();
+    /// let product_count = db.scan_nodes_by_label("Product").count();
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// - [`find_nodes_by_property`](Self::find_nodes_by_property) - Find nodes by label + property value
+    /// - [`node_count`](Self::node_count) - Total node count across all labels
+    pub fn scan_nodes_by_label(&self, label: &str) -> impl Iterator<Item = NodeId> + '_ {
+        self.current.scan_nodes_by_label(label)
+    }
+
     // ========================================================================
     // Zero-copy access methods (Issue #190)
     // ========================================================================
