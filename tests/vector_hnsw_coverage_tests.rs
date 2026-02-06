@@ -226,6 +226,70 @@ fn test_hnsw_builder_m_too_large_error() {
     }
 }
 
+#[test]
+fn test_hnsw_builder_ef_construction_too_large() {
+    let result = HnswIndexBuilder::new(64, DistanceMetric::Cosine)
+        .ef_construction(5000)
+        .build();
+    assert!(result.is_err());
+    match result {
+        Err(err) => assert!(
+            err.to_string().contains("ef_construction must be in range"),
+            "Expected ef_construction range error, got: {}",
+            err
+        ),
+        Ok(_) => panic!("Expected error"),
+    }
+}
+
+#[test]
+fn test_hnsw_builder_ef_construction_too_small() {
+    let result = HnswIndexBuilder::new(64, DistanceMetric::Cosine)
+        .ef_construction(5)
+        .build();
+    assert!(result.is_err());
+    match result {
+        Err(err) => assert!(
+            err.to_string().contains("ef_construction must be in range"),
+            "Expected ef_construction range error, got: {}",
+            err
+        ),
+        Ok(_) => panic!("Expected error"),
+    }
+}
+
+#[test]
+fn test_hnsw_builder_ef_search_too_large() {
+    let result = HnswIndexBuilder::new(64, DistanceMetric::Cosine)
+        .ef_search(5000)
+        .build();
+    assert!(result.is_err());
+    match result {
+        Err(err) => assert!(
+            err.to_string().contains("ef_search must be in range"),
+            "Expected ef_search range error, got: {}",
+            err
+        ),
+        Ok(_) => panic!("Expected error"),
+    }
+}
+
+#[test]
+fn test_hnsw_builder_ef_search_too_small() {
+    let result = HnswIndexBuilder::new(64, DistanceMetric::Cosine)
+        .ef_search(0)
+        .build();
+    assert!(result.is_err());
+    match result {
+        Err(err) => assert!(
+            err.to_string().contains("ef_search must be in range"),
+            "Expected ef_search range error, got: {}",
+            err
+        ),
+        Ok(_) => panic!("Expected error"),
+    }
+}
+
 // ============================================================================
 // Distance metric conversion tests
 // ============================================================================
