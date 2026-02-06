@@ -9,8 +9,8 @@
 //! updates and use them for queries, ensuring we're testing real time-travel
 //! functionality.
 
-use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::Error;
+use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 /// Test that anchors are created at expected positions with default anchor_interval=10

@@ -8,8 +8,8 @@
 
 mod common;
 
-use aletheiadb::Error;
 use aletheiadb::AletheiaDB;
+use aletheiadb::Error;
 use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::core::id::{NodeId, VersionId};
 use aletheiadb::core::property::PropertyMapBuilder;

@@ -186,10 +186,11 @@ fn test_closure_based_read_api() {
     let name = db
         .read(|tx| {
             let node = tx.get_node(node_id)?;
-            Ok::<_, Error>(node
-                .get_property("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()))
+            Ok::<_, Error>(
+                node.get_property("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            )
         })
         .unwrap();
 

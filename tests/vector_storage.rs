@@ -4,8 +4,8 @@
 //! AletheiaDB API, including storage, retrieval, versioning, and
 //! temporal queries.
 
-use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 use aletheiadb::Error;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 
 // ============================================================
 // Helper Functions

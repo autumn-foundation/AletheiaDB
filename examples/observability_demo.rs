@@ -27,8 +27,8 @@
 //! cargo run --example observability_demo --features observability
 //! ```
 
-use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 use aletheiadb::Error;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 
 #[cfg(feature = "observability")]
 use aletheiadb::observability;

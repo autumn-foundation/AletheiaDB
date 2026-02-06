@@ -1,7 +1,7 @@
 //! Debug test for temporal node lookup issue #306
 
-use aletheiadb::*;
 use aletheiadb::Error;
+use aletheiadb::*;
 use std::thread;
 use std::time::Duration;
 

@@ -6,8 +6,8 @@
 //! - Temporal interval closing for edges
 //! - Edge version chain integrity
 
-use aletheiadb::*;
 use aletheiadb::Error;
+use aletheiadb::*;
 use std::thread;
 use std::time::Duration;
 
