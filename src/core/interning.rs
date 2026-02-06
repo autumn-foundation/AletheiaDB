@@ -62,7 +62,16 @@ impl InternedString {
 
 impl fmt::Display for InternedString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Interned({})", self.0)
+        // Try to resolve using the global interner first
+        // This makes debugging much easier by showing the actual string
+        // We use resolve_with to avoid allocating a new String just for display
+        let result = GLOBAL_INTERNER.resolve_with(*self, |s| write!(f, "{}", s));
+
+        // If resolution failed (e.g. ID from a local interner), fallback to showing ID
+        match result {
+            Some(res) => res,
+            None => write!(f, "Interned({})", self.0),
+        }
     }
 }
 
