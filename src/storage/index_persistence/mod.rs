@@ -132,8 +132,12 @@ pub const VECTOR_META_MAGIC: [u8; 4] = *b"GVEC";
 pub const MAX_STRING_COUNT: u64 = 100_000;
 
 /// Maximum length of a single string in bytes (DoS protection).
-/// 1MB per string is generous while preventing memory exhaustion.
-pub const MAX_STRING_LENGTH: usize = 1_048_576; // 1MB
+/// Increased from 1MB to 10MB to support business scenarios:
+/// - Document storage: Full articles and papers
+/// - Base64 encoded data: Medium-sized images and files
+/// - Large JSON objects: Complex configuration and metadata
+/// Still provides DoS protection while enabling practical use cases.
+pub const MAX_STRING_LENGTH: usize = 10_485_760; // 10MB
 
 /// Maximum vector dimension (DoS protection).
 /// 100K dimensions aligns with the documented maximum.
@@ -143,11 +147,15 @@ pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 /// Maximum size of a graph index file (DoS protection).
 ///
 /// Limits the amount of memory allocated when loading graph indexes.
-/// Default: 4GB in production, 10MB in tests.
+/// Increased from 4GB to 100GB to support enterprise-scale graphs:
+/// - 4GB ≈ 100M-500M nodes (depending on density)
+/// - Enterprise graphs can have billions of nodes
+/// - Enables large-scale knowledge graphs and social networks
+/// Default: 100GB in production, 10MB in tests.
 pub const MAX_GRAPH_INDEX_FILE_SIZE: u64 = if cfg!(test) {
     10 * 1024 * 1024
 } else {
-    4 * 1024 * 1024 * 1024
+    100 * 1024 * 1024 * 1024
 };
 
 /// Maximum size of a vector index metadata/mappings file (DoS protection).

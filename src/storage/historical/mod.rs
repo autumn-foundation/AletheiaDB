@@ -38,9 +38,12 @@ pub const DEFAULT_MAX_VERSION_AGE_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 /// Maximum recursion depth for version reconstruction (DoS protection).
 ///
 /// This limit prevents stack overflow from corrupted version chains or cycles.
-/// A depth of 100 is sufficient for any legitimate use case since anchors are
-/// typically created every 10-20 versions.
-pub const MAX_RECONSTRUCTION_DEPTH: usize = 100;
+/// Increased from 100 to 1,000 to support business scenarios:
+/// - High-update entities: Stock prices, sensor data, real-time feeds
+/// - Long-running systems without compaction
+/// - 1,000 deltas enables longer operational periods before compaction
+/// Still provides infinite loop protection while enabling practical use cases.
+pub const MAX_RECONSTRUCTION_DEPTH: usize = 1_000;
 
 /// Retention policy for version history (DoS protection).
 ///
