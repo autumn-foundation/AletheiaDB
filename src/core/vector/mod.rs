@@ -93,6 +93,8 @@ pub(crate) mod simd;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod sentry_tests;
 
 pub use constants::*;
 pub use metric::*;
