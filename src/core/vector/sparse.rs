@@ -1,4 +1,4 @@
-use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
+use super::SQUARED_MAGNITUDE_THRESHOLD;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::utils::error::{Error, Result, VectorError};
 
