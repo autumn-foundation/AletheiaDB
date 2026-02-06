@@ -4,7 +4,7 @@ This document describes the query language extensions for AletheiaDB, providing 
 
 ## Overview
 
-AletheiaDB's query language (AQL - Gallifrey Query Language) extends the Cypher graph query language with:
+AletheiaDB's query language (AQL - Aletheia Query Language) extends the Cypher graph query language with:
 
 1. **Vector Search Operations**: Native k-NN search and similarity-based ranking
 2. **Bi-Temporal Queries**: Point-in-time and time-range queries
