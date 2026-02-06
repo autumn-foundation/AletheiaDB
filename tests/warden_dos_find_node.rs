@@ -60,6 +60,9 @@ mod tests {
 
         // This assertion expects the SAFE behavior (1000).
         // It will FAIL initially (Red Phase).
-        assert_eq!(returned_count, 1000, "Should cap results at 1000 to prevent DoS");
+        assert_eq!(
+            returned_count, 1000,
+            "Should cap results at 1000 to prevent DoS"
+        );
     }
 }
