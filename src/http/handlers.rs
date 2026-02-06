@@ -354,8 +354,9 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(state)
-                .route("/query", web::post().to(handle_query))
-        ).await;
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
 
         // Malicious payload: offset = usize::MAX, limit = 1
         // offset + limit = usize::MAX + 1 = 0 (wrapped), which is < max_deep_pagination (10000)
@@ -376,11 +377,18 @@ mod tests {
         // VULNERABLE: Returns 200 OK because the check was bypassed
         // SECURE: Should return 400 Bad Request
 
-        assert!(resp.status().is_client_error(), "Should reject overflow attempt");
+        assert!(
+            resp.status().is_client_error(),
+            "Should reject overflow attempt"
+        );
         let body = test::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let error = json["error"].as_str().unwrap();
-        assert!(error.contains("Pagination limit exceeded"), "Error: {}", error);
+        assert!(
+            error.contains("Pagination limit exceeded"),
+            "Error: {}",
+            error
+        );
     }
 
     // Warden: Check if FindNode allows deep pagination
@@ -392,8 +400,9 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(state)
-                .route("/query", web::post().to(handle_query))
-        ).await;
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
 
         // Deep pagination request
         let payload = json!({
@@ -411,10 +420,17 @@ mod tests {
         let resp = test::call_service(&app, req).await;
 
         // SECURE: Should return 400 Bad Request
-        assert!(resp.status().is_client_error(), "Should reject deep pagination");
+        assert!(
+            resp.status().is_client_error(),
+            "Should reject deep pagination"
+        );
         let body = test::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let error = json["error"].as_str().unwrap();
-        assert!(error.contains("Pagination limit exceeded"), "Error: {}", error);
+        assert!(
+            error.contains("Pagination limit exceeded"),
+            "Error: {}",
+            error
+        );
     }
 }
