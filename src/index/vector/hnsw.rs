@@ -671,6 +671,10 @@ impl VectorIndex for HnswIndex {
             }));
         }
 
+        // Acquire inner lock FIRST to prevent deadlocks (PR #751).
+        // This respects the lock ordering invariant: inner > id_mapping.
+        let index = self.inner.write();
+
         // Get or create key for this NodeId
         // Use entry API for atomic check-and-update to prevent race conditions
         match self.id_mapping.entry(id) {
@@ -679,12 +683,6 @@ impl VectorIndex for HnswIndex {
                 // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
                 // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
-
-                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
-                // where multiple threads try to update the same node concurrently (PR #575).
-                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
-                // causing "Duplicate keys not allowed" error.
-                let index = self.inner.write();
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
@@ -752,7 +750,6 @@ impl VectorIndex for HnswIndex {
                 };
 
                 // Insert into usearch index (auto-expand capacity if needed)
-                let index = self.inner.write();
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
@@ -1024,6 +1021,13 @@ impl VectorIndex for HnswIndex {
 
 // Private helper methods for HnswIndex
 impl HnswIndex {
+    /// Helper for chaos testing to verify lock ordering.
+    /// Accesses id_mapping only (Lock A).
+    #[doc(hidden)]
+    pub fn inspect_ids(&self) -> usize {
+        self.id_mapping.len()
+    }
+
     /// Internal implementation of index saving.
     ///
     /// This method performs the actual blocking I/O operations for saving the index
