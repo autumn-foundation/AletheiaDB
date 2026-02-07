@@ -727,7 +727,7 @@ impl VectorIndex for HnswIndex {
                 // New node: allocate key with overflow protection
                 // Check BEFORE incrementing to avoid leaving next_key in invalid state
                 const MAX_VALID_KEY: u64 = u64::MAX - 1000;
-                let key = loop {
+                loop {
                     let current = self.next_key.load(Ordering::SeqCst);
                     if current > MAX_VALID_KEY {
                         return Err(Error::Vector(VectorError::IndexError(
@@ -743,38 +743,42 @@ impl VectorIndex for HnswIndex {
                         Ordering::SeqCst,
                     ) {
                         Ok(key) => {
-                            entry.insert(key);
+                            // Fix for race condition (Phantom Vector):
+                            // Hold the id_mapping lock (via the returned RefMut) until we have
+                            // updated the inner index. This prevents remove() from seeing the
+                            // new mapping before the vector is actually in the index.
+                            let _guard = entry.insert(key);
                             self.reverse_mapping.insert(key, id);
-                            break key;
+
+
+                            // Insert into usearch index (auto-expand capacity if needed)
+                            let index = self.inner.write();
+
+                            // Check if we need to expand capacity
+                            if index.size() >= index.capacity() {
+                                // Double capacity, minimum 1024
+                                let new_capacity = (index.capacity() * 2).max(1024);
+                                index.reserve(new_capacity).map_err(|e| {
+                                    Error::Vector(VectorError::IndexError(format!(
+                                        "Failed to expand capacity: {}",
+                                        e
+                                    )))
+                                })?;
+                            }
+
+                            index.add(key, vector).map_err(|e| {
+                                Error::Vector(VectorError::IndexError(format!(
+                                    "Failed to add vector: {}",
+                                    e
+                                )))
+                            })?;
+
+                            self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                            return Ok(());
                         }
                         Err(_) => continue, // Retry with new current value
                     }
-                };
-
-                // Insert into usearch index (auto-expand capacity if needed)
-                let index = self.inner.write();
-
-                // Check if we need to expand capacity
-                if index.size() >= index.capacity() {
-                    // Double capacity, minimum 1024
-                    let new_capacity = (index.capacity() * 2).max(1024);
-                    index.reserve(new_capacity).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to expand capacity: {}",
-                            e
-                        )))
-                    })?;
                 }
-
-                index.add(key, vector).map_err(|e| {
-                    Error::Vector(VectorError::IndexError(format!(
-                        "Failed to add vector: {}",
-                        e
-                    )))
-                })?;
-
-                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
-                Ok(())
             }
         }
     }
