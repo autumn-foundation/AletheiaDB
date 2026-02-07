@@ -108,8 +108,8 @@ fn test_time_range_vector_query() -> Result<()> {
         let timestamp = ((i as i64 * 1000) + base_time.wallclock()).into();
         index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
 
-        index.on_transaction()?;
-        index.on_transaction()?;
+        index.on_transaction_at(timestamp)?;
+        index.on_transaction_at(timestamp)?;
     }
 
     assert!(index.snapshot_count() >= 2);
