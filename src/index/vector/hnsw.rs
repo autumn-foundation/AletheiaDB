@@ -381,8 +381,18 @@ where
             panic!("usearch passed null pointer to metric function");
         }
 
+        // Check for alignment to prevent UB
+        // Use bitwise check for power-of-2 alignment (f32 align is 4)
+        let align_mask = std::mem::align_of::<f32>() - 1;
+        if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
+            panic!(
+                "usearch passed unaligned pointer to metric function (expected alignment {})",
+                std::mem::align_of::<f32>()
+            );
+        }
+
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
-        // We verified they are not null above.
+        // We verified they are not null and aligned above.
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
         distance_fn(slice_a, slice_b)
@@ -1279,29 +1289,53 @@ fn load_mappings_with_integrity(
         return Ok((id_mapping, reverse_mapping, max_key));
     }
 
-    let file_data = std::fs::read(mappings_path).map_err(|e| {
+    // Use streaming (File + BufReader) instead of reading entire file to memory (fs::read).
+    // This prevents OOM DoS attacks with large or manipulated files.
+    let file = File::open(mappings_path).map_err(|e| {
         Error::Vector(VectorError::IndexError(format!(
-            "Failed to read mappings: {}",
+            "Failed to open mappings file: {}",
             e
         )))
     })?;
 
+    let file_len = file.metadata().map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to get mappings file metadata: {}",
+            e
+        )))
+    })?.len();
+
     // Minimum size: magic(4) + version(1) + count(8) + crc(4) = 17 bytes
-    if file_data.len() < 17 {
+    if file_len < 17 {
         return Err(Error::Vector(VectorError::IndexError(
             "Mapping file too small or corrupted".to_string(),
         )));
     }
 
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Hasher::new();
+
+    // 1. Read Header (13 bytes)
+    let mut header = [0u8; 13];
+    reader.read_exact(&mut header).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read mappings header: {}",
+            e
+        )))
+    })?;
+
+    // Update hasher with header
+    hasher.update(&header);
+
     // Verify magic bytes
-    if &file_data[0..4] != MAPPING_MAGIC {
+    if &header[0..4] != MAPPING_MAGIC {
         return Err(Error::Vector(VectorError::IndexError(
             "Invalid mapping file: bad magic bytes".to_string(),
         )));
     }
 
     // Check version
-    let version = file_data[4];
+    let version = header[4];
     if version != MAPPING_VERSION {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Unsupported mapping file version: {} (expected {})",
@@ -1309,25 +1343,12 @@ fn load_mappings_with_integrity(
         ))));
     }
 
-    // Extract and verify CRC32
-    let crc_offset = file_data.len() - 4;
-    let stored_crc = u32::from_le_bytes(file_data[crc_offset..].try_into().unwrap());
-    let mut hasher = Hasher::new();
-    hasher.update(&file_data[..crc_offset]);
-    let computed_crc = hasher.finalize();
-
-    if stored_crc != computed_crc {
-        return Err(Error::Vector(VectorError::IndexError(format!(
-            "Mapping file corrupted: CRC mismatch (stored: {}, computed: {})",
-            stored_crc, computed_crc
-        ))));
-    }
-
     // Parse count
-    let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
+    let count = u64::from_le_bytes(header[5..13].try_into().unwrap()) as usize;
 
     // Verify data size with checked arithmetic
-    let data_size = count.checked_mul(16).ok_or_else(|| {
+    // Cast to u64 for file size comparison
+    let data_size = (count as u64).checked_mul(16).ok_or_else(|| {
         Error::Vector(VectorError::IndexError(
             "Mapping count too large (overflow)".to_string(),
         ))
@@ -1338,26 +1359,68 @@ fn load_mappings_with_integrity(
         ))
     })?;
 
-    if file_data.len() != expected_size {
+    // Critical Security Check: Verify file size matches expected size BEFORE reading data.
+    // This prevents reading until EOF if the file is truncated or huge.
+    if file_len != expected_size {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Mapping file size mismatch: expected {} bytes, got {}",
-            expected_size,
-            file_data.len()
+            expected_size, file_len
         ))));
     }
 
-    // Parse mappings
-    let data_start = 13;
-    let data_end = crc_offset;
-    for chunk in file_data[data_start..data_end].chunks_exact(16) {
-        let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-        let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+    // 2. Read Data
+    // We read in chunks to avoid allocating a huge buffer, but large enough for efficiency.
+    // 16KB buffer holds 1024 entries.
+    const CHUNK_SIZE: usize = 1024 * 16;
+    let mut buffer = vec![0u8; CHUNK_SIZE];
+    let mut remaining_entries = count;
 
-        if let Ok(node_id) = NodeId::new(node_id_raw) {
-            id_mapping.insert(node_id, key);
-            reverse_mapping.insert(key, node_id);
-            max_key = max_key.max(key);
+    while remaining_entries > 0 {
+        // Calculate entries for this chunk
+        let entries_in_chunk = std::cmp::min(remaining_entries, 1024);
+        let bytes_to_read = entries_in_chunk * 16;
+        let slice = &mut buffer[0..bytes_to_read];
+
+        reader.read_exact(slice).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to read mappings data: {}",
+                e
+            )))
+        })?;
+
+        hasher.update(slice);
+
+        for chunk in slice.chunks_exact(16) {
+            let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+            let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+
+            if let Ok(node_id) = NodeId::new(node_id_raw) {
+                id_mapping.insert(node_id, key);
+                reverse_mapping.insert(key, node_id);
+                max_key = max_key.max(key);
+            }
         }
+
+        remaining_entries -= entries_in_chunk;
+    }
+
+    // 3. Read and Verify CRC
+    let mut crc_buf = [0u8; 4];
+    reader.read_exact(&mut crc_buf).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read mappings CRC: {}",
+            e
+        )))
+    })?;
+
+    let stored_crc = u32::from_le_bytes(crc_buf);
+    let computed_crc = hasher.finalize();
+
+    if stored_crc != computed_crc {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Mapping file corrupted: CRC mismatch (stored: {}, computed: {})",
+            stored_crc, computed_crc
+        ))));
     }
 
     Ok((id_mapping, reverse_mapping, max_key))
@@ -1578,6 +1641,29 @@ mod tests {
         assert_eq!(results[0].0, node1);
 
         Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "usearch passed unaligned pointer")]
+    fn test_metric_wrapper_panic_on_unaligned() {
+        // This test ensures that the metric wrapper correctly detects unaligned pointers.
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        // Create a buffer that we can misalign
+        // We need at least 4 f32s (16 bytes) + 1 byte offset
+        let mut buffer = vec![0u8; 16 + 8];
+
+        // Get an aligned pointer
+        let aligned_ptr = buffer.as_mut_ptr();
+
+        // Create an unaligned pointer by adding 1 byte offset
+        // SAFETY: We allocated enough space. This pointer is valid but unaligned for f32.
+        let unaligned_ptr = unsafe { aligned_ptr.add(1) } as *const f32;
+        let valid_ptr = aligned_ptr as *const f32;
+
+        // Pass unaligned pointer - should panic
+        wrapper(valid_ptr, unaligned_ptr);
     }
 
     #[test]
