@@ -34,7 +34,13 @@ use super::tools::*;
 // ============================================================================
 
 /// Maximum traversal depth to prevent stack overflow and excessive computation.
-const MAX_TRAVERSAL_DEPTH: usize = 10;
+/// Increased from 10 to 20 to support business scenarios:
+/// - Social network analysis (6 degrees of separation)
+/// - Supply chain tracking (can exceed 10 hops)
+/// - Genealogy and multi-generation queries
+///
+///   Still provides DoS protection via query timeouts and result limits.
+const MAX_TRAVERSAL_DEPTH: usize = 20;
 
 /// Maximum number of results to return in a single query.
 const MAX_RESULT_LIMIT: usize = 10_000;

@@ -106,9 +106,14 @@ const MAPPING_VERSION: u8 = 1;
 
 /// Maximum number of results that can be requested in a search.
 ///
-/// This prevents DoS attacks via excessive memory allocation when an attacker
-/// requests an extremely large k value.
-const MAX_K: usize = 10_000;
+/// Increased from 10K to 100K to support business scenarios:
+/// - Bulk similarity computations and exports
+/// - Large-scale batch processing
+/// - Migration and data analysis operations
+///
+///   This prevents DoS attacks via excessive memory allocation while enabling
+///   legitimate bulk operations.
+const MAX_K: usize = 100_000;
 
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {

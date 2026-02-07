@@ -10,10 +10,15 @@ use std::time::Duration;
 /// Maximum number of retries when creating a snapshot due to races (default: 3)
 pub const MAX_SNAPSHOT_RETRIES: usize = 3;
 
-/// Maximum depth of delta chain traversal before forcing full snapshot (default: 10)
-/// This prevents unbounded delta chains and ensures reconstruction performance.
-/// Mirrors the full_snapshot_interval default value.
-pub const MAX_DELTA_CHAIN_DEPTH: usize = 10;
+/// Maximum depth of delta chain traversal before forcing full snapshot.
+/// Increased from 10 to 50 to support business scenarios:
+/// - Frequently updated embeddings (re-training cycles, continuous learning)
+/// - Live document embeddings with frequent updates
+/// - A/B testing with multiple variant updates
+///
+///   This prevents unbounded delta chains while reducing compaction frequency
+///   for high-update workloads.
+pub const MAX_DELTA_CHAIN_DEPTH: usize = 50;
 
 /// Minimum capacity estimate for HashMap pre-allocation (default: 100)
 /// Used when estimating capacity for vector collections to avoid excessive resizing.

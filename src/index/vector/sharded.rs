@@ -87,7 +87,7 @@ use std::sync::Arc;
 /// Maximum number of results that can be requested in a search.
 ///
 /// This prevents DoS attacks via excessive memory allocation.
-const MAX_K: usize = 10_000;
+const MAX_K: usize = 100_000;
 
 /// Default number of shards.
 const DEFAULT_NUM_SHARDS: usize = 4;
