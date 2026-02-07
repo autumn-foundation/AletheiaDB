@@ -42,7 +42,8 @@ pub const DEFAULT_MAX_VERSION_AGE_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 /// - High-update entities: Stock prices, sensor data, real-time feeds
 /// - Long-running systems without compaction
 /// - 1,000 deltas enables longer operational periods before compaction
-/// Still provides infinite loop protection while enabling practical use cases.
+///
+///   Still provides infinite loop protection while enabling practical use cases.
 pub const MAX_RECONSTRUCTION_DEPTH: usize = 1_000;
 
 /// Retention policy for version history (DoS protection).

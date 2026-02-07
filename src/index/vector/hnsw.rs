@@ -110,8 +110,9 @@ const MAPPING_VERSION: u8 = 1;
 /// - Bulk similarity computations and exports
 /// - Large-scale batch processing
 /// - Migration and data analysis operations
-/// This prevents DoS attacks via excessive memory allocation while enabling
-/// legitimate bulk operations.
+///
+///   This prevents DoS attacks via excessive memory allocation while enabling
+///   legitimate bulk operations.
 const MAX_K: usize = 100_000;
 
 /// Convert our DistanceMetric to usearch's MetricKind

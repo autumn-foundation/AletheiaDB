@@ -49,7 +49,8 @@ pub const TAG_SPARSE_VECTOR: u8 = 8;
 /// - Time series data: 115 days at 1kHz, multiple years at hourly resolution
 /// - IoT telemetry: High-frequency sensor data
 /// - Batch processing: Large bulk imports
-/// Still provides DoS protection (max 40MB for f32 array).
+///
+///   Still provides DoS protection (max 40MB for f32 array).
 pub const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
 
 /// Maximum number of dimensions allowed in a deserialized vector.
@@ -61,7 +62,8 @@ pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 /// - E-commerce: Products with extensive attributes and variations
 /// - Scientific data: Rich metadata and measurements
 /// - Dynamic schemas: User profiles with custom fields
-/// Still provides DoS protection (~1MB per node maximum).
+///
+///   Still provides DoS protection (~1MB per node maximum).
 pub const MAX_PROPERTY_MAP_CAPACITY: usize = 100_000;
 
 /// Maximum recursion depth for nested properties (e.g., arrays of arrays).

@@ -15,8 +15,9 @@ pub const MAX_SNAPSHOT_RETRIES: usize = 3;
 /// - Frequently updated embeddings (re-training cycles, continuous learning)
 /// - Live document embeddings with frequent updates
 /// - A/B testing with multiple variant updates
-/// This prevents unbounded delta chains while reducing compaction frequency
-/// for high-update workloads.
+///
+///   This prevents unbounded delta chains while reducing compaction frequency
+///   for high-update workloads.
 pub const MAX_DELTA_CHAIN_DEPTH: usize = 50;
 
 /// Minimum capacity estimate for HashMap pre-allocation (default: 100)

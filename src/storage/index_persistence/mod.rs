@@ -136,7 +136,8 @@ pub const MAX_STRING_COUNT: u64 = 100_000;
 /// - Document storage: Full articles and papers
 /// - Base64 encoded data: Medium-sized images and files
 /// - Large JSON objects: Complex configuration and metadata
-/// Still provides DoS protection while enabling practical use cases.
+///
+///   Still provides DoS protection while enabling practical use cases.
 pub const MAX_STRING_LENGTH: usize = 10_485_760; // 10MB
 
 /// Maximum vector dimension (DoS protection).
@@ -151,7 +152,8 @@ pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 /// - 4GB ≈ 100M-500M nodes (depending on density)
 /// - Enterprise graphs can have billions of nodes
 /// - Enables large-scale knowledge graphs and social networks
-/// Default: 100GB in production, 10MB in tests.
+///
+///   Default: 100GB in production, 10MB in tests.
 pub const MAX_GRAPH_INDEX_FILE_SIZE: u64 = if cfg!(test) {
     10 * 1024 * 1024
 } else {

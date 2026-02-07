@@ -38,7 +38,8 @@ use super::tools::*;
 /// - Social network analysis (6 degrees of separation)
 /// - Supply chain tracking (can exceed 10 hops)
 /// - Genealogy and multi-generation queries
-/// Still provides DoS protection via query timeouts and result limits.
+///
+///   Still provides DoS protection via query timeouts and result limits.
 const MAX_TRAVERSAL_DEPTH: usize = 20;
 
 /// Maximum number of results to return in a single query.
