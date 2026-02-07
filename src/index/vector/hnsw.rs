@@ -637,14 +637,18 @@ pub struct HnswIndex {
 }
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║ LOCK ORDERING INVARIANT (Deadlock Prevention - PR #751)                  ║
+// ║ LOCK ORDERING INVARIANT (Deadlock Prevention & Consistency)              ║
 // ╠═══════════════════════════════════════════════════════════════════════════╣
 // ║ ALL operations MUST acquire locks in this order:                         ║
 // ║   1. inner (RwLock<Index>)           - FIRST                             ║
 // ║   2. id_mapping/reverse_mapping (DashMap) - SECOND                       ║
 // ║                                                                           ║
 // ║ NEVER hold DashMap shard locks while acquiring inner lock.               ║
-// ║ Violating this order causes deadlock between add() and save().           ║
+// ║                                                                           ║
+// ║ This ordering ensures:                                                   ║
+// ║ 1. Deadlock freedom: Acyclic dependency graph.                           ║
+// ║ 2. Atomicity: Holding 'inner' lock prevents concurrent modifications     ║
+// ║    while updating mappings, ensuring 'save' sees a consistent snapshot.  ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 impl std::fmt::Debug for HnswIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -676,139 +680,143 @@ impl VectorIndex for HnswIndex {
             }));
         }
 
-        // Get or create key for this NodeId
-        // Use entry API for atomic check-and-update to prevent race conditions
-        match self.id_mapping.entry(id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => {
-                // Re-adding existing node: remove old vector from usearch if it exists
-                // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
-                // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
-                let existing_key = *entry.get();
+        // Use a loop to handle retries for concurrent modifications in Occupied path
+        loop {
+            // Get or create key for this NodeId
+            match self.id_mapping.entry(id) {
+                dashmap::mapref::entry::Entry::Occupied(entry) => {
+                    let existing_key = *entry.get();
+                    // CRITICAL: Drop the entry to release DashMap lock BEFORE acquiring inner lock
+                    // This prevents lock ordering inversion (dashmap -> inner is FORBIDDEN).
+                    // We must follow Inner -> DashMap order.
+                    drop(entry);
 
-                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
-                // where multiple threads try to update the same node concurrently (PR #575).
-                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
-                // causing "Duplicate keys not allowed" error.
-                let index = self.inner.write();
+                    let index = self.inner.write();
 
-                // Check if key exists before removing to avoid wasteful FFI call
-                if index.contains(existing_key) {
-                    // Key exists in usearch - remove it before re-adding
-                    // (usearch requires explicit remove before add with same key)
-                    index.remove(existing_key).map_err(|e| {
+                    // VERIFY CONSISTENCY: Ensure id still maps to existing_key.
+                    // Since we dropped the lock, another thread could have modified or removed the mapping.
+                    // We hold the inner lock, so we can safely re-query DashMap (Inner -> DashMap order).
+                    if let Some(current_key) = self.id_mapping.get(&id) {
+                        if *current_key != existing_key {
+                            // Concurrent modification changed the key. Retry.
+                            continue;
+                        }
+                    } else {
+                        // Concurrent removal. Retry (will likely hit Vacant path next).
+                        continue;
+                    }
+
+                    // Check if key exists before removing to avoid wasteful FFI call
+                    if index.contains(existing_key) {
+                        index.remove(existing_key).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to remove existing vector: {}",
+                                e
+                            )))
+                        })?;
+                    }
+
+                    // Keep lock held - check if we need to expand capacity
+                    if index.size() >= index.capacity() {
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        index.reserve(new_capacity).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to expand capacity: {}",
+                                e
+                            )))
+                        })?;
+                    }
+
+                    // Add the new vector while still holding the lock
+                    index.add(existing_key, vector).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
-                            "Failed to remove existing vector: {}",
+                            "Failed to add vector: {}",
                             e
                         )))
                     })?;
-                }
-                // Note: If key doesn't exist, we skip remove() and proceed directly to add()
-                // This is safe because add() with a non-existent key will succeed
 
-                // Keep lock held - check if we need to expand capacity
-                if index.size() >= index.capacity() {
-                    // Double capacity, minimum 1024
-                    let new_capacity = (index.capacity() * 2).max(1024);
-                    index.reserve(new_capacity).map_err(|e| {
+                    self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    // New node: allocate key with overflow protection
+                    const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+
+                    // CRITICAL: Drop the entry to release DashMap lock BEFORE acquiring inner lock
+                    drop(entry);
+
+                    // Step 1: Atomically allocate a unique key (no locks held)
+                    let key = loop {
+                        let current = self.next_key.load(Ordering::SeqCst);
+                        if current > MAX_VALID_KEY {
+                            return Err(Error::Vector(VectorError::IndexError(
+                                "Maximum number of vectors exceeded (key overflow protection)"
+                                    .to_string(),
+                            )));
+                        }
+                        match self.next_key.compare_exchange(
+                            current,
+                            current + 1,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(key) => break key,
+                            Err(_) => continue,
+                        }
+                    };
+
+                    // Step 2: Acquire inner write lock FIRST
+                    // This serializes all modifications and allows safe updates to mappings.
+                    let index = self.inner.write();
+
+                    // Check if we need to expand capacity
+                    if index.size() >= index.capacity() {
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        index.reserve(new_capacity).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to expand capacity: {}",
+                                e
+                            )))
+                        })?;
+                    }
+
+                    // Step 3: Add to inner usearch index while holding write lock
+                    index.add(key, vector).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
-                            "Failed to expand capacity: {}",
+                            "Failed to add vector: {}",
                             e
                         )))
                     })?;
-                }
 
-                // Add the new vector while still holding the lock
-                index.add(existing_key, vector).map_err(|e| {
-                    Error::Vector(VectorError::IndexError(format!(
-                        "Failed to add vector: {}",
-                        e
-                    )))
-                })?;
+                    // Step 4: Insert to mappings (dashmap) WHILE HOLDING inner lock.
+                    // This ensures atomicity: 'save' cannot see the index update without the mapping update
+                    // because 'save' acquires 'inner' read lock.
+                    // Lock ordering Inner -> DashMap is respected.
+                    if let Some(_existing_key) = self.id_mapping.insert(id, key) {
+                        // Race detected: Another thread added this NodeId concurrently.
+                        // Since we hold inner lock, this must have happened before we acquired it
+                        // (but after we dropped the initial Vacant entry).
 
-                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                // New node: allocate key with overflow protection
-                // Check BEFORE incrementing to avoid leaving next_key in invalid state
-                const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+                        // Clean up by removing our vector from inner
+                        index.remove(key).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to rollback vector after concurrent add: {}",
+                                e
+                            )))
+                        })?;
 
-                // CRITICAL: Drop the entry to release DashMap lock BEFORE acquiring inner lock
-                // This prevents lock ordering inversion (dashmap -> inner is FORBIDDEN)
-                drop(entry);
-
-                // Step 1: Atomically allocate a unique key (no locks held)
-                let key = loop {
-                    let current = self.next_key.load(Ordering::SeqCst);
-                    if current > MAX_VALID_KEY {
+                        // The existing mapping wins; return error to indicate retry needed
                         return Err(Error::Vector(VectorError::IndexError(
-                            "Maximum number of vectors exceeded (key overflow protection)"
+                            "Concurrent add detected for same NodeId, vector already exists"
                                 .to_string(),
                         )));
                     }
-                    // Try to atomically increment; retry if another thread beat us
-                    match self.next_key.compare_exchange(
-                        current,
-                        current + 1,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(key) => break key,
-                        Err(_) => continue, // Retry with new current value
-                    }
-                };
 
-                // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
-                // This prevents deadlock with search_with_filter which holds inner -> dashmap.
-                let index = self.inner.write();
-
-                // Check if we need to expand capacity
-                if index.size() >= index.capacity() {
-                    // Double capacity, minimum 1024
-                    let new_capacity = (index.capacity() * 2).max(1024);
-                    index.reserve(new_capacity).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to expand capacity: {}",
-                            e
-                        )))
-                    })?;
+                    // Success: we inserted the mapping
+                    self.reverse_mapping.insert(key, id);
+                    self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
                 }
-
-                // Step 3: Add to inner usearch index while holding write lock
-                index.add(key, vector).map_err(|e| {
-                    Error::Vector(VectorError::IndexError(format!(
-                        "Failed to add vector: {}",
-                        e
-                    )))
-                })?;
-
-                // Release inner lock before accessing DashMap
-                drop(index);
-
-                // Step 4: Insert to mappings (dashmap) AFTER inner is updated
-                // Handle race: another thread may have added this NodeId while we held inner lock
-                if let Some(_existing_key) = self.id_mapping.insert(id, key) {
-                    // Race detected: Another thread added this NodeId concurrently
-                    // Our vector is in inner with key=key, their mapping points to existing_key
-                    // Clean up by removing our vector from inner
-                    let index = self.inner.write();
-                    index.remove(key).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to rollback vector after concurrent add: {}",
-                            e
-                        )))
-                    })?;
-                    // The existing mapping wins; return error to indicate retry needed
-                    return Err(Error::Vector(VectorError::IndexError(
-                        "Concurrent add detected for same NodeId, vector already exists"
-                            .to_string(),
-                    )));
-                }
-
-                // Success: we inserted the mapping
-                self.reverse_mapping.insert(key, id);
-                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
-                Ok(())
             }
         }
     }
@@ -821,22 +829,53 @@ impl VectorIndex for HnswIndex {
             )));
         }
 
-        // Find the key for this NodeId
-        if let Some((_, key)) = self.id_mapping.remove(&id) {
-            self.reverse_mapping.remove(&key);
+        // Loop to handle concurrent modifications (CAS-like loop)
+        loop {
+            // 1. Get the key optimistically (DashMap read)
+            let key_opt = self.id_mapping.get(&id).map(|k| *k);
 
-            // Native delete in usearch
-            let index = self.inner.write();
-            index.remove(key).map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Failed to remove vector: {}",
-                    e
-                )))
-            })?;
+            if let Some(key) = key_opt {
+                // 2. Acquire inner write lock
+                // This serializes modifications and ensures we can safely update mappings atomically.
+                let index = self.inner.write();
 
-            self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
+                // 3. Verify that id still maps to key (double-check locking)
+                // We hold inner lock, so querying DashMap is safe (Inner -> DashMap order).
+                if let Some(current) = self.id_mapping.get(&id) {
+                    if *current == key {
+                        // Match confirmed.
+                        // Drop the read lock (current) so we can remove (write) from DashMap.
+                        // Since we hold 'index' lock, and all modifiers acquire 'index' lock
+                        // before modifying mappings, the state cannot change between drop and remove.
+                        drop(current);
+
+                        // 4. Remove from inner
+                        index.remove(key).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to remove vector: {}",
+                                e
+                            )))
+                        })?;
+
+                        // 5. Remove from mappings while holding inner lock
+                        self.id_mapping.remove(&id);
+                        self.reverse_mapping.remove(&key);
+
+                        self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    } else {
+                        // Key changed concurrently (e.g. update). Retry loop.
+                        continue;
+                    }
+                } else {
+                    // Node removed concurrently.
+                    return Ok(());
+                }
+            } else {
+                // Node not found.
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
@@ -1064,26 +1103,21 @@ impl HnswIndex {
     /// and its mappings. It is separated from `save()` to allow the latter to use
     /// `tokio::task::block_in_place` when running within a Tokio runtime.
     fn save_internal(&self, path: &Path) -> Result<()> {
-        // DEADLOCK FIX (PR #751): Collect mappings BEFORE acquiring any locks
-        // This prevents lock ordering deadlock with add() which holds DashMap → inner lock order
+        // Acquire inner lock FIRST.
+        // This ensures a consistent snapshot because all modification operations (add, remove)
+        // now hold the 'inner' write lock while updating mappings.
         //
-        // Lock Ordering Invariant:
+        // Lock Ordering Invariant (Inner -> DashMap):
         //   1. inner (RwLock<Index>) - FIRST
         //   2. id_mapping (DashMap) - SECOND
         //
-        // Previous implementation violated this by:
-        //   1. Acquiring inner.read() first (line 991)
-        //   2. Then iterating id_mapping (line 1032), acquiring DashMap shard locks
-        //
-        // Meanwhile, add() (Occupied path) acquires locks in reverse order:
-        //   1. DashMap shard lock via entry() (line 634)
-        //   2. Then inner.write() (line 645)
-        //
-        // Result: Classic lock inversion deadlock.
-        //
-        // Solution: Collect all mappings into Vec with no locks held, sacrificing
-        // the "⚡ Bolt Optimization" streaming approach for correctness.
-        // Memory cost: O(N) allocation (~16MB for 1M nodes), acceptable for infrequent save operation.
+        // Since we hold inner(Read), no writer can acquire inner(Write).
+        // Therefore, no one can modify 'inner' OR 'mappings' (since they require inner(Write)).
+        // Thus, 'mappings' and 'index' are frozen and consistent with each other.
+        let index = self.inner.read();
+
+        // Collect mappings
+        // Safe to iterate DashMap because we hold Inner lock (Inner -> DashMap order).
         let mappings: Vec<(NodeId, u64)> = self
             .id_mapping
             .iter()
@@ -1091,8 +1125,7 @@ impl HnswIndex {
             .collect();
         let count = mappings.len();
 
-        // Now acquire inner.read() with no other locks held
-        let index = self.inner.read();
+        // Save index
         index
             .save(path.to_str().ok_or_else(|| {
                 Error::Vector(VectorError::IndexError(
@@ -1105,7 +1138,8 @@ impl HnswIndex {
                     e
                 )))
             })?;
-        // Explicit drop to release lock before I/O
+
+        // Release lock
         drop(index);
 
         // Save mappings to companion file with integrity checks
