@@ -1523,27 +1523,38 @@ impl HnswIndex {
     }
 }
 
-// SAFETY: HnswIndex is safe to send across threads.
+// SAFETY: HnswIndex is safe to send between and share across threads.
 //
 // Why these manual impls are needed:
-// usearch::Index contains raw pointers internally and doesn't automatically implement
-// Send/Sync. However, usearch documents that Index is thread-safe for concurrent
-// reads and writes (it uses internal locks for thread safety).
+// usearch::Index wraps a C++ `index_dense_gt` object via raw pointers, which causes
+// the compiler to conservatively refuse auto-deriving Send/Sync. However, the
+// underlying C++ implementation is thread-safe:
 //
-// Our wrapper ensures safety through:
-// 1. `inner: Arc<RwLock<Index>>` - The RwLock provides exclusive access for writes
-//    and shared access for reads, even though usearch has internal synchronization.
-//    This double-locking is intentional: usearch's internal locks may not match
-//    Rust's Send/Sync requirements, so we add our own synchronization layer.
-// 2. `id_mapping: Arc<DashMap<NodeId, u64>>` - DashMap is explicitly Send+Sync
-// 3. `reverse_mapping: Arc<DashMap<u64, NodeId>>` - DashMap is explicitly Send+Sync
-// 4. `next_key: AtomicU64` - All atomics are Send+Sync
-// 5. `stats: Arc<IndexStats>` - Contains only AtomicU64 fields
-// 6. Remaining fields (config, max_k, is_mmap) contain only Send+Sync types
+// - usearch internally protects graph modifications with a per-node lock
+//   (see usearch C++ source: `index_dense_gt::add`, `search`).
+// - The usearch documentation explicitly states that concurrent readers and
+//   writers are supported: https://unum-cloud.github.io/usearch/cpp/index.html
+//
+// Our wrapper adds a second synchronization layer on top for Rust safety:
+// 1. `inner: Arc<RwLock<Index>>` - Our RwLock ensures Rust's aliasing rules are
+//    upheld. Writes get exclusive access, reads get shared access. This is
+//    intentionally redundant with usearch's internal locks so that the Rust
+//    borrow checker can verify correctness at our API boundary.
+// 2. `id_mapping: Arc<DashMap<NodeId, u64>>` - DashMap is explicitly Send+Sync.
+// 3. `reverse_mapping: Arc<DashMap<u64, NodeId>>` - DashMap is explicitly Send+Sync.
+// 4. `next_key: AtomicU64` - All atomics are Send+Sync.
+// 5. `stats: Arc<IndexStats>` - Contains only AtomicU64 fields.
+// 6. `config: HnswConfig` - Contains only Copy/Clone primitive types.
+// 7. `max_k: usize`, `is_mmap: bool` - Immutable after construction.
+//
+// In practice, all HnswIndex instances in AletheiaDB are accessed through
+// `Arc<RwLock<HnswIndex>>` (see VectorIndexManager), providing an additional
+// synchronization barrier before any field is touched.
 //
 // References:
-// - usearch thread safety: https://unum-cloud.github.io/usearch/cpp/index.html
-// - The library uses internal mutex/rwlock for graph modifications
+// - usearch thread safety docs: https://unum-cloud.github.io/usearch/cpp/index.html
+// - usearch C++ uses per-node locks for graph modifications
+// - This fork: https://github.com/madmax983/USearch (pinned revision in Cargo.toml)
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
 

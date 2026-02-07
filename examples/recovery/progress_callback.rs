@@ -16,7 +16,7 @@
 //!              progress.percent, progress.completed, progress.total);
 //! })?;
 //! ```
-//! See Issue #XXX for the high-level recovery API implementation.
+//! See the project roadmap for the planned high-level recovery API.
 //!
 //! # Running
 //!
