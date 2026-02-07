@@ -326,9 +326,8 @@ mod tests {
 
         // Construct a large vector of numbers
         // Note: generating this large structure in memory is acceptable for a test
-        let large_vec: Vec<serde_json::Value> = std::iter::repeat(json!(1.0))
-            .take(too_large)
-            .collect();
+        let large_vec: Vec<serde_json::Value> =
+            std::iter::repeat(json!(1.0)).take(too_large).collect();
         let json_val = serde_json::Value::Array(large_vec);
 
         let result = json_to_property_value(&json_val);
