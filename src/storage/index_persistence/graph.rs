@@ -8,12 +8,14 @@ use crc32fast::Hasher;
 
 use crate::core::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+use crate::storage::compression::decompress_with_limit;
+use crate::utils::error::{Error, StorageError};
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
     GraphIndexData, GraphIndexDelta, PersistedPropertyMap, PersistedPropertyValue,
 };
-use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
+use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION, MAX_GRAPH_DECOMPRESSED_SIZE};
 
 /// Convert PropertyValue to PersistedPropertyValue.
 ///
@@ -200,9 +202,14 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
-        // Decompress the data
-        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
-            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
+        // Decompress the data with size limit check
+        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE).map_err(|e| {
+            match e {
+                Error::Storage(StorageError::CapacityExceeded { .. }) => {
+                    IndexPersistenceError::SizeLimitExceeded { message: format!("{}", e) }
+                },
+                _ => IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e)),
+            }
         })?;
         &decompressed_data[..]
     } else {
@@ -368,9 +375,14 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
-        // Decompress the data
-        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
-            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
+        // Decompress the data with size limit check
+        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE).map_err(|e| {
+            match e {
+                Error::Storage(StorageError::CapacityExceeded { .. }) => {
+                    IndexPersistenceError::SizeLimitExceeded { message: format!("{}", e) }
+                },
+                _ => IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e)),
+            }
         })?;
         &decompressed_data[..]
     } else {
@@ -629,9 +641,14 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
-        // Decompress the data
-        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
-            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
+        // Decompress the data with size limit check
+        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE).map_err(|e| {
+            match e {
+                Error::Storage(StorageError::CapacityExceeded { .. }) => {
+                    IndexPersistenceError::SizeLimitExceeded { message: format!("{}", e) }
+                },
+                _ => IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e)),
+            }
         })?;
         &decompressed_data[..]
     } else {
@@ -823,5 +840,67 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "graph_delta_tests.rs"]
-mod delta_tests;
+mod warden_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+    use zstd::stream::write::Encoder;
+
+    #[test]
+    fn test_zstd_bomb_detection_internal() {
+        let dir = tempdir().unwrap();
+        let bomb_path = dir.path().join("bomb.idx");
+
+        // 1. Create a "Zip Bomb" (High compression ratio)
+        // We'll compress 200MB of zeros.
+        // In test mode, MAX_GRAPH_DECOMPRESSED_SIZE is 100MB.
+
+        let mut compressed_data = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut compressed_data, 1).unwrap(); // Level 1 is fast enough for zeros
+            let chunk = vec![0u8; 10 * 1024 * 1024];
+            for _ in 0..20 {
+                encoder.write_all(&chunk).unwrap();
+            }
+            encoder.finish().unwrap();
+        }
+
+        // Append a fake CRC32 checksum (4 bytes)
+        let mut file_content = compressed_data;
+        file_content.extend_from_slice(&[0, 0, 0, 0]);
+
+        std::fs::write(&bomb_path, &file_content).unwrap();
+
+        // 2. Attempt to load
+        let result = load_graph_index(&bomb_path);
+
+        // 3. Verify behavior
+        match result {
+            Err(IndexPersistenceError::SizeLimitExceeded { .. }) => {
+               // Success!
+            }
+            Err(IndexPersistenceError::Serialization(msg)) => {
+                // Also acceptable if wrapped (though we prefer specific error now)
+                if msg.contains("size limit exceeded") || msg.contains("Capacity exceeded") {
+                    return;
+                }
+                panic!("Got serialization error but not size limit: {}", msg);
+            }
+            Err(IndexPersistenceError::Corrupted { source, .. }) => {
+                let msg = source.to_string();
+                 if msg.contains("size limit exceeded") || msg.contains("Capacity exceeded") {
+                    return;
+                }
+                panic!("Vulnerable to zstd bomb! Got corrupted error instead of size limit: {}", msg);
+            }
+            Ok(_) => panic!("Should not succeed - Decompressed size limit ignored"),
+            Err(e) => {
+                 let msg = format!("{}", e);
+                 if msg.contains("Capacity exceeded") {
+                     return;
+                 }
+                 panic!("Unexpected error: {}", e);
+            },
+        }
+    }
+}

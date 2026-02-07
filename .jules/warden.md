@@ -164,3 +164,16 @@ Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed t
 
 **Verification:** Regression Test
 Added `tests/warden_vector_safety.rs` which attempts to insert and serialize oversized vectors using the `try_` methods. Verified that they now return `VectorError::DimensionTooLarge` instead of crashing the test runner.
+
+## 2026-02-22 - Decompression DoS Hardening
+
+**Threat:** Allocation DoS via Zstd Bomb
+The graph index loader (`load_graph_index`) used `zstd::decode_all` which attempts to decompress the entire input into memory without a size limit. A malicious actor could craft a "zip bomb" (small compressed file expanding to gigabytes) to cause an OOM crash.
+
+**Defense:** Decompression Limit
+- Implemented `decompress_with_limit` in `src/storage/compression.rs` using a streaming decoder (`zstd::stream::read::Decoder`) with `take(limit)`.
+- Defined strict decompression limits: 16GB for production (64-bit), 2GB (32-bit), and 100MB for tests.
+- Updated `load_graph_index`, `load_graph_index_mmap`, and `load_graph_index_with_delta` to use the safe decompression helper.
+
+**Verification:** Reproduction Test
+Added a unit test `test_zstd_bomb_detection_internal` in `src/storage/index_persistence/graph.rs` that attempts to load a 200MB bomb (exceeding the 100MB test limit). Confirmed that it now returns `StorageError::CapacityExceeded` instead of allocating unbounded memory.

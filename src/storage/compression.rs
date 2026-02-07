@@ -6,6 +6,12 @@
 
 use crate::storage::redb_cold_storage::ColdStorageConfig;
 use crate::utils::error::{Result, StorageError};
+use std::io::Read;
+
+/// Maximum allowed decompressed size for generic operations (DoS protection).
+/// Set to 256MB by default, which should be sufficient for most individual items
+/// (versions, property maps, etc.) while preventing OOM attacks.
+pub const MAX_DECOMPRESSED_SIZE: usize = 256 * 1024 * 1024;
 
 /// Compress data according to the configuration.
 ///
@@ -51,6 +57,12 @@ pub fn compress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
 ///
 /// If checksums were enabled during compression, the checksum is verified.
 /// Returns an error if the checksum doesn't match or if decompression fails.
+///
+/// # DoS Protection
+///
+/// This function enforces a maximum decompressed size of [`MAX_DECOMPRESSED_SIZE`]
+/// to prevent "zip bomb" attacks. If the data exceeds this limit,
+/// `StorageError::CapacityExceeded` is returned.
 pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
     // Extract checksum if enabled
     let (data_to_decompress, expected_checksum) = if config.enable_checksums {
@@ -78,13 +90,65 @@ pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
 
     // Decompress based on algorithm
     match config.compression.zstd_level() {
-        Some(_) => {
-            zstd::decode_all(data_to_decompress).map_err(|e| -> crate::utils::error::Error {
-                StorageError::io_error(e.to_string()).into()
-            })
-        }
+        Some(_) => decompress_with_limit(data_to_decompress, MAX_DECOMPRESSED_SIZE),
         None => Ok(data_to_decompress.to_vec()),
     }
+}
+
+/// Decompress zstd data with a strict output size limit.
+///
+/// This function uses a streaming decoder to prevent unbounded allocation
+/// attacks (e.g., "zip bombs") where a small compressed payload expands
+/// to fill all available memory.
+///
+/// # Arguments
+///
+/// * `data` - The compressed data
+/// * `limit` - The maximum allowed decompressed size in bytes
+///
+/// # Errors
+///
+/// Returns `StorageError::CapacityExceeded` if the decompressed size exceeds `limit`.
+/// Returns `StorageError::IoError` if decompression fails.
+pub fn decompress_with_limit(data: &[u8], limit: usize) -> Result<Vec<u8>> {
+    // Create a streaming decoder
+    let decoder = zstd::stream::read::Decoder::new(data).map_err(|e| {
+        crate::utils::error::Error::Storage(StorageError::io_error(format!(
+            "Failed to create zstd decoder: {}",
+            e
+        )))
+    })?;
+
+    // Use take() to limit the output size.
+    // We limit to `limit + 1` to detect if we exceeded the limit.
+    // Casting limit to u64 is safe on 32-bit and 64-bit systems.
+    let mut limited_reader = decoder.take((limit as u64).saturating_add(1));
+
+    let mut buffer = Vec::new();
+    limited_reader.read_to_end(&mut buffer).map_err(|e| {
+        crate::utils::error::Error::Storage(StorageError::io_error(format!(
+            "Decompression failed: {}",
+            e
+        )))
+    })?;
+
+    // Debugging output (only in tests)
+    #[cfg(test)]
+    {
+        // println!("Decompressed {} bytes with limit {}", buffer.len(), limit);
+    }
+
+    if buffer.len() > limit {
+        return Err(crate::utils::error::Error::Storage(
+            StorageError::CapacityExceeded {
+                resource: "decompressed_size".to_string(),
+                current: buffer.len(),
+                limit,
+            },
+        ));
+    }
+
+    Ok(buffer)
 }
 
 #[cfg(test)]
@@ -149,5 +213,51 @@ mod tests {
                 .to_string()
                 .contains("Checksum mismatch")
         );
+    }
+
+    #[test]
+    fn test_decompress_with_limit_success() {
+        // Data smaller than limit
+        let data = [0u8; 100];
+        let compressed = zstd::encode_all(&data[..], 1).unwrap();
+
+        let decompressed = decompress_with_limit(&compressed, 200).unwrap();
+        assert_eq!(decompressed.len(), 100);
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_decompress_with_limit_exceeded() {
+        // Data larger than limit
+        let data = [0u8; 200];
+        let compressed = zstd::encode_all(&data[..], 1).unwrap();
+
+        // Limit to 100 bytes
+        let result = decompress_with_limit(&compressed, 100);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+                resource,
+                current,
+                limit,
+            }) => {
+                assert_eq!(resource, "decompressed_size");
+                assert!(current > 100);
+                assert_eq!(limit, 100);
+            }
+            e => panic!("Unexpected error type: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_decompress_with_limit_exact() {
+        // Data exactly at limit
+        let data = [0u8; 100];
+        let compressed = zstd::encode_all(&data[..], 1).unwrap();
+
+        let decompressed = decompress_with_limit(&compressed, 100).unwrap();
+        assert_eq!(decompressed.len(), 100);
+        assert_eq!(decompressed, data);
     }
 }
