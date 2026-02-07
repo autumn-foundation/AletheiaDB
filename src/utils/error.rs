@@ -5,28 +5,35 @@
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::temporal::Timestamp;
-use std::fmt;
 use std::io;
+use thiserror::Error;
 
 /// Result type alias using AletheiaDB's Error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Main error type for all AletheiaDB operations.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
     /// Storage-related errors.
+    #[error("Storage error: {0}")]
     Storage(StorageError),
     /// Temporal constraint violations.
+    #[error("Temporal error: {0}")]
     Temporal(TemporalError),
     /// Query-related errors.
+    #[error("Query error: {0}")]
     Query(QueryError),
     /// Transaction-related errors.
+    #[error("Transaction error: {0}")]
     Transaction(TransactionError),
     /// Vector-related errors.
+    #[error("Vector error: {0}")]
     Vector(VectorError),
     /// I/O errors.
+    #[error("I/O error: {0}")]
     Io(io::Error),
     /// Feature not yet implemented.
+    #[error("Feature not implemented: {feature} ({reason})")]
     NotImplemented {
         /// The feature that is not implemented
         feature: String,
@@ -34,6 +41,7 @@ pub enum Error {
         reason: String,
     },
     /// Other errors.
+    #[error("{0}")]
     Other(String),
 }
 
@@ -62,33 +70,8 @@ impl Error {
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Storage(e) => write!(f, "Storage error: {}", e),
-            Error::Temporal(e) => write!(f, "Temporal error: {}", e),
-            Error::Query(e) => write!(f, "Query error: {}", e),
-            Error::Transaction(e) => write!(f, "Transaction error: {}", e),
-            Error::Vector(e) => write!(f, "Vector error: {}", e),
-            Error::Io(e) => write!(f, "I/O error: {}", e),
-            Error::NotImplemented { feature, reason } => {
-                write!(f, "Feature not implemented: {} ({})", feature, reason)
-            }
-            Error::Other(msg) => write!(f, "{}", msg),
-        }
-    }
-}
+// Manual From impls preserved because they have observability counter side effects.
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-// Conversions from specific error types to main Error type
 impl From<StorageError> for Error {
     fn from(e: StorageError) -> Self {
         #[cfg(feature = "observability")]
@@ -155,16 +138,45 @@ impl From<VectorError> for Error {
     }
 }
 
+impl From<crate::config::ConfigError> for Error {
+    fn from(e: crate::config::ConfigError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_other_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        Error::Other(e.to_string())
+    }
+}
+
+#[cfg(feature = "sql")]
+impl From<crate::sql::SqlError> for Error {
+    fn from(e: crate::sql::SqlError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_query_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        Error::Query(QueryError::SyntaxError {
+            message: e.to_string(),
+        })
+    }
+}
+
 /// Errors related to storage operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StorageError {
     /// Node with the given ID was not found.
+    #[error("Node not found: {0}")]
     NodeNotFound(NodeId),
     /// Edge with the given ID was not found.
+    #[error("Edge not found: {0}")]
     EdgeNotFound(EdgeId),
     /// Version with the given ID was not found.
+    #[error("Version not found: {0}")]
     VersionNotFound(VersionId),
     /// Attempted to create a node/edge with an ID that already exists.
+    #[error("Duplicate {kind} ID: {id}")]
     DuplicateId {
         /// The duplicate ID
         id: String,
@@ -172,6 +184,7 @@ pub enum StorageError {
         kind: String,
     },
     /// Invalid property value or type.
+    #[error("Invalid property '{key}': {reason}")]
     InvalidProperty {
         /// The property key
         key: String,
@@ -179,32 +192,43 @@ pub enum StorageError {
         reason: String,
     },
     /// Database is in an inconsistent state.
+    #[error("Inconsistent database state: {reason}")]
     InconsistentState {
         /// Why the state is inconsistent
         reason: String,
     },
     /// Write-ahead log error.
+    #[error("Write-ahead log error: {reason}")]
     WalError {
         /// The error reason
         reason: String,
     },
     /// Checkpoint error.
+    #[error("Checkpoint error: {reason}")]
     CheckpointError {
         /// The error reason
         reason: String,
     },
     /// I/O error during persistence operations.
+    #[error("I/O error: {0}")]
     IoError(String),
     /// Corrupted data detected.
+    #[error("Corrupted data: {0}")]
     CorruptedData(String),
     /// Index persistence error.
     ///
     /// This variant preserves the original IndexPersistenceError information
     /// for better debugging and error handling of persistence operations.
+    #[error("Persistence error: {0}")]
     PersistenceError(String),
     /// Property with the given key was not found.
+    #[error("Property not found: {0}")]
     PropertyNotFound(String),
     /// Invalid ID value (out of range or reserved).
+    #[error(
+        "Invalid {id_type} ID {id}: exceeds maximum allowed value {max} (reserved range for internal use)",
+        max = crate::core::id::MAX_VALID_ID
+    )]
     InvalidId {
         /// The invalid ID value
         id: u64,
@@ -212,6 +236,7 @@ pub enum StorageError {
         id_type: &'static str,
     },
     /// Capacity limit exceeded (DoS protection).
+    #[error("Capacity exceeded for {resource}: current={current}, limit={limit} (DoS protection)")]
     CapacityExceeded {
         /// The resource that exceeded capacity
         resource: String,
@@ -239,63 +264,11 @@ impl StorageError {
     }
 }
 
-impl fmt::Display for StorageError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StorageError::NodeNotFound(id) => write!(f, "Node not found: {}", id),
-            StorageError::EdgeNotFound(id) => write!(f, "Edge not found: {}", id),
-            StorageError::VersionNotFound(id) => write!(f, "Version not found: {}", id),
-            StorageError::DuplicateId { id, kind } => {
-                write!(f, "Duplicate {} ID: {}", kind, id)
-            }
-            StorageError::InvalidProperty { key, reason } => {
-                write!(f, "Invalid property '{}': {}", key, reason)
-            }
-            StorageError::InconsistentState { reason } => {
-                write!(f, "Inconsistent database state: {}", reason)
-            }
-            StorageError::WalError { reason } => {
-                write!(f, "Write-ahead log error: {}", reason)
-            }
-            StorageError::CheckpointError { reason } => {
-                write!(f, "Checkpoint error: {}", reason)
-            }
-            StorageError::IoError(msg) => write!(f, "I/O error: {}", msg),
-            StorageError::CorruptedData(msg) => write!(f, "Corrupted data: {}", msg),
-            StorageError::PersistenceError(msg) => write!(f, "Persistence error: {}", msg),
-            StorageError::PropertyNotFound(key) => {
-                write!(f, "Property not found: {}", key)
-            }
-            StorageError::InvalidId { id, id_type } => {
-                write!(
-                    f,
-                    "Invalid {} ID {}: exceeds maximum allowed value {} (reserved range for internal use)",
-                    id_type,
-                    id,
-                    crate::core::id::MAX_VALID_ID
-                )
-            }
-            StorageError::CapacityExceeded {
-                resource,
-                current,
-                limit,
-            } => {
-                write!(
-                    f,
-                    "Capacity exceeded for {}: current={}, limit={} (DoS protection)",
-                    resource, current, limit
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for StorageError {}
-
 /// Errors related to temporal constraints and bi-temporal operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TemporalError {
     /// Transaction time is not monotonically increasing.
+    #[error("Transaction time must be monotonic: previous={previous}, attempted={attempted}")]
     NonMonotonicTransactionTime {
         /// The previous transaction time
         previous: Timestamp,
@@ -303,6 +276,7 @@ pub enum TemporalError {
         attempted: Timestamp,
     },
     /// Invalid time range (start > end).
+    #[error("Invalid time range: start={start} > end={end}")]
     InvalidTimeRange {
         /// The start timestamp
         start: Timestamp,
@@ -310,6 +284,7 @@ pub enum TemporalError {
         end: Timestamp,
     },
     /// Invalid timestamp (exceeds valid range).
+    #[error("Invalid timestamp {timestamp}: {reason}")]
     InvalidTimestamp {
         /// The invalid timestamp
         timestamp: Timestamp,
@@ -317,11 +292,13 @@ pub enum TemporalError {
         reason: String,
     },
     /// Temporal paradox detected (e.g., deleting before creating).
+    #[error("Temporal paradox: {reason}")]
     TemporalParadox {
         /// Description of the paradox
         reason: String,
     },
     /// Valid time precedes creation.
+    #[error("Valid time ({valid_time}) precedes creation time ({creation_time})")]
     ValidTimeBeforeCreation {
         /// The valid time timestamp
         valid_time: Timestamp,
@@ -329,11 +306,13 @@ pub enum TemporalError {
         creation_time: Timestamp,
     },
     /// Attempted to modify closed version.
+    #[error("Version {version_id} is already closed")]
     VersionAlreadyClosed {
         /// The version ID
         version_id: VersionId,
     },
     /// Version chain is corrupted.
+    #[error("Corrupted version chain for {entity_id}: {reason}")]
     CorruptedVersionChain {
         /// The entity ID
         entity_id: String,
@@ -341,6 +320,7 @@ pub enum TemporalError {
         reason: String,
     },
     /// Anchor not found in version chain.
+    #[error("Missing anchor in version chain for {entity_id}")]
     MissingAnchor {
         /// The entity ID
         entity_id: String,
@@ -349,6 +329,9 @@ pub enum TemporalError {
     ///
     /// This error indicates either a corrupted version chain (possible cycle)
     /// or an unusually long delta chain that exceeds the safety limit.
+    #[error(
+        "Maximum recursion depth ({max_depth}) exceeded while reconstructing {entity_id}: possible corrupted version chain or cycle"
+    )]
     MaxDepthExceeded {
         /// The maximum depth that was exceeded
         max_depth: usize,
@@ -356,6 +339,9 @@ pub enum TemporalError {
         entity_id: String,
     },
     /// Node did not exist at the specified point in bi-temporal time.
+    #[error(
+        "Node {node_id} did not exist at valid_time={valid_time}, transaction_time={transaction_time}"
+    )]
     NodeNotFoundAtTime {
         /// The node ID that was queried
         node_id: NodeId,
@@ -365,12 +351,16 @@ pub enum TemporalError {
         transaction_time: Timestamp,
     },
     /// Version was not found.
+    #[error("Version {0} not found")]
     VersionNotFound(VersionId),
     /// HLC logical counter overflow.
     ///
     /// This occurs when the logical counter would exceed u32::MAX, which theoretically
     /// requires 4+ billion events at the same microsecond wallclock. In practice, this
     /// indicates severe clock drift or a pathological workload.
+    #[error(
+        "HLC logical counter overflow at wallclock={wallclock}: current_logical={current_logical} would exceed u32::MAX"
+    )]
     LogicalCounterOverflow {
         /// The wallclock at which overflow occurred
         wallclock: i64,
@@ -382,6 +372,9 @@ pub enum TemporalError {
     /// This prevents users from forward-dating facts decades or centuries into the future,
     /// which could be either an accident or a DoS attack attempting to fill the database
     /// with far-future timestamps.
+    #[error(
+        "valid_from {valid_from} is too far in future (current: {current_time}, max offset: {max_future_offset_us}\u{b5}s)"
+    )]
     ValidTimeTooFarInFuture {
         /// The attempted valid_from timestamp
         valid_from: Timestamp,
@@ -395,6 +388,9 @@ pub enum TemporalError {
     /// This prevents backdating a fact's valid_time to before the entity existed.
     /// For example, you cannot update a node with valid_from=Jan 1 if the node
     /// was created on Feb 1.
+    #[error(
+        "valid_from {valid_from} is before entity creation time {entity_creation_time} for {entity_id}"
+    )]
     ValidTimeBeforeEntityCreation {
         /// The attempted valid_from timestamp
         valid_from: Timestamp,
@@ -405,118 +401,17 @@ pub enum TemporalError {
     },
 }
 
-impl fmt::Display for TemporalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TemporalError::NonMonotonicTransactionTime {
-                previous,
-                attempted,
-            } => {
-                write!(
-                    f,
-                    "Transaction time must be monotonic: previous={}, attempted={}",
-                    previous, attempted
-                )
-            }
-            TemporalError::InvalidTimeRange { start, end } => {
-                write!(f, "Invalid time range: start={} > end={}", start, end)
-            }
-            TemporalError::InvalidTimestamp { timestamp, reason } => {
-                write!(f, "Invalid timestamp {}: {}", timestamp, reason)
-            }
-            TemporalError::TemporalParadox { reason } => {
-                write!(f, "Temporal paradox: {}", reason)
-            }
-            TemporalError::ValidTimeBeforeCreation {
-                valid_time,
-                creation_time,
-            } => {
-                write!(
-                    f,
-                    "Valid time ({}) precedes creation time ({})",
-                    valid_time, creation_time
-                )
-            }
-            TemporalError::VersionAlreadyClosed { version_id } => {
-                write!(f, "Version {} is already closed", version_id)
-            }
-            TemporalError::CorruptedVersionChain { entity_id, reason } => {
-                write!(f, "Corrupted version chain for {}: {}", entity_id, reason)
-            }
-            TemporalError::MissingAnchor { entity_id } => {
-                write!(f, "Missing anchor in version chain for {}", entity_id)
-            }
-            TemporalError::MaxDepthExceeded {
-                max_depth,
-                entity_id,
-            } => {
-                write!(
-                    f,
-                    "Maximum recursion depth ({}) exceeded while reconstructing {}: possible corrupted version chain or cycle",
-                    max_depth, entity_id
-                )
-            }
-            TemporalError::NodeNotFoundAtTime {
-                node_id,
-                valid_time,
-                transaction_time,
-            } => {
-                write!(
-                    f,
-                    "Node {} did not exist at valid_time={}, transaction_time={}",
-                    node_id, valid_time, transaction_time
-                )
-            }
-            TemporalError::VersionNotFound(version_id) => {
-                write!(f, "Version {} not found", version_id)
-            }
-            TemporalError::LogicalCounterOverflow {
-                wallclock,
-                current_logical,
-            } => {
-                write!(
-                    f,
-                    "HLC logical counter overflow at wallclock={}: current_logical={} would exceed u32::MAX",
-                    wallclock, current_logical
-                )
-            }
-            TemporalError::ValidTimeTooFarInFuture {
-                valid_from,
-                current_time,
-                max_future_offset_us,
-            } => {
-                write!(
-                    f,
-                    "valid_from {} is too far in future (current: {}, max offset: {}µs)",
-                    valid_from, current_time, max_future_offset_us
-                )
-            }
-            TemporalError::ValidTimeBeforeEntityCreation {
-                valid_from,
-                entity_creation_time,
-                entity_id,
-            } => {
-                write!(
-                    f,
-                    "valid_from {} is before entity creation time {} for {}",
-                    valid_from, entity_creation_time, entity_id
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for TemporalError {}
-
 /// Errors related to query operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum QueryError {
     /// Query syntax error.
+    #[error("Query syntax error: {message}")]
     SyntaxError {
         /// The error message
         message: String,
     },
     /// Invalid query parameter.
+    #[error("Invalid query parameter '{parameter}': {reason}")]
     InvalidParameter {
         /// The parameter name
         parameter: String,
@@ -524,21 +419,25 @@ pub enum QueryError {
         reason: String,
     },
     /// Query timeout.
+    #[error("Query timeout after {duration_ms} ms")]
     Timeout {
         /// Duration in milliseconds
         duration_ms: u64,
     },
     /// Query result limit exceeded.
+    #[error("Query result limit ({limit}) exceeded")]
     LimitExceeded {
         /// The limit that was exceeded
         limit: usize,
     },
     /// Invalid traversal (e.g., edge doesn't connect specified nodes).
+    #[error("Invalid graph traversal: {reason}")]
     InvalidTraversal {
         /// Why the traversal is invalid
         reason: String,
     },
     /// Type mismatch in query.
+    #[error("Type mismatch: expected {expected}, got {actual}")]
     TypeMismatch {
         /// The expected type
         expected: String,
@@ -546,11 +445,13 @@ pub enum QueryError {
         actual: String,
     },
     /// Query execution error (runtime failure).
+    #[error("Query execution error: {message}")]
     ExecutionError {
         /// The error message
         message: String,
     },
     /// Required index not found during query planning.
+    #[error("{}", format_index_not_found(index_type, property_name, hint))]
     IndexNotFound {
         /// The type of index required (e.g., "vector")
         index_type: String,
@@ -561,55 +462,23 @@ pub enum QueryError {
     },
 }
 
-impl fmt::Display for QueryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            QueryError::SyntaxError { message } => {
-                write!(f, "Query syntax error: {}", message)
-            }
-            QueryError::InvalidParameter { parameter, reason } => {
-                write!(f, "Invalid query parameter '{}': {}", parameter, reason)
-            }
-            QueryError::Timeout { duration_ms } => {
-                write!(f, "Query timeout after {} ms", duration_ms)
-            }
-            QueryError::LimitExceeded { limit } => {
-                write!(f, "Query result limit ({}) exceeded", limit)
-            }
-            QueryError::InvalidTraversal { reason } => {
-                write!(f, "Invalid graph traversal: {}", reason)
-            }
-            QueryError::TypeMismatch { expected, actual } => {
-                write!(f, "Type mismatch: expected {}, got {}", expected, actual)
-            }
-            QueryError::ExecutionError { message } => {
-                write!(f, "Query execution error: {}", message)
-            }
-            QueryError::IndexNotFound {
-                index_type,
-                property_name,
-                hint,
-            } => {
-                write!(
-                    f,
-                    "Query requires {} index on '{}' property which is not enabled",
-                    index_type, property_name
-                )?;
-                if let Some(hint_msg) = hint {
-                    write!(f, ". Hint: {}", hint_msg)?;
-                }
-                Ok(())
-            }
-        }
+/// Format the `IndexNotFound` display message with optional hint.
+fn format_index_not_found(index_type: &str, property_name: &str, hint: &Option<String>) -> String {
+    let mut msg = format!(
+        "Query requires {} index on '{}' property which is not enabled",
+        index_type, property_name
+    );
+    if let Some(hint_msg) = hint {
+        msg.push_str(&format!(". Hint: {}", hint_msg));
     }
+    msg
 }
 
-impl std::error::Error for QueryError {}
-
 /// Errors related to transaction operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TransactionError {
     /// Transaction is not in the correct state for this operation.
+    #[error("Transaction in invalid state: expected {expected}, got {current}")]
     InvalidState {
         /// The current state
         current: String,
@@ -617,16 +486,19 @@ pub enum TransactionError {
         expected: String,
     },
     /// Transaction has already been committed.
+    #[error("Transaction {tx_id} has already been committed")]
     AlreadyCommitted {
         /// The transaction ID
         tx_id: u64,
     },
     /// Transaction has been aborted.
+    #[error("Transaction {tx_id} has been aborted")]
     Aborted {
         /// The transaction ID
         tx_id: u64,
     },
     /// Write conflict detected.
+    #[error("Write conflict on {entity_id}: {reason}")]
     WriteConflict {
         /// The entity ID involved in the conflict
         entity_id: String,
@@ -637,6 +509,7 @@ pub enum TransactionError {
     ///
     /// This occurs when two concurrent transactions try to modify the same entity
     /// and one commits after the other's snapshot was taken.
+    #[error("Serialization failure on {entity}: {reason}")]
     SerializationFailure {
         /// The entity involved in the conflict
         entity: String,
@@ -644,16 +517,19 @@ pub enum TransactionError {
         reason: String,
     },
     /// Validation failed before commit.
+    #[error("Transaction validation failed: {reason}")]
     ValidationFailed {
         /// Why validation failed
         reason: String,
     },
     /// Commit failed.
+    #[error("Transaction commit failed: {reason}")]
     CommitFailed {
         /// Why commit failed
         reason: String,
     },
     /// Rollback failed.
+    #[error("Transaction rollback failed: {reason}")]
     RollbackFailed {
         /// Why rollback failed
         reason: String,
@@ -664,6 +540,7 @@ pub enum TransactionError {
     /// the configured thresholds (MAX_BACKWARD_DRIFT_US or MAX_FORWARD_JUMP_US).
     /// Such large jumps would break temporal query semantics by creating timestamps
     /// that are far in the future or violate causality.
+    #[error("{}", format_clock_skew(*wallclock, *previous, *drift_us, *max_allowed))]
     ClockSkew {
         /// Current wallclock timestamp
         wallclock: i64,
@@ -676,65 +553,25 @@ pub enum TransactionError {
     },
 }
 
-impl fmt::Display for TransactionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TransactionError::InvalidState { current, expected } => {
-                write!(
-                    f,
-                    "Transaction in invalid state: expected {}, got {}",
-                    expected, current
-                )
-            }
-            TransactionError::AlreadyCommitted { tx_id } => {
-                write!(f, "Transaction {} has already been committed", tx_id)
-            }
-            TransactionError::Aborted { tx_id } => {
-                write!(f, "Transaction {} has been aborted", tx_id)
-            }
-            TransactionError::WriteConflict { entity_id, reason } => {
-                write!(f, "Write conflict on {}: {}", entity_id, reason)
-            }
-            TransactionError::SerializationFailure { entity, reason } => {
-                write!(f, "Serialization failure on {}: {}", entity, reason)
-            }
-            TransactionError::ValidationFailed { reason } => {
-                write!(f, "Transaction validation failed: {}", reason)
-            }
-            TransactionError::CommitFailed { reason } => {
-                write!(f, "Transaction commit failed: {}", reason)
-            }
-            TransactionError::RollbackFailed { reason } => {
-                write!(f, "Transaction rollback failed: {}", reason)
-            }
-            TransactionError::ClockSkew {
-                wallclock,
-                previous,
-                drift_us,
-                max_allowed,
-            } => {
-                let direction = if *drift_us < 0 { "backward" } else { "forward" };
-                write!(
-                    f,
-                    "Clock skew too large: system clock jumped {} by {} µs (max allowed: {} µs). \
-                     Wallclock: {}, Previous: {}. This may indicate NTP adjustment or manual clock change.",
-                    direction,
-                    drift_us.abs(),
-                    max_allowed.abs(),
-                    wallclock,
-                    previous
-                )
-            }
-        }
-    }
+/// Format the `ClockSkew` display message with computed direction.
+fn format_clock_skew(wallclock: i64, previous: i64, drift_us: i64, max_allowed: i64) -> String {
+    let direction = if drift_us < 0 { "backward" } else { "forward" };
+    format!(
+        "Clock skew too large: system clock jumped {} by {} \u{b5}s (max allowed: {} \u{b5}s). \
+         Wallclock: {}, Previous: {}. This may indicate NTP adjustment or manual clock change.",
+        direction,
+        drift_us.abs(),
+        max_allowed.abs(),
+        wallclock,
+        previous
+    )
 }
 
-impl std::error::Error for TransactionError {}
-
 /// Errors related to vector operations and validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum VectorError {
     /// Vector dimensions do not match.
+    #[error("Vector dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch {
         /// The expected dimension (from the first vector)
         expected: usize,
@@ -742,16 +579,19 @@ pub enum VectorError {
         actual: usize,
     },
     /// Vector contains NaN (Not a Number) values.
+    #[error("Vector contains {count} NaN value(s)")]
     ContainsNaN {
         /// Number of NaN values found
         count: usize,
     },
     /// Vector contains infinity values.
+    #[error("Vector contains {count} infinity value(s)")]
     ContainsInfinity {
         /// Number of infinity values found
         count: usize,
     },
     /// Vector dimension exceeds maximum allowed.
+    #[error("Vector dimension {dimension} exceeds maximum allowed {max_allowed}")]
     DimensionTooLarge {
         /// The actual dimension
         dimension: usize,
@@ -759,6 +599,7 @@ pub enum VectorError {
         max_allowed: usize,
     },
     /// Index is out of bounds for the vector or index structure.
+    #[error("Vector index {index} out of bounds for length {len}")]
     IndexOutOfBounds {
         /// The index that was accessed
         index: usize,
@@ -766,70 +607,27 @@ pub enum VectorError {
         len: usize,
     },
     /// Vector not found in storage or index.
+    #[error("Vector not found: {id}")]
     NotFound {
         /// Identifier or description of the vector that was not found
         id: String,
     },
     /// Vector is invalid for the requested operation.
+    #[error("Invalid vector: {reason}")]
     InvalidVector {
         /// Description of why the vector is invalid
         reason: String,
     },
     /// Sparse vector is invalid (e.g., duplicate indices, zero values).
+    #[error("Invalid sparse vector: {reason}")]
     InvalidSparseVector {
         /// Description of why the sparse vector is invalid
         reason: String,
     },
     /// Error from underlying vector index implementation.
+    #[error("Vector index error: {0}")]
     IndexError(String),
 }
-
-impl fmt::Display for VectorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VectorError::DimensionMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "Vector dimension mismatch: expected {}, got {}",
-                    expected, actual
-                )
-            }
-            VectorError::ContainsNaN { count } => {
-                write!(f, "Vector contains {} NaN value(s)", count)
-            }
-            VectorError::ContainsInfinity { count } => {
-                write!(f, "Vector contains {} infinity value(s)", count)
-            }
-            VectorError::DimensionTooLarge {
-                dimension,
-                max_allowed,
-            } => {
-                write!(
-                    f,
-                    "Vector dimension {} exceeds maximum allowed {}",
-                    dimension, max_allowed
-                )
-            }
-            VectorError::IndexOutOfBounds { index, len } => {
-                write!(f, "Vector index {} out of bounds for length {}", index, len)
-            }
-            VectorError::NotFound { id } => {
-                write!(f, "Vector not found: {}", id)
-            }
-            VectorError::InvalidVector { reason } => {
-                write!(f, "Invalid vector: {}", reason)
-            }
-            VectorError::InvalidSparseVector { reason } => {
-                write!(f, "Invalid sparse vector: {}", reason)
-            }
-            VectorError::IndexError(msg) => {
-                write!(f, "Vector index error: {}", msg)
-            }
-        }
-    }
-}
-
-impl std::error::Error for VectorError {}
 
 #[cfg(test)]
 mod tests {
