@@ -293,10 +293,14 @@ mod tests {
         let oversized_string = "x".repeat(super::super::MAX_STRING_LENGTH + 1);
 
         // Verify this exceeds the limit but is within file size bounds for test
-        assert!(oversized_string.len() > super::super::MAX_STRING_LENGTH,
-                "String should exceed MAX_STRING_LENGTH");
-        assert!(oversized_string.len() < super::super::MAX_STRING_INTERNER_FILE_SIZE as usize,
-                "String should be within file size limit to test string length check");
+        assert!(
+            oversized_string.len() > super::super::MAX_STRING_LENGTH,
+            "String should exceed MAX_STRING_LENGTH"
+        );
+        assert!(
+            oversized_string.len() < super::super::MAX_STRING_INTERNER_FILE_SIZE as usize,
+            "String should be within file size limit to test string length check"
+        );
 
         let bad_data = StringInternerData {
             magic: INTERNER_MAGIC,
