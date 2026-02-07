@@ -383,6 +383,13 @@ where
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
+        //
+        // The 'dims' parameter is captured from the HnswConfig at index creation time.
+        // Since the index is created with this fixed dimension, and usearch respects it,
+        // the pointers passed to this callback will always have at least `dims` valid elements.
+        //
+        // We also enforce F32 quantization when using custom metrics (see HnswIndexBuilder::build),
+        // which ensures that the pointers are indeed *const f32 and not compressed data.
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
         distance_fn(slice_a, slice_b)

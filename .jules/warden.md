@@ -164,3 +164,20 @@ Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed t
 
 **Verification:** Regression Test
 Added `tests/warden_vector_safety.rs` which attempts to insert and serialize oversized vectors using the `try_` methods. Verified that they now return `VectorError::DimensionTooLarge` instead of crashing the test runner.
+
+## 2026-02-18 - Unbounded Allocation DoS Hardening
+
+**Threat:** Unbounded Allocation in JSON-to-Vector Conversion
+The `json_to_property_value` function in `src/http/converters.rs` processed JSON arrays of numbers by collecting them into a `Vec<f32>` *before* checking the `MAX_VECTOR_DIMENSIONS` limit. An attacker could send a JSON array with millions of numbers (e.g., 100M elements), causing the server to attempt a large allocation (400MB+) before rejecting it. This could lead to memory exhaustion and denial of service.
+
+**Defense:** Pre-allocation Limit Check
+Modified `json_to_property_value_recursive` to check `arr.len()` against `MAX_VECTOR_DIMENSIONS` immediately after verifying that the array contains only numbers and before allocating the vector. If the length exceeds the limit, it returns an error immediately, preventing the allocation.
+
+**Verification:** Reproduction Test
+Added `test_json_vector_dimension_allocation_check` in `src/http/converters.rs`. Verified that the function correctly rejects oversized vectors with the expected error message. While the allocation avoidance is structural (verified by code audit), the behavior remains correct (rejection).
+
+**Audit:** Unsafe FFI Boundaries
+Audited `src/index/vector/hnsw.rs`, specifically the `unsafe` block in `create_metric_wrapper` which converts raw pointers from `usearch` into Rust slices.
+- Confirmed that `dims` is fixed at index creation time.
+- Confirmed that `usearch` contract implies valid pointers for the configured dimension.
+- Added explicit safety comments documenting these invariants and the reliance on `Quantization::F32` enforcement for custom metrics.

@@ -199,6 +199,17 @@ fn json_to_property_value_recursive(
         serde_json::Value::String(s) => Ok(PropertyValue::String(Arc::from(s.as_str()))),
         serde_json::Value::Array(arr) => {
             if arr.iter().all(|v| v.is_number()) && !arr.is_empty() {
+                // SECURITY: Check dimensions BEFORE allocating vector to prevent DoS.
+                // If it looks like a vector (all numbers) but is too large, reject it immediately
+                // rather than allocating a huge Vec<f32> only to reject it later.
+                if arr.len() > crate::core::property::MAX_VECTOR_DIMENSIONS {
+                    return Err(format!(
+                        "Vector dimension {} exceeds limit {}",
+                        arr.len(),
+                        crate::core::property::MAX_VECTOR_DIMENSIONS
+                    ));
+                }
+
                 let floats: Result<Vec<f32>, String> = arr
                     .iter()
                     .map(|v| {
@@ -209,13 +220,6 @@ fn json_to_property_value_recursive(
                     .collect();
 
                 if let Ok(floats) = floats {
-                    if floats.len() > crate::core::property::MAX_VECTOR_DIMENSIONS {
-                        return Err(format!(
-                            "Vector dimension {} exceeds limit {}",
-                            floats.len(),
-                            crate::core::property::MAX_VECTOR_DIMENSIONS
-                        ));
-                    }
                     return Ok(PropertyValue::Vector(Arc::from(floats)));
                 }
             }
@@ -321,6 +325,37 @@ mod tests {
         // This should now fail with a dimension limit error
         match result {
             Ok(_) => panic!("Validation failed: should have rejected large vector"),
+            Err(e) => {
+                assert!(
+                    e.contains("exceeds limit"),
+                    "Unexpected error message: {}",
+                    e
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod verify_hardening {
+    use super::*;
+    use serde_json::json;
+    use crate::core::property::MAX_VECTOR_DIMENSIONS;
+
+    #[test]
+    fn test_json_vector_dimension_allocation_check() {
+        // Create a JSON array that exceeds MAX_VECTOR_DIMENSIONS
+        let too_large = MAX_VECTOR_DIMENSIONS + 1;
+        // Construct a large vector of numbers
+        let large_vec: Vec<serde_json::Value> =
+            std::iter::repeat_n(json!(1.0), too_large).collect();
+        let json_val = serde_json::Value::Array(large_vec);
+
+        let result = json_to_property_value(&json_val);
+
+        // Verify it returns an error about dimension limit
+        match result {
+            Ok(_) => panic!("Should have rejected large vector"),
             Err(e) => {
                 assert!(
                     e.contains("exceeds limit"),
