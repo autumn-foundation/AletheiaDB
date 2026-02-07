@@ -1243,6 +1243,64 @@ mod proptests {
             prop_assert_eq!(version.as_u64(), raw_id);
         }
 
+        /// Property: ID ordering is transitive: if a < b and b < c then a < c
+        #[test]
+        fn prop_id_ordering_is_transitive(
+            a in valid_id_strategy(),
+            b in valid_id_strategy(),
+            c in valid_id_strategy(),
+        ) {
+            let node_a = NodeId::new(a).unwrap();
+            let node_b = NodeId::new(b).unwrap();
+            let node_c = NodeId::new(c).unwrap();
+
+            if node_a < node_b && node_b < node_c {
+                prop_assert!(node_a < node_c,
+                    "Ordering transitivity violated: {:?} < {:?} < {:?} but a >= c",
+                    node_a, node_b, node_c);
+            }
+
+            // Also verify for EdgeId
+            let edge_a = EdgeId::new(a).unwrap();
+            let edge_b = EdgeId::new(b).unwrap();
+            let edge_c = EdgeId::new(c).unwrap();
+
+            if edge_a < edge_b && edge_b < edge_c {
+                prop_assert!(edge_a < edge_c,
+                    "EdgeId ordering transitivity violated");
+            }
+        }
+
+        /// Property: IDs from a generator never exceed MAX_VALID_ID
+        #[test]
+        fn prop_generator_ids_within_max_valid_id(start in 0u64..MAX_VALID_ID-50, count in 1usize..50) {
+            let generator = IdGenerator::with_start(start);
+
+            for _ in 0..count {
+                match generator.next() {
+                    Ok(id) => {
+                        prop_assert!(id <= MAX_VALID_ID,
+                            "Generator produced ID {} exceeding MAX_VALID_ID {}", id, MAX_VALID_ID);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        /// Property: TxIdGenerator produces strictly increasing transaction IDs
+        #[test]
+        fn prop_tx_id_generator_monotonic(_dummy in 0..50usize) {
+            let tx_gen = TxIdGenerator::new();
+            let mut prev = tx_gen.next();
+
+            for _ in 0..10 {
+                let curr = tx_gen.next();
+                prop_assert!(curr > prev,
+                    "TxId should be strictly increasing: {:?} vs {:?}", prev, curr);
+                prev = curr;
+            }
+        }
+
         /// Property: Validation is consistent (always returns same result for same input)
         #[test]
         fn prop_validation_is_deterministic(raw_id in any_u64_strategy()) {
