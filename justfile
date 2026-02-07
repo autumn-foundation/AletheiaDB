@@ -233,16 +233,16 @@ mutants:
 # Run mutation tests only on uncommitted changes
 mutants-diff:
     #!/usr/bin/env bash
+    trap 'rm -f mutants-diff.tmp' EXIT
     git diff HEAD > mutants-diff.tmp
     cargo mutants --in-place -vV --in-diff mutants-diff.tmp
-    rm -f mutants-diff.tmp
 
 # Run mutation tests on changes vs trunk
 mutants-branch:
     #!/usr/bin/env bash
+    trap 'rm -f mutants-diff.tmp' EXIT
     git diff origin/trunk.. > mutants-diff.tmp
     cargo mutants --in-place -vV --in-diff mutants-diff.tmp
-    rm -f mutants-diff.tmp
 
 # === Git Worktree Commands ===
 # These commands enable parallel development with multiple Claude instances
