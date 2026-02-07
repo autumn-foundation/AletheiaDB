@@ -219,6 +219,15 @@ fn json_to_property_value_recursive(
                     return Ok(PropertyValue::Vector(Arc::from(floats)));
                 }
             }
+            // Enforce MAX_ARRAY_ELEMENTS limit
+            if arr.len() > crate::core::property::MAX_ARRAY_ELEMENTS {
+                return Err(format!(
+                    "Array count {} exceeds maximum allowed {}",
+                    arr.len(),
+                    crate::core::property::MAX_ARRAY_ELEMENTS
+                ));
+            }
+
             let values: Result<Vec<PropertyValue>, String> = arr
                 .iter()
                 .map(|v| json_to_property_value_recursive(v, depth + 1))
@@ -329,5 +338,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_json_array_limit_enforced() {
+        use crate::core::property::MAX_ARRAY_ELEMENTS;
+
+        // Create array slightly over limit
+        // We use nulls to ensure fallback to PropertyValue::Array (generic array)
+        // instead of PropertyValue::Vector (numeric vector)
+        let limit = MAX_ARRAY_ELEMENTS + 1;
+        let vec: Vec<serde_json::Value> = std::iter::repeat(json!(null)).take(limit).collect();
+        let val = serde_json::Value::Array(vec);
+
+        let res = json_to_property_value(&val);
+        assert!(res.is_err(), "Should enforce MAX_ARRAY_ELEMENTS");
+        assert!(res.unwrap_err().contains("exceeds maximum allowed"));
     }
 }
