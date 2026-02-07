@@ -1,3 +1,4 @@
+#![allow(clippy::manual_is_multiple_of)]
 use aletheiadb::core::id::NodeId;
 use aletheiadb::index::VectorIndex;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
