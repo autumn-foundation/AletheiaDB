@@ -203,14 +203,18 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
         // Decompress the data with size limit check
-        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE).map_err(|e| {
-            match e {
+        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE)
+            .map_err(|e| match e {
                 Error::Storage(StorageError::CapacityExceeded { .. }) => {
-                    IndexPersistenceError::SizeLimitExceeded { message: format!("{}", e) }
-                },
-                _ => IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e)),
-            }
-        })?;
+                    IndexPersistenceError::SizeLimitExceeded {
+                        message: format!("{}", e),
+                    }
+                }
+                _ => IndexPersistenceError::Serialization(format!(
+                    "zstd decompression failed: {}",
+                    e
+                )),
+            })?;
         &decompressed_data[..]
     } else {
         data_slice
@@ -376,14 +380,18 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
         // Decompress the data with size limit check
-        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE).map_err(|e| {
-            match e {
+        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE)
+            .map_err(|e| match e {
                 Error::Storage(StorageError::CapacityExceeded { .. }) => {
-                    IndexPersistenceError::SizeLimitExceeded { message: format!("{}", e) }
-                },
-                _ => IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e)),
-            }
-        })?;
+                    IndexPersistenceError::SizeLimitExceeded {
+                        message: format!("{}", e),
+                    }
+                }
+                _ => IndexPersistenceError::Serialization(format!(
+                    "zstd decompression failed: {}",
+                    e
+                )),
+            })?;
         &decompressed_data[..]
     } else {
         data_slice
@@ -642,14 +650,18 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
         // Decompress the data with size limit check
-        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE).map_err(|e| {
-            match e {
+        decompressed_data = decompress_with_limit(data_slice, MAX_GRAPH_DECOMPRESSED_SIZE)
+            .map_err(|e| match e {
                 Error::Storage(StorageError::CapacityExceeded { .. }) => {
-                    IndexPersistenceError::SizeLimitExceeded { message: format!("{}", e) }
-                },
-                _ => IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e)),
-            }
-        })?;
+                    IndexPersistenceError::SizeLimitExceeded {
+                        message: format!("{}", e),
+                    }
+                }
+                _ => IndexPersistenceError::Serialization(format!(
+                    "zstd decompression failed: {}",
+                    e
+                )),
+            })?;
         &decompressed_data[..]
     } else {
         data_slice
@@ -877,7 +889,7 @@ mod warden_tests {
         // 3. Verify behavior
         match result {
             Err(IndexPersistenceError::SizeLimitExceeded { .. }) => {
-               // Success!
+                // Success!
             }
             Err(IndexPersistenceError::Serialization(msg)) => {
                 // Also acceptable if wrapped (though we prefer specific error now)
@@ -888,19 +900,22 @@ mod warden_tests {
             }
             Err(IndexPersistenceError::Corrupted { source, .. }) => {
                 let msg = source.to_string();
-                 if msg.contains("size limit exceeded") || msg.contains("Capacity exceeded") {
+                if msg.contains("size limit exceeded") || msg.contains("Capacity exceeded") {
                     return;
                 }
-                panic!("Vulnerable to zstd bomb! Got corrupted error instead of size limit: {}", msg);
+                panic!(
+                    "Vulnerable to zstd bomb! Got corrupted error instead of size limit: {}",
+                    msg
+                );
             }
             Ok(_) => panic!("Should not succeed - Decompressed size limit ignored"),
             Err(e) => {
-                 let msg = format!("{}", e);
-                 if msg.contains("Capacity exceeded") {
-                     return;
-                 }
-                 panic!("Unexpected error: {}", e);
-            },
+                let msg = format!("{}", e);
+                if msg.contains("Capacity exceeded") {
+                    return;
+                }
+                panic!("Unexpected error: {}", e);
+            }
         }
     }
 }
