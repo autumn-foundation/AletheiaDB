@@ -512,6 +512,19 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 
 **See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete LLM integration patterns.**
 
+## Known Limitations
+
+### Orphaned Edges on Node Deletion
+
+Calling `delete_node` removes only the node itself -- any edges where the deleted node
+is the source or target will remain in storage as **orphaned edges**. Traversals that
+follow these edges may encounter missing endpoints.
+
+**Recommended**: Use `delete_node_cascade` instead, which atomically deletes the node
+and all connected edges, preventing orphans. The non-cascade `delete_node` is retained
+for cases where callers manage edge cleanup themselves or where performance requires
+avoiding the edge scan.
+
 ## Future Considerations
 
 ### Vector Search (SUPERRAG) - Remaining Phases
