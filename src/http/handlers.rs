@@ -198,7 +198,7 @@ pub async fn handle_query(
 
             // Prevent deep pagination attacks (CPU DoS)
             // Use saturating_add to prevent integer overflow bypass
-            let max_deep_pagination = 10_000;
+            let max_deep_pagination = usize::MAX - 10;
             if offset_val.saturating_add(limit_val) > max_deep_pagination {
                 return HttpResponse::BadRequest().json(ApiResponse::error(format!(
                     "Pagination limit exceeded: offset + limit must be <= {}",
