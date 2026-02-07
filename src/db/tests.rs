@@ -947,3 +947,1257 @@ fn test_find_nodes_by_property_facade_cross_label() {
         db.find_nodes_by_property("Person", "name", &PropertyValue::String("Alice".into()));
     assert_eq!(results, vec![person_id]);
 }
+
+// ========================================================================
+// Ops Edge Cases & Error Paths
+// ========================================================================
+
+#[test]
+fn test_get_node_nonexistent() {
+    let db = AletheiaDB::new().unwrap();
+    let fake_id = NodeId::new(9999).unwrap();
+    let result = db.get_node(fake_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_edge_nonexistent() {
+    let db = AletheiaDB::new().unwrap();
+    let fake_id = crate::core::id::EdgeId::new(9999).unwrap();
+    let result = db.get_edge(fake_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_edge_source_nonexistent() {
+    let db = AletheiaDB::new().unwrap();
+    let fake_id = crate::core::id::EdgeId::new(9999).unwrap();
+    let result = db.get_edge_source(fake_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_edge_target_nonexistent() {
+    let db = AletheiaDB::new().unwrap();
+    let fake_id = crate::core::id::EdgeId::new(9999).unwrap();
+    let result = db.get_edge_target(fake_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_create_node_empty_properties() {
+    let db = AletheiaDB::new().unwrap();
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let node = db.get_node(node_id).unwrap();
+    assert!(node.properties.is_empty());
+}
+
+#[test]
+fn test_create_node_empty_label() {
+    let db = AletheiaDB::new().unwrap();
+    // Empty label should still work - it's a valid string
+    let node_id = db
+        .create_node("", PropertyMapBuilder::new().build())
+        .unwrap();
+    let node = db.get_node(node_id).unwrap();
+    assert_eq!(node.id, node_id);
+}
+
+#[test]
+fn test_create_edge_invalid_source() {
+    let db = AletheiaDB::new().unwrap();
+    let target = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let fake_source = NodeId::new(9999).unwrap();
+    let result = db.create_edge(
+        fake_source,
+        target,
+        "KNOWS",
+        PropertyMapBuilder::new().build(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_create_edge_invalid_target() {
+    let db = AletheiaDB::new().unwrap();
+    let source = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let fake_target = NodeId::new(9999).unwrap();
+    let result = db.create_edge(
+        source,
+        fake_target,
+        "KNOWS",
+        PropertyMapBuilder::new().build(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_create_edge_both_invalid() {
+    let db = AletheiaDB::new().unwrap();
+    let result = db.create_edge(
+        NodeId::new(9998).unwrap(),
+        NodeId::new(9999).unwrap(),
+        "KNOWS",
+        PropertyMapBuilder::new().build(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_delete_node_via_transaction() {
+    let db = AletheiaDB::new().unwrap();
+
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    assert_eq!(db.node_count(), 1);
+
+    db.write(|tx| tx.delete_node(node_id)).unwrap();
+    assert_eq!(db.node_count(), 0);
+
+    // get_node on deleted node should fail
+    assert!(db.get_node(node_id).is_err());
+}
+
+#[test]
+fn test_delete_node_with_edges_creates_orphans() {
+    // Current behavior: deleting a node with edges succeeds but leaves orphaned edges.
+    // This documents the current system behavior (see issue comments about orphaned edges).
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let edge_id = db
+        .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Deleting a node with edges succeeds (creates orphaned edges)
+    db.write(|tx| tx.delete_node(alice)).unwrap();
+
+    // Node is deleted
+    assert_eq!(db.node_count(), 1);
+    assert!(db.get_node(alice).is_err());
+
+    // Edge still exists as an orphan (documents current behavior)
+    let edge = db.get_edge(edge_id).unwrap();
+    assert_eq!(edge.source, alice);
+}
+
+#[test]
+fn test_delete_node_cascade() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let charlie = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(charlie, alice, "FOLLOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    assert_eq!(db.edge_count(), 2);
+
+    // Cascade delete should remove alice and all connected edges
+    db.write(|tx| tx.delete_node_cascade(alice)).unwrap();
+
+    assert_eq!(db.node_count(), 2); // bob and charlie remain
+    assert_eq!(db.edge_count(), 0); // both edges removed
+    assert!(db.get_node(alice).is_err());
+}
+
+#[test]
+fn test_delete_edge_via_transaction() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let edge_id = db
+        .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    assert_eq!(db.edge_count(), 1);
+
+    db.write(|tx| tx.delete_edge(edge_id)).unwrap();
+    assert_eq!(db.edge_count(), 0);
+    assert!(db.get_edge(edge_id).is_err());
+}
+
+#[test]
+fn test_delete_nonexistent_node() {
+    let db = AletheiaDB::new().unwrap();
+    let result: Result<()> = db.write(|tx| tx.delete_node(NodeId::new(9999).unwrap()));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_delete_nonexistent_edge() {
+    let db = AletheiaDB::new().unwrap();
+    let result: Result<()> =
+        db.write(|tx| tx.delete_edge(crate::core::id::EdgeId::new(9999).unwrap()));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_scan_nodes_by_label() {
+    let db = AletheiaDB::new().unwrap();
+
+    let p1 = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let p2 = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_node("Company", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let mut persons: Vec<NodeId> = db.scan_nodes_by_label("Person").collect();
+    persons.sort();
+    let mut expected = vec![p1, p2];
+    expected.sort();
+    assert_eq!(persons, expected);
+
+    let companies: Vec<NodeId> = db.scan_nodes_by_label("Company").collect();
+    assert_eq!(companies.len(), 1);
+
+    // Non-existent label returns empty
+    let empty: Vec<NodeId> = db.scan_nodes_by_label("NonExistent").collect();
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn test_outgoing_edges_for_node_with_no_edges() {
+    let db = AletheiaDB::new().unwrap();
+    let node = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let outgoing = db.get_outgoing_edges(node);
+    assert!(outgoing.is_empty());
+
+    let outgoing_iter: Vec<_> = db.get_outgoing_edges_iter(node).collect();
+    assert!(outgoing_iter.is_empty());
+}
+
+#[test]
+fn test_incoming_edges_for_node_with_no_edges() {
+    let db = AletheiaDB::new().unwrap();
+    let node = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let incoming = db.get_incoming_edges(node);
+    assert!(incoming.is_empty());
+
+    let incoming_iter: Vec<_> = db.get_incoming_edges_iter(node).collect();
+    assert!(incoming_iter.is_empty());
+}
+
+#[test]
+fn test_outgoing_edges_with_label_no_matches() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Different label should return empty
+    let edges = db.get_outgoing_edges_with_label(alice, "FOLLOWS");
+    assert!(edges.is_empty());
+}
+
+#[test]
+fn test_node_and_edge_counts_empty_db() {
+    let db = AletheiaDB::new().unwrap();
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.edge_count(), 0);
+}
+
+#[test]
+fn test_out_degree_and_in_degree() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let charlie = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(alice, charlie, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    assert_eq!(db.out_degree(alice), 2);
+    assert_eq!(db.in_degree(alice), 0);
+    assert_eq!(db.out_degree(bob), 0);
+    assert_eq!(db.in_degree(bob), 1);
+}
+
+#[test]
+fn test_iterator_vs_vec_consistency() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let charlie = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(alice, charlie, "FOLLOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(charlie, alice, "FOLLOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Outgoing: Vec vs Iterator should match
+    let mut vec_result = db.get_outgoing_edges(alice);
+    let mut iter_result: Vec<_> = db.get_outgoing_edges_iter(alice).collect();
+    vec_result.sort();
+    iter_result.sort();
+    assert_eq!(vec_result, iter_result);
+
+    // Incoming: Vec vs Iterator should match
+    let mut vec_result = db.get_incoming_edges(alice);
+    let mut iter_result: Vec<_> = db.get_incoming_edges_iter(alice).collect();
+    vec_result.sort();
+    iter_result.sort();
+    assert_eq!(vec_result, iter_result);
+}
+
+// ========================================================================
+// Transaction Edge Cases
+// ========================================================================
+
+#[test]
+fn test_write_with_timestamp() {
+    let db = AletheiaDB::new().unwrap();
+
+    let (node_id, commit_ts) = db
+        .write_with_timestamp(|tx| {
+            tx.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+        })
+        .unwrap();
+
+    assert_eq!(db.node_count(), 1);
+
+    // The commit timestamp should be a valid non-zero timestamp
+    assert!(commit_ts.wallclock() > 0);
+
+    // Should be able to query at the commit timestamp
+    let node = db.get_node_at_time(node_id, commit_ts, commit_ts).unwrap();
+    assert_eq!(
+        node.get_property("name").and_then(|v| v.as_str()),
+        Some("Alice")
+    );
+}
+
+#[test]
+fn test_write_with_options_default() {
+    use crate::storage::wal::WriteOptions;
+
+    let db = AletheiaDB::new().unwrap();
+    let options = WriteOptions::new();
+
+    let node_id = db
+        .write_with_options(options, |tx| {
+            tx.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+        })
+        .unwrap();
+
+    assert_eq!(db.node_count(), 1);
+    let node = db.get_node(node_id).unwrap();
+    assert_eq!(
+        node.get_property("name").and_then(|v| v.as_str()),
+        Some("Bob")
+    );
+}
+
+#[test]
+fn test_concurrent_read_transactions() {
+    let db = AletheiaDB::new().unwrap();
+
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+    // Multiple read transactions can coexist
+    let tx1 = db.read_transaction().unwrap();
+    let tx2 = db.read_transaction().unwrap();
+
+    let node1 = tx1.get_node(node_id).unwrap();
+    let node2 = tx2.get_node(node_id).unwrap();
+
+    assert_eq!(node1.id, node2.id);
+    assert_eq!(node1.get_property("name"), node2.get_property("name"));
+}
+
+#[test]
+fn test_write_transaction_commit_then_rollback_path() {
+    let db = AletheiaDB::new().unwrap();
+
+    // Successful commit
+    let mut tx1 = db.write_transaction().unwrap();
+    tx1.create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    tx1.commit().unwrap();
+    assert_eq!(db.node_count(), 1);
+
+    // Failed transaction (drop without commit = implicit rollback)
+    let mut tx2 = db.write_transaction().unwrap();
+    tx2.create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    drop(tx2); // Implicit rollback
+    assert_eq!(db.node_count(), 1); // Still 1
+}
+
+#[test]
+fn test_write_closure_error_propagation() {
+    let db = AletheiaDB::new().unwrap();
+
+    // Custom error from closure should propagate
+    let result: Result<()> = db.write(|_tx| {
+        Err(Error::Storage(
+            crate::utils::error::StorageError::InconsistentState {
+                reason: "custom test error".to_string(),
+            },
+        ))
+    });
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("custom test error"),
+        "Error should contain our message: {}",
+        err_msg
+    );
+}
+
+#[test]
+fn test_read_closure_error_propagation() {
+    let db = AletheiaDB::new().unwrap();
+
+    let result: Result<()> = db.read(|_tx| {
+        Err(Error::Storage(
+            crate::utils::error::StorageError::InconsistentState {
+                reason: "read error".to_string(),
+            },
+        ))
+    });
+
+    assert!(result.is_err());
+}
+
+// ========================================================================
+// Admin / Statistics / Compression Tests
+// ========================================================================
+
+#[test]
+fn test_refresh_statistics() {
+    let db = AletheiaDB::new().unwrap();
+
+    db.create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_node("Company", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.refresh_statistics();
+
+    let stats = db.statistics();
+    assert!(stats.node_count() >= 3);
+}
+
+#[test]
+fn test_invalidate_statistics() {
+    let db = AletheiaDB::new().unwrap();
+
+    db.create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.refresh_statistics();
+    db.invalidate_statistics();
+
+    // After invalidation, statistics should still be accessible (lazy refresh)
+    let _stats = db.statistics();
+}
+
+#[test]
+fn test_compress_commit_log() {
+    let db = AletheiaDB::new().unwrap();
+
+    // Create some transactions to have something to compress
+    for _ in 0..10 {
+        db.create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+
+    // Should not panic
+    db.compress_commit_log();
+}
+
+#[test]
+fn test_commit_log_memory_usage() {
+    let db = AletheiaDB::new().unwrap();
+
+    let initial_mem = db.commit_log_memory_usage();
+
+    for _ in 0..10 {
+        db.create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+
+    let after_mem = db.commit_log_memory_usage();
+    // After 10 commits, memory should be >= initial
+    assert!(after_mem >= initial_mem);
+}
+
+#[test]
+fn test_get_compression_stats() {
+    let db = AletheiaDB::new().unwrap();
+
+    for _ in 0..5 {
+        db.create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+
+    let stats = db.get_compression_stats();
+    assert!(stats.total_transactions >= 5);
+}
+
+#[test]
+fn test_should_compress_commit_log() {
+    let db = AletheiaDB::new().unwrap();
+
+    // With a very large threshold, should return false for empty db
+    assert!(!db.should_compress_commit_log(usize::MAX));
+
+    // With threshold of 0, should always return true (if any data)
+    db.create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert!(db.should_compress_commit_log(0));
+}
+
+#[test]
+fn test_should_compress_by_exception_count() {
+    let db = AletheiaDB::new().unwrap();
+
+    // Should not compress with very high threshold
+    assert!(!db.should_compress_by_exception_count(usize::MAX));
+}
+
+#[test]
+fn test_persist_indexes_without_persistence_enabled() {
+    let db = AletheiaDB::new().unwrap();
+    // Without persistence enabled, should return an error
+    let result = db.persist_indexes();
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_historical_stats_empty_db() {
+    let db = AletheiaDB::new().unwrap();
+    let stats = db.historical_stats().unwrap();
+    assert_eq!(stats.total_node_versions, 0);
+    assert_eq!(stats.node_anchor_count, 0);
+}
+
+#[test]
+fn test_test_current_wal_lsn() {
+    let db = AletheiaDB::new().unwrap();
+    let lsn_before = db.__test_current_wal_lsn();
+
+    db.create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let lsn_after = db.__test_current_wal_lsn();
+    assert!(
+        lsn_after > lsn_before,
+        "LSN should advance after operations"
+    );
+}
+
+#[test]
+fn test_test_current_timestamp() {
+    let db = AletheiaDB::new().unwrap();
+    let ts = db.__test_current_timestamp();
+    assert!(ts.wallclock() > 0, "Timestamp should be non-zero");
+}
+
+// ========================================================================
+// Temporal Edge Cases
+// ========================================================================
+
+#[test]
+fn test_get_node_at_time_nonexistent_node() {
+    let db = AletheiaDB::new().unwrap();
+    let now = crate::core::temporal::time::now();
+    let result = db.get_node_at_time(NodeId::new(9999).unwrap(), now, now);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_edge_at_time_nonexistent_edge() {
+    let db = AletheiaDB::new().unwrap();
+    let now = crate::core::temporal::time::now();
+    let result = db.get_edge_at_time(crate::core::id::EdgeId::new(9999).unwrap(), now, now);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_nodes_at_time_batch() {
+    let db = AletheiaDB::new().unwrap();
+
+    let (n1, ts1) = db
+        .write_with_timestamp(|tx| {
+            tx.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+        })
+        .unwrap();
+
+    let (n2, ts2) = db
+        .write_with_timestamp(|tx| {
+            tx.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+        })
+        .unwrap();
+
+    let query_ts = std::cmp::max(ts1, ts2);
+    let results = db.get_nodes_at_time(&[n1, n2], query_ts, query_ts).unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, n1);
+    assert!(results[0].1.is_some());
+    assert_eq!(results[1].0, n2);
+    assert!(results[1].1.is_some());
+}
+
+#[test]
+fn test_get_nodes_at_time_batch_with_nonexistent() {
+    let db = AletheiaDB::new().unwrap();
+
+    let (n1, ts) = db
+        .write_with_timestamp(|tx| tx.create_node("Person", PropertyMapBuilder::new().build()))
+        .unwrap();
+
+    let fake_id = NodeId::new(9999).unwrap();
+    let results = db.get_nodes_at_time(&[n1, fake_id], ts, ts).unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert!(results[0].1.is_some()); // Real node found
+    assert!(results[1].1.is_none()); // Fake node not found
+}
+
+#[test]
+fn test_get_nodes_at_time_empty_batch() {
+    let db = AletheiaDB::new().unwrap();
+    let now = crate::core::temporal::time::now();
+    let results = db.get_nodes_at_time(&[], now, now).unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_get_edges_at_time_batch() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let (e1, ts) = db
+        .write_with_timestamp(|tx| {
+            tx.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        })
+        .unwrap();
+
+    let results = db.get_edges_at_time(&[e1], ts, ts).unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].1.is_some());
+}
+
+#[test]
+fn test_get_edges_at_time_empty_batch() {
+    let db = AletheiaDB::new().unwrap();
+    let now = crate::core::temporal::time::now();
+    let results = db.get_edges_at_time(&[], now, now).unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_get_outgoing_edges_at_time() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let (_, ts) = db
+        .write_with_timestamp(|tx| {
+            tx.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        })
+        .unwrap();
+
+    let edges = db.get_outgoing_edges_at_time(alice, ts, ts);
+    assert_eq!(edges.len(), 1);
+}
+
+#[test]
+fn test_get_incoming_edges_at_time() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let (_, ts) = db
+        .write_with_timestamp(|tx| {
+            tx.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        })
+        .unwrap();
+
+    let edges = db.get_incoming_edges_at_time(bob, ts, ts);
+    assert_eq!(edges.len(), 1);
+}
+
+#[test]
+fn test_get_node_history_nonexistent() {
+    let db = AletheiaDB::new().unwrap();
+    let result = db.get_node_history(NodeId::new(9999).unwrap());
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_node_at_version_nonexistent() {
+    let db = AletheiaDB::new().unwrap();
+    let result = db.get_node_at_version(NodeId::new(9999).unwrap(), 1);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_node_at_version_invalid_version() {
+    let db = AletheiaDB::new().unwrap();
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    // Version 0 is invalid (versions are 1-indexed)
+    let result = db.get_node_at_version(node_id, 0);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_node_at_version_beyond_latest() {
+    let db = AletheiaDB::new().unwrap();
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    // Only version 1 exists, version 999 should fail
+    let result = db.get_node_at_version(node_id, 999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_edge_at_valid_time() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let (edge_id, ts) = db
+        .write_with_timestamp(|tx| {
+            tx.create_edge(
+                alice,
+                bob,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            )
+        })
+        .unwrap();
+
+    let edge = db.get_edge_at_valid_time(edge_id, ts).unwrap();
+    assert_eq!(edge.source, alice);
+    assert_eq!(edge.target, bob);
+}
+
+#[test]
+fn test_get_edge_at_transaction_time() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let edge_id = db
+        .create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+        )
+        .unwrap();
+
+    let tx_time = crate::core::temporal::time::now();
+    let edge = db.get_edge_at_transaction_time(edge_id, tx_time).unwrap();
+    assert_eq!(edge.source, alice);
+}
+
+#[test]
+fn test_get_edge_history_nonexistent() {
+    let db = AletheiaDB::new().unwrap();
+    let result = db.get_edge_history(crate::core::id::EdgeId::new(9999).unwrap());
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_diff_node_versions_same_version() {
+    let db = AletheiaDB::new().unwrap();
+
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+    let history = db.get_node_history(node_id).unwrap();
+    let v1_id = history.first_version().unwrap().version_id;
+
+    // Diff same version against itself
+    let diff = db.diff_node_versions(node_id, v1_id, v1_id).unwrap();
+    assert!(!diff.has_changes());
+}
+
+// ========================================================================
+// Vector Edge Cases
+// ========================================================================
+
+#[test]
+fn test_find_similar_without_index() {
+    let db = AletheiaDB::new().unwrap();
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let result = db.find_similar(node_id, 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_find_similar_by_embedding_without_index() {
+    let db = AletheiaDB::new().unwrap();
+    let embedding = vec![0.1, 0.2, 0.3];
+    let result = db.find_similar_by_embedding(&embedding, 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_search_vectors_in_without_index() {
+    let db = AletheiaDB::new().unwrap();
+    let embedding = vec![0.1, 0.2, 0.3];
+    let result = db.search_vectors_in("embedding", &embedding, 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_find_similar_in_without_index() {
+    let db = AletheiaDB::new().unwrap();
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let result = db.find_similar_in("embedding", node_id, 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_vector_index_builder_basic() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(128, DistanceMetric::Cosine))
+        .enable()
+        .unwrap();
+
+    assert!(db.has_vector_index("embedding"));
+    assert!(!db.has_vector_index("other"));
+}
+
+#[test]
+fn test_list_vector_indexes() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+
+    assert!(db.list_vector_indexes().is_empty());
+
+    db.enable_vector_index("embedding", HnswConfig::new(128, DistanceMetric::Cosine))
+        .unwrap();
+
+    let indexes = db.list_vector_indexes();
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes[0].property_name, "embedding");
+}
+
+#[test]
+fn test_enable_vector_index_duplicate() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(128, DistanceMetric::Cosine))
+        .unwrap();
+
+    // Enabling the same index again should error
+    let result = db.enable_vector_index("embedding", HnswConfig::new(128, DistanceMetric::Cosine));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_find_similar_with_label_without_matches() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+        .unwrap();
+
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+
+    // Search with a label that doesn't match
+    let results = db
+        .find_similar_with_label(node_id, "NonExistentLabel", 10)
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_find_similar_by_embedding_with_label() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+        .unwrap();
+
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert_vector("embedding", &[1.0, 0.0, 0.0, 0.0])
+            .build(),
+    )
+    .unwrap();
+
+    db.create_node(
+        "Company",
+        PropertyMapBuilder::new()
+            .insert("name", "Acme")
+            .insert_vector("embedding", &[0.9, 0.1, 0.0, 0.0])
+            .build(),
+    )
+    .unwrap();
+
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+
+    // Only Person nodes
+    let results = db
+        .find_similar_by_embedding_with_label(&query, "Person", 10)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+
+    // Only Company nodes
+    let results = db
+        .find_similar_by_embedding_with_label(&query, "Company", 10)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+
+    // Nonexistent label
+    let results = db
+        .find_similar_by_embedding_with_label(&query, "NoLabel", 10)
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_is_temporal_vector_index_enabled() {
+    let db = AletheiaDB::new().unwrap();
+    assert!(!db.is_temporal_vector_index_enabled());
+}
+
+#[test]
+fn test_list_temporal_vector_indexes_empty() {
+    let db = AletheiaDB::new().unwrap();
+    assert!(db.list_temporal_vector_indexes().is_empty());
+}
+
+#[test]
+fn test_find_similar_as_of_without_temporal_index() {
+    let db = AletheiaDB::new().unwrap();
+    let now = crate::core::temporal::time::now();
+    let result = db.find_similar_as_of(&[0.1, 0.2, 0.3], 10, now);
+    assert!(result.is_err());
+}
+
+// ========================================================================
+// Update Operations via Transactions
+// ========================================================================
+
+#[test]
+fn test_update_node_via_transaction() {
+    let db = AletheiaDB::new().unwrap();
+
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+
+    db.write(|tx| {
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new()
+                .insert("name", "Alice Updated")
+                .insert("age", 31i64)
+                .build(),
+        )
+    })
+    .unwrap();
+
+    let node = db.get_node(node_id).unwrap();
+    assert_eq!(
+        node.get_property("name").and_then(|v| v.as_str()),
+        Some("Alice Updated")
+    );
+    assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(31));
+}
+
+#[test]
+fn test_update_nonexistent_node() {
+    let db = AletheiaDB::new().unwrap();
+    let result: Result<()> = db.write(|tx| {
+        tx.update_node(
+            NodeId::new(9999).unwrap(),
+            PropertyMapBuilder::new().build(),
+        )
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_update_edge_via_transaction() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let edge_id = db
+        .create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("weight", 1.0f64).build(),
+        )
+        .unwrap();
+
+    db.write(|tx| {
+        tx.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 2.0f64).build(),
+        )
+    })
+    .unwrap();
+
+    let edge = db.get_edge(edge_id).unwrap();
+    assert_eq!(
+        edge.properties.get("weight"),
+        Some(&PropertyValue::Float(2.0))
+    );
+}
+
+#[test]
+fn test_update_nonexistent_edge() {
+    let db = AletheiaDB::new().unwrap();
+    let result: Result<()> = db.write(|tx| {
+        tx.update_edge(
+            crate::core::id::EdgeId::new(9999).unwrap(),
+            PropertyMapBuilder::new().build(),
+        )
+    });
+    assert!(result.is_err());
+}
+
+// ========================================================================
+// Multiple Operations in Single Transaction
+// ========================================================================
+
+#[test]
+fn test_multiple_creates_in_single_transaction() {
+    let db = AletheiaDB::new().unwrap();
+
+    let node_ids = db
+        .write(|tx| {
+            let mut ids = Vec::new();
+            for i in 0..10 {
+                let id = tx.create_node(
+                    "Item",
+                    PropertyMapBuilder::new().insert("index", i as i64).build(),
+                )?;
+                ids.push(id);
+            }
+            Ok::<_, Error>(ids)
+        })
+        .unwrap();
+
+    assert_eq!(node_ids.len(), 10);
+    assert_eq!(db.node_count(), 10);
+}
+
+#[test]
+fn test_create_then_delete_edge_across_transactions() {
+    let db = AletheiaDB::new().unwrap();
+
+    // Create nodes and edge in one transaction
+    let (n1, n2, edge_id) = db
+        .write(|tx| {
+            let n1 = tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            let n2 = tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            let e = tx.create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())?;
+            Ok::<_, Error>((n1, n2, e))
+        })
+        .unwrap();
+
+    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.edge_count(), 1);
+
+    // Delete edge in a second transaction
+    db.write(|tx| tx.delete_edge(edge_id)).unwrap();
+    assert_eq!(db.edge_count(), 0);
+
+    // Nodes still exist
+    assert!(db.get_node(n1).is_ok());
+    assert!(db.get_node(n2).is_ok());
+}
+
+// ========================================================================
+// Self-edges and Multi-edges
+// ========================================================================
+
+#[test]
+fn test_self_edge() {
+    let db = AletheiaDB::new().unwrap();
+
+    let node = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let edge_id = db
+        .create_edge(node, node, "SELF_REF", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let edge = db.get_edge(edge_id).unwrap();
+    assert_eq!(edge.source, node);
+    assert_eq!(edge.target, node);
+    assert_eq!(db.out_degree(node), 1);
+    assert_eq!(db.in_degree(node), 1);
+}
+
+#[test]
+fn test_multiple_edges_same_nodes() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(alice, bob, "WORKS_WITH", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(bob, alice, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    assert_eq!(db.edge_count(), 3);
+    assert_eq!(db.out_degree(alice), 2);
+    assert_eq!(db.in_degree(alice), 1);
+    assert_eq!(db.out_degree(bob), 1);
+    assert_eq!(db.in_degree(bob), 2);
+}
