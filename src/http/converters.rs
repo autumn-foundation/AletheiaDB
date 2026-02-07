@@ -198,7 +198,25 @@ fn json_to_property_value_recursive(
         }
         serde_json::Value::String(s) => Ok(PropertyValue::String(Arc::from(s.as_str()))),
         serde_json::Value::Array(arr) => {
+            // Early check for array size limit before any processing
+            if arr.len() > crate::core::property::MAX_ARRAY_ELEMENTS {
+                return Err(format!(
+                    "Array count {} exceeds maximum allowed {}",
+                    arr.len(),
+                    crate::core::property::MAX_ARRAY_ELEMENTS
+                ));
+            }
+
             if arr.iter().all(|v| v.is_number()) && !arr.is_empty() {
+                // Early check for vector dimension limit before allocation
+                if arr.len() > crate::core::property::MAX_VECTOR_DIMENSIONS {
+                    return Err(format!(
+                        "Vector dimension {} exceeds limit {}",
+                        arr.len(),
+                        crate::core::property::MAX_VECTOR_DIMENSIONS
+                    ));
+                }
+
                 let floats: Result<Vec<f32>, String> = arr
                     .iter()
                     .map(|v| {
@@ -209,23 +227,8 @@ fn json_to_property_value_recursive(
                     .collect();
 
                 if let Ok(floats) = floats {
-                    if floats.len() > crate::core::property::MAX_VECTOR_DIMENSIONS {
-                        return Err(format!(
-                            "Vector dimension {} exceeds limit {}",
-                            floats.len(),
-                            crate::core::property::MAX_VECTOR_DIMENSIONS
-                        ));
-                    }
                     return Ok(PropertyValue::Vector(Arc::from(floats)));
                 }
-            }
-            // Enforce MAX_ARRAY_ELEMENTS limit
-            if arr.len() > crate::core::property::MAX_ARRAY_ELEMENTS {
-                return Err(format!(
-                    "Array count {} exceeds maximum allowed {}",
-                    arr.len(),
-                    crate::core::property::MAX_ARRAY_ELEMENTS
-                ));
             }
 
             let values: Result<Vec<PropertyValue>, String> = arr
@@ -322,7 +325,7 @@ mod tests {
         // Construct a large vector of numbers
         // Note: generating this large structure in memory is acceptable for a test
         let large_vec: Vec<serde_json::Value> =
-            std::iter::repeat_n(json!(1.0), too_large).collect();
+            std::iter::repeat(json!(1.0)).take(too_large).collect();
         let json_val = serde_json::Value::Array(large_vec);
 
         let result = json_to_property_value(&json_val);
@@ -352,7 +355,28 @@ mod tests {
         let val = serde_json::Value::Array(vec);
 
         let res = json_to_property_value(&val);
-        let err = res.expect_err("Should enforce MAX_ARRAY_ELEMENTS");
-        assert!(err.contains("exceeds maximum allowed"));
+        assert!(res.is_err(), "Should enforce MAX_ARRAY_ELEMENTS");
+        assert!(res.unwrap_err().contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_json_vector_pre_allocation_limit() {
+        use crate::core::property::MAX_VECTOR_DIMENSIONS;
+        use crate::core::property::MAX_ARRAY_ELEMENTS;
+
+        // Verify that numeric vectors are checked BEFORE allocation
+        // This test relies on the fact that MAX_VECTOR_DIMENSIONS < MAX_ARRAY_ELEMENTS
+        assert!(MAX_VECTOR_DIMENSIONS < MAX_ARRAY_ELEMENTS);
+
+        // Create a numeric vector that is larger than MAX_VECTOR_DIMENSIONS but smaller than MAX_ARRAY_ELEMENTS
+        // This should fail with "Vector dimension X exceeds limit"
+        let size = MAX_VECTOR_DIMENSIONS + 100;
+        let vec: Vec<serde_json::Value> = std::iter::repeat(json!(1.0)).take(size).collect();
+        let val = serde_json::Value::Array(vec);
+
+        let res = json_to_property_value(&val);
+        assert!(res.is_err());
+        // Should hit vector limit, not array limit
+        assert!(res.unwrap_err().contains("Vector dimension"));
     }
 }
