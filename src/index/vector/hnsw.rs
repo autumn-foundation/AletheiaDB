@@ -732,6 +732,8 @@ impl VectorIndex for HnswIndex {
                 // New node: allocate key with overflow protection
                 // Check BEFORE incrementing to avoid leaving next_key in invalid state
                 const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+
+                // Step 1: Atomically allocate a unique key (no locks held)
                 let key = loop {
                     let current = self.next_key.load(Ordering::SeqCst);
                     if current > MAX_VALID_KEY {
@@ -747,16 +749,13 @@ impl VectorIndex for HnswIndex {
                         Ordering::SeqCst,
                         Ordering::SeqCst,
                     ) {
-                        Ok(key) => {
-                            entry.insert(key);
-                            self.reverse_mapping.insert(key, id);
-                            break key;
-                        }
+                        Ok(key) => break key,
                         Err(_) => continue, // Retry with new current value
                     }
                 };
 
-                // Insert into usearch index (auto-expand capacity if needed)
+                // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
+                // This prevents deadlock with search_with_filter which holds inner -> dashmap.
                 let index = self.inner.write();
 
                 // Check if we need to expand capacity
@@ -771,6 +770,9 @@ impl VectorIndex for HnswIndex {
                     })?;
                 }
 
+                // Step 3: Add to inner usearch index while holding write lock
+                // This happens BEFORE we insert mappings, preventing phantom vectors.
+                // If remove() runs between step 3 and 4, it won't find the mapping (no-op).
                 index.add(key, vector).map_err(|e| {
                     Error::Vector(VectorError::IndexError(format!(
                         "Failed to add vector: {}",
@@ -778,6 +780,13 @@ impl VectorIndex for HnswIndex {
                     )))
                 })?;
 
+                // Step 4: Insert to mappings (dashmap) AFTER inner is updated
+                // The entry lock was released after the loop, so we manually insert here.
+                // SAFETY: We allocated key via compare_exchange, so it's unique.
+                entry.insert(key);
+                self.reverse_mapping.insert(key, id);
+
+                // Lock is released after this block
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
