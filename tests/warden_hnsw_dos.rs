@@ -1,5 +1,5 @@
-use aletheiadb::index::vector::{HnswConfig, HnswIndex, DistanceMetric};
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
 use aletheiadb::utils::error::{Error, VectorError};
 use std::fs::File;
 use std::io::Write;
@@ -12,7 +12,9 @@ fn test_load_mappings_huge_count_small_file() {
     let mappings_path = index_path.with_extension("usearch.mappings");
 
     // Create a valid index file first using the builder
-    let index = aletheiadb::index::vector::HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    let index = aletheiadb::index::vector::HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
     index.save(&index_path).unwrap();
 
     // Now overwrite the mappings file with a malicious one
@@ -43,7 +45,11 @@ fn test_load_mappings_huge_count_small_file() {
     assert!(result.is_err());
     match result {
         Err(Error::Vector(VectorError::IndexError(msg))) => {
-            assert!(msg.contains("Mapping file size mismatch"), "Expected size mismatch error, got: {}", msg);
+            assert!(
+                msg.contains("Mapping file size mismatch"),
+                "Expected size mismatch error, got: {}",
+                msg
+            );
         }
         _ => panic!("Expected IndexError, got {:?}", result),
     }
@@ -55,7 +61,9 @@ fn test_load_mappings_truncated_data() {
     let index_path = dir.path().join("test_trunc.index");
     let mappings_path = index_path.with_extension("usearch.mappings");
 
-    let index = aletheiadb::index::vector::HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    let index = aletheiadb::index::vector::HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
     index.save(&index_path).unwrap();
 
     let mut file = File::create(&mappings_path).unwrap();
@@ -79,7 +87,11 @@ fn test_load_mappings_truncated_data() {
     assert!(result.is_err());
     match result {
         Err(Error::Vector(VectorError::IndexError(msg))) => {
-             assert!(msg.contains("Mapping file size mismatch"), "Expected size mismatch error, got: {}", msg);
+            assert!(
+                msg.contains("Mapping file size mismatch"),
+                "Expected size mismatch error, got: {}",
+                msg
+            );
         }
         _ => panic!("Expected IndexError, got {:?}", result),
     }

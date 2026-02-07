@@ -1298,12 +1298,15 @@ fn load_mappings_with_integrity(
         )))
     })?;
 
-    let file_len = file.metadata().map_err(|e| {
-        Error::Vector(VectorError::IndexError(format!(
-            "Failed to get mappings file metadata: {}",
-            e
-        )))
-    })?.len();
+    let file_len = file
+        .metadata()
+        .map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to get mappings file metadata: {}",
+                e
+            )))
+        })?
+        .len();
 
     // Minimum size: magic(4) + version(1) + count(8) + crc(4) = 17 bytes
     if file_len < 17 {
