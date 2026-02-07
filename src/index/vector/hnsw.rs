@@ -86,6 +86,7 @@
 //! - Searches can run concurrently with additions
 
 use crate::core::id::NodeId;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
@@ -114,6 +115,12 @@ const MAPPING_VERSION: u8 = 1;
 ///   This prevents DoS attacks via excessive memory allocation while enabling
 ///   legitimate bulk operations.
 const MAX_K: usize = 100_000;
+
+/// Maximum initial capacity to prevent OOM DoS via configuration.
+///
+/// 10M vectors is a generous limit for initial allocation (40MB-400GB depending on dims).
+/// Indexes can still grow beyond this limit incrementally.
+const MAX_HNSW_CAPACITY: usize = 10_000_000;
 
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
@@ -464,6 +471,24 @@ impl HnswIndexBuilder {
         if self.config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    self.config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
+        // Validate capacity
+        if self.config.capacity > MAX_HNSW_CAPACITY {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "capacity {} exceeds maximum allowed initial capacity {}",
+                    self.config.capacity, MAX_HNSW_CAPACITY
+                ),
             }));
         }
 
@@ -1279,7 +1304,35 @@ fn load_mappings_with_integrity(
         return Ok((id_mapping, reverse_mapping, max_key));
     }
 
-    let file_data = std::fs::read(mappings_path).map_err(|e| {
+    let file = File::open(mappings_path).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to open mappings file: {}",
+            e
+        )))
+    })?;
+
+    let metadata = file.metadata().map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read mappings metadata: {}",
+            e
+        )))
+    })?;
+
+    let file_len = metadata.len();
+
+    // Prevent OOM by limiting file size (e.g. 2GB)
+    // 100M vectors * 16 bytes = 1.6GB, so 2GB covers reasonable use cases.
+    const MAX_MAPPINGS_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+    if file_len > MAX_MAPPINGS_FILE_SIZE {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Mappings file too large: {} bytes (max {})",
+            file_len, MAX_MAPPINGS_FILE_SIZE
+        ))));
+    }
+
+    let mut reader = std::io::BufReader::new(file);
+    let mut file_data = Vec::with_capacity(file_len as usize);
+    reader.read_to_end(&mut file_data).map_err(|e| {
         Error::Vector(VectorError::IndexError(format!(
             "Failed to read mappings: {}",
             e
@@ -1417,6 +1470,16 @@ impl HnswIndex {
 
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        // Security Check: Validate dimensions against DoS limits
+        if config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         // Security Check: Custom metrics require F32 quantization
         if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
             return Err(Error::Vector(VectorError::InvalidVector {

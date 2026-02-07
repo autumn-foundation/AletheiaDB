@@ -83,6 +83,17 @@ pub const DEFAULT_NUM_STRIPES: usize = 16;
 /// Default ring buffer capacity per stripe.
 pub const DEFAULT_STRIPE_CAPACITY: usize = 1024;
 
+/// Maximum number of stripes to prevent excessive memory usage.
+const MAX_NUM_STRIPES: usize = 1024;
+
+/// Maximum stripe capacity to prevent OOM DoS.
+///
+/// 10M entries * sizeof(Slot) can be significant.
+/// Slot is ~16 bytes + PendingEntry size (variable).
+/// But the ring buffer allocates Slots upfront.
+/// 10M slots * 128 bytes (assuming padding) ≈ 1.2GB.
+const MAX_STRIPE_CAPACITY: usize = 10_000_000;
+
 /// Configuration for the concurrent WAL.
 #[derive(Debug, Clone)]
 pub struct ConcurrentWalConfig {
@@ -165,6 +176,31 @@ pub struct ConcurrentWal {
 impl ConcurrentWal {
     /// Create a new concurrent WAL with the given configuration.
     pub fn new(config: ConcurrentWalConfig) -> Result<Self> {
+        // Validate configuration to prevent DoS
+        if config.num_stripes > MAX_NUM_STRIPES {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: format!(
+                    "num_stripes {} exceeds maximum allowed {}",
+                    config.num_stripes, MAX_NUM_STRIPES
+                ),
+            }));
+        }
+
+        if config.stripe_capacity > MAX_STRIPE_CAPACITY {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: format!(
+                    "stripe_capacity {} exceeds maximum allowed {}",
+                    config.stripe_capacity, MAX_STRIPE_CAPACITY
+                ),
+            }));
+        }
+
+        if config.stripe_capacity == 0 {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "stripe_capacity must be greater than 0".to_string(),
+            }));
+        }
+
         let num_stripes = config.num_stripes.next_power_of_two();
         let stripe_mask = num_stripes - 1;
 
