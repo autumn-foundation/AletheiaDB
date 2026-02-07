@@ -1,0 +1,19 @@
+# cargo-mutants configuration for AletheiaDB
+# See: https://mutants.rs/config.html
+
+# Timeout per mutant — scales relative to the baseline test time
+timeout_multiplier = 1.5
+minimum_test_timeout = 60
+
+# Exclude low-value mutation targets
+exclude_globs = [
+    "benches/**",           # Benchmark harnesses
+    "examples/**",          # Example code
+    "tests/**",             # Integration test helpers
+    "src/mcp/**",           # MCP server (IO-heavy, tested via integration)
+]
+
+exclude_re = [
+    "impl (Debug|Display) for",   # Display/Debug impls
+    "fn fmt\\(",                    # fmt methods
+]
