@@ -108,8 +108,8 @@ fn test_time_range_vector_query() -> Result<()> {
         let timestamp = ((i as i64 * 1000) + base_time.wallclock()).into();
         index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
 
-        index.on_transaction()?;
-        index.on_transaction()?;
+        index.on_transaction_at(timestamp)?;
+        index.on_transaction_at(timestamp)?;
     }
 
     assert!(index.snapshot_count() >= 2);
@@ -368,8 +368,8 @@ fn test_semantic_evolution_end_to_end() -> Result<()> {
     for (i, vector) in vectors.iter().enumerate() {
         let timestamp = ((i as i64 * 1000) + base_time.wallclock()).into();
         index.add(node_id, vector, timestamp)?;
-        index.on_transaction()?;
-        index.on_transaction()?; // Trigger snapshot with interval=2
+        index.on_transaction_at(timestamp)?;
+        index.on_transaction_at(timestamp)?; // Trigger snapshot with interval=2
     }
 
     // Get semantic evolution
@@ -401,32 +401,23 @@ fn test_track_semantic_drift_over_time() -> Result<()> {
 
     // Create vectors that progressively drift from [1,0,0,0]
     index.add(node_id, &[1.0, 0.0, 0.0, 0.0], base_time)?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    index.on_transaction_at(base_time)?;
+    index.on_transaction_at(base_time)?;
 
-    index.add(
-        node_id,
-        &[0.8, 0.2, 0.0, 0.0],
-        (1000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t2 = (1000 + base_time.wallclock()).into();
+    index.add(node_id, &[0.8, 0.2, 0.0, 0.0], t2)?;
+    index.on_transaction_at(t2)?;
+    index.on_transaction_at(t2)?;
 
-    index.add(
-        node_id,
-        &[0.5, 0.5, 0.0, 0.0],
-        (2000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t3 = (2000 + base_time.wallclock()).into();
+    index.add(node_id, &[0.5, 0.5, 0.0, 0.0], t3)?;
+    index.on_transaction_at(t3)?;
+    index.on_transaction_at(t3)?;
 
-    index.add(
-        node_id,
-        &[0.0, 1.0, 0.0, 0.0],
-        (3000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t4 = (3000 + base_time.wallclock()).into();
+    index.add(node_id, &[0.0, 1.0, 0.0, 0.0], t4)?;
+    index.on_transaction_at(t4)?;
+    index.on_transaction_at(t4)?;
 
     // Track drift from original vector
     let reference = vec![1.0, 0.0, 0.0, 0.0];
@@ -463,8 +454,8 @@ fn test_calculate_consecutive_drift_end_to_end() -> Result<()> {
     for (i, vector) in vectors.iter().enumerate() {
         let timestamp = ((i as i64 * 1000) + base_time.wallclock()).into();
         index.add(node_id, vector, timestamp)?;
-        index.on_transaction()?;
-        index.on_transaction()?;
+        index.on_transaction_at(timestamp)?;
+        index.on_transaction_at(timestamp)?;
     }
 
     // Calculate consecutive drift
@@ -497,26 +488,20 @@ fn test_semantic_evolution_with_gaps() -> Result<()> {
 
     // Add node1 at times 1000 and 3000
     index.add(node1, &[1.0, 0.0, 0.0, 0.0], base_time)?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    index.on_transaction_at(base_time)?;
+    index.on_transaction_at(base_time)?;
 
     // Add node2 at time 2000 (different node)
-    index.add(
-        node2,
-        &[0.0, 1.0, 0.0, 0.0],
-        (1000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t2 = (1000 + base_time.wallclock()).into();
+    index.add(node2, &[0.0, 1.0, 0.0, 0.0], t2)?;
+    index.on_transaction_at(t2)?;
+    index.on_transaction_at(t2)?;
 
     // Add node1 again at time 3000
-    index.add(
-        node1,
-        &[0.0, 0.0, 1.0, 0.0],
-        (2000 + base_time.wallclock()).into(),
-    )?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t3 = (2000 + base_time.wallclock()).into();
+    index.add(node1, &[0.0, 0.0, 1.0, 0.0], t3)?;
+    index.on_transaction_at(t3)?;
+    index.on_transaction_at(t3)?;
 
     // Get evolution for node1
     // Use wide time range to capture all snapshots
@@ -572,16 +557,18 @@ fn test_drift_calculation_with_normalized_vectors() -> Result<()> {
     let v3 = normalize(&[0.0, 1.0, 0.0, 0.0]); // 90 degrees
 
     index.add(node_id, &v1, base_time)?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    index.on_transaction_at(base_time)?;
+    index.on_transaction_at(base_time)?;
 
-    index.add(node_id, &v2, (1000 + base_time.wallclock()).into())?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t2 = (1000 + base_time.wallclock()).into();
+    index.add(node_id, &v2, t2)?;
+    index.on_transaction_at(t2)?;
+    index.on_transaction_at(t2)?;
 
-    index.add(node_id, &v3, (2000 + base_time.wallclock()).into())?;
-    index.on_transaction()?;
-    index.on_transaction()?;
+    let t3 = (2000 + base_time.wallclock()).into();
+    index.add(node_id, &v3, t3)?;
+    index.on_transaction_at(t3)?;
+    index.on_transaction_at(t3)?;
 
     // Calculate consecutive drift
     // Use wide time range to capture all snapshots
