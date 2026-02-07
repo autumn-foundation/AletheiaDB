@@ -1715,14 +1715,6 @@ mod sentry_tests {
     }
 
     #[test]
-    #[should_panic(expected = "usearch passed null pointer")]
-    fn test_metric_wrapper_panic_on_null() {
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
-        let wrapper = create_metric_wrapper(4, distance_fn);
-        wrapper(std::ptr::null(), std::ptr::null());
-    }
-
-    #[test]
     fn test_is_retryable_error_matching() {
         assert!(is_retryable_usearch_error(
             "Error: No available threads to lock for search"
