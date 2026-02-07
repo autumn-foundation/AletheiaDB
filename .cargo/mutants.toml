@@ -2,7 +2,7 @@
 # See: https://mutants.rs/config.html
 
 # Timeout per mutant — scales relative to the baseline test time
-timeout_multiplier = 1.5
+timeout_multiplier = 3.0
 minimum_test_timeout = 60
 
 # Exclude low-value mutation targets
