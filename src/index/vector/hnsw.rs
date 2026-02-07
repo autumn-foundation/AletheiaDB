@@ -99,6 +99,29 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
+// Thread-local flag to detect re-entrant modification attempts during filtered search.
+// This prevents deadlocks when user filter callbacks try to modify the index.
+std::thread_local! {
+    static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard that sets IN_FILTER_CALLBACK to true on creation and false on drop.
+/// This ensures the flag is always reset, even if the callback panics.
+struct FilterCallbackGuard;
+
+impl FilterCallbackGuard {
+    fn new() -> Self {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
+        FilterCallbackGuard
+    }
+}
+
+impl Drop for FilterCallbackGuard {
+    fn drop(&mut self) {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+    }
+}
+
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
 /// Current mapping file format version
@@ -658,6 +681,16 @@ impl std::fmt::Debug for HnswIndex {
 
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
+        // Check for re-entrant modification during filtered search (prevents deadlock)
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot modify index from within a search_with_filter callback. \
+                 This would cause a deadlock due to lock re-entrancy. \
+                 Consider collecting modifications and applying them after the search completes."
+                    .to_string(),
+            )));
+        }
+
         // Check if index is read-only (memory-mapped)
         if self.is_mmap {
             return Err(Error::Vector(VectorError::IndexError(
@@ -814,6 +847,16 @@ impl VectorIndex for HnswIndex {
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
+        // Check for re-entrant modification during filtered search (prevents deadlock)
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot modify index from within a search_with_filter callback. \
+                 This would cause a deadlock due to lock re-entrancy. \
+                 Consider collecting modifications and applying them after the search completes."
+                    .to_string(),
+            )));
+        }
+
         // Check if index is read-only (memory-mapped)
         if self.is_mmap {
             return Err(Error::Vector(VectorError::IndexError(
@@ -935,9 +978,15 @@ impl VectorIndex for HnswIndex {
         //
         // This avoids ~1-2ns of validation overhead per candidate node examined.
         // For searches examining 1,000 nodes, this saves ~1-2μs total.
+        //
+        // DEADLOCK PREVENTION (PR #870):
+        // We set IN_FILTER_CALLBACK flag when calling the user's predicate to detect
+        // and prevent re-entrant modification attempts that would cause deadlock.
         let reverse_mapping = &self.reverse_mapping;
         let filter = |key: u64| -> bool {
             if let Some(node_id_ref) = reverse_mapping.get(&key) {
+                // Set flag to prevent modifications during callback
+                let _guard = FilterCallbackGuard::new();
                 predicate(node_id_ref.value())
             } else {
                 false
@@ -1438,7 +1487,7 @@ impl HnswIndex {
             multi: false,
         };
 
-        let index = Index::new(&options).map_err(|e| {
+        let mut index = Index::new(&options).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to create index for loading: {}",
                 e
@@ -1457,6 +1506,18 @@ impl HnswIndex {
                     e
                 )))
             })?;
+
+        // Apply custom metric if configured (must happen after load, before use)
+        // This ensures custom metrics are preserved across save/load cycles
+        if let Some(ref custom) = config.custom_metric {
+            let dims = config.dimensions;
+            let distance_fn = Arc::clone(&custom.distance_fn);
+
+            // Create a wrapper that converts usearch's raw pointer API to our safe slice API
+            let metric_wrapper = create_metric_wrapper(dims, distance_fn);
+
+            index.change_metric(metric_wrapper);
+        }
 
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
