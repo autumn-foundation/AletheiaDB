@@ -212,37 +212,4 @@ impl AletheiaDB {
 
         self.execute_query(query)
     }
-
-    /// Execute a Cypher query.
-    ///
-    /// This is a placeholder for future Cypher support.
-    #[cfg(feature = "cypher")]
-    pub fn cypher(&self, _query: &str) -> Result<QueryResults> {
-        use crate::query::executor::{QueryRow, ResultIterator};
-
-        // Minimal empty iterator to satisfy the return type
-        struct EmptyCypherIterator;
-        impl ResultIterator for EmptyCypherIterator {
-            fn next(&mut self) -> Option<Result<QueryRow>> {
-                None
-            }
-            fn size_hint(&self) -> (usize, Option<usize>) {
-                (0, Some(0))
-            }
-        }
-
-        Ok(QueryResults::new(Box::new(EmptyCypherIterator)))
-    }
-
-    /// Execute a Cypher query with parameters.
-    ///
-    /// This is a placeholder for future Cypher support.
-    #[cfg(feature = "cypher")]
-    pub fn cypher_with_params(
-        &self,
-        query: &str,
-        _params: crate::core::property::PropertyMap,
-    ) -> Result<QueryResults> {
-        self.cypher(query)
-    }
 }
