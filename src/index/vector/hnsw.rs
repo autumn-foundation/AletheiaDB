@@ -750,7 +750,6 @@ impl VectorIndex for HnswIndex {
                             let _guard = entry.insert(key);
                             self.reverse_mapping.insert(key, id);
 
-
                             // Insert into usearch index (auto-expand capacity if needed)
                             let index = self.inner.write();
 

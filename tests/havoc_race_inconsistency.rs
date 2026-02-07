@@ -1,5 +1,5 @@
-use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -75,7 +75,10 @@ fn havoc_race_phantom_vector() {
     }
 
     if phantom_count > 0 {
-        panic!("❌ FAILED: Leaked {} phantom vectors due to race condition.", phantom_count);
+        panic!(
+            "❌ FAILED: Leaked {} phantom vectors due to race condition.",
+            phantom_count
+        );
     } else {
         println!("✅ Survived without leaks (maybe lucky timing?)");
     }
