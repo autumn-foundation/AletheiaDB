@@ -135,7 +135,9 @@ pub fn json_to_property_map(
     let mut builder = PropertyMapBuilder::new();
     for (key, value) in json {
         let pv = json_to_property_value(value)?;
-        builder = builder.insert(key.as_str(), pv);
+        builder = builder
+            .try_insert(key.as_str(), pv)
+            .map_err(|e| e.to_string())?;
     }
     Ok(builder.build())
 }
@@ -207,6 +209,13 @@ fn json_to_property_value_recursive(
                     .collect();
 
                 if let Ok(floats) = floats {
+                    if floats.len() > crate::core::property::MAX_VECTOR_DIMENSIONS {
+                        return Err(format!(
+                            "Vector dimension {} exceeds limit {}",
+                            floats.len(),
+                            crate::core::property::MAX_VECTOR_DIMENSIONS
+                        ));
+                    }
                     return Ok(PropertyValue::Vector(Arc::from(floats)));
                 }
             }
@@ -290,6 +299,35 @@ mod tests {
                 "Unexpected error: {}",
                 e
             ),
+        }
+    }
+
+    #[test]
+    fn test_json_vector_dimension_bypass() {
+        use crate::core::property::MAX_VECTOR_DIMENSIONS;
+
+        // Create a JSON array that exceeds MAX_VECTOR_DIMENSIONS
+        // We use a small overflow to verify boundary condition
+        let too_large = MAX_VECTOR_DIMENSIONS + 1;
+
+        // Construct a large vector of numbers
+        // Note: generating this large structure in memory is acceptable for a test
+        let large_vec: Vec<serde_json::Value> =
+            std::iter::repeat_n(json!(1.0), too_large).collect();
+        let json_val = serde_json::Value::Array(large_vec);
+
+        let result = json_to_property_value(&json_val);
+
+        // This should now fail with a dimension limit error
+        match result {
+            Ok(_) => panic!("Validation failed: should have rejected large vector"),
+            Err(e) => {
+                assert!(
+                    e.contains("exceeds limit"),
+                    "Unexpected error message: {}",
+                    e
+                );
+            }
         }
     }
 }
