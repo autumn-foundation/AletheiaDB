@@ -415,7 +415,16 @@ where
         }
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
-        // We verified they are not null and aligned above.
+        // We verified they are not null above.
+
+        // Strict alignment check to prevent UB (Sentry Directive)
+        // f32 requires 4-byte alignment. accessing unaligned data via slice is UB.
+        if a.align_offset(std::mem::align_of::<f32>()) != 0
+            || b.align_offset(std::mem::align_of::<f32>()) != 0
+        {
+            panic!("usearch passed unaligned pointer to metric function");
+        }
+
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
         distance_fn(slice_a, slice_b)
@@ -1684,6 +1693,35 @@ impl HnswIndex {
 // - This fork: https://github.com/madmax983/USearch (pinned revision in Cargo.toml)
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "usearch passed unaligned pointer")]
+    fn test_metric_wrapper_panic_on_unaligned() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        // Create a buffer and get an unaligned pointer
+        let buffer = [0u8; 32];
+        // Address + 1 is definitely unaligned for f32 (align 4)
+        let unaligned_ptr = unsafe { buffer.as_ptr().add(1) } as *const f32;
+        let aligned_vec = [0.0f32; 4];
+        let aligned_ptr = aligned_vec.as_ptr();
+
+        wrapper(unaligned_ptr, aligned_ptr);
+    }
+
+    #[test]
+    fn test_is_retryable_error_matching() {
+        assert!(is_retryable_usearch_error(
+            "Error: No available threads to lock for search"
+        ));
+        assert!(!is_retryable_usearch_error("Other error"));
+    }
+}
 
 #[cfg(test)]
 mod tests {
