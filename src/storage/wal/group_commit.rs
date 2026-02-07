@@ -150,13 +150,9 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Panics if the coordinator lock is poisoned.
     pub fn register_transaction(&self) -> Result<(u64, bool), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.state.lock().unwrap();
 
         state.batch_count += 1;
         let epoch = state.current_epoch;
@@ -194,11 +190,7 @@ impl GroupCommitCoordinator {
     /// - The flush for this epoch failed
     /// - The wait times out (indicates a stuck flush thread or excessive system load)
     pub fn wait_for_flush(&self, epoch: u64) -> Result<(), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.state.lock().unwrap();
 
         // Deadlock detection timeout (NOT a performance SLA)
         let base_timeout =
@@ -215,14 +207,8 @@ impl GroupCommitCoordinator {
         // EPOCH SEMANTICS: flushed_epoch = N means "epoch N has been flushed".
         // Transaction at epoch E waits while flushed_epoch < E (i.e., E has not been flushed yet).
         while state.flushed_epoch < epoch {
-            let (new_state, timeout_result) = self
-                .flush_complete
-                .wait_timeout(state, timeout)
-                .map_err(|_| {
-                    Error::Storage(StorageError::LockPoisoned {
-                        resource: "group_commit_state".to_string(),
-                    })
-                })?;
+            let (new_state, timeout_result) =
+                self.flush_complete.wait_timeout(state, timeout).unwrap();
 
             state = new_state;
 
@@ -261,13 +247,9 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Panics if the coordinator lock is poisoned.
     pub fn mark_flushed(&self, result: Result<(), Error>) -> Result<(), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.state.lock().unwrap();
 
         // Store any error for propagation
         state.last_flush_error = result.err().map(|e| e.to_string());
@@ -295,14 +277,9 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Panics if the coordinator lock is poisoned.
     pub fn current_batch_size(&self) -> Result<usize, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
-        Ok(state.batch_count)
+        Ok(self.state.lock().unwrap().batch_count)
     }
 
     /// Get the current epoch.
@@ -311,14 +288,9 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Panics if the coordinator lock is poisoned.
     pub fn current_epoch(&self) -> Result<u64, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
-        Ok(state.current_epoch)
+        Ok(self.state.lock().unwrap().current_epoch)
     }
 
     /// Get the last flushed epoch.
@@ -327,14 +299,9 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Panics if the coordinator lock is poisoned.
     pub fn flushed_epoch(&self) -> Result<u64, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
-        Ok(state.flushed_epoch)
+        Ok(self.state.lock().unwrap().flushed_epoch)
     }
 
     /// Check if a flush should be triggered based on batch size.
@@ -343,13 +310,9 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Panics if the coordinator lock is poisoned.
     pub fn should_flush(&self) -> Result<bool, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let state = self.state.lock().unwrap();
         Ok(state.batch_count >= self.config.max_batch_size)
     }
 

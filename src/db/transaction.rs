@@ -2,7 +2,7 @@ use crate::api::transaction::{ReadTransaction, WriteTransaction};
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::storage::wal::WriteOptions;
-use crate::utils::error::{Result, TransactionError};
+use crate::utils::error::Result;
 use std::sync::Arc;
 
 impl AletheiaDB {
@@ -27,13 +27,7 @@ impl AletheiaDB {
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
         let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp =
-            *self
-                .current_timestamp
-                .lock()
-                .map_err(|_| TransactionError::LockPoisoned {
-                    resource: "current_timestamp".to_string(),
-                })?;
+        let snapshot_timestamp = *self.current_timestamp.lock().unwrap();
 
         // Register as active
         self.visibility_manager.register_active(tx_id);
@@ -122,12 +116,7 @@ impl AletheiaDB {
         // >= the last commit timestamp (monotonicity). This allows the transaction
         // to see all commits that happened before it started.
         let snapshot_timestamp = {
-            let ts = self
-                .current_timestamp
-                .lock()
-                .map_err(|_| TransactionError::LockPoisoned {
-                    resource: "current_timestamp".to_string(),
-                })?;
+            let ts = self.current_timestamp.lock().unwrap();
             std::cmp::max(crate::core::temporal::time::now(), *ts)
         };
 
@@ -364,12 +353,7 @@ impl AletheiaDB {
         // >= the last commit timestamp (monotonicity). This allows the transaction
         // to see all commits that happened before it started.
         let snapshot_timestamp = {
-            let ts = self
-                .current_timestamp
-                .lock()
-                .map_err(|_| TransactionError::LockPoisoned {
-                    resource: "current_timestamp".to_string(),
-                })?;
+            let ts = self.current_timestamp.lock().unwrap();
             std::cmp::max(crate::core::temporal::time::now(), *ts)
         };
 

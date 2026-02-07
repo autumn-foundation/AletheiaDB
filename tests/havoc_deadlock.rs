@@ -11,20 +11,9 @@ const NUM_SEARCHERS: usize = 4;
 const NUM_ADDERS_VACANT: usize = 2;
 const NUM_ADDERS_OCCUPIED: usize = 2;
 const NUM_SAVERS: usize = 1;
-
-fn is_ci() -> bool {
-    std::env::var("CI").is_ok()
-}
-
-/// Returns reduced iterations in CI to avoid timeouts on slow runners.
-fn iterations() -> usize {
-    if is_ci() { 30 } else { 100 }
-}
-
-/// Returns a longer timeout in CI to accommodate slow shared runners.
-fn test_timeout_secs() -> u64 {
-    if is_ci() { 120 } else { 60 }
-}
+// Reduced iterations to prevent CI timeouts while still exercising concurrency
+const ITERATIONS: usize = 100;
+const TEST_TIMEOUT_SECS: u64 = 60;
 
 /// Chaos Engineering: Concurrency Stress Test
 ///
@@ -52,12 +41,11 @@ fn havoc_deadlock_stress_test() {
     });
 
     // Watchdog: If test takes longer than timeout, it's likely deadlocked
-    let timeout = test_timeout_secs();
-    match rx.recv_timeout(Duration::from_secs(timeout)) {
+    match rx.recv_timeout(Duration::from_secs(TEST_TIMEOUT_SECS)) {
         Ok(_) => (), // Success
         Err(_) => panic!(
             "Deadlock detected or test too slow: Timed out after {}s",
-            timeout
+            TEST_TIMEOUT_SECS
         ),
     }
 }
@@ -98,7 +86,7 @@ fn run_deadlock_stress_test() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             let query = vec![0.1f32; VECTOR_DIM];
-            for _ in 0..iterations() {
+            for _ in 0..ITERATIONS {
                 // Filter that accesses node ID (reverse mapping)
                 // We access the node ID to force the closure to actually do something with the mapping
                 let result = index.search_with_filter(&query, 10, |id| id.as_u64() % 2 == 0);
@@ -118,7 +106,7 @@ fn run_deadlock_stress_test() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             let vec = vec![0.1f32; VECTOR_DIM];
-            for i in 0..iterations() {
+            for i in 0..ITERATIONS {
                 let id_val = 1000 + (t * 1000) + i;
                 let id = NodeId::new(id_val as u64).unwrap();
                 match index.add(id, &vec) {
@@ -140,7 +128,7 @@ fn run_deadlock_stress_test() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             let vec = vec![0.2f32; VECTOR_DIM];
-            for i in 0..iterations() {
+            for i in 0..ITERATIONS {
                 // Update existing nodes 1..100
                 // Use a different node each time to hit different shards
                 let id_val = (i % 100) + 1;
@@ -189,9 +177,9 @@ fn run_deadlock_stress_test() {
     assert!(successes > 0, "No operations succeeded during stress test");
 
     // Verify index consistency
-    // We added 100 initial nodes + (NUM_ADDERS_VACANT * iterations()) new nodes
+    // We added 100 initial nodes + (NUM_ADDERS_VACANT * ITERATIONS) new nodes
     // Updates do not change count
-    let expected_len = 100 + (NUM_ADDERS_VACANT * iterations());
+    let expected_len = 100 + (NUM_ADDERS_VACANT * ITERATIONS);
     assert_eq!(
         index.len(),
         expected_len,
@@ -199,7 +187,7 @@ fn run_deadlock_stress_test() {
     );
 
     // Verify a random sample of nodes exists
-    for i in 0..iterations() {
+    for i in 0..ITERATIONS {
         let id_val = 1000 + i; // From first adder
         let id = NodeId::new(id_val as u64).unwrap();
         // Just verify we can remove it (it exists)

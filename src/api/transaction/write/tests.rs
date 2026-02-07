@@ -16,9 +16,9 @@ mod tombstone_tests {
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
         let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(IdGenerator::new());
-        let edge_id_gen = Arc::new(IdGenerator::new());
-        let version_id_gen = Arc::new(IdGenerator::new());
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
 
         let visibility_manager = Arc::new(TxVisibilityManager::new());
@@ -94,9 +94,9 @@ mod general_tests {
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
         let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(IdGenerator::new());
-        let edge_id_gen = Arc::new(IdGenerator::new());
-        let version_id_gen = Arc::new(IdGenerator::new());
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
 
         // Create snapshot and visibility manager for testing
@@ -984,9 +984,9 @@ mod general_tests {
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
         let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(IdGenerator::new());
-        let edge_id_gen = Arc::new(IdGenerator::new());
-        let version_id_gen = Arc::new(IdGenerator::new());
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
 
         // Create visibility manager and snapshot for testing
@@ -1444,9 +1444,9 @@ mod general_tests {
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
         let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(IdGenerator::new());
-        let edge_id_gen = Arc::new(IdGenerator::new());
-        let version_id_gen = Arc::new(IdGenerator::new());
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
 
         // Create snapshot and visibility manager for testing
@@ -1492,9 +1492,9 @@ mod conflict_detection_tests {
         wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
-        node_id_gen: Arc<IdGenerator>,
-        edge_id_gen: Arc<IdGenerator>,
-        version_id_gen: Arc<IdGenerator>,
+        node_id_gen: Arc<Mutex<IdGenerator>>,
+        edge_id_gen: Arc<Mutex<IdGenerator>>,
+        version_id_gen: Arc<Mutex<IdGenerator>>,
         tx_id_gen: TxIdGenerator,
         _temp_dir: TempDir, // Keep alive for WAL directory
     }
@@ -1511,9 +1511,9 @@ mod conflict_detection_tests {
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
             let current_timestamp = Arc::new(Mutex::new(time::now()));
-            let node_id_gen = Arc::new(IdGenerator::new());
-            let edge_id_gen = Arc::new(IdGenerator::new());
-            let version_id_gen = Arc::new(IdGenerator::new());
+            let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
             let tx_id_gen = TxIdGenerator::new();
             let visibility_manager = Arc::new(TxVisibilityManager::new());
 
@@ -2404,9 +2404,9 @@ mod clock_skew_tests {
         wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
-        node_id_gen: Arc<IdGenerator>,
-        edge_id_gen: Arc<IdGenerator>,
-        version_id_gen: Arc<IdGenerator>,
+        node_id_gen: Arc<Mutex<IdGenerator>>,
+        edge_id_gen: Arc<Mutex<IdGenerator>>,
+        version_id_gen: Arc<Mutex<IdGenerator>>,
         tx_id_gen: TxIdGenerator,
         _temp_dir: TempDir,
     }
@@ -2422,9 +2422,9 @@ mod clock_skew_tests {
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
             let current_timestamp = Arc::new(Mutex::new(time::now()));
-            let node_id_gen = Arc::new(IdGenerator::new());
-            let edge_id_gen = Arc::new(IdGenerator::new());
-            let version_id_gen = Arc::new(IdGenerator::new());
+            let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
             let tx_id_gen = TxIdGenerator::new();
             let visibility_manager = Arc::new(TxVisibilityManager::new());
 
@@ -2543,9 +2543,9 @@ mod timestamp_ordering_tests {
         wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
-        node_id_gen: Arc<IdGenerator>,
-        edge_id_gen: Arc<IdGenerator>,
-        version_id_gen: Arc<IdGenerator>,
+        node_id_gen: Arc<Mutex<IdGenerator>>,
+        edge_id_gen: Arc<Mutex<IdGenerator>>,
+        version_id_gen: Arc<Mutex<IdGenerator>>,
         tx_id_gen: TxIdGenerator,
         _temp_dir: TempDir,
     }
@@ -2561,9 +2561,9 @@ mod timestamp_ordering_tests {
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
             let current_timestamp = Arc::new(Mutex::new(time::now()));
-            let node_id_gen = Arc::new(IdGenerator::new());
-            let edge_id_gen = Arc::new(IdGenerator::new());
-            let version_id_gen = Arc::new(IdGenerator::new());
+            let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
             let tx_id_gen = TxIdGenerator::new();
             let visibility_manager = Arc::new(TxVisibilityManager::new());
 
@@ -2800,9 +2800,9 @@ mod bitemporal_validation_tests {
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
-        node_id_gen: Arc<IdGenerator>,
-        edge_id_gen: Arc<IdGenerator>,
-        version_id_gen: Arc<IdGenerator>,
+        node_id_gen: Arc<Mutex<IdGenerator>>,
+        edge_id_gen: Arc<Mutex<IdGenerator>>,
+        version_id_gen: Arc<Mutex<IdGenerator>>,
         tx_id_gen: TxIdGenerator,
         visibility_manager: Arc<TxVisibilityManager>,
         _temp_dir: TempDir,
@@ -2819,9 +2819,9 @@ mod bitemporal_validation_tests {
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
             let current_timestamp = Arc::new(Mutex::new(time::now()));
-            let node_id_gen = Arc::new(IdGenerator::new());
-            let edge_id_gen = Arc::new(IdGenerator::new());
-            let version_id_gen = Arc::new(IdGenerator::new());
+            let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
             let tx_id_gen = TxIdGenerator::new();
             let visibility_manager = Arc::new(TxVisibilityManager::new());
 
@@ -3069,9 +3069,9 @@ mod find_nodes_by_property_tests {
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
         let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(IdGenerator::new());
-        let edge_id_gen = Arc::new(IdGenerator::new());
-        let version_id_gen = Arc::new(IdGenerator::new());
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
 
         let visibility_manager = Arc::new(TxVisibilityManager::new());
@@ -3121,9 +3121,9 @@ mod find_nodes_by_property_tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
         let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(IdGenerator::new());
-        let edge_id_gen = Arc::new(IdGenerator::new());
-        let version_id_gen = Arc::new(IdGenerator::new());
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
@@ -3186,9 +3186,9 @@ mod find_nodes_by_property_tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
         let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(IdGenerator::new());
-        let edge_id_gen = Arc::new(IdGenerator::new());
-        let version_id_gen = Arc::new(IdGenerator::new());
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
@@ -3237,9 +3237,9 @@ mod find_nodes_by_property_tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
         let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(IdGenerator::new());
-        let edge_id_gen = Arc::new(IdGenerator::new());
-        let version_id_gen = Arc::new(IdGenerator::new());
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {

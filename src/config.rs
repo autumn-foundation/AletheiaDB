@@ -701,21 +701,30 @@ impl AletheiaDBConfig {
 }
 
 /// Errors that can occur when loading or saving configuration.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConfigError {
     /// I/O error when reading or writing file.
-    #[error("I/O error: {0}")]
     IoError(String),
     /// Error parsing TOML.
-    #[error("Parse error: {0}")]
     ParseError(String),
     /// Error serializing to TOML.
-    #[error("Serialize error: {0}")]
     SerializeError(String),
     /// Invalid configuration value.
-    #[error("Invalid value: {0}")]
     InvalidValue(String),
 }
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            ConfigError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            ConfigError::SerializeError(msg) => write!(f, "Serialize error: {}", msg),
+            ConfigError::InvalidValue(msg) => write!(f, "Invalid value: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 #[cfg(test)]
 mod tests {

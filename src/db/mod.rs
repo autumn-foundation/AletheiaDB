@@ -110,10 +110,9 @@ pub struct AletheiaDB {
     /// Transaction visibility manager for Snapshot Isolation
     pub(crate) visibility_manager: Arc<TxVisibilityManager>,
     /// ID generators for nodes, edges, and versions (shared with transactions)
-    /// IdGenerator uses AtomicU64 internally, so no external Mutex is needed.
-    pub(crate) node_id_gen: Arc<IdGenerator>,
-    pub(crate) edge_id_gen: Arc<IdGenerator>,
-    pub(crate) version_id_gen: Arc<IdGenerator>,
+    pub(crate) node_id_gen: Arc<Mutex<IdGenerator>>,
+    pub(crate) edge_id_gen: Arc<Mutex<IdGenerator>>,
+    pub(crate) version_id_gen: Arc<Mutex<IdGenerator>>,
     /// Default durability mode for write transactions
     pub(crate) default_durability: DurabilityMode,
     /// Query optimization statistics - cached across queries for effective cost-based optimization

@@ -92,7 +92,7 @@ impl AppState {
         &self.db
     }
 
-    /// Get the Arc<AletheiaDB> directly
+    /// Get the `Arc<AletheiaDB>` directly
     ///
     /// Useful when you need to clone the Arc or pass it to other components.
     pub fn db_arc(&self) -> Arc<AletheiaDB> {

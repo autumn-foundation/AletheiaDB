@@ -1,62 +1,84 @@
-use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
+use tempfile::tempdir;
 
+use aletheiadb::core::id::NodeId;
+
+/// 👺 HAVOC DEADLOCK REGRESSION TEST (Fixed in PR #751)
+///
+/// Previously triggered a deadlock between `add` (Occupied path) and `save`.
+///
+/// Lock Inversion (FIXED):
+/// - Thread 1 (`add`): Acquires Shard Lock (via entry) -> Then acquires Inner Write Lock
+/// - Thread 2 (`save`): Previously acquired Inner Read Lock -> Then iterated Shard Locks
+///
+/// Fix: save_internal() now collects mappings BEFORE acquiring any locks,
+/// establishing consistent lock ordering: inner -> DashMap
+///
+/// This test now serves as a regression test to ensure the deadlock doesn't return.
 #[test]
-fn test_hnsw_reentrant_deadlock_prevented() {
+fn havoc_deadlock_add_vs_save() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("havoc_deadlock.index");
+
+    // Create index
     let index = Arc::new(
-        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        HnswIndexBuilder::new(128, DistanceMetric::Cosine)
             .build()
-            .unwrap(),
+            .expect("Failed to build index"),
     );
 
-    let id1 = NodeId::new(1).unwrap();
-    index.add(id1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    let node_id = NodeId::new(1).unwrap();
+    let vector = vec![1.0; 128];
 
-    let index_clone = index.clone();
+    // Add initial node so that subsequent adds hit the 'Occupied' path
+    index.add(node_id, &vector).expect("Initial add failed");
 
-    // Test that re-entrant modifications are detected and prevented.
-    // Previously, this would cause a deadlock. Now it should return an error.
+    let index_clone1 = index.clone();
+    let index_clone2 = index.clone();
+    let path_clone = index_path.clone();
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let barrier = Arc::new(Barrier::new(3));
+    let b1 = barrier.clone();
+    let b2 = barrier.clone();
 
-    thread::spawn(move || {
-        println!("Starting search with filter...");
+    println!("Starting deadlock torture test...");
 
-        // This filter attempts to modify the index, which would cause a deadlock
-        // if not prevented. With our fix (PR #870), this should return an error.
-        let result = index_clone.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, |id| {
-            println!("Inside filter for {:?}", id);
-
-            // Attempt to modify index from within the filter callback.
-            // This should now return an error instead of deadlocking.
-            let new_id = NodeId::new(id.as_u64() + 100).unwrap();
-            let add_result = index_clone.add(new_id, &[0.0, 1.0, 0.0, 0.0]);
-
-            // Verify that the add operation was rejected with the expected error
-            assert!(add_result.is_err(), "Expected add to fail during filter");
-            let err_msg = add_result.unwrap_err().to_string();
-            assert!(
-                err_msg.contains("Cannot modify index from within a search_with_filter callback"),
-                "Expected re-entrancy error, got: {}",
-                err_msg
-            );
-
-            true
-        });
-
-        println!("Search finished with result: {:?}", result);
-
-        // The search itself should succeed (the filter just checks the add failed)
-        assert!(result.is_ok(), "Expected search to succeed: {:?}", result);
-
-        tx.send(()).unwrap();
+    // Thread 1: Updates the node (Occupied path)
+    // Lock Order: Shard Lock (via entry) -> Inner Write Lock
+    let t1 = thread::spawn(move || {
+        b1.wait();
+        for i in 0..10000 {
+            let vec = vec![i as f32; 128];
+            // This hits the Occupied path because node_id exists
+            index_clone1.add(node_id, &vec).unwrap();
+            // Busy loop to keep pressure high
+        }
     });
 
-    // Wait for 2 seconds. The operation should complete quickly now.
-    if rx.recv_timeout(Duration::from_secs(2)).is_err() {
-        panic!("Test timed out! The re-entrancy prevention may not be working correctly.");
-    }
+    // Thread 2: Saves the index
+    // Lock Order: Inner Read Lock -> Shard Lock (via iter)
+    let t2 = thread::spawn(move || {
+        b2.wait();
+        for i in 0..100 {
+            let p = path_clone.with_extension(format!("{}.index", i));
+            // This calls save(), which acquires inner.read() then iterates id_mapping
+            let _ = index_clone2.save(&p);
+            // Yield slightly to allow T1 to get locks
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    // Wait for threads to start
+    barrier.wait();
+
+    println!("Threads running. If this hangs, we successfully deadlocked.");
+
+    // Join threads
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    println!("Test finished without deadlock (Unlucky timing?)");
 }

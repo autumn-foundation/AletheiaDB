@@ -455,9 +455,12 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
         .count();
 
     let mut tombstone_ids = if num_deletes > 0 {
-        let ids: Result<Vec<u64>> = (0..num_deletes)
-            .map(|_| tx.version_id_gen.next().map_err(Into::into))
-            .collect();
+        let ids: Result<Vec<u64>> = {
+            let id_gen = tx.version_id_gen.lock().unwrap();
+            (0..num_deletes)
+                .map(|_| id_gen.next().map_err(Into::into))
+                .collect()
+        };
         ids?.into_iter()
     } else {
         Vec::new().into_iter()

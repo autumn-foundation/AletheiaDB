@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use parking_lot::RwLock;
 
@@ -522,9 +522,9 @@ pub(crate) fn load_indexes_startup(
     manager: &IndexPersistenceManager,
     current: &Arc<CurrentStorage>,
     historical: &Arc<RwLock<HistoricalStorage>>,
-    node_id_gen: &Arc<IdGenerator>,
-    edge_id_gen: &Arc<IdGenerator>,
-    version_id_gen: &Arc<IdGenerator>,
+    node_id_gen: &Arc<Mutex<IdGenerator>>,
+    edge_id_gen: &Arc<Mutex<IdGenerator>>,
+    version_id_gen: &Arc<Mutex<IdGenerator>>,
 ) {
     // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
     // (manifest is only saved on shutdown, not during background persistence)
@@ -569,16 +569,18 @@ pub(crate) fn load_indexes_startup(
                 }
 
                 // Initialize ID generators BEFORE inserting entities to prevent collisions
-                // IdGenerator uses AtomicU64, so reset_to is lock-free and thread-safe.
                 if max_node_id > 0 {
-                    node_id_gen.reset_to(max_node_id + 1);
+                    let mut node_gen = node_id_gen.lock().unwrap();
+                    *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
                 }
                 if max_edge_id > 0 {
-                    edge_id_gen.reset_to(max_edge_id + 1);
+                    let mut edge_gen = edge_id_gen.lock().unwrap();
+                    *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
                 }
                 // Initialize version ID generator from max persisted version_id
                 if max_version_id > 0 {
-                    version_id_gen.reset_to(max_version_id + 1);
+                    let mut version_gen = version_id_gen.lock().unwrap();
+                    *version_gen = crate::core::id::IdGenerator::with_start(max_version_id + 1);
                 }
 
                 // Restore nodes with explicit error tracking
