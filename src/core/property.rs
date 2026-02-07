@@ -4295,10 +4295,7 @@ mod sentry_tests {
         let bytes = serialize_vector(slice);
         let (deserialized, _) = deserialize_vector(&bytes).unwrap();
 
-        assert_eq!(deserialized.len(), 3);
-        assert_eq!(deserialized[0], 2.0);
-        assert_eq!(deserialized[1], 3.0);
-        assert_eq!(deserialized[2], 4.0);
+        assert_eq!(&*deserialized, &[2.0, 3.0, 4.0]);
     }
 
     /// 🎯 Target: PropertyMapBuilder::insert panic
