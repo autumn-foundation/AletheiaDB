@@ -352,7 +352,7 @@ mod tests {
         let val = serde_json::Value::Array(vec);
 
         let res = json_to_property_value(&val);
-        assert!(res.is_err(), "Should enforce MAX_ARRAY_ELEMENTS");
-        assert!(res.unwrap_err().contains("exceeds maximum allowed"));
+        let err = res.expect_err("Should enforce MAX_ARRAY_ELEMENTS");
+        assert!(err.contains("exceeds maximum allowed"));
     }
 }
