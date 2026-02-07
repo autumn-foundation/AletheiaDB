@@ -245,6 +245,15 @@ pub enum StorageError {
         /// Maximum allowed
         limit: usize,
     },
+    /// A Mutex lock was poisoned (a thread panicked while holding the lock).
+    ///
+    /// This indicates severe internal corruption. The affected resource cannot be
+    /// safely accessed.
+    #[error("Lock poisoned for {resource}: a thread panicked while holding the lock")]
+    LockPoisoned {
+        /// The resource whose lock was poisoned
+        resource: String,
+    },
 }
 
 impl StorageError {
@@ -533,6 +542,15 @@ pub enum TransactionError {
     RollbackFailed {
         /// Why rollback failed
         reason: String,
+    },
+    /// A Mutex lock was poisoned (a thread panicked while holding the lock).
+    ///
+    /// This indicates severe internal corruption. The affected resource cannot be
+    /// safely accessed, and the transaction must be aborted.
+    #[error("Lock poisoned for {resource}: a thread panicked while holding the lock")]
+    LockPoisoned {
+        /// The resource whose lock was poisoned
+        resource: String,
     },
     /// Clock skew exceeds acceptable bounds.
     ///
