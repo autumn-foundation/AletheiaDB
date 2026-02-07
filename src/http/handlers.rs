@@ -245,19 +245,9 @@ pub async fn handle_query(
                 Ok(nid) => {
                     // Safety limits to prevent DoS
                     let max_limit = 1000;
-                    let max_deep_pagination = 10_000;
 
                     let limit_val = limit.unwrap_or(100).min(max_limit);
                     let offset_val = offset.unwrap_or(0);
-
-                    // Prevent deep pagination attacks (CPU DoS)
-                    // Use saturating_add to prevent integer overflow bypass
-                    if offset_val.saturating_add(limit_val) > max_deep_pagination {
-                        return HttpResponse::BadRequest().json(ApiResponse::error(format!(
-                            "Pagination limit exceeded: offset + limit must be <= {}",
-                            max_deep_pagination
-                        )));
-                    }
 
                     // Deduplication
                     let mut seen_ids = HashSet::new();
