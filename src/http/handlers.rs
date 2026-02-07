@@ -336,10 +336,10 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use actix_web::web;
     use crate::AletheiaDB;
     use crate::config::WalConfigBuilder;
     use crate::storage::wal::DurabilityMode;
+    use actix_web::web;
     use std::sync::Arc;
 
     /// 🎯 Target: FindNeighbors pagination limit check
@@ -388,12 +388,15 @@ mod sentry_tests {
 
         // Assert we get 400 Bad Request
         if resp.status().is_success() {
-             // This means overflow wrapped around and check passed!
-             panic!("Security vulnerability: Integer overflow bypassed pagination limit check!");
+            // This means overflow wrapped around and check passed!
+            panic!("Security vulnerability: Integer overflow bypassed pagination limit check!");
         }
 
-        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST,
-            "Should return 400 Bad Request on overflow/deep pagination");
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Should return 400 Bad Request on overflow/deep pagination"
+        );
 
         // Optional: verify error message
         use actix_web::body::MessageBody;

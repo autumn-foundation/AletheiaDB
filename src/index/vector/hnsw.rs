@@ -203,8 +203,12 @@ mod sentry_tests {
     #[test]
     fn test_is_retryable_usearch_error() {
         // Known retryable error
-        assert!(is_retryable_usearch_error("Error: No available threads to lock for search"));
-        assert!(is_retryable_usearch_error("Some prefix: No available threads to lock"));
+        assert!(is_retryable_usearch_error(
+            "Error: No available threads to lock for search"
+        ));
+        assert!(is_retryable_usearch_error(
+            "Some prefix: No available threads to lock"
+        ));
 
         // Non-retryable errors
         assert!(!is_retryable_usearch_error("Memory allocation failed"));
@@ -247,7 +251,10 @@ mod sentry_tests {
         // It relies on defaults or external config.
         // If this changes in the future, this test should be updated.
         // For now, deserialized will have F32 (default), original has F16.
-        assert_ne!(original.quantization, deserialized.quantization, "Quantization is not persisted, so it reverts to default (F32)");
+        assert_ne!(
+            original.quantization, deserialized.quantization,
+            "Quantization is not persisted, so it reverts to default (F32)"
+        );
         assert_eq!(deserialized.quantization, Quantization::F32); // Default
     }
 }
