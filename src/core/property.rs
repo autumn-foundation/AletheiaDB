@@ -4323,7 +4323,8 @@ mod sentry_tests {
     fn test_deserialize_vector_zero_dim() {
         let empty: Vec<f32> = Vec::new();
         let bytes = serialize_vector(&empty);
-        let (deserialized, _) = deserialize_vector(&bytes).expect("Should deserialize empty vector");
+        let (deserialized, _) =
+            deserialize_vector(&bytes).expect("Should deserialize empty vector");
         assert!(deserialized.is_empty());
     }
 }
