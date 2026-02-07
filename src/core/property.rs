@@ -4246,4 +4246,82 @@ mod sentry_tests {
         let vec_nan = PropertyValue::vector([f32::NAN]);
         assert_ne!(vec_nan, vec_nan, "Vector with NaN should not equal itself");
     }
+
+    /// 🎯 Target: unsafe block in serialize_vector_into
+    /// 💣 Risk: Bulk copy optimization might corrupt bits of special float values.
+    /// 🧪 Strategy: Serialize/deserialize values with distinct bit patterns (NaN payloads, signed zero) and verify bits match exactly.
+    /// 🔬 Verification: Compare to_bits().
+    #[test]
+    fn test_vector_bitwise_preservation() {
+        // Construct special float values
+        let pos_zero = 0.0f32;
+        let neg_zero = -0.0f32;
+        let inf = f32::INFINITY;
+        let neg_inf = f32::NEG_INFINITY;
+
+        // Construct distinct NaN payloads if possible
+        // Standard NaN: 0x7fc00000
+        let nan1 = f32::from_bits(0x7fc00001); // Signaling/Quiet NaN with payload 1
+        let nan2 = f32::from_bits(0x7fc00002); // Different payload
+
+        let data = vec![pos_zero, neg_zero, inf, neg_inf, nan1, nan2];
+        let bytes = serialize_vector(&data);
+        let (deserialized, _) = deserialize_vector(&bytes).unwrap();
+
+        assert_eq!(deserialized.len(), data.len());
+
+        for (i, &val) in data.iter().enumerate() {
+            assert_eq!(
+                val.to_bits(),
+                deserialized[i].to_bits(),
+                "Bitwise mismatch at index {}: expected {:08x}, got {:08x}",
+                i,
+                val.to_bits(),
+                deserialized[i].to_bits()
+            );
+        }
+    }
+
+    /// 🎯 Target: unsafe block in try_serialize_vector_into
+    /// 💣 Risk: Pointer arithmetic on slices that are not at the start of allocation might be incorrect.
+    /// 🧪 Strategy: Slice a vector and serialize it.
+    /// 🔬 Verification: Verify result matches expected values.
+    #[test]
+    fn test_serialize_vector_slice_offsets() {
+        let full_vec: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        // Take a slice from the middle: [2.0, 3.0, 4.0]
+        let slice = &full_vec[1..4];
+
+        let bytes = serialize_vector(slice);
+        let (deserialized, _) = deserialize_vector(&bytes).unwrap();
+
+        assert_eq!(&*deserialized, &[2.0, 3.0, 4.0]);
+    }
+
+    /// 🎯 Target: PropertyMapBuilder::insert panic
+    /// 💣 Risk: Incorrect panic message or behavior on recursion limit.
+    /// 🧪 Strategy: Trigger recursion limit and catch panic message.
+    /// 🔬 Verification: expect specific string.
+    #[test]
+    #[should_panic(expected = "recursion depth limit exceeded")]
+    fn test_property_map_builder_insert_panic_message() {
+        let mut value = PropertyValue::Int(42);
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            value = PropertyValue::Array(Arc::new(vec![value]));
+        }
+        PropertyMapBuilder::new().insert("deep", value);
+    }
+
+    /// 🎯 Target: deserialize_vector (zero dim)
+    /// 💣 Risk: Unsafe code might be triggered with 0 length, potentially causing issues (though logically safe).
+    /// 🧪 Strategy: Serialize empty vector and deserialize.
+    /// 🔬 Verification: Ensure no error and empty result.
+    #[test]
+    fn test_deserialize_vector_zero_dim() {
+        let empty: Vec<f32> = Vec::new();
+        let bytes = serialize_vector(&empty);
+        let (deserialized, _) =
+            deserialize_vector(&bytes).expect("Should deserialize empty vector");
+        assert!(deserialized.is_empty());
+    }
 }

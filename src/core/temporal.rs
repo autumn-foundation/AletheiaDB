@@ -447,16 +447,28 @@ pub mod time {
     /// For monotonic HLC generation with causality, use HLC's send() method.
     ///
     /// # Panics
-    /// Panics if the system clock is set before Unix epoch.
+    /// Panics if the system clock is set before Unix epoch. Use [`try_now`] for
+    /// a fallible version that returns `Result` instead.
     pub fn now() -> Timestamp {
+        try_now().expect("System clock is before Unix epoch")
+    }
+
+    /// Fallible version of [`now`] that returns `Result` instead of panicking.
+    ///
+    /// Returns an error if the system clock is set before Unix epoch.
+    /// Most callers should use [`now`] instead, since a pre-epoch clock
+    /// is an unrecoverable system-level error.
+    pub fn try_now() -> Result<Timestamp, crate::utils::error::TemporalError> {
         let wallclock = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("System clock is before Unix epoch")
+            .map_err(|_| crate::utils::error::TemporalError::TemporalParadox {
+                reason: "System clock is before Unix epoch".to_string(),
+            })?
             .as_micros() as i64;
 
         // Return HybridTimestamp with logical counter = 0
         // Use new_unchecked for performance (system clock is trusted)
-        HybridTimestamp::new_unchecked(wallclock, 0)
+        Ok(HybridTimestamp::new_unchecked(wallclock, 0))
     }
 
     /// Convert a Timestamp to a human-readable ISO 8601 string (UTC).

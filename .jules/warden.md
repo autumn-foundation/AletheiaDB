@@ -164,3 +164,18 @@ Added `tests/repro_allocation_dos.rs` simulating malicious payloads. Confirmed t
 
 **Verification:** Regression Test
 Added `tests/warden_vector_safety.rs` which attempts to insert and serialize oversized vectors using the `try_` methods. Verified that they now return `VectorError::DimensionTooLarge` instead of crashing the test runner.
+
+## 2026-02-19 - Pagination DoS Hardening
+
+**Threat:** Integer Overflow Bypass for DoS Protection
+The `FindNeighbors` endpoint had a deep pagination check `if offset + limit > 10000`. However, a malicious request with `offset = usize::MAX` and `limit = 1` would cause an integer overflow (wrapping to 0), bypassing the check. This would force the server to attempt an iteration of `usize::MAX` items (CPU DoS).
+Additionally, `FindNode` endpoint completely lacked this deep pagination check.
+
+**Defense:** Saturating Arithmetic & Validation
+- Replaced `+` with `saturating_add` in `FindNeighbors` to safely saturate at `usize::MAX` on overflow, correctly triggering the limit check.
+- Added strict pagination validation to `FindNode` endpoint using the same logic.
+
+**Verification:** Regression Test
+Added `test_warden_find_neighbors_overflow` and `test_warden_find_node_deep_pagination` in `src/http/handlers.rs`.
+- Confirmed that `offset = usize::MAX` now returns `400 Bad Request` instead of bypassing the check.
+- Confirmed that deep pagination in `FindNode` now returns `400 Bad Request`.

@@ -87,9 +87,10 @@ pub struct WriteTransaction {
     pub(crate) visibility_manager: Arc<TxVisibilityManager>,
 
     // ID generators (needed for creating new entities)
-    pub(crate) node_id_gen: Arc<Mutex<IdGenerator>>,
-    pub(crate) edge_id_gen: Arc<Mutex<IdGenerator>>,
-    pub(crate) version_id_gen: Arc<Mutex<IdGenerator>>,
+    // IdGenerator uses AtomicU64 internally, so no external Mutex is needed.
+    pub(crate) node_id_gen: Arc<IdGenerator>,
+    pub(crate) edge_id_gen: Arc<IdGenerator>,
+    pub(crate) version_id_gen: Arc<IdGenerator>,
 
     /// Durability mode for this transaction's commit
     pub(crate) durability_mode: DurabilityMode,
@@ -107,9 +108,9 @@ impl WriteTransaction {
         wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
-        node_id_gen: Arc<Mutex<IdGenerator>>,
-        edge_id_gen: Arc<Mutex<IdGenerator>>,
-        version_id_gen: Arc<Mutex<IdGenerator>>,
+        node_id_gen: Arc<IdGenerator>,
+        edge_id_gen: Arc<IdGenerator>,
+        version_id_gen: Arc<IdGenerator>,
     ) -> Self {
         Self::new_with_durability(
             tx_id,
@@ -138,9 +139,9 @@ impl WriteTransaction {
         wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
-        node_id_gen: Arc<Mutex<IdGenerator>>,
-        edge_id_gen: Arc<Mutex<IdGenerator>>,
-        version_id_gen: Arc<Mutex<IdGenerator>>,
+        node_id_gen: Arc<IdGenerator>,
+        edge_id_gen: Arc<IdGenerator>,
+        version_id_gen: Arc<IdGenerator>,
         durability_mode: DurabilityMode,
     ) -> Self {
         WriteTransaction {
@@ -268,7 +269,12 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
 
-            let mut ts = self.current_timestamp.lock().unwrap();
+            let mut ts =
+                self.current_timestamp
+                    .lock()
+                    .map_err(|_| TransactionError::LockPoisoned {
+                        resource: "current_timestamp".to_string(),
+                    })?;
 
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
@@ -737,8 +743,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let node_id = NodeId::new_unchecked(self.node_id_gen.lock().unwrap().next()?);
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock().unwrap().next()?);
+        let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         // Get timestamp: use provided valid_from or default to transaction start time
@@ -778,8 +784,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.lock().unwrap().next()?);
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock().unwrap().next()?);
+        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         // Get timestamp: use provided valid_from or default to transaction start time
@@ -817,7 +823,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current node to preserve label and existing properties
         let node = self.current.get_node(node_id)?;
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock().unwrap().next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
 
         // PATCH semantics: Merge new properties with existing ones
         // Start with existing properties
@@ -881,7 +887,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current edge to preserve source, target, label and existing properties
         let edge = self.current.get_edge(edge_id)?;
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock().unwrap().next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
 
         // PATCH semantics: Merge new properties with existing ones
         // Start with existing properties
