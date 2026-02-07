@@ -732,6 +732,12 @@ impl VectorIndex for HnswIndex {
                 // New node: allocate key with overflow protection
                 // Check BEFORE incrementing to avoid leaving next_key in invalid state
                 const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+
+                // CRITICAL: Drop the entry to release DashMap lock BEFORE acquiring inner lock
+                // This prevents lock ordering inversion (dashmap -> inner is FORBIDDEN)
+                drop(entry);
+
+                // Step 1: Atomically allocate a unique key (no locks held)
                 let key = loop {
                     let current = self.next_key.load(Ordering::SeqCst);
                     if current > MAX_VALID_KEY {
@@ -747,16 +753,13 @@ impl VectorIndex for HnswIndex {
                         Ordering::SeqCst,
                         Ordering::SeqCst,
                     ) {
-                        Ok(key) => {
-                            entry.insert(key);
-                            self.reverse_mapping.insert(key, id);
-                            break key;
-                        }
+                        Ok(key) => break key,
                         Err(_) => continue, // Retry with new current value
                     }
                 };
 
-                // Insert into usearch index (auto-expand capacity if needed)
+                // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
+                // This prevents deadlock with search_with_filter which holds inner -> dashmap.
                 let index = self.inner.write();
 
                 // Check if we need to expand capacity
@@ -771,6 +774,7 @@ impl VectorIndex for HnswIndex {
                     })?;
                 }
 
+                // Step 3: Add to inner usearch index while holding write lock
                 index.add(key, vector).map_err(|e| {
                     Error::Vector(VectorError::IndexError(format!(
                         "Failed to add vector: {}",
@@ -778,6 +782,31 @@ impl VectorIndex for HnswIndex {
                     )))
                 })?;
 
+                // Release inner lock before accessing DashMap
+                drop(index);
+
+                // Step 4: Insert to mappings (dashmap) AFTER inner is updated
+                // Handle race: another thread may have added this NodeId while we held inner lock
+                if let Some(_existing_key) = self.id_mapping.insert(id, key) {
+                    // Race detected: Another thread added this NodeId concurrently
+                    // Our vector is in inner with key=key, their mapping points to existing_key
+                    // Clean up by removing our vector from inner
+                    let index = self.inner.write();
+                    index.remove(key).map_err(|e| {
+                        Error::Vector(VectorError::IndexError(format!(
+                            "Failed to rollback vector after concurrent add: {}",
+                            e
+                        )))
+                    })?;
+                    // The existing mapping wins; return error to indicate retry needed
+                    return Err(Error::Vector(VectorError::IndexError(
+                        "Concurrent add detected for same NodeId, vector already exists"
+                            .to_string(),
+                    )));
+                }
+
+                // Success: we inserted the mapping
+                self.reverse_mapping.insert(key, id);
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
