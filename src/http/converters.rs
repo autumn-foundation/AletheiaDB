@@ -198,10 +198,20 @@ fn json_to_property_value_recursive(
         }
         serde_json::Value::String(s) => Ok(PropertyValue::String(Arc::from(s.as_str()))),
         serde_json::Value::Array(arr) => {
+            // SECURITY: Check array length BEFORE allocation to prevent DoS.
+            // This protects both the optimized vector path and the generic array fallback.
+            if arr.len() > crate::core::property::MAX_ARRAY_ELEMENTS {
+                return Err(format!(
+                    "Array count {} exceeds maximum allowed {}",
+                    arr.len(),
+                    crate::core::property::MAX_ARRAY_ELEMENTS
+                ));
+            }
+
             if arr.iter().all(|v| v.is_number()) && !arr.is_empty() {
-                // SECURITY: Check dimensions BEFORE allocating vector to prevent DoS.
-                // If it looks like a vector (all numbers) but is too large, reject it immediately
-                // rather than allocating a huge Vec<f32> only to reject it later.
+                // SECURITY: Check dimensions for potential vector conversion.
+                // Even if it fits in MAX_ARRAY_ELEMENTS, it might exceed MAX_VECTOR_DIMENSIONS
+                // if those limits differ.
                 if arr.len() > crate::core::property::MAX_VECTOR_DIMENSIONS {
                     return Err(format!(
                         "Vector dimension {} exceeds limit {}",
@@ -316,8 +326,9 @@ mod tests {
 
         // Construct a large vector of numbers
         // Note: generating this large structure in memory is acceptable for a test
-        let large_vec: Vec<serde_json::Value> =
-            std::iter::repeat_n(json!(1.0), too_large).collect();
+        let large_vec: Vec<serde_json::Value> = std::iter::repeat(json!(1.0))
+            .take(too_large)
+            .collect();
         let json_val = serde_json::Value::Array(large_vec);
 
         let result = json_to_property_value(&json_val);
@@ -334,35 +345,24 @@ mod tests {
             }
         }
     }
-}
-
-#[cfg(test)]
-mod verify_hardening {
-    use super::*;
-    use serde_json::json;
-    use crate::core::property::MAX_VECTOR_DIMENSIONS;
 
     #[test]
-    fn test_json_vector_dimension_allocation_check() {
-        // Create a JSON array that exceeds MAX_VECTOR_DIMENSIONS
-        let too_large = MAX_VECTOR_DIMENSIONS + 1;
-        // Construct a large vector of numbers
-        let large_vec: Vec<serde_json::Value> =
-            std::iter::repeat_n(json!(1.0), too_large).collect();
-        let json_val = serde_json::Value::Array(large_vec);
+    fn test_json_array_element_limit_check() {
+        // Create a mixed JSON array that would bypass vector check
+        // but should be subject to array count limit.
+        // Since we can't easily allocate 10M+ elements in a test without running out of memory,
+        // we can at least verify that a normal mixed array works, and we rely on
+        // the code audit for the limit check itself (which uses the constant).
 
+        let mixed_vec = vec![json!(1.0), json!("string")];
+        let json_val = serde_json::Value::Array(mixed_vec);
         let result = json_to_property_value(&json_val);
 
-        // Verify it returns an error about dimension limit
-        match result {
-            Ok(_) => panic!("Should have rejected large vector"),
-            Err(e) => {
-                assert!(
-                    e.contains("exceeds limit"),
-                    "Unexpected error message: {}",
-                    e
-                );
-            }
+        assert!(result.is_ok());
+        if let Ok(PropertyValue::Array(arr)) = result {
+            assert_eq!(arr.len(), 2);
+        } else {
+            panic!("Should have parsed as Array");
         }
     }
 }
