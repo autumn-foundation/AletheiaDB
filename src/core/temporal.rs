@@ -939,3 +939,347 @@ mod tests {
         assert!(!interval.is_visible_at(jan_15, jan_15));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy for generating valid wallclock values within safe bounds.
+    /// We use a range well within MAX_VALID_TIMESTAMP to avoid overflow in
+    /// arithmetic operations and to stay away from sentinel values.
+    fn valid_wallclock() -> impl Strategy<Value = i64> {
+        0..=(MAX_VALID_TIMESTAMP / 2)
+    }
+
+    /// Strategy for generating HybridTimestamps with valid values.
+    fn valid_timestamp() -> impl Strategy<Value = Timestamp> {
+        (valid_wallclock(), any::<u32>())
+            .prop_map(|(wc, lc)| HybridTimestamp::new_unchecked(wc, lc))
+    }
+
+    /// Strategy for generating three ordered wallclock values (a <= b <= c).
+    fn three_ordered_wallclocks() -> impl Strategy<Value = (i64, i64, i64)> {
+        (valid_wallclock(), valid_wallclock(), valid_wallclock()).prop_map(|(a, b, c)| {
+            let mut vals = [a, b, c];
+            vals.sort();
+            (vals[0], vals[1], vals[2])
+        })
+    }
+
+    proptest! {
+        // ====================================================================
+        // Timestamp Ordering Properties
+        // ====================================================================
+
+        /// Property: Timestamp ordering is transitive.
+        /// If a < b and b < c then a < c.
+        #[test]
+        fn prop_timestamp_ordering_is_transitive(
+            (wc_a, wc_b, wc_c) in three_ordered_wallclocks()
+        ) {
+            let a = HybridTimestamp::new_unchecked(wc_a, 0);
+            let b = HybridTimestamp::new_unchecked(wc_b, 0);
+            let c = HybridTimestamp::new_unchecked(wc_c, 0);
+
+            if a < b && b < c {
+                prop_assert!(a < c, "Transitivity violated: {:?} < {:?} < {:?} but a >= c", a, b, c);
+            }
+        }
+
+        /// Property: Timestamp ordering is transitive with logical counters.
+        #[test]
+        fn prop_timestamp_ordering_transitive_with_logical(
+            wc in valid_wallclock(),
+            lc_a in 0u32..1000,
+            lc_b in 0u32..1000,
+            lc_c in 0u32..1000,
+        ) {
+            let a = HybridTimestamp::new_unchecked(wc, lc_a);
+            let b = HybridTimestamp::new_unchecked(wc, lc_b);
+            let c = HybridTimestamp::new_unchecked(wc, lc_c);
+
+            if a < b && b < c {
+                prop_assert!(a < c, "Logical counter transitivity violated");
+            }
+        }
+
+        /// Property: Timestamp ordering is antisymmetric.
+        /// If a <= b and b <= a then a == b.
+        #[test]
+        fn prop_timestamp_ordering_antisymmetric(
+            a in valid_timestamp(),
+            b in valid_timestamp(),
+        ) {
+            if a <= b && b <= a {
+                prop_assert_eq!(a, b);
+            }
+        }
+
+        /// Property: Timestamp ordering is total.
+        /// For any a, b: exactly one of a < b, a == b, a > b holds.
+        #[test]
+        fn prop_timestamp_ordering_total(
+            a in valid_timestamp(),
+            b in valid_timestamp(),
+        ) {
+            let lt = a < b;
+            let eq = a == b;
+            let gt = a > b;
+            let exactly_one = (lt as u8 + eq as u8 + gt as u8) == 1;
+            prop_assert!(exactly_one, "Total ordering violated: lt={}, eq={}, gt={}", lt, eq, gt);
+        }
+
+        // ====================================================================
+        // Timestamp Monotonicity Properties
+        // ====================================================================
+
+        /// Property: time::now() produces timestamps after a known past time.
+        #[test]
+        fn prop_time_now_is_after_epoch(_dummy in 0..10u8) {
+            let ts = time::now();
+            let epoch = HybridTimestamp::new_unchecked(0, 0);
+            prop_assert!(ts > epoch, "time::now() should be after epoch");
+        }
+
+        /// Property: Sequential calls to time::now() produce non-decreasing timestamps.
+        #[test]
+        fn prop_time_now_monotonic(_dummy in 0..10u8) {
+            let t1 = time::now();
+            let t2 = time::now();
+            prop_assert!(t2 >= t1, "Sequential now() calls should be non-decreasing: {:?} vs {:?}", t1, t2);
+        }
+
+        // ====================================================================
+        // TimeRange Properties
+        // ====================================================================
+
+        /// Property: Valid time ranges always have start <= end.
+        #[test]
+        fn prop_time_range_well_formed(
+            start_wc in valid_wallclock(),
+            end_wc in valid_wallclock(),
+        ) {
+            let start = HybridTimestamp::new_unchecked(start_wc, 0);
+            let end = HybridTimestamp::new_unchecked(end_wc, 0);
+            let result = TimeRange::new(start, end);
+
+            if start <= end {
+                let range = result.expect("Valid range should succeed");
+                prop_assert!(range.start() <= range.end(),
+                    "TimeRange should have start <= end");
+            } else {
+                prop_assert!(result.is_err(),
+                    "TimeRange::new should reject start > end");
+            }
+        }
+
+        /// Property: TimeRange::from() always creates a current (open-ended) range.
+        #[test]
+        fn prop_time_range_from_is_current(ts in valid_timestamp()) {
+            let range = TimeRange::from(ts);
+            prop_assert!(range.is_current(), "TimeRange::from should be current");
+            prop_assert_eq!(range.start(), ts);
+            prop_assert_eq!(range.end(), TIMESTAMP_MAX);
+        }
+
+        /// Property: TimeRange::at() creates a point-in-time range where start == end.
+        #[test]
+        fn prop_time_range_at_is_point(ts in valid_timestamp()) {
+            let range = TimeRange::at(ts);
+            prop_assert_eq!(range.start(), range.end());
+            prop_assert_eq!(range.start(), ts);
+        }
+
+        /// Property: TimeRange contains its start but not its end (half-open interval).
+        #[test]
+        fn prop_time_range_half_open(
+            (wc_start, wc_end) in (0i64..1_000_000, 1i64..1_000_000)
+                .prop_map(|(s, delta)| (s, s + delta))
+        ) {
+            let start = HybridTimestamp::new_unchecked(wc_start, 0);
+            let end = HybridTimestamp::new_unchecked(wc_end, 0);
+            let range = TimeRange::new(start, end).unwrap();
+
+            prop_assert!(range.contains(start), "Range should contain its start");
+            prop_assert!(!range.contains(end), "Range should not contain its end (exclusive)");
+        }
+
+        /// Property: TimeRange::contains is consistent with the [start, end) semantics.
+        #[test]
+        fn prop_time_range_contains_semantics(
+            wc_start in 0i64..500_000,
+            wc_end in 500_001i64..1_000_000,
+            wc_point in 0i64..1_000_000,
+        ) {
+            let start = HybridTimestamp::new_unchecked(wc_start, 0);
+            let end = HybridTimestamp::new_unchecked(wc_end, 0);
+            let point = HybridTimestamp::new_unchecked(wc_point, 0);
+            let range = TimeRange::new(start, end).unwrap();
+
+            let expected = point >= start && point < end;
+            prop_assert_eq!(range.contains(point), expected,
+                "contains({:?}) mismatch for range [{:?}, {:?})", point, start, end);
+        }
+
+        /// Property: TimeRange overlaps is symmetric.
+        #[test]
+        fn prop_time_range_overlaps_symmetric(
+            wc_a in 0i64..500_000,
+            len_a in 1i64..500_000,
+            wc_b in 0i64..500_000,
+            len_b in 1i64..500_000,
+        ) {
+            let start_a = HybridTimestamp::new_unchecked(wc_a, 0);
+            let end_a = HybridTimestamp::new_unchecked(wc_a + len_a, 0);
+            let start_b = HybridTimestamp::new_unchecked(wc_b, 0);
+            let end_b = HybridTimestamp::new_unchecked(wc_b + len_b, 0);
+
+            let range_a = TimeRange::new(start_a, end_a).unwrap();
+            let range_b = TimeRange::new(start_b, end_b).unwrap();
+
+            prop_assert_eq!(range_a.overlaps(&range_b), range_b.overlaps(&range_a),
+                "overlaps should be symmetric");
+        }
+
+        /// Property: A range always contains itself (reflexive containment).
+        #[test]
+        fn prop_time_range_contains_self(
+            wc_start in 0i64..500_000,
+            wc_end in 500_001i64..1_000_000,
+        ) {
+            let start = HybridTimestamp::new_unchecked(wc_start, 0);
+            let end = HybridTimestamp::new_unchecked(wc_end, 0);
+            let range = TimeRange::new(start, end).unwrap();
+
+            prop_assert!(range.contains_range(&range),
+                "A range should always contain itself");
+        }
+
+        /// Property: TimeRange serialization roundtrip preserves values.
+        #[test]
+        fn prop_time_range_serialization_roundtrip(
+            wc_start in valid_wallclock(),
+            wc_end in valid_wallclock(),
+        ) {
+            let (s, e) = if wc_start <= wc_end { (wc_start, wc_end) } else { (wc_end, wc_start) };
+            let start = HybridTimestamp::new_unchecked(s, 0);
+            let end = HybridTimestamp::new_unchecked(e, 0);
+            let range = TimeRange::new(start, end).unwrap();
+
+            let bytes = range.serialize();
+            prop_assert_eq!(bytes.len(), 24);
+            let (deserialized, consumed) = TimeRange::deserialize(&bytes).unwrap();
+            prop_assert_eq!(consumed, 24);
+            prop_assert_eq!(deserialized, range);
+        }
+
+        // ====================================================================
+        // BiTemporalInterval Properties
+        // ====================================================================
+
+        /// Property: BiTemporalInterval::current() is always current in both dimensions.
+        #[test]
+        fn prop_bitemporal_current_is_current(ts in valid_timestamp()) {
+            let interval = BiTemporalInterval::current(ts);
+            prop_assert!(interval.is_currently_valid());
+            prop_assert!(interval.is_currently_recorded());
+            prop_assert!(interval.is_current());
+        }
+
+        /// Property: BiTemporalInterval serialization roundtrip preserves values.
+        #[test]
+        fn prop_bitemporal_serialization_roundtrip(
+            wc_vs in valid_wallclock(),
+            wc_ve in valid_wallclock(),
+            wc_ts in valid_wallclock(),
+            wc_te in valid_wallclock(),
+        ) {
+            let (vs, ve) = if wc_vs <= wc_ve { (wc_vs, wc_ve) } else { (wc_ve, wc_vs) };
+            let (ts, te) = if wc_ts <= wc_te { (wc_ts, wc_te) } else { (wc_te, wc_ts) };
+
+            let vt = TimeRange::new(
+                HybridTimestamp::new_unchecked(vs, 0),
+                HybridTimestamp::new_unchecked(ve, 0),
+            ).unwrap();
+            let tt = TimeRange::new(
+                HybridTimestamp::new_unchecked(ts, 0),
+                HybridTimestamp::new_unchecked(te, 0),
+            ).unwrap();
+
+            let interval = BiTemporalInterval::new(vt, tt);
+            let bytes = interval.serialize();
+            prop_assert_eq!(bytes.len(), 48);
+            let (deserialized, consumed) = BiTemporalInterval::deserialize(&bytes).unwrap();
+            prop_assert_eq!(consumed, 48);
+            prop_assert_eq!(deserialized, interval);
+        }
+
+        /// Property: Closing valid time makes the interval no longer currently valid.
+        #[test]
+        fn prop_closing_valid_time_makes_not_current(
+            wc_start in 0i64..500_000,
+            wc_close in 500_001i64..1_000_000,
+        ) {
+            let start = HybridTimestamp::new_unchecked(wc_start, 0);
+            let close = HybridTimestamp::new_unchecked(wc_close, 0);
+
+            let interval = BiTemporalInterval::current(start);
+            prop_assert!(interval.is_currently_valid());
+
+            let closed = interval.close_valid_time(close);
+            prop_assert!(!closed.is_currently_valid());
+            prop_assert_eq!(closed.valid_time().end(), close);
+        }
+
+        /// Property: Closing transaction time makes the interval no longer currently recorded.
+        #[test]
+        fn prop_closing_tx_time_makes_not_recorded(
+            wc_start in 0i64..500_000,
+            wc_close in 500_001i64..1_000_000,
+        ) {
+            let start = HybridTimestamp::new_unchecked(wc_start, 0);
+            let close = HybridTimestamp::new_unchecked(wc_close, 0);
+
+            let interval = BiTemporalInterval::current(start);
+            prop_assert!(interval.is_currently_recorded());
+
+            let closed = interval.close_transaction_time(close);
+            prop_assert!(!closed.is_currently_recorded());
+            prop_assert_eq!(closed.transaction_time().end(), close);
+        }
+
+        /// Property: TimeRange duration is non-negative for valid ranges.
+        #[test]
+        fn prop_time_range_duration_non_negative(
+            wc_start in valid_wallclock(),
+            wc_end in valid_wallclock(),
+        ) {
+            let (s, e) = if wc_start <= wc_end { (wc_start, wc_end) } else { (wc_end, wc_start) };
+            let start = HybridTimestamp::new_unchecked(s, 0);
+            let end = HybridTimestamp::new_unchecked(e, 0);
+            let range = TimeRange::new(start, end).unwrap();
+
+            if let Some(duration) = range.duration_micros() {
+                prop_assert!(duration >= 0,
+                    "Duration should be non-negative, got {}", duration);
+            }
+        }
+
+        /// Property: time::from_secs roundtrips through to_secs.
+        #[test]
+        fn prop_time_secs_roundtrip(secs in 0i64..1_000_000_000) {
+            let ts = time::from_secs(secs);
+            let result = time::to_secs(ts);
+            prop_assert_eq!(result, secs);
+        }
+
+        /// Property: time::from_millis roundtrips through to_millis.
+        #[test]
+        fn prop_time_millis_roundtrip(millis in 0i64..1_000_000_000_000) {
+            let ts = time::from_millis(millis);
+            let result = time::to_millis(ts);
+            prop_assert_eq!(result, millis);
+        }
+    }
+}
