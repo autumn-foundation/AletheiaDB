@@ -1,8 +1,8 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
 use aletheiadb::index::VectorIndex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
