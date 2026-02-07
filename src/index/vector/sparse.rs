@@ -79,7 +79,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 /// Maximum number of results that can be requested in a search.
 ///
 /// This prevents DoS attacks via excessive memory allocation.
-const MAX_K: usize = 10_000;
+const MAX_K: usize = 100_000;
 
 /// Magic bytes for sparse index files: "GSPS"
 const SPARSE_INDEX_MAGIC: [u8; 4] = [0x47, 0x53, 0x50, 0x53];

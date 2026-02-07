@@ -72,7 +72,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 /// Maximum number of results that can be requested in a search.
-const MAX_K: usize = 10_000;
+const MAX_K: usize = 100_000;
 
 /// Overfetch factor for filtered search.
 /// When applying post-search filters, we fetch this many times more results

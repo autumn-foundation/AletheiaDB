@@ -45,16 +45,26 @@ pub const TAG_SPARSE_VECTOR: u8 = 8;
 // These limits prevent DoS attacks via memory exhaustion from malicious input.
 
 /// Maximum number of elements allowed in a deserialized array.
-/// Set to 1 million elements - enough for any practical use case.
-pub const MAX_ARRAY_ELEMENTS: usize = 1_000_000;
+/// Increased from 1M to 10M to support business scenarios:
+/// - Time series data: 115 days at 1kHz, multiple years at hourly resolution
+/// - IoT telemetry: High-frequency sensor data
+/// - Batch processing: Large bulk imports
+///
+///   Still provides DoS protection (max 40MB for f32 array).
+pub const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
 
 /// Maximum number of dimensions allowed in a deserialized vector.
 /// Set to 100,000 - far exceeds typical embedding sizes (384-4096 dimensions).
 pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 
 /// Maximum capacity allowed for a deserialized property map.
-/// Set to 10,000 to prevent OOM DoS attacks via malicious count fields.
-pub const MAX_PROPERTY_MAP_CAPACITY: usize = 10_000;
+/// Increased from 10K to 100K to support business scenarios:
+/// - E-commerce: Products with extensive attributes and variations
+/// - Scientific data: Rich metadata and measurements
+/// - Dynamic schemas: User profiles with custom fields
+///
+///   Still provides DoS protection (~1MB per node maximum).
+pub const MAX_PROPERTY_MAP_CAPACITY: usize = 100_000;
 
 /// Maximum recursion depth for nested properties (e.g., arrays of arrays).
 /// Set to 100 to prevent stack overflow from malicious input.
