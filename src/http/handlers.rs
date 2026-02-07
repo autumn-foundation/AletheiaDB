@@ -239,7 +239,7 @@ pub async fn handle_query(
                     let offset_val = offset.unwrap_or(0);
 
                     // Prevent deep pagination attacks (CPU DoS)
-                    if offset_val + limit_val > max_deep_pagination {
+                    if offset_val.saturating_add(limit_val) > max_deep_pagination {
                         return HttpResponse::BadRequest().json(ApiResponse::error(format!(
                             "Pagination limit exceeded: offset + limit must be <= {}",
                             max_deep_pagination
@@ -330,5 +330,75 @@ mod tests {
             serde_json::from_slice(&body).expect("Response body should be valid JSON");
 
         assert_eq!(json["status"], "healthy");
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use actix_web::web;
+    use crate::AletheiaDB;
+    use crate::config::WalConfigBuilder;
+    use crate::storage::wal::DurabilityMode;
+    use std::sync::Arc;
+
+    /// 🎯 Target: FindNeighbors pagination limit check
+    /// 💣 Risk: Integer overflow in `offset + limit` could bypass the max limit check,
+    ///    allowing DoS via deep pagination (e.g. skipping 18 quintillion items).
+    /// 🧪 Strategy: Pass a huge offset that would cause wrap-around if not saturating.
+    #[actix_rt::test]
+    async fn test_find_neighbors_pagination_overflow() {
+        // Setup a temporary DB (needed for AppState, even if not queried due to validation failure)
+        let dir = tempfile::tempdir().unwrap();
+        let wal_config = WalConfigBuilder::new()
+            .wal_dir(dir.path().join("wal"))
+            .durability_mode(DurabilityMode::Async {
+                flush_interval_ms: 100,
+            })
+            .build();
+
+        let db = Arc::new(AletheiaDB::with_wal_config(wal_config).unwrap());
+        let state = AppState::new(db);
+
+        // Construct request with huge offset
+        // limit defaults to 100.
+        // offset = usize::MAX - 10
+        // offset + limit = overflow!
+        // In debug mode, this would panic. In release, it wraps to ~90.
+        // 90 <= 10,000 (max_deep_pagination), so validation passes.
+        // Then it tries to skip(usize::MAX - 10), which is DoS.
+        //
+        // We want validation to fail (return 400).
+        let req = QueryRequest::FindNeighbors {
+            node_id: 1, // Valid ID format, doesn't need to exist in DB for this check
+            limit: Some(100),
+            offset: Some(usize::MAX - 10),
+        };
+
+        let resp = handle_query(web::Data::new(state), web::Json(req)).await;
+
+        // If the fix is NOT applied:
+        // - In debug mode: panic (test fails)
+        // - In release mode: returns OK (success) with empty list (because skip exhausts iterator)
+        //
+        // If the fix IS applied (using saturating_add):
+        // - offset + limit becomes usize::MAX
+        // - usize::MAX > 10,000
+        // - Returns 400 Bad Request
+
+        // Assert we get 400 Bad Request
+        if resp.status().is_success() {
+             // This means overflow wrapped around and check passed!
+             panic!("Security vulnerability: Integer overflow bypassed pagination limit check!");
+        }
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST,
+            "Should return 400 Bad Request on overflow/deep pagination");
+
+        // Optional: verify error message
+        use actix_web::body::MessageBody;
+        let body_bytes = resp.into_body().try_into_bytes().unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(body_str.contains("Pagination limit exceeded"));
     }
 }

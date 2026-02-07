@@ -193,6 +193,65 @@ impl Default for HnswConfig {
     }
 }
 
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    /// 🎯 Target: is_retryable_usearch_error
+    /// 💣 Risk: Fragile string matching might fail if error messages change or are typoed.
+    /// 🧪 Strategy: Unit test the function with known error strings.
+    #[test]
+    fn test_is_retryable_usearch_error() {
+        // Known retryable error
+        assert!(is_retryable_usearch_error("Error: No available threads to lock for search"));
+        assert!(is_retryable_usearch_error("Some prefix: No available threads to lock"));
+
+        // Non-retryable errors
+        assert!(!is_retryable_usearch_error("Memory allocation failed"));
+        assert!(!is_retryable_usearch_error("Invalid argument"));
+        assert!(!is_retryable_usearch_error(""));
+    }
+
+    /// 🎯 Target: HnswConfig serialization
+    /// 💣 Risk: Schema drift or backward compatibility breakage.
+    /// 🧪 Strategy: Round-trip serialization test.
+    #[test]
+    fn test_config_serialization_round_trip() {
+        let original = HnswConfig {
+            dimensions: 384,
+            metric: DistanceMetric::Cosine,
+            m: 32,
+            ef_construction: 200,
+            ef_search: 100,
+            capacity: 5000,
+            quantization: Quantization::F16,
+            // Storage mode and custom metric are NOT serialized/deserialized by design
+            storage: StorageMode::InMemory,
+            custom_metric: None,
+        };
+
+        let mut buffer = Vec::new();
+        original.serialize_into(&mut buffer).unwrap();
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let deserialized = HnswConfig::deserialize_from(&mut cursor).unwrap();
+
+        assert_eq!(original.dimensions, deserialized.dimensions);
+        assert_eq!(original.metric, deserialized.metric);
+        assert_eq!(original.m, deserialized.m);
+        assert_eq!(original.ef_construction, deserialized.ef_construction);
+        assert_eq!(original.ef_search, deserialized.ef_search);
+        assert_eq!(original.capacity, deserialized.capacity);
+
+        // Note: Quantization is NOT serialized in HnswConfig::serialize_into.
+        // It relies on defaults or external config.
+        // If this changes in the future, this test should be updated.
+        // For now, deserialized will have F32 (default), original has F16.
+        assert_ne!(original.quantization, deserialized.quantization, "Quantization is not persisted, so it reverts to default (F32)");
+        assert_eq!(deserialized.quantization, Quantization::F32); // Default
+    }
+}
+
 impl HnswConfig {
     /// Creates a new configuration with the specified dimensions and metric.
     pub fn new(dimensions: usize, metric: DistanceMetric) -> Self {
