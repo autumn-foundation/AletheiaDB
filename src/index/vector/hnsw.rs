@@ -839,10 +839,24 @@ impl VectorIndex for HnswIndex {
 
                 // Step 4: Insert to mappings (dashmap) AFTER inner is updated
                 // Handle race: another thread may have added this NodeId while we held inner lock
-                if let Some(_existing_key) = self.id_mapping.insert(id, key) {
+                // Use entry API to safely check for existence without overwriting (which causes Zombie Vectors)
+                let race_detected = match self.id_mapping.entry(id) {
+                    dashmap::mapref::entry::Entry::Occupied(_) => true,
+                    dashmap::mapref::entry::Entry::Vacant(e) => {
+                        // Success: we claimed the ID
+                        e.insert(key);
+                        // Drop the entry lock implicitly here when e is consumed/scope ends
+                        false
+                    }
+                };
+
+                if race_detected {
                     // Race detected: Another thread added this NodeId concurrently
-                    // Our vector is in inner with key=key, their mapping points to existing_key
-                    // Clean up by removing our vector from inner
+                    // Our vector is in inner with key=key, but someone else claimed the ID.
+                    // We must rollback our addition to avoid phantom vectors.
+
+                    // Acquire inner lock again to remove our key.
+                    // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
                     let index = self.inner.write();
                     index.remove(key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
@@ -850,6 +864,7 @@ impl VectorIndex for HnswIndex {
                             e
                         )))
                     })?;
+
                     // The existing mapping wins; return error to indicate retry needed
                     return Err(Error::Vector(VectorError::IndexError(
                         "Concurrent add detected for same NodeId, vector already exists"
@@ -857,7 +872,9 @@ impl VectorIndex for HnswIndex {
                     )));
                 }
 
-                // Success: we inserted the mapping
+                // If no race, we successfully inserted into id_mapping.
+                // Now insert reverse mapping.
+                // Note: We do this outside the id_mapping lock to reduce contention.
                 self.reverse_mapping.insert(key, id);
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
                 Ok(())
