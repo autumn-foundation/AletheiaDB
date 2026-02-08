@@ -1,6 +1,6 @@
-//! Russian Writers Knowledge Graph - Comprehensive GallifreyDB Demo
+//! Russian Writers Knowledge Graph - Comprehensive AletheiaDB Demo
 //!
-//! This example demonstrates GallifreyDB's capabilities using Russian literary history:
+//! This example demonstrates AletheiaDB's capabilities using Russian literary history:
 //! - Bi-temporal storage with evolving interpretations
 //! - Vector embeddings for semantic search
 //! - Hybrid graph traversal + vector similarity queries
@@ -12,9 +12,9 @@
 //!
 //! Run with: cargo run --example russian_writers
 
-use gallifreydb::{
-    GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
-    WriteOps,
+use aletheiadb::{
+    AletheiaDB, GLOBAL_INTERNER, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
+    WriteOps, query::semantic_pathfinding::SemanticPathfinder,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -173,6 +173,7 @@ impl RussianLitCompleter {
                 "styles".to_string(),
                 "archetypes".to_string(),
                 "thematic".to_string(),
+                "path".to_string(),
                 "timewarp".to_string(),
                 "tw".to_string(),
                 "influences".to_string(),
@@ -333,7 +334,7 @@ impl Helper for RussianLitCompleter {}
 // ============================================================================
 
 struct DemoData {
-    db: GallifreyDB,
+    db: AletheiaDB,
     // Track entities by type for easy lookup
     authors: HashMap<String, NodeId>,
     books: HashMap<String, NodeId>,
@@ -346,7 +347,7 @@ struct DemoData {
 impl DemoData {
     fn new() -> Self {
         Self {
-            db: GallifreyDB::new().expect("Failed to create database"),
+            db: AletheiaDB::new().expect("Failed to create database"),
             authors: HashMap::new(),
             books: HashMap::new(),
             characters: HashMap::new(),
@@ -373,8 +374,7 @@ impl DemoData {
 /// Helper to get label string from InternedString
 fn label_str(label: InternedString) -> String {
     GLOBAL_INTERNER
-        .resolve(label)
-        .map(|s| s.to_string())
+        .resolve_with(label, |s| s.to_string())
         .unwrap_or_else(|| format!("{:?}", label))
 }
 
@@ -534,6 +534,32 @@ fn find_entity_fuzzy<'a>(
     None
 }
 
+/// Search for an entity across all types (authors, books, characters, themes)
+/// Returns (name, node_id, entity_type)
+fn find_any_entity(demo: &DemoData, query: &str) -> Option<(String, NodeId, &'static str)> {
+    // Try authors first
+    if let Some((name, &id)) = find_entity_fuzzy(&demo.authors, query) {
+        return Some((name.clone(), id, "Author"));
+    }
+
+    // Try books
+    if let Some((name, &id)) = find_entity_fuzzy(&demo.books, query) {
+        return Some((name.clone(), id, "Book"));
+    }
+
+    // Try characters
+    if let Some((name, &id)) = find_character_fuzzy(&demo.characters, query) {
+        return Some((name.clone(), id, "Character"));
+    }
+
+    // Try themes
+    if let Some((name, &id)) = find_entity_fuzzy(&demo.themes, query) {
+        return Some((name.clone(), id, "Theme"));
+    }
+
+    None
+}
+
 /// Macro to time an operation and print elapsed time if timing is enabled
 macro_rules! timed {
     ($demo:expr, $label:expr, $op:expr) => {{
@@ -557,19 +583,17 @@ macro_rules! timed {
 /// Get the display name from any entity node
 ///
 /// Tries 'name' property first, then 'title' property
-fn get_entity_name(node: &gallifreydb::core::graph::Node) -> Result<String> {
+fn get_entity_name(node: &aletheiadb::core::graph::Node) -> Result<String> {
     node.properties
         .get("name")
         .or_else(|| node.properties.get("title"))
         .map(format_value)
-        .ok_or_else(|| {
-            gallifreydb::Error::other("Entity has no name or title property".to_string())
-        })
+        .ok_or_else(|| aletheiadb::Error::other("Entity has no name or title property".to_string()))
 }
 
 /// Get current timestamp
 fn now_timestamp() -> Result<Timestamp> {
-    Ok(gallifreydb::core::temporal::time::now())
+    Ok(aletheiadb::core::temporal::time::now())
 }
 
 /// Create approximate timestamp for Jan 1 of a given year
@@ -584,12 +608,12 @@ fn year_to_timestamp(year: i64) -> Timestamp {
     let years_since_1970 = year.saturating_sub(1970);
     let days = (years_since_1970 * 365) + (years_since_1970 / 4);
     let millis = days.saturating_mul(86400).saturating_mul(1_000);
-    gallifreydb::core::temporal::time::from_millis(millis)
+    aletheiadb::core::temporal::time::from_millis(millis)
 }
 
 /// Helper to format property values nicely
-fn format_value(value: &gallifreydb::PropertyValue) -> String {
-    use gallifreydb::PropertyValue;
+fn format_value(value: &aletheiadb::PropertyValue) -> String {
+    use aletheiadb::PropertyValue;
     match value {
         PropertyValue::Null => "null".to_string(),
         PropertyValue::Bool(b) => b.to_string(),
@@ -618,17 +642,17 @@ macro_rules! props {
 // ============================================================================
 
 fn load_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let content = fs::read_to_string(path).map_err(gallifreydb::Error::Io)?;
+    let content = fs::read_to_string(path).map_err(aletheiadb::Error::Io)?;
 
     serde_json::from_str(&content)
-        .map_err(|e| gallifreydb::Error::other(format!("JSON deserialization failed: {}", e)))
+        .map_err(|e| aletheiadb::Error::other(format!("JSON deserialization failed: {}", e)))
 }
 
 fn check_data_files() -> Result<()> {
     let data_dir = Path::new("examples/russian_writers/data");
 
     if !data_dir.exists() {
-        return Err(gallifreydb::Error::Io(std::io::Error::new(
+        return Err(aletheiadb::Error::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!(
                 "Data directory not found: {}\n\
@@ -653,7 +677,7 @@ fn check_data_files() -> Result<()> {
     for file in &required_files {
         let path = data_dir.join(file);
         if !path.exists() {
-            return Err(gallifreydb::Error::Io(std::io::Error::new(
+            return Err(aletheiadb::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Required file not found: {}", path.display()),
             )));
@@ -695,10 +719,10 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     // 1. Current index: for fast similarity searches (find_similar)
     // 2. Temporal index: for tracking semantic drift over time
     println!("\n  Setting up vector indexes...");
-    use gallifreydb::index::vector::temporal::{
+    use aletheiadb::index::vector::temporal::{
         RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
     };
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
     let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
 
@@ -1144,7 +1168,7 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
 
             // Get original embedding to perturb
             let original_node = demo.db.get_node(character_id)?;
-            let original_embedding = if let Some(gallifreydb::PropertyValue::Vector(vec)) =
+            let original_embedding = if let Some(aletheiadb::PropertyValue::Vector(vec)) =
                 original_node.properties.get("semantic_embedding")
             {
                 vec.clone()
@@ -1220,15 +1244,13 @@ fn show_entity(demo: &DemoData, name: &str) -> Result<()> {
         let mut props: Vec<_> = node.properties.iter().collect();
         props.sort_by_key(|(k, _)| {
             GLOBAL_INTERNER
-                .resolve(**k)
-                .map(|s| s.to_string())
+                .resolve_with(**k, |s| s.to_string())
                 .unwrap_or_default()
         });
 
         for (key, value) in props {
             let key_str = GLOBAL_INTERNER
-                .resolve(*key)
-                .map(|s| s.to_string())
+                .resolve_with(*key, |s| s.to_string())
                 .unwrap_or_else(|| format!("{:?}", key));
 
             let value_str = format_value(value);
@@ -1409,7 +1431,7 @@ fn find_similar_entities(
         .or_else(|| {
             find_entity_fuzzy(&demo.themes, entity_name).map(|(name, id)| (*id, name.clone()))
         })
-        .ok_or_else(|| gallifreydb::Error::other(format!("Entity not found: {}", entity_name)))?;
+        .ok_or_else(|| aletheiadb::Error::other(format!("Entity not found: {}", entity_name)))?;
 
     let query_node = demo.db.get_node(query_id)?;
 
@@ -1475,7 +1497,7 @@ fn find_similar_entities(
         let vector_props: Vec<String> = query_node
             .properties
             .iter()
-            .filter(|(_, v)| matches!(v, gallifreydb::PropertyValue::Vector(_)))
+            .filter(|(_, v)| matches!(v, aletheiadb::PropertyValue::Vector(_)))
             .map(|(k, _)| k.to_string())
             .collect();
 
@@ -1623,7 +1645,7 @@ fn find_similar_entities(
     Ok(())
 }
 
-/// Query how a book's interpretation evolved over time using GallifreyDB's temporal API
+/// Query how a book's interpretation evolved over time using AletheiaDB's temporal API
 ///
 /// This demonstrates bi-temporal queries by retrieving the book's state as it
 /// existed at a specific point in time. The example shows how literary criticism
@@ -1666,7 +1688,7 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
         let query_timestamp = year_to_timestamp(year);
         let current_tx_time = now_timestamp()?;
 
-        // Use GallifreyDB's temporal API to get the node as it was in that year
+        // Use AletheiaDB's temporal API to get the node as it was in that year
         match demo
             .db
             .get_node_at_time(book_id, query_timestamp, current_tx_time)
@@ -1787,7 +1809,7 @@ fn show_influences(demo: &DemoData, author_name: &str) -> Result<()> {
         println!("\n═══ STYLISTICALLY SIMILAR (Vector Similarity) ═══");
 
         // Get style embedding for this author
-        if let Some(gallifreydb::PropertyValue::Vector(style_vec)) =
+        if let Some(aletheiadb::PropertyValue::Vector(style_vec)) =
             author.properties.get("style_embedding")
         {
             let ranked_nodes = timed!(demo, "Hybrid query (scan + rank_by_similarity)", {
@@ -1901,6 +1923,136 @@ fn show_influences(demo: &DemoData, author_name: &str) -> Result<()> {
     Ok(())
 }
 
+fn find_semantic_path(
+    demo: &DemoData,
+    from_name: &str,
+    to_name: &str,
+    concept_name: &str,
+) -> Result<()> {
+    // Try to find entities using fuzzy matching across all entity types
+    let from_entity = find_any_entity(demo, from_name);
+    let to_entity = find_any_entity(demo, to_name);
+    let concept_entity = find_any_entity(demo, concept_name);
+
+    let (from_id, from_display) = match from_entity {
+        Some((name, id, entity_type)) => (id, format!("{} ({})", name, entity_type)),
+        None => {
+            println!("\n❌ Source entity not found: {}", from_name);
+            println!("\nTry: list authors, list books, list characters, or list themes");
+            return Ok(());
+        }
+    };
+
+    let (to_id, to_display) = match to_entity {
+        Some((name, id, entity_type)) => (id, format!("{} ({})", name, entity_type)),
+        None => {
+            println!("\n❌ Target entity not found: {}", to_name);
+            println!("\nTry: list authors, list books, list characters, or list themes");
+            return Ok(());
+        }
+    };
+
+    println!("\n╔═══════════════════════════════════════════════════════════╗");
+    println!("║  SEMANTIC PATHFINDING");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!("\n🎯 Finding path from {} to {}", from_display, to_display);
+
+    // Get concept embedding
+    let concept_embedding = match concept_entity {
+        Some((concept_display, concept_id, _)) => {
+            println!("🧭 Guided by concept: {}\n", concept_display);
+            // Try to get semantic_embedding from the concept entity
+            let concept_node = demo.db.get_node(concept_id)?;
+            if let Some(aletheiadb::PropertyValue::Vector(vec)) =
+                concept_node.properties.get("semantic_embedding")
+            {
+                vec.clone()
+            } else {
+                println!(
+                    "❌ No semantic_embedding found for concept: {}",
+                    concept_display
+                );
+                return Ok(());
+            }
+        }
+        None => {
+            println!("❌ Concept entity not found: {}", concept_name);
+            println!("\n💡 Tip: Use an existing theme, author, book, or character as the concept.");
+            println!("   Try: list themes");
+            return Ok(());
+        }
+    };
+
+    // Create pathfinder and find path
+    let pathfinder = SemanticPathfinder::new(&demo.db, "semantic_embedding");
+    let max_depth = 10; // Allow up to 10 hops
+
+    let path_result = timed!(
+        demo,
+        "Semantic pathfinding",
+        pathfinder.find_path(from_id, to_id, &concept_embedding, max_depth)
+    )?;
+
+    match path_result {
+        Some(path) => {
+            println!("✅ Path found ({} hops):\n", path.len() - 1);
+
+            // Display the path with entity details
+            for (i, &node_id) in path.iter().enumerate() {
+                let node = demo.db.get_node(node_id)?;
+                let name = get_entity_name(&node)?;
+                let label = label_str(node.label);
+
+                // Calculate semantic score (similarity to concept)
+                let semantic_score = if let Some(aletheiadb::PropertyValue::Vector(vec)) =
+                    node.properties.get("semantic_embedding")
+                {
+                    aletheiadb::core::vector::cosine_similarity(vec, &concept_embedding)
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+
+                if i == 0 {
+                    println!("  🟢 START: {} [{}]", name, label);
+                } else if i == path.len() - 1 {
+                    println!(
+                        "  🎯 END:   {} [{}] (relevance: {:.3})",
+                        name, label, semantic_score
+                    );
+                } else {
+                    // Find connecting edge for display
+                    let prev_node = path[i - 1];
+                    let mut edge_label = "→".to_string();
+                    for edge_id in demo.db.get_outgoing_edges(prev_node) {
+                        if let Ok(edge) = demo.db.get_edge(edge_id)
+                            && edge.target == node_id
+                        {
+                            edge_label = label_str(edge.label);
+                            break;
+                        }
+                    }
+                    println!(
+                        "  ↓   {}   {} [{}] (relevance: {:.3})",
+                        edge_label, name, label, semantic_score
+                    );
+                }
+            }
+
+            println!("\n💡 This path was chosen because each hop maximizes semantic similarity");
+            println!("   to the concept, creating a meaningful thematic connection!");
+        }
+        None => {
+            println!("❌ No path found within {} hops", max_depth);
+            println!("\n💡 Try:");
+            println!("   • Entities that are more closely connected in the graph");
+            println!("   • A different concept that bridges them better");
+        }
+    }
+
+    Ok(())
+}
+
 fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
     // Find character with fuzzy matching
     if let Some((name, &character_id)) = find_character_fuzzy(&demo.characters, character_name) {
@@ -1908,7 +2060,7 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
 
         // Get the original (current) embedding
         let current_node = demo.db.get_node(character_id)?;
-        let reference_embedding = if let Some(gallifreydb::PropertyValue::Vector(vec)) =
+        let reference_embedding = if let Some(aletheiadb::PropertyValue::Vector(vec)) =
             current_node.properties.get("semantic_embedding")
         {
             vec.clone()
@@ -1918,7 +2070,7 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
         };
 
         // Track drift from 1866 to present
-        use gallifreydb::core::temporal::TimeRange;
+        use aletheiadb::core::temporal::TimeRange;
         let time_range = TimeRange::new(
             year_to_timestamp(1866), // Start of our data
             now_timestamp()?,        // Current time
@@ -2142,8 +2294,7 @@ fn show_style_similarity(demo: &DemoData, author_name: &str, k: usize) -> Result
         println!("\nAuthors with similar writing styles:\n");
 
         // Find similar authors using style_embedding
-        if let Some(gallifreydb::PropertyValue::Vector(_)) =
-            author.properties.get("style_embedding")
+        if let Some(aletheiadb::PropertyValue::Vector(_)) = author.properties.get("style_embedding")
         {
             let similar = timed!(
                 demo,
@@ -2240,7 +2391,7 @@ fn show_character_archetypes(demo: &DemoData, character_name: &str, k: usize) ->
         println!("\n\nSimilar character archetypes:\n");
 
         // Find similar characters using personality_embedding
-        if let Some(gallifreydb::PropertyValue::Vector(_)) =
+        if let Some(aletheiadb::PropertyValue::Vector(_)) =
             character.properties.get("personality_embedding")
         {
             let similar = timed!(
@@ -2312,7 +2463,7 @@ fn show_thematic_similarity(demo: &DemoData, entity_name: &str, k: usize) -> Res
                 .map(|(name, id)| (*id, "Theme", name.clone()))
         })
         .ok_or_else(|| {
-            gallifreydb::Error::other(format!("Book or theme not found: {}", entity_name))
+            aletheiadb::Error::other(format!("Book or theme not found: {}", entity_name))
         })?;
 
     let query_entity = demo.db.get_node(query_id)?;
@@ -2339,7 +2490,7 @@ fn show_thematic_similarity(demo: &DemoData, entity_name: &str, k: usize) -> Res
     println!("\n\nThematically similar entities:\n");
 
     // Find similar entities using theme_embedding
-    if let Some(gallifreydb::PropertyValue::Vector(_)) =
+    if let Some(aletheiadb::PropertyValue::Vector(_)) =
         query_entity.properties.get("theme_embedding")
     {
         let similar = timed!(
@@ -2488,6 +2639,8 @@ TEMPORAL QUERIES (Time Travel):
 
 GRAPH QUERIES (Query Builder API):
   influences <author>      - Show influences (graph + vector hybrid)
+  path <from> <to> --like <concept>
+                           - Find semantic path between entities
 
 SYSTEM:
   stats                    - Database statistics
@@ -2503,6 +2656,8 @@ Examples:
   > archetypes Raskolnikov 8
   > thematic "Crime and Punishment"
   > influences Dostoevsky
+  > path Pushkin Gorky --like "Social Justice"
+  > path Gogol Chekhov --like "Psychological Realism"
   > indexes
   > list books
 "#
@@ -2519,7 +2674,7 @@ fn main() -> Result<()> {
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
 ║   RUSSIAN WRITERS KNOWLEDGE GRAPH                         ║
-║   GallifreyDB Comprehensive Demo                          ║
+║   AletheiaDB Comprehensive Demo                          ║
 ║                                                           ║
 ║   Showcasing:                                             ║
 ║   • Bi-temporal storage with evolving interpretations     ║
@@ -2550,7 +2705,7 @@ fn main() -> Result<()> {
     // Initialize rustyline with auto-complete
     let completer = RussianLitCompleter::new(&demo);
     let mut rl = Editor::new()
-        .map_err(|e| gallifreydb::Error::other(format!("Failed to initialize readline: {}", e)))?;
+        .map_err(|e| aletheiadb::Error::other(format!("Failed to initialize readline: {}", e)))?;
     rl.set_helper(Some(completer));
 
     println!("\n💡 Tip: Use TAB for auto-complete!");
@@ -2561,7 +2716,7 @@ fn main() -> Result<()> {
         let input = match readline {
             Ok(line) => {
                 rl.add_history_entry(&line).map_err(|e| {
-                    gallifreydb::Error::other(format!("Failed to add history entry: {}", e))
+                    aletheiadb::Error::other(format!("Failed to add history entry: {}", e))
                 })?;
                 line
             }
@@ -2704,16 +2859,14 @@ fn main() -> Result<()> {
                 println!(
                     "\n💡 Why: This command requires setting explicit valid times when updating nodes,"
                 );
-                println!(
-                    "   but GallifreyDB's current API doesn't support backdating valid times."
-                );
+                println!("   but AletheiaDB's current API doesn't support backdating valid times.");
                 println!("\n📝 Technical details:");
                 println!("   - To show interpretation evolution from 1885→1925→1955→2024,");
                 println!(
                     "   - We need: update_node_with_valid_time(node_id, props, year_1885_timestamp)"
                 );
                 println!("   - Currently: BiTemporalInterval::current() sets valid_time = now()");
-                println!("\n✨ This is a great feature request for GallifreyDB's bi-temporal API!");
+                println!("\n✨ This is a great feature request for AletheiaDB's bi-temporal API!");
                 println!("\nTry these working features instead:");
                 println!("  • similar Dostoevsky    - cross-entity semantic similarity");
                 println!("  • influences Tolstoy    - hybrid graph+vector queries");
@@ -2776,6 +2929,41 @@ fn main() -> Result<()> {
             }
             "indexes" => {
                 show_vector_indexes(&demo)?;
+            }
+            "path" => {
+                let parts = parse_quoted_args(args);
+                if parts.len() < 3 {
+                    println!("Usage: path <from> <to> --like <concept>");
+                    println!("Example: path Pushkin Gorky --like \"Social Justice\"");
+                    println!("         path Gogol Chekhov --like \"Psychological Realism\"");
+                    println!("         path Turgenev Dostoevsky --like Nihilism");
+                    println!(
+                        "\n💡 The concept guides the pathfinding to prefer semantically relevant hops."
+                    );
+                    println!(
+                        "   Use any theme, author, book, or character as the guiding concept."
+                    );
+                } else {
+                    // Parse: path <from> <to> --like <concept>
+                    let from_name = &parts[0];
+                    let to_name = &parts[1];
+
+                    // Find --like flag
+                    let mut concept_name = None;
+                    for i in 2..parts.len() {
+                        if parts[i] == "--like" && i + 1 < parts.len() {
+                            concept_name = Some(parts[i + 1].as_str());
+                            break;
+                        }
+                    }
+
+                    if let Some(concept) = concept_name {
+                        find_semantic_path(&demo, from_name, to_name, concept)?;
+                    } else {
+                        println!("❌ Missing --like <concept> parameter");
+                        println!("Example: path Pushkin Gorky --like \"Social Justice\"");
+                    }
+                }
             }
             _ => {
                 println!(

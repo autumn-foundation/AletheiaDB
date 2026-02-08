@@ -7,6 +7,7 @@ A comprehensive demonstration of GallifreyDB's capabilities using Russian litera
 ✅ **Bi-Temporal Storage**: Track how literary interpretations evolved from publication to present day
 ✅ **Vector Embeddings**: Semantic search for similar characters, themes, and writing styles
 ✅ **Hybrid Queries**: Combine graph traversal with vector similarity ranking
+✅ **Semantic Pathfinding**: Find meaningful connections guided by concepts (KILLER FEATURE! 🚀)
 ✅ **Rich Graph Structure**: Authors, books, characters, themes, historical events, movements
 ✅ **Real Educational Value**: Learn about Russian literature while exploring the database!
 
@@ -99,6 +100,23 @@ Influenced by:
 Influenced:
   - Anton Chekhov (psychological realism)
   - Maxim Gorky (social themes)
+```
+
+### Semantic Pathfinding
+```
+> path Pushkin Gorky --like "Social Justice"
+🎯 Finding path from Alexander Pushkin (Author) to Maxim Gorky (Author)
+🧭 Guided by concept: Social Justice (Theme)
+
+✅ Path found (3 hops):
+
+  🟢 START: Alexander Pushkin [Author]
+  ↓   INFLUENCED_BY   Nikolai Gogol [Author] (relevance: 0.756)
+  ↓   INFLUENCED_BY   Ivan Turgenev [Author] (relevance: 0.823)
+  🎯 END:   Maxim Gorky [Author] (relevance: 0.891)
+
+💡 This path was chosen because each hop maximizes semantic similarity
+   to the concept, creating a meaningful thematic connection!
 ```
 
 ## Dataset Overview
