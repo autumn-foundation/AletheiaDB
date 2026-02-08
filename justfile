@@ -224,6 +224,26 @@ outdated:
 audit:
     cargo audit
 
+# === Mutation Testing ===
+
+# Run mutation tests on all code
+mutants:
+    cargo mutants --in-place -vV
+
+# Run mutation tests only on uncommitted changes
+mutants-diff:
+    #!/usr/bin/env bash
+    trap 'rm -f mutants-diff.tmp' EXIT
+    git diff HEAD > mutants-diff.tmp
+    cargo mutants --in-place -vV --in-diff mutants-diff.tmp
+
+# Run mutation tests on changes vs trunk
+mutants-branch:
+    #!/usr/bin/env bash
+    trap 'rm -f mutants-diff.tmp' EXIT
+    git diff origin/trunk.. > mutants-diff.tmp
+    cargo mutants --in-place -vV --in-diff mutants-diff.tmp
+
 # === Git Worktree Commands ===
 # These commands enable parallel development with multiple Claude instances
 

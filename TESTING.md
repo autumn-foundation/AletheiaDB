@@ -162,6 +162,63 @@ exclude = [
 ]
 ```
 
+## Mutation Testing
+
+Mutation testing validates that tests actually *assert correctness*, not just execute code. [cargo-mutants](https://mutants.rs/) introduces small changes (mutants) to source code and checks whether at least one test fails. A surviving mutant means code was executed but not meaningfully verified.
+
+See [ADR-0035](docs/adr/0035-mutation-testing.md) for the full rationale.
+
+### Installation
+
+```bash
+cargo install cargo-mutants
+# or faster with pre-built binaries:
+cargo binstall cargo-mutants
+```
+
+### Running Locally
+
+```bash
+# Mutation test only uncommitted changes (fast)
+just mutants-diff
+
+# Mutation test changes vs trunk (useful before opening a PR)
+just mutants-branch
+
+# Full mutation test run (slow — tests every function in scope)
+just mutants
+```
+
+### Interpreting Results
+
+Results are written to `mutants.out/`:
+
+| File | Meaning |
+|------|---------|
+| `caught.txt` | Mutants killed by tests (good) |
+| `missed.txt` | Mutants that survived (investigate these) |
+| `timeout.txt` | Mutants that caused test timeouts |
+| `unviable.txt` | Mutants that failed to compile (neutral) |
+
+Focus on **`missed.txt`** — each entry is a code location where a behavioral change went undetected. Common fixes:
+
+- Add an assertion for the return value or side effect
+- Add a test case that exercises the specific branch or condition
+- If the mutant is genuinely equivalent (behavior can't differ), it can be ignored
+
+### CI Integration
+
+- **On PRs**: `cargo mutants --in-diff` runs on changed code only (informational, non-blocking)
+- **Weekly**: Full sharded run across 4 runners for comprehensive mutation score tracking
+- Results are uploaded as artifacts and summarized in the GitHub job summary
+
+### Configuration
+
+Exclusions are configured in `.cargo/mutants.toml`. Currently excluded:
+- Benchmarks, examples, and integration test helpers
+- MCP server (IO-heavy, tested via integration)
+- `Display`/`Debug` impls and `fmt` methods
+
 ## Profiling
 
 ### Tracy Profiling

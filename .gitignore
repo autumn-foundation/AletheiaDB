@@ -73,3 +73,7 @@ final_cleanup.sh
 # Debug output files
 *_output.txt
 test_output_*.txt
+
+# Mutation testing output
+mutants.out/
+mutants.out.old/
