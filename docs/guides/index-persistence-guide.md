@@ -20,6 +20,58 @@ AletheiaDB's index persistence layer enables **fast cold starts** by saving all 
 - ✅ Temporal indexes (bi-temporal version chains)
 - ✅ String interner (label/property key deduplication)
 
+## File-Based Persistence Quickstart
+
+**⚠️ Common Mistake:** There is **NO `AletheiaDB::open()` method**. Use `with_unified_config()` instead.
+
+### The Right Way (File-Based Persistence)
+
+```rust
+use aletheiadb::{AletheiaDB, AletheiaDBConfig};
+use aletheiadb::config::WalConfigBuilder;
+use aletheiadb::storage::index_persistence::PersistenceConfig;
+use std::time::Duration;
+
+// Configure database with custom paths
+let db_path = std::env::current_dir()?.join(".my-app-data");
+
+let config = AletheiaDBConfig::builder()
+    .wal(WalConfigBuilder::new()
+        .wal_dir(db_path.join("wal"))  // WAL files location
+        .build())
+    .persistence(PersistenceConfig {
+        enabled: true,
+        data_dir: db_path.join("indexes"),  // Index persistence location
+        load_on_startup: true,  // Load existing indexes on startup
+        auto_persist_interval: Duration::from_secs(300),  // Save every 5min
+        ..Default::default()
+    })
+    .build();
+
+// Creates directories automatically - no manual mkdir needed!
+let db = AletheiaDB::with_unified_config(config)?;
+```
+
+**What this creates:**
+```
+.my-app-data/
+├── wal/           # Write-ahead log (transaction durability)
+│   ├── 00000X.log # WAL segments
+│   └── manifest.json
+└── indexes/       # Persisted indexes (fast restart)
+    ├── graph.bin.zst        # Graph structure (compressed)
+    ├── temporal.bin.zst     # Temporal indexes
+    └── vector_*.bin         # Vector HNSW indexes
+```
+
+**Benefits:**
+- ✅ Data survives process restarts
+- ✅ 6-30x faster startup (loads indexes from disk)
+- ✅ Automatic directory creation
+- ✅ Automatic cleanup of old WAL segments
+
+**See [`examples/file_based_persistence.rs`](../../examples/file_based_persistence.rs) for a complete working example.**
+
 ## Quick Start
 
 ### Basic Usage
