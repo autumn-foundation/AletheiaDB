@@ -1772,6 +1772,10 @@ mod sentry_tests {
         // Test with both unaligned
         let result2 = wrapper(unaligned_ptr, unaligned_ptr);
         assert_eq!(result2, 42.0);
+
+        // Test with both aligned (Coverage for happy path)
+        let result3 = wrapper(aligned_ptr, aligned_ptr);
+        assert_eq!(result3, 42.0);
     }
 
     #[test]
@@ -1838,6 +1842,10 @@ mod tests {
         // Pass unaligned pointer - should NOT panic and return correct result (1.0 + 2.0 = 3.0)
         let result = wrapper(unaligned_ptr, aligned_ptr);
         assert!((result - 3.0).abs() < f32::EPSILON);
+
+        // Test with both aligned (Coverage for happy path)
+        let result3 = wrapper(aligned_ptr, aligned_ptr);
+        assert!((result3 - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -1578,4 +1578,23 @@ mod tests {
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
     }
+
+    #[test]
+    fn test_read_entries_from_dir_with_corrupt_segment() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("1.log");
+
+        // Write a corrupt segment (invalid magic)
+        let mut file = File::create(&segment_path).unwrap();
+        file.write_all(b"BAD!").unwrap();
+
+        // Calling read_entries_from_dir should propagate the error
+        let result = read_entries_from_dir(dir.path(), LSN(1));
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Invalid WAL segment") || err_msg.contains("bad magic"));
+    }
 }
