@@ -55,9 +55,9 @@ fn test_hnsw_race_corruption() {
         // 1. We should be able to remove the node.
         // If corruption happened, id might map to a key that was removed from inner index.
         if let Err(e) = index.remove(id) {
-             // If remove fails, check if search finds it.
-             // If search finds it, but remove fails, that's definitely corruption.
-             println!("Remove failed for iteration {}: {}", i, e);
+            // If remove fails, check if search finds it.
+            // If search finds it, but remove fails, that's definitely corruption.
+            println!("Remove failed for iteration {}: {}", i, e);
         }
 
         // 2. Search should NOT find the node after removal.
@@ -67,7 +67,10 @@ fn test_hnsw_race_corruption() {
 
         for (found_id, _) in results {
             if found_id == id {
-                panic!("CORRUPTION DETECTED at iteration {}: Node {:?} was removed but still found in search! (Zombie Vector)", i, id);
+                panic!(
+                    "CORRUPTION DETECTED at iteration {}: Node {:?} was removed but still found in search! (Zombie Vector)",
+                    i, id
+                );
             }
         }
     }
