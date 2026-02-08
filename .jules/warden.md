@@ -63,6 +63,7 @@ Arithmetic operations on file offsets (`src/storage/wal/segment_reader.rs`) and 
 - `usearch` FFI boundaries rely on the C++ library behaving correctly regarding pointer validity. We added panic guards for null pointers, but full memory safety depends on `usearch` correctness.
 - The `usearch` dependency points to a fork (`madmax983/USearch`). This fork contains Rust-specific fixes (move semantics) not yet in upstream. We have pinned the specific commit to ensure stability, but future upstream security patches will need manual cherry-picking.
 - `mmap` usage in `src/storage/wal/segment_reader.rs` is inherently unsafe against external file truncation (SIGBUS risk), though file size is checked before mapping.
+- `HnswIndex::load` validates configuration against the file, but we cannot currently verify that the underlying `usearch` index matches the expected quantization (API limitation). This creates a theoretical risk if a loaded index has different quantization than expected, potentially leading to memory safety issues with custom metrics.
 
 ## 2026-02-12 - SIMD Hardening
 **Threat:** Buffer Over-read in Release Builds
@@ -84,7 +85,7 @@ Refactored both functions to use recursive helpers that track depth. Enforced `M
 The `usearch` library supports quantized vector storage (I8, F16), which reduces memory usage. However, user-defined custom metrics are defined to operate on `f32` slices. When using a custom metric with quantized storage, `usearch` passes pointers to the quantized data (e.g., `i8*`), but the Rust wrapper blindly cast these to `f32*`. This resulted in reading 4x (for I8) or 2x (for F16) more memory than allocated, leading to potential crashes (DoS) or information leakage (reading uninitialized/unrelated memory).
 
 **Defense:** Configuration Validation
-Enforced a strict validation rule in `HnswIndexBuilder::build` and `HnswIndex::load`: Custom metrics are now **only** allowed when using `Quantization::F32`. Attempting to combine `custom_metric` with `I8` or `F16` quantization now returns a specific `InvalidVector` error instead of proceeding with unsafe memory access.
+Enforced a strict validation rule in `HnswIndexBuilder::build` and `HnswIndex::load`: Custom metrics are now **only** allowed when using `Quantization::F32`. Attempting to combine `custom_metric` with `I8` or `F16` quantization now returns a specific `InvalidVector` error instead of crashing.
 
 **Verification:** Regression Test
 Added `tests/security_custom_metric.rs` which attempts to build and load an index with this dangerous combination. Verified that the operation fails safely with the expected error message, whereas previously it would read out-of-bounds memory.
