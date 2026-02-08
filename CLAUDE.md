@@ -101,6 +101,24 @@ All performance-critical features must include benchmarks:
 - **Vector search**: <10ms k-NN (k=10, 1M vectors)
 - **Hybrid queries**: <30ms graph+vector+temporal
 
+### Miri - Undefined Behavior Detection
+
+All `unsafe` code must be validated with [Miri](https://github.com/rust-lang/miri).
+
+**Quick Commands:**
+```bash
+just miri-setup        # Install miri (one-time)
+just miri              # Run miri on all tests
+just miri-test name    # Run specific test
+```
+
+**When to run Miri:**
+- Before committing any changes to `unsafe` blocks
+- After modifying SIMD, lock-free, or concurrent code
+- When working with raw pointers, transmute, or FFI
+
+**See [docs/MIRI.md](docs/MIRI.md) for complete guide, configuration, and troubleshooting.**
+
 ## Major Features
 
 ### Write-Ahead Log (WAL)
@@ -438,12 +456,13 @@ This enables multiple Claude instances to work in parallel without conflicts.
 - [ ] **Code formatted**: `cargo fmt --all` applied
 - [ ] **Tests pass**: All tests passing
 - [ ] **Coverage maintained**: Meets coverage thresholds
+- [ ] **Miri passes** (if unsafe code changed): `just miri-test <affected_module>`
 - [ ] Temporal invariants preserved
 - [ ] No performance regression on benchmarks
 - [ ] Error handling is comprehensive (no unwrap/expect)
 - [ ] Tests cover edge cases
 - [ ] Documentation updated
-- [ ] No unsafe without safety comments
+- [ ] No unsafe without safety comments (SAFETY: comments required)
 - [ ] Strong typing used (no raw primitives for IDs)
 - [ ] Code follows [CODING_STANDARDS.md](docs/CODING_STANDARDS.md)
 
@@ -565,6 +584,7 @@ avoiding the edge scan.
 - **[docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md)** - Complete development workflow
 - **[docs/CODING_STANDARDS.md](docs/CODING_STANDARDS.md)** - Rust coding standards
 - **[TESTING.md](TESTING.md)** - Testing requirements and coverage
+- **[docs/MIRI.md](docs/MIRI.md)** - Undefined behavior detection for unsafe code
 
 ### Feature Documentation
 - **[docs/WAL.md](docs/WAL.md)** - Write-ahead log internals

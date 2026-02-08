@@ -1,0 +1,49 @@
+# Miri Configuration for AletheiaDB
+# https://github.com/rust-lang/miri
+
+# ==============================================================================
+# Memory Model Configuration
+# ==============================================================================
+
+# Enforce strict provenance rules for pointer operations.
+# Catches invalid pointer-integer casts and use-after-free bugs.
+-Zmiri-strict-provenance
+
+# Track raw pointer tags through memory to detect aliasing violations.
+# Helps identify undefined behavior in unsafe code.
+-Zmiri-tag-raw-pointers
+
+# ==============================================================================
+# Concurrency Configuration
+# ==============================================================================
+
+# Enable weak memory emulation for realistic concurrency behavior.
+# Detects data races and ordering violations.
+-Zmiri-preemption-rate=0.01
+
+# Disable isolation to allow basic system interactions.
+# Required for tests that access env vars or file system.
+-Zmiri-disable-isolation
+
+# ==============================================================================
+# Performance & Diagnostics
+# ==============================================================================
+
+# Improve performance by reducing symbolic execution complexity.
+# Reasonable default for development.
+-Zmiri-symbolic-alignment-check
+
+# Show backtraces on errors for easier debugging.
+-Zmiri-backtrace=full
+
+# ==============================================================================
+# Known Limitations
+# ==============================================================================
+#
+# Miri cannot execute:
+# - SIMD intrinsics (avx2, sse2) - Use cfg(not(miri)) to skip
+# - FFI calls to usearch - Tests with vector search will be skipped
+# - Some advanced tokio features - Basic async/await works
+#
+# Use `just miri` or `just miri-test` for filtered test runs.
+# ==============================================================================

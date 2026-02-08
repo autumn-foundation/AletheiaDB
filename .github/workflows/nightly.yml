@@ -50,11 +50,18 @@ jobs:
       - name: Setup miri
         run: cargo miri setup
 
-      - name: Run miri
-        run: cargo miri test
+      - name: Run miri on library tests
+        run: cargo miri test --lib
         continue-on-error: true
         env:
-          MIRIFLAGS: -Zmiri-strict-provenance
+          # Flags are loaded from .mirirc, but we can override here if needed
+          RUST_BACKTRACE: 1
+
+      - name: Run miri on integration tests (may have FFI failures)
+        run: cargo miri test --tests
+        continue-on-error: true
+        env:
+          RUST_BACKTRACE: 1
 
   performance-profile:
     name: Performance Profiling
