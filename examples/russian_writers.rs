@@ -846,9 +846,22 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
 
         // Create book with publication year as valid_from (enables temporal evolution)
         let publication_time = year_to_timestamp(book.published_year);
+
+        // Debug: Log book creation details for Crime and Punishment
+        if book.title == "Crime and Punishment" {
+            println!("\n  [DEBUG] Creating Crime and Punishment:");
+            println!("    Published year: {}", book.published_year);
+            println!("    Valid_from timestamp: {:?}", publication_time);
+        }
+
         let node_id = demo.db.write(|tx| {
             tx.create_node_with_valid_time("Book", builder.build(), Some(publication_time))
         })?;
+
+        if book.title == "Crime and Punishment" {
+            println!("    Node ID: {:?}", node_id);
+        }
+
         demo.books.insert(book.title.clone(), node_id);
     }
 
@@ -1085,7 +1098,6 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
 
             for (year, interpretation) in stages {
                 // Create a new version with updated interpretation
-                // Note: update_node does a full replacement (PUT), so we need all properties
                 let current_node = demo.db.get_node(book_id)?;
 
                 // Rebuild PropertyMap with all existing properties plus updated interpretation
@@ -1105,10 +1117,11 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
                     tx.update_node_with_valid_time(book_id, builder.build(), Some(valid_time))
                 })?;
 
-                // Truncate interpretation (character-aware)
+                // Truncate interpretation for display
                 let truncated: String = interpretation.chars().take(60).collect();
                 println!("    {} → {}", year, truncated);
             }
+            println!();
         }
     }
 
@@ -1241,6 +1254,9 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
     }
 
     println!("\n  ✓ Created temporal versions with semantic drift in embeddings");
+
+    println!("\n  ✓ Temporal versions created successfully");
+    println!("    Use 'evolution <book>' or 'timewarp <book> <year>' to explore!\n");
 
     Ok(())
 }
@@ -1703,57 +1719,73 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
 
         println!("\n═══ TEMPORAL QUERY: INTERPRETATION IN {} ═══\n", year);
 
-        // Convert year to timestamp and get current transaction time
+        // Convert year to timestamp
         let query_timestamp = year_to_timestamp(year);
-        let current_tx_time = now_timestamp()?;
 
-        // Use AletheiaDB's temporal API to get the node as it was in that year
-        match demo
-            .db
-            .get_node_at_time(book_id, query_timestamp, current_tx_time)
-        {
-            Ok(historical_node) => {
-                let historical_interp = historical_node
-                    .properties
-                    .get("interpretation")
-                    .map(format_value)
-                    .unwrap_or_else(|| "No interpretation recorded yet".to_string());
+        // Use version history API to find the version valid at this time
+        match demo.db.get_node_history(book_id) {
+            Ok(history) => {
+                // Find the version whose valid_time interval contains the query year
+                let version_at_time = history.versions.iter().find(|v| {
+                    v.temporal.valid_time().contains(query_timestamp)
+                });
 
-                println!("Interpretation in {}:", year);
-                println!("  {}\n", historical_interp);
+                match version_at_time {
+                    Some(version_info) => {
+                        // Reconstruct the node at this version
+                        match demo.db.get_node_at_version(book_id, version_info.version_number) {
+                            Ok(historical_node) => {
+                                let historical_interp = historical_node
+                                    .properties
+                                    .get("interpretation")
+                                    .map(format_value)
+                                    .unwrap_or_else(|| "No interpretation recorded yet".to_string());
 
-                // Compare with current interpretation
-                println!("Current interpretation (2024):");
-                println!("  {}\n", current_interp);
+                                println!("Interpretation in {}:", year);
+                                println!("  {}\n", historical_interp);
 
-                // Show temporal context
-                if year < 1900 {
-                    println!("In {}, literary criticism was still emerging.", year);
-                    println!("The work would have been viewed through a 19th century lens.");
-                } else if year < 1950 {
-                    println!(
-                        "In {}, modernist and early psychoanalytic interpretations",
-                        year
-                    );
-                    println!("were beginning to influence literary criticism.");
-                } else if year < 2000 {
-                    println!(
-                        "In {}, post-war critical theory and structural analysis",
-                        year
-                    );
-                    println!("dominated literary interpretation.");
-                } else {
-                    println!("In {}, contemporary criticism emphasizes diverse", year);
-                    println!("perspectives including trauma studies, postcolonial theory, etc.");
+                                // Compare with current interpretation
+                                println!("Current interpretation (2024):");
+                                println!("  {}\n", current_interp);
+
+                                // Show temporal context
+                                if year < 1900 {
+                                    println!("In {}, literary criticism was still emerging.", year);
+                                    println!("The work would have been viewed through a 19th century lens.");
+                                } else if year < 1950 {
+                                    println!(
+                                        "In {}, modernist and early psychoanalytic interpretations",
+                                        year
+                                    );
+                                    println!("were beginning to influence literary criticism.");
+                                } else if year < 2000 {
+                                    println!(
+                                        "In {}, post-war critical theory and structural analysis",
+                                        year
+                                    );
+                                    println!("dominated literary interpretation.");
+                                } else {
+                                    println!("In {}, contemporary criticism emphasizes diverse", year);
+                                    println!("perspectives including trauma studies, postcolonial theory, etc.");
+                                }
+                            }
+                            Err(e) => {
+                                println!("⚠️  Error retrieving version: {}", e);
+                            }
+                        }
+                    }
+                    None => {
+                        println!("⚠️  No version of this book exists at year {}", year);
+                        println!("The book may not have been published yet, or no updates were recorded.");
+                    }
                 }
             }
-            Err(_) => {
-                println!("⚠️  No version of this book exists at year {}", year);
-                println!("The book may not have been published yet, or no updates were recorded.");
+            Err(e) => {
+                println!("⚠️  Error getting node history: {}", e);
             }
         }
 
-        println!("\n💡 This query used: db.get_node_at_time(book_id, valid_time, tx_time)");
+        println!("\n💡 This query used: db.get_node_history() + version filtering");
         println!("   Valid Time: Jan 1, {} (approximate)", year);
         println!("   Transaction Time: now (latest committed state)");
     } else {
@@ -2456,9 +2488,10 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
         );
         println!("╚═══════════════════════════════════════════════════════════╝");
 
-        let current_time = now_timestamp()?;
-
         println!("\nHow our interpretation of this work evolved from publication to present:\n");
+
+        // Get the full version history for this book
+        let history = demo.db.get_node_history(book_id)?;
 
         // Query interpretation at different time periods
         // We know books were updated at: 1885, 1900, 1925, 1945, 1955, 1960, 2024
@@ -2468,40 +2501,59 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
         for year in years {
             let timestamp = year_to_timestamp(year as i64);
 
-            // Query book state at this time
-            match timed!(
-                demo,
-                &format!("Temporal query (year {})", year),
-                demo.db.get_node_at_time(book_id, timestamp, current_time)
-            ) {
-                Ok(historical_node) => {
-                    // Debug: show available properties
-                    if !found_any {
-                        println!("\n  Debug: Available properties in node:");
-                        for (key, _value) in historical_node.properties.iter() {
-                            println!("    • {}", label_str(*key));
+            // Find the version whose valid_time interval contains this year
+            let version_at_time = history.versions.iter().find(|v| {
+                v.temporal.valid_time().contains(timestamp)
+            });
+
+            match version_at_time {
+                Some(version_info) => {
+                    // Retrieve the actual node at this version
+                    match timed!(
+                        demo,
+                        &format!("Version lookup (year {})", year),
+                        demo.db.get_node_at_version(book_id, version_info.version_number)
+                    ) {
+                        Ok(historical_node) => {
+                            // Debug: show available properties
+                            if !found_any {
+                                println!("\n  Debug: Available properties in node:");
+                                for (key, _value) in historical_node.properties.iter() {
+                                    println!("    • {}", label_str(*key));
+                                }
+                            }
+
+                            if let Some(interpretation) =
+                                historical_node.properties.get("interpretation")
+                            {
+                                let interp_text = format_value(interpretation);
+
+                                println!(
+                                    "┌─ {} {}",
+                                    year,
+                                    "─".repeat(60 - year.to_string().len())
+                                );
+                                println!("│");
+                                let wrapped = wrap_text(&interp_text, 68, "│ ");
+                                println!("{}", wrapped);
+                                println!("│");
+
+                                found_any = true;
+                            } else {
+                                println!(
+                                    "  Debug: Year {} - no 'interpretation' property found",
+                                    year
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            println!("  Debug: Year {} - query error: {}", year, e);
+                            continue;
                         }
                     }
-
-                    if let Some(interpretation) = historical_node.properties.get("interpretation") {
-                        let interp_text = format_value(interpretation);
-
-                        println!("┌─ {} {}", year, "─".repeat(60 - year.to_string().len()));
-                        println!("│");
-                        let wrapped = wrap_text(&interp_text, 68, "│ ");
-                        println!("{}", wrapped);
-                        println!("│");
-
-                        found_any = true;
-                    } else {
-                        println!(
-                            "  Debug: Year {} - no 'interpretation' property found",
-                            year
-                        );
-                    }
                 }
-                Err(e) => {
-                    println!("  Debug: Year {} - query error: {}", year, e);
+                None => {
+                    // No version exists for this year
                     continue;
                 }
             }
