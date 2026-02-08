@@ -21,6 +21,7 @@ use aletheiadb::{
 use aletheiadb::{
     experimental::concept_algebra::ConceptAlgebra,
     experimental::fishing::{Bait, FishingRod, FishingTrip},
+    experimental::prophet::Prophet,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -203,6 +204,7 @@ impl RussianLitCompleter {
         {
             commands.push("fish".to_string());
             commands.push("analogy".to_string());
+            commands.push("predict".to_string());
         }
 
         Self {
@@ -1726,20 +1728,26 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
         match demo.db.get_node_history(book_id) {
             Ok(history) => {
                 // Find the version whose valid_time interval contains the query year
-                let version_at_time = history.versions.iter().find(|v| {
-                    v.temporal.valid_time().contains(query_timestamp)
-                });
+                let version_at_time = history
+                    .versions
+                    .iter()
+                    .find(|v| v.temporal.valid_time().contains(query_timestamp));
 
                 match version_at_time {
                     Some(version_info) => {
                         // Reconstruct the node at this version
-                        match demo.db.get_node_at_version(book_id, version_info.version_number) {
+                        match demo
+                            .db
+                            .get_node_at_version(book_id, version_info.version_number)
+                        {
                             Ok(historical_node) => {
                                 let historical_interp = historical_node
                                     .properties
                                     .get("interpretation")
                                     .map(format_value)
-                                    .unwrap_or_else(|| "No interpretation recorded yet".to_string());
+                                    .unwrap_or_else(|| {
+                                        "No interpretation recorded yet".to_string()
+                                    });
 
                                 println!("Interpretation in {}:", year);
                                 println!("  {}\n", historical_interp);
@@ -1751,7 +1759,9 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
                                 // Show temporal context
                                 if year < 1900 {
                                     println!("In {}, literary criticism was still emerging.", year);
-                                    println!("The work would have been viewed through a 19th century lens.");
+                                    println!(
+                                        "The work would have been viewed through a 19th century lens."
+                                    );
                                 } else if year < 1950 {
                                     println!(
                                         "In {}, modernist and early psychoanalytic interpretations",
@@ -1765,8 +1775,13 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
                                     );
                                     println!("dominated literary interpretation.");
                                 } else {
-                                    println!("In {}, contemporary criticism emphasizes diverse", year);
-                                    println!("perspectives including trauma studies, postcolonial theory, etc.");
+                                    println!(
+                                        "In {}, contemporary criticism emphasizes diverse",
+                                        year
+                                    );
+                                    println!(
+                                        "perspectives including trauma studies, postcolonial theory, etc."
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -1776,7 +1791,9 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
                     }
                     None => {
                         println!("⚠️  No version of this book exists at year {}", year);
-                        println!("The book may not have been published yet, or no updates were recorded.");
+                        println!(
+                            "The book may not have been published yet, or no updates were recorded."
+                        );
                     }
                 }
             }
@@ -2502,9 +2519,10 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
             let timestamp = year_to_timestamp(year as i64);
 
             // Find the version whose valid_time interval contains this year
-            let version_at_time = history.versions.iter().find(|v| {
-                v.temporal.valid_time().contains(timestamp)
-            });
+            let version_at_time = history
+                .versions
+                .iter()
+                .find(|v| v.temporal.valid_time().contains(timestamp));
 
             match version_at_time {
                 Some(version_info) => {
@@ -2512,7 +2530,8 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
                     match timed!(
                         demo,
                         &format!("Version lookup (year {})", year),
-                        demo.db.get_node_at_version(book_id, version_info.version_number)
+                        demo.db
+                            .get_node_at_version(book_id, version_info.version_number)
                     ) {
                         Ok(historical_node) => {
                             // Debug: show available properties
@@ -2528,11 +2547,7 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
                             {
                                 let interp_text = format_value(interpretation);
 
-                                println!(
-                                    "┌─ {} {}",
-                                    year,
-                                    "─".repeat(60 - year.to_string().len())
-                                );
+                                println!("┌─ {} {}", year, "─".repeat(60 - year.to_string().len()));
                                 println!("│");
                                 let wrapped = wrap_text(&interp_text, 68, "│ ");
                                 println!("{}", wrapped);
@@ -2572,6 +2587,96 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
     } else {
         println!("\n❌ Book not found: {}", book_title);
         println!("\nTry: list books");
+    }
+
+    Ok(())
+}
+
+/// Predict missing links using Prophet (topology + semantics).
+#[cfg(feature = "nova")]
+fn predict_missing_links(demo: &DemoData, args: &str) -> Result<()> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let entity_name = parts.first().map(|s| strip_quotes(s)).unwrap_or("");
+    let k = parts
+        .get(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(10);
+
+    if let Some(node_id) = demo.get_node(entity_name) {
+        let node = demo.db.get_node(node_id)?;
+        let entity_name_display = node
+            .properties
+            .get("name")
+            .or_else(|| node.properties.get("title"))
+            .map(format_value)
+            .unwrap_or_else(|| label_str(node.label));
+
+        println!("\n╔═══════════════════════════════════════════════════════════╗");
+        println!("║  LINK PREDICTION: {}", entity_name_display.to_uppercase());
+        println!("╚═══════════════════════════════════════════════════════════╝");
+        println!("\nPredicting missing connections using:");
+        println!("  • Topological structure (Adamic-Adar via common neighbors)");
+        println!("  • Semantic similarity (vector embeddings)");
+        println!();
+
+        // Use Prophet to predict links
+        let prophet = Prophet::new(&demo.db);
+        let predictions = timed!(
+            demo,
+            "Prophet link prediction",
+            prophet.predict_links(node_id, k)
+        )?;
+
+        if predictions.is_empty() {
+            println!("No predictions found. This entity might:");
+            println!("  • Have no neighbors (disconnected node)");
+            println!("  • Already be connected to all potential candidates");
+            println!("  • Have neighbors with no outgoing connections");
+            return Ok(());
+        }
+
+        println!(
+            "Predicted missing connections (top {}):\n",
+            predictions.len()
+        );
+
+        for (rank, (predicted_id, score)) in predictions.iter().enumerate() {
+            if let Ok(predicted_node) = demo.db.get_node(*predicted_id) {
+                let predicted_name = predicted_node
+                    .properties
+                    .get("name")
+                    .or_else(|| predicted_node.properties.get("title"))
+                    .map(format_value)
+                    .unwrap_or_else(|| label_str(predicted_node.label));
+
+                let label = label_str(predicted_node.label);
+
+                println!(
+                    "{}. {} ({}) - Score: {:.3}",
+                    rank + 1,
+                    predicted_name,
+                    label,
+                    score
+                );
+
+                // Show a hint about why this might be a good prediction
+                if *score > 1.0 {
+                    println!("   💡 Strong candidate: high topological + semantic similarity");
+                } else if *score > 0.5 {
+                    println!("   💡 Moderate candidate: shares common neighbors");
+                } else {
+                    println!("   💡 Weak candidate: few common neighbors");
+                }
+            }
+        }
+
+        println!("\n💡 These predictions combine:");
+        println!("   • Graph topology: Entities with many common neighbors");
+        println!("   • Vector semantics: Entities with similar embeddings");
+        println!("\n   Higher scores indicate more likely missing connections!");
+    } else {
+        println!("\n❌ Entity not found: {}", entity_name);
+        println!("\nTry: list authors, list books, list characters");
     }
 
     Ok(())
@@ -2944,6 +3049,7 @@ GRAPH QUERIES (Query Builder API):
   influences <author>      - Show influences (graph + vector hybrid)
   path <from> <to> --like <concept>
                            - Find semantic path between entities
+  predict <entity> [k]     - Predict missing connections (topology + semantics)
 
 SYSTEM:
   stats                    - Database statistics
@@ -2960,6 +3066,7 @@ Examples:
   > thematic "Crime and Punishment"
   > influences Dostoevsky
   > path Pushkin Gorky --like Suffering
+  > predict Dostoevsky
   > indexes
   > list books
 "#
@@ -3192,6 +3299,20 @@ fn main() -> Result<()> {
                     println!("  • The Brothers Karamazov");
                 } else {
                     show_personality_evolution(&demo, args)?;
+                }
+            }
+            #[cfg(feature = "nova")]
+            "predict" => {
+                if args.is_empty() {
+                    println!("Usage: predict <entity_name> [k]");
+                    println!("Example: predict Dostoevsky");
+                    println!("         predict Tolstoy 8");
+                    println!("\nPredicts missing connections based on:");
+                    println!("  • Topological structure (common neighbors)");
+                    println!("  • Semantic similarity (vector embeddings)");
+                    println!("\n💡 Experimental feature from Prophet link prediction engine");
+                } else {
+                    predict_missing_links(&demo, args)?;
                 }
             }
             "styles" => {
