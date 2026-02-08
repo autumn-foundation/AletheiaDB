@@ -9,11 +9,29 @@ use crc32fast::Hasher;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 
+use crate::storage::compression::decompress_with_limit;
+
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
     GraphIndexData, GraphIndexDelta, PersistedPropertyMap, PersistedPropertyValue,
 };
 use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
+
+/// Map decompression errors to `IndexPersistenceError`, preserving the
+/// specific `SizeLimitExceeded` variant for capacity violations.
+fn map_decompress_error(e: crate::utils::error::Error) -> IndexPersistenceError {
+    match e {
+        crate::utils::error::Error::Storage(
+            crate::utils::error::StorageError::CapacityExceeded { current, limit, .. },
+        ) => IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Decompressed size {} exceeds limit {} (possible zip bomb)",
+                current, limit
+            ),
+        },
+        _ => IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e)),
+    }
+}
 
 /// Convert PropertyValue to PersistedPropertyValue.
 ///
@@ -200,10 +218,8 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
-        // Decompress the data
-        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
-            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
-        })?;
+        decompressed_data = decompress_with_limit(data_slice, super::MAX_GRAPH_DECOMPRESSED_SIZE)
+            .map_err(map_decompress_error)?;
         &decompressed_data[..]
     } else {
         data_slice
@@ -368,10 +384,8 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
-        // Decompress the data
-        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
-            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
-        })?;
+        decompressed_data = decompress_with_limit(data_slice, super::MAX_GRAPH_DECOMPRESSED_SIZE)
+            .map_err(map_decompress_error)?;
         &decompressed_data[..]
     } else {
         data_slice
@@ -629,10 +643,8 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     let decompressed_data;
     let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
-        // Decompress the data
-        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
-            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
-        })?;
+        decompressed_data = decompress_with_limit(data_slice, super::MAX_GRAPH_DECOMPRESSED_SIZE)
+            .map_err(map_decompress_error)?;
         &decompressed_data[..]
     } else {
         data_slice
@@ -819,6 +831,104 @@ mod tests {
         } else {
             panic!("Expected vector property");
         }
+    }
+}
+
+/// Regression tests for zstd decompression bomb protection.
+#[cfg(test)]
+mod zstd_bomb_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+    use zstd::stream::write::Encoder;
+
+    /// Create a compressed zstd bomb: `uncompressed_mb` MB of zeros,
+    /// wrapped with a fake CRC32 trailer to look like our file format.
+    fn create_zstd_bomb(uncompressed_mb: usize) -> Vec<u8> {
+        let mut compressed = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut compressed, 1).unwrap();
+            let chunk = vec![0u8; 1024 * 1024]; // 1MB chunk
+            for _ in 0..uncompressed_mb {
+                encoder.write_all(&chunk).unwrap();
+            }
+            encoder.finish().unwrap();
+        }
+        // Append fake CRC32 (4 bytes) — the loader splits on trailing 4 bytes
+        compressed.extend_from_slice(&[0, 0, 0, 0]);
+        compressed
+    }
+
+    #[test]
+    fn test_zstd_bomb_blocked_by_load_graph_index() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bomb.idx");
+
+        // 200MB bomb, test limit is 100MB
+        let bomb = create_zstd_bomb(200);
+        // Bomb should be small on disk (zeros compress extremely well)
+        assert!(bomb.len() < 500_000, "Bomb compressed size: {}", bomb.len());
+
+        std::fs::write(&path, &bomb).unwrap();
+
+        let result = load_graph_index(&path);
+        assert!(
+            matches!(result, Err(IndexPersistenceError::SizeLimitExceeded { .. })),
+            "Expected SizeLimitExceeded, got: {:?}",
+            result,
+        );
+    }
+
+    #[test]
+    fn test_zstd_bomb_blocked_by_load_graph_index_mmap() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bomb_mmap.idx");
+
+        let bomb = create_zstd_bomb(200);
+        std::fs::write(&path, &bomb).unwrap();
+
+        let result = load_graph_index_mmap(&path);
+        assert!(
+            matches!(result, Err(IndexPersistenceError::SizeLimitExceeded { .. })),
+            "Expected SizeLimitExceeded, got: {:?}",
+            result,
+        );
+    }
+
+    #[test]
+    fn test_zstd_bomb_blocked_by_load_graph_index_with_delta() {
+        let dir = tempdir().unwrap();
+
+        // Create a valid base index
+        let base_path = dir.path().join("base.idx");
+        let base_data = new_graph_index_data();
+        save_graph_index(&base_data, &base_path).unwrap();
+
+        // Create a bomb as the delta
+        let delta_path = dir.path().join("bomb_delta.idx");
+        let bomb = create_zstd_bomb(200);
+        std::fs::write(&delta_path, &bomb).unwrap();
+
+        let result = load_graph_index_with_delta(&base_path, &delta_path);
+        assert!(
+            matches!(result, Err(IndexPersistenceError::SizeLimitExceeded { .. })),
+            "Expected SizeLimitExceeded, got: {:?}",
+            result,
+        );
+    }
+
+    #[test]
+    fn test_legitimate_compressed_index_loads_fine() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("compressed.idx");
+
+        // Create and save a legitimate compressed index
+        let data = new_graph_index_data();
+        save_graph_index_compressed(&data, &path, 3).unwrap();
+
+        // Should load without error
+        let loaded = load_graph_index(&path).unwrap();
+        assert_eq!(loaded.node_count, 0);
     }
 }
 
