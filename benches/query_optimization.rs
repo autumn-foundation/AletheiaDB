@@ -17,7 +17,8 @@ use aletheiadb::index::vector::{DistanceMetric, hnsw::HnswConfig};
 use aletheiadb::query::builder::QueryBuilder;
 use aletheiadb::query::planner::{QueryPlanner, Statistics};
 use aletheiadb::storage::CurrentStorage;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 
 /// Create a test graph for query benchmarks

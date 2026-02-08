@@ -325,7 +325,7 @@ mod tests {
         // Construct a large vector of numbers
         // Note: generating this large structure in memory is acceptable for a test
         let large_vec: Vec<serde_json::Value> =
-            std::iter::repeat(json!(1.0)).take(too_large).collect();
+            std::iter::repeat_n(json!(1.0), too_large).collect();
         let json_val = serde_json::Value::Array(large_vec);
 
         let result = json_to_property_value(&json_val);
@@ -351,7 +351,7 @@ mod tests {
         // We use nulls to ensure fallback to PropertyValue::Array (generic array)
         // instead of PropertyValue::Vector (numeric vector)
         let limit = MAX_ARRAY_ELEMENTS + 1;
-        let vec: Vec<serde_json::Value> = std::iter::repeat(json!(null)).take(limit).collect();
+        let vec: Vec<serde_json::Value> = std::iter::repeat_n(json!(null), limit).collect();
         let val = serde_json::Value::Array(vec);
 
         let res = json_to_property_value(&val);
@@ -366,12 +366,12 @@ mod tests {
 
         // Verify that numeric vectors are checked BEFORE allocation
         // This test relies on the fact that MAX_VECTOR_DIMENSIONS < MAX_ARRAY_ELEMENTS
-        assert!(MAX_VECTOR_DIMENSIONS < MAX_ARRAY_ELEMENTS);
+        const { assert!(MAX_VECTOR_DIMENSIONS < MAX_ARRAY_ELEMENTS) };
 
         // Create a numeric vector that is larger than MAX_VECTOR_DIMENSIONS but smaller than MAX_ARRAY_ELEMENTS
         // This should fail with "Vector dimension X exceeds limit"
         let size = MAX_VECTOR_DIMENSIONS + 100;
-        let vec: Vec<serde_json::Value> = std::iter::repeat(json!(1.0)).take(size).collect();
+        let vec: Vec<serde_json::Value> = std::iter::repeat_n(json!(1.0), size).collect();
         let val = serde_json::Value::Array(vec);
 
         let res = json_to_property_value(&val);

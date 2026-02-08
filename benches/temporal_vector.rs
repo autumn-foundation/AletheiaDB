@@ -15,7 +15,8 @@ use aletheiadb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 
 /// Helper to create a test temporal index

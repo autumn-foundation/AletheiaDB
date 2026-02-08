@@ -31,7 +31,8 @@ use aletheiadb::storage::historical::HistoricalStorage;
 use aletheiadb::storage::wal::WalOperation;
 use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 use aletheiadb::storage::{CheckpointManager, UnifiedCheckpointConfig};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::time::Duration;
 use tempfile::TempDir;
 

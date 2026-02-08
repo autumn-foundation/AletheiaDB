@@ -7,7 +7,8 @@ mod common;
 
 use aletheiadb::Error;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, ReadOps, WriteOps};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 
