@@ -63,8 +63,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-mutants-target-
 
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@cargo-binstall
+
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@cargo-mutants
+        run: cargo binstall --no-confirm cargo-mutants
 
       - name: Generate diff against base branch
         run: git diff origin/${{ github.base_ref }}..HEAD > mutants-diff.patch
@@ -149,8 +152,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-mutants-target-
 
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@cargo-binstall
+
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@cargo-mutants
+        run: cargo binstall --no-confirm cargo-mutants
 
       - name: Run mutation tests (shard ${{ matrix.shard }}/4)
         run: |
