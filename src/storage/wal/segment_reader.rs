@@ -827,9 +827,9 @@ mod tests {
         let garbage = [0u8; 30];
         file.write_all(&garbage).unwrap();
 
-         // Since we parse eagerly to sort, we expect immediate error for the first segment
-         let result = read_entries_from_dir(dir.path(), LSN(1));
-         assert!(result.is_err());
+        // Since we parse eagerly to sort, we expect immediate error for the first segment
+        let result = read_entries_from_dir(dir.path(), LSN(1));
+        assert!(result.is_err());
     }
 
     // =============================================================================
