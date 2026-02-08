@@ -92,6 +92,9 @@ pub mod validation;
 pub(crate) mod simd;
 
 #[cfg(test)]
+mod sentry_tests;
+
+#[cfg(test)]
 mod tests;
 
 pub use constants::*;
