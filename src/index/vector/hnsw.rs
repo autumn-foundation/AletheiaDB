@@ -1456,7 +1456,17 @@ fn load_mappings_with_integrity(
             let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
 
             if let Ok(node_id) = NodeId::new(node_id_raw) {
-                id_mapping.insert(node_id, key);
+                // Security Check: Detect duplicate NodeIds to prevent sparse file DoS attacks.
+                // A valid mapping file should not contain duplicate NodeIds.
+                // If we encounter one, it indicates corruption or a malicious file (e.g., all zeros).
+                // Use insert() which returns the old value if present, avoiding double lookup.
+                if id_mapping.insert(node_id, key).is_some() {
+                    return Err(Error::Vector(VectorError::IndexError(format!(
+                        "Duplicate NodeId detected in mapping file: {}. This indicates data corruption or a malicious file.",
+                        node_id
+                    ))));
+                }
+
                 reverse_mapping.insert(key, node_id);
                 max_key = max_key.max(key);
             }
