@@ -16,24 +16,38 @@ impl AletheiaDB {
     /// When it hasn't (e.g., multiple operations within the same clock tick), we
     /// advance one logical tick past the last commit.
     fn snapshot_timestamp_for_read(&self) -> Result<Timestamp> {
-        let last_commit =
-            *self
-                .current_timestamp
-                .lock()
-                .map_err(|_| TransactionError::LockPoisoned {
-                    resource: "current_timestamp".to_string(),
-                })?;
+        // Capture current time before acquiring lock to minimize lock contention
         let now = crate::core::temporal::time::now();
+
+        let last_commit = *self
+            .current_timestamp
+            .lock()
+            .map_err(|_| TransactionError::LockPoisoned {
+                resource: "current_timestamp".to_string(),
+            })?;
 
         if now > last_commit {
             // Wallclock advanced past the last commit — now is sufficient
             Ok(now)
         } else {
             // Wallclock hasn't advanced — advance one logical tick past the last
-            // commit so that `commit_ts < snapshot_ts` holds for all committed txns
+            // commit so that `commit_ts < snapshot_ts` holds for all committed txns.
+            // Use checked_add to handle potential overflow (theoretically requires
+            // 4B+ events per microsecond, but we handle it for correctness).
+            let next_logical = last_commit.logical().checked_add(1).ok_or(
+                crate::utils::error::Error::Temporal(
+                    crate::utils::error::TemporalError::LogicalCounterOverflow {
+                        wallclock: last_commit.wallclock(),
+                        current_logical: last_commit.logical(),
+                    },
+                ),
+            )?;
+
+            // SAFETY: wallclock is copied from an existing valid HybridTimestamp,
+            // and next_logical is bounded by u32::MAX via checked_add above.
             Ok(HybridTimestamp::new_unchecked(
                 last_commit.wallclock(),
-                last_commit.logical() + 1,
+                next_logical,
             ))
         }
     }
