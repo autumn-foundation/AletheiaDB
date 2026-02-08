@@ -123,7 +123,11 @@ fn test_dot_product_inf_propagation_exact() {
     let a = vec![1.0, 2.0, f32::INFINITY, 4.0];
     let b = vec![1.0, 2.0, 1.0, 4.0];
     let result = dot_product(&a, &b).unwrap();
-    assert_eq!(result, f32::INFINITY, "Dot product should propagate Infinity");
+    assert_eq!(
+        result,
+        f32::INFINITY,
+        "Dot product should propagate Infinity"
+    );
 }
 
 #[test]

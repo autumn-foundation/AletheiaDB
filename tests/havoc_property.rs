@@ -26,7 +26,8 @@ proptest! {
                 msg.contains("exceeds maximum allowed") ||
                 msg.contains("exceeds dimension") ||
                 msg.contains("Unknown PropertyValue type tag") ||
-                msg.contains("Empty buffer"),
+                msg.contains("Empty buffer") ||
+                msg.contains("Insufficient buffer size"),
                 "Unexpected error message: {}", msg
             );
         }
