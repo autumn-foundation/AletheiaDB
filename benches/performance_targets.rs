@@ -22,7 +22,8 @@
 use aletheiadb::Error;
 use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::{AletheiaDB, CurrentStorage, PropertyMapBuilder};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /// Target: Current-state single-hop traversal <1µs
 fn bench_single_hop_target(c: &mut Criterion) {

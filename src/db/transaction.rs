@@ -1,4 +1,5 @@
 use crate::api::transaction::{ReadTransaction, WriteTransaction};
+use crate::core::hlc::HybridTimestamp;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::storage::wal::WriteOptions;
@@ -6,6 +7,52 @@ use crate::utils::error::{Result, TransactionError};
 use std::sync::Arc;
 
 impl AletheiaDB {
+    /// Compute a snapshot timestamp that is strictly greater than the last commit
+    /// timestamp, ensuring all previously committed transactions are visible.
+    ///
+    /// The MVCC visibility check uses strict less-than (`commit_ts < snapshot_ts`),
+    /// so the snapshot must be strictly greater than the most recent commit to see it.
+    /// When the system clock advances past the last commit, `now()` is sufficient.
+    /// When it hasn't (e.g., multiple operations within the same clock tick), we
+    /// advance one logical tick past the last commit.
+    fn snapshot_timestamp_for_read(&self) -> Result<Timestamp> {
+        // Capture current time before acquiring lock to minimize lock contention
+        let now = crate::core::temporal::time::now();
+
+        let last_commit =
+            *self
+                .current_timestamp
+                .lock()
+                .map_err(|_| TransactionError::LockPoisoned {
+                    resource: "current_timestamp".to_string(),
+                })?;
+
+        if now > last_commit {
+            // Wallclock advanced past the last commit — now is sufficient
+            Ok(now)
+        } else {
+            // Wallclock hasn't advanced — advance one logical tick past the last
+            // commit so that `commit_ts < snapshot_ts` holds for all committed txns.
+            // Use checked_add to handle potential overflow (theoretically requires
+            // 4B+ events per microsecond, but we handle it for correctness).
+            let next_logical = last_commit.logical().checked_add(1).ok_or(
+                crate::utils::error::Error::Temporal(
+                    crate::utils::error::TemporalError::LogicalCounterOverflow {
+                        wallclock: last_commit.wallclock(),
+                        current_logical: last_commit.logical(),
+                    },
+                ),
+            )?;
+
+            // SAFETY: wallclock is copied from an existing valid HybridTimestamp,
+            // and next_logical is bounded by u32::MAX via checked_add above.
+            Ok(HybridTimestamp::new_unchecked(
+                last_commit.wallclock(),
+                next_logical,
+            ))
+        }
+    }
+
     /// Create a new read-only transaction.
     ///
     /// Read-only transactions are lightweight and have zero overhead:
@@ -27,13 +74,7 @@ impl AletheiaDB {
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
         let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp =
-            *self
-                .current_timestamp
-                .lock()
-                .map_err(|_| TransactionError::LockPoisoned {
-                    resource: "current_timestamp".to_string(),
-                })?;
+        let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
         // Register as active
         self.visibility_manager.register_active(tx_id);
@@ -117,19 +158,7 @@ impl AletheiaDB {
     /// ```
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
         let tx_id = self.tx_id_gen.next();
-
-        // Capture snapshot timestamp using current wallclock time, ensuring it's
-        // >= the last commit timestamp (monotonicity). This allows the transaction
-        // to see all commits that happened before it started.
-        let snapshot_timestamp = {
-            let ts = self
-                .current_timestamp
-                .lock()
-                .map_err(|_| TransactionError::LockPoisoned {
-                    resource: "current_timestamp".to_string(),
-                })?;
-            std::cmp::max(crate::core::temporal::time::now(), *ts)
-        };
+        let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
         // Register as active
         self.visibility_manager.register_active(tx_id);
@@ -359,19 +388,7 @@ impl AletheiaDB {
         options: WriteOptions,
     ) -> Result<WriteTransaction> {
         let tx_id = self.tx_id_gen.next();
-
-        // Capture snapshot timestamp using current wallclock time, ensuring it's
-        // >= the last commit timestamp (monotonicity). This allows the transaction
-        // to see all commits that happened before it started.
-        let snapshot_timestamp = {
-            let ts = self
-                .current_timestamp
-                .lock()
-                .map_err(|_| TransactionError::LockPoisoned {
-                    resource: "current_timestamp".to_string(),
-                })?;
-            std::cmp::max(crate::core::temporal::time::now(), *ts)
-        };
+        let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
         // Register as active
         self.visibility_manager.register_active(tx_id);

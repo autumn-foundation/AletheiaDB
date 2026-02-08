@@ -1,7 +1,8 @@
 use super::*;
 use crate::storage::index_persistence::formats::{
-    PersistedEdge, PersistedNode, PersistedPropertyMap,
+    GraphIndexDelta, PersistedEdge, PersistedNode, PersistedPropertyMap,
 };
+use crate::storage::index_persistence::{DELTA_MAGIC, MANIFEST_VERSION};
 use tempfile::tempdir;
 
 fn create_test_node(id: u64, label_idx: u32, version_id: u64) -> PersistedNode {
@@ -196,6 +197,56 @@ fn test_delta_empty() {
 
     assert_eq!(loaded.nodes.len(), 1);
     assert_eq!(loaded.nodes[0], base_data.nodes[0]);
+}
+
+#[test]
+fn test_delta_uncompressed_loads_correctly() {
+    // Regression test: ensures the zstd detection condition correctly requires
+    // BOTH length >= 4 AND magic bytes match. Without the && short-circuit,
+    // uncompressed data would be incorrectly fed to the zstd decompressor.
+    let dir = tempdir().unwrap();
+    let base_path = dir.path().join("base.idx");
+    let delta_path = dir.path().join("delta.idx");
+
+    // Create and save base
+    let mut base_data = new_graph_index_data();
+    base_data.nodes.push(create_test_node(1, 1, 100));
+    base_data.node_count = 1;
+    save_graph_index(&base_data, &base_path).unwrap();
+
+    // Build an uncompressed delta file manually (no zstd wrapper)
+    let delta = GraphIndexDelta {
+        magic: DELTA_MAGIC,
+        version: MANIFEST_VERSION,
+        added_nodes: vec![create_test_node(2, 2, 101)],
+        modified_nodes: vec![],
+        deleted_node_ids: vec![],
+        added_edges: vec![],
+        modified_edges: vec![],
+        deleted_edge_ids: vec![],
+        new_node_count: 2,
+        new_edge_count: 0,
+    };
+
+    let encoded = bitcode::encode(&delta);
+
+    // CRC32 of uncompressed data
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&encoded);
+    let checksum = hasher.finalize();
+
+    // Write raw encoded data + checksum (no zstd compression)
+    let mut file_data = encoded;
+    file_data.extend_from_slice(&checksum.to_le_bytes());
+    std::fs::write(&delta_path, &file_data).unwrap();
+
+    // Load must succeed — the loader should detect no zstd magic and skip decompression
+    let loaded = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+
+    assert_eq!(loaded.node_count, 2);
+    assert_eq!(loaded.nodes.len(), 2);
+    assert!(loaded.nodes.iter().any(|n| n.id == 1));
+    assert!(loaded.nodes.iter().any(|n| n.id == 2));
 }
 
 #[test]

@@ -14,7 +14,8 @@ use aletheiadb::{
     AletheiaDB, NodeId, PropertyMapBuilder, WalConfigBuilder, WriteOps,
     storage::wal::DurabilityMode,
 };
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /// Create a test database configured for benchmarking (Async mode, no waiting).
 fn create_benchmark_db() -> AletheiaDB {
