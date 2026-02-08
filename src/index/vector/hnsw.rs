@@ -404,30 +404,50 @@ where
             panic!("usearch passed null pointer to metric function");
         }
 
-        // Check for alignment to prevent UB
+        // Check alignment
         // Use bitwise check for power-of-2 alignment (f32 align is 4)
         let align_mask = std::mem::align_of::<f32>() - 1;
-        if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
-            panic!(
-                "usearch passed unaligned pointer to metric function (expected alignment {})",
-                std::mem::align_of::<f32>()
-            );
+        let a_aligned = (a as usize) & align_mask == 0;
+        let b_aligned = (b as usize) & align_mask == 0;
+
+        if a_aligned && b_aligned {
+            // Fast path: both pointers are aligned
+            // SAFETY: usearch guarantees pointers are valid for `dims` elements.
+            // We verified they are not null above.
+            let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+            let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+            return distance_fn(slice_a, slice_b);
         }
 
-        // SAFETY: usearch guarantees pointers are valid for `dims` elements.
-        // We verified they are not null above.
+        // Slow path: at least one pointer is unaligned
+        // We must copy to an aligned buffer to avoid UB.
+        // This allocation is unfortunate but necessary for safety if usearch misbehaves.
+        // This prevents panic-across-FFI (UB) and allows recovery from unaligned inputs.
 
-        // Strict alignment check to prevent UB (Sentry Directive)
-        // f32 requires 4-byte alignment. accessing unaligned data via slice is UB.
-        if a.align_offset(std::mem::align_of::<f32>()) != 0
-            || b.align_offset(std::mem::align_of::<f32>()) != 0
-        {
-            panic!("usearch passed unaligned pointer to metric function");
-        }
+        let vec_a = if a_aligned {
+            std::borrow::Cow::Borrowed(unsafe { std::slice::from_raw_parts(a, dims) })
+        } else {
+            let mut v = Vec::with_capacity(dims);
+            unsafe {
+                // copy_nonoverlapping handles unaligned source pointers safely (memcpy)
+                std::ptr::copy_nonoverlapping(a as *const u8, v.as_mut_ptr() as *mut u8, dims * 4);
+                v.set_len(dims);
+            }
+            std::borrow::Cow::Owned(v)
+        };
 
-        let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
-        let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-        distance_fn(slice_a, slice_b)
+        let vec_b = if b_aligned {
+            std::borrow::Cow::Borrowed(unsafe { std::slice::from_raw_parts(b, dims) })
+        } else {
+            let mut v = Vec::with_capacity(dims);
+            unsafe {
+                std::ptr::copy_nonoverlapping(b as *const u8, v.as_mut_ptr() as *mut u8, dims * 4);
+                v.set_len(dims);
+            }
+            std::borrow::Cow::Owned(v)
+        };
+
+        distance_fn(&vec_a, &vec_b)
     })
 }
 
@@ -1699,19 +1719,33 @@ mod sentry_tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
-    fn test_metric_wrapper_panic_on_unaligned() {
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+    fn test_metric_wrapper_handles_unaligned() {
+        // This test ensures that the metric wrapper correctly handles unaligned pointers
+        // by copying to an aligned buffer instead of panicking.
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| {
+            // Verify data integrity
+            if a[0] != 1.0 { return -1.0; }
+            if b[0] != 0.0 { return -1.0; }
+            42.0
+        });
         let wrapper = create_metric_wrapper(4, distance_fn);
 
         // Create a buffer and get an unaligned pointer
-        let buffer = [0u8; 32];
+        let mut buffer = [0u8; 32];
+        // Fill buffer with 1.0f32 at offset 1
+        let val_bytes = 1.0f32.to_ne_bytes();
+        buffer[1] = val_bytes[0];
+        buffer[2] = val_bytes[1];
+        buffer[3] = val_bytes[2];
+        buffer[4] = val_bytes[3];
+
         // Address + 1 is definitely unaligned for f32 (align 4)
         let unaligned_ptr = unsafe { buffer.as_ptr().add(1) } as *const f32;
         let aligned_vec = [0.0f32; 4];
         let aligned_ptr = aligned_vec.as_ptr();
 
-        wrapper(unaligned_ptr, aligned_ptr);
+        let result = wrapper(unaligned_ptr, aligned_ptr);
+        assert_eq!(result, 42.0);
     }
 
     #[test]
@@ -1746,26 +1780,44 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
-    fn test_metric_wrapper_panic_on_unaligned() {
-        // This test ensures that the metric wrapper correctly detects unaligned pointers.
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+    fn test_metric_wrapper_handles_unaligned_buffer() {
+        // This test ensures that the metric wrapper correctly handles unaligned pointers
+        // by verifying data integrity after copy.
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| {
+            assert_eq!(a[0], 1.0);
+            assert_eq!(b[0], 2.0);
+            42.0
+        });
         let wrapper = create_metric_wrapper(4, distance_fn);
 
-        // Create a buffer that we can misalign
-        // We need at least 4 f32s (16 bytes) + 1 byte offset
-        let mut buffer = vec![0u8; 16 + 8];
+        // Create a larger buffer to hold two vectors without overlap
+        // a at 0..16
+        // b at 33..49 (offset 33 is unaligned for f32)
+        let mut buffer = vec![0u8; 64];
+
+        // Populate values
+        // aligned part (valid_ptr will point here)
+        let val_a = 1.0f32.to_ne_bytes();
+        buffer[0..4].copy_from_slice(&val_a);
+
+        // unaligned part (offset 33)
+        let val_b = 2.0f32.to_ne_bytes();
+        buffer[33] = val_b[0];
+        buffer[34] = val_b[1];
+        buffer[35] = val_b[2];
+        buffer[36] = val_b[3];
 
         // Get an aligned pointer
         let aligned_ptr = buffer.as_mut_ptr();
 
-        // Create an unaligned pointer by adding 1 byte offset
+        // Create an unaligned pointer by adding 33 bytes offset
         // SAFETY: We allocated enough space. This pointer is valid but unaligned for f32.
-        let unaligned_ptr = unsafe { aligned_ptr.add(1) } as *const f32;
+        let unaligned_ptr = unsafe { aligned_ptr.add(33) } as *const f32;
         let valid_ptr = aligned_ptr as *const f32;
 
-        // Pass unaligned pointer - should panic
-        wrapper(valid_ptr, unaligned_ptr);
+        // Pass unaligned pointer - should succeed
+        let result = wrapper(valid_ptr, unaligned_ptr);
+        assert_eq!(result, 42.0);
     }
 
     #[test]

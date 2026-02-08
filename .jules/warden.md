@@ -179,3 +179,7 @@ Additionally, `FindNode` endpoint completely lacked this deep pagination check.
 Added `test_warden_find_neighbors_overflow` and `test_warden_find_node_deep_pagination` in `src/http/handlers.rs`.
 - Confirmed that `offset = usize::MAX` now returns `400 Bad Request` instead of bypassing the check.
 - Confirmed that deep pagination in `FindNode` now returns `400 Bad Request`.
+
+**2026-02-15 - [FFI Panic Prevention]**
+**Threat:** A custom metric callback in `HnswIndex` panics when receiving unaligned pointers from the `usearch` C++ library. Panicking across FFI boundaries is Undefined Behavior (UB) and can be exploited for Denial of Service (DoS).
+**Defense:** Replaced the `panic!` with a safe fallback that detects unaligned pointers and copies data to a temporary aligned buffer using `std::ptr::copy_nonoverlapping`. This ensures robustness even if the upstream library violates alignment expectations.
