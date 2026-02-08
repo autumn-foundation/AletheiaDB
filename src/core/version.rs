@@ -2110,13 +2110,20 @@ mod sentry_nan_tests {
             // But logic says: if both are vectors -> use VectorDelta::from_diff
             // VectorDelta::from_diff returns None if no changes found.
             // So delta.vector_deltas will be empty, and delta.changed will be empty (for that key).
-            assert!(!delta.is_empty(), "Delta should not be empty when changing 1.0 to NaN");
+            assert!(
+                !delta.is_empty(),
+                "Delta should not be empty when changing 1.0 to NaN"
+            );
         }
 
         let applied_props = delta.apply(&old_props);
         let applied_val = applied_props.get("vec").unwrap().as_vector().unwrap();
 
-        assert!(applied_val[0].is_nan(), "Applied value should be NaN, got {}", applied_val[0]);
+        assert!(
+            applied_val[0].is_nan(),
+            "Applied value should be NaN, got {}",
+            applied_val[0]
+        );
     }
 
     /// 🎯 Target: VectorDelta equality
