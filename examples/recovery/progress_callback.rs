@@ -162,8 +162,12 @@ impl RecoveryProgress {
 
 /// Count total WAL entries (for progress tracking)
 fn count_wal_entries(wal: &ConcurrentWalSystem, start_lsn: LSN) -> Result<usize> {
-    let entries = wal.read_from(start_lsn)?;
-    Ok(entries.count())
+    let mut count = 0;
+    for entry in wal.read_from(start_lsn)? {
+        entry?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn main() -> Result<()> {

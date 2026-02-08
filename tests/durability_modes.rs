@@ -1359,8 +1359,10 @@ fn test_recovery_after_concurrent_writes() {
     }
 
     // Phase 2: Recovery - read entries from disk
-    let recovered_entries =
-        read_wal_entries(&wal_path, LSN(1)).expect("failed to read WAL entries");
+    let recovered_entries: Vec<_> = read_wal_entries(&wal_path, LSN(1))
+        .expect("failed to read WAL entries")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to parse entries");
 
     // Verify all entries were recovered
     assert_eq!(
@@ -1464,8 +1466,10 @@ fn test_recovery_partial_flush_ordering() {
     }
 
     // Phase 2: Recovery - whatever was flushed should be ordered
-    let recovered_entries =
-        read_wal_entries(&wal_path, LSN(1)).expect("failed to read WAL entries");
+    let recovered_entries: Vec<_> = read_wal_entries(&wal_path, LSN(1))
+        .expect("failed to read WAL entries")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("failed to parse entries");
 
     // We should have recovered at least some entries
     assert!(

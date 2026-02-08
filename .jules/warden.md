@@ -179,11 +179,3 @@ Additionally, `FindNode` endpoint completely lacked this deep pagination check.
 Added `test_warden_find_neighbors_overflow` and `test_warden_find_node_deep_pagination` in `src/http/handlers.rs`.
 - Confirmed that `offset = usize::MAX` now returns `400 Bad Request` instead of bypassing the check.
 - Confirmed that deep pagination in `FindNode` now returns `400 Bad Request`.
-
-2026-02-15 - HNSW Metric Panic
-**Threat:** The `create_metric_wrapper` function in `src/index/vector/hnsw.rs` contained an explicit panic if pointers passed from `usearch` were unaligned. This is a potential DoS vector (crash) if the upstream library behavior changes or if custom metrics are used with incompatible quantization settings.
-**Defense:** Replaced the panic with a safe fallback that copies unaligned data to a temporary aligned buffer (`Vec<f32>`). Updated tests to verify safe handling.
-
-2026-02-15 - WAL Replay OOM
-**Threat:** `read_entries_from_dir` in `src/storage/wal/segment_reader.rs` loaded all WAL segments into a `Vec<WalEntry>` in memory during recovery. For massive WALs (e.g. 100GB), this guarantees an OOM crash (DoS).
-**Defense:** Refactored WAL reading to use `WalDirectoryIterator` and `WalSegmentIterator`, enabling streaming access. Updated `ConcurrentWalSystem::read_from` to return the iterator, and updated consumers (`checkpoint.rs`, `persistence.rs`) to process entries lazily.

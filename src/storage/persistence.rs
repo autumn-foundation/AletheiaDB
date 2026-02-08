@@ -540,8 +540,8 @@ impl PersistenceManager {
         let wal_entries = wal.read_from(start_lsn)?;
 
         for entry_result in wal_entries {
-            let entry = entry_result?;
             use crate::storage::wal::WalOperation;
+            let entry = entry_result?;
 
             match entry.operation {
                 WalOperation::CreateNode {
