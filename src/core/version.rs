@@ -1981,3 +1981,81 @@ mod storage_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
+
+    #[test]
+    fn test_materialize_vector_deltas_missing_base_property() {
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+        let mut delta = PropertyDelta::new();
+
+        // Manually insert a sparse delta that requires a base property
+        // We use a dummy sparse delta
+        let sparse_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes: std::sync::Arc::new(vec![]),
+        };
+        delta.vector_deltas.insert(key, sparse_delta);
+
+        // Empty base map (missing the key)
+        let base = PropertyMapBuilder::new().build();
+
+        let result = delta.materialize_vector_deltas(&base);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("base property not found"));
+    }
+
+    #[test]
+    fn test_materialize_vector_deltas_wrong_base_type() {
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+        let mut delta = PropertyDelta::new();
+
+        let sparse_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes: std::sync::Arc::new(vec![]),
+        };
+        delta.vector_deltas.insert(key, sparse_delta);
+
+        // Base map has the key but it's an integer, not a vector
+        let base = PropertyMapBuilder::new().insert("embedding", 42i64).build();
+
+        let result = delta.materialize_vector_deltas(&base);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("base property is not a vector"));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "VectorDelta applied to vector of wrong dimension")]
+    fn test_vector_delta_apply_dimension_mismatch_panic() {
+        // Create a sparse delta expecting dimension 10
+        let delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes: std::sync::Arc::new(vec![]),
+        };
+
+        // Apply to a base vector of dimension 5 (mismatch)
+        let base = vec![0.0f32; 5];
+        let _ = delta.apply(&base);
+    }
+
+    #[test]
+    fn test_vector_delta_from_diff_max_dimensions() {
+        // Create vectors exceeding the maximum allowed dimension
+        let len = MAX_VECTOR_DIMENSIONS + 1;
+        let v1 = vec![0.0f32; len];
+        let v2 = vec![1.0f32; len];
+
+        // Should return None due to dimension limit
+        let result = VectorDelta::from_diff(&v1, &v2);
+        assert!(result.is_none());
+    }
+}
