@@ -138,6 +138,18 @@ const MAPPING_VERSION: u8 = 1;
 ///   legitimate bulk operations.
 const MAX_K: usize = 100_000;
 
+/// Maximum number of entries allowed in a mappings file.
+///
+/// This limit prevents Memory Exhaustion DoS attacks where a malicious actor
+/// provides a sparse mappings file with a header claiming billions of entries.
+/// Loading such a file would cause `load_mappings_with_integrity` to attempt
+/// allocating massive amounts of memory for the ID mapping `DashMap`.
+///
+/// Set to 100 Million (100_000_000), which is well above reasonable single-index limits
+/// but low enough to prevent catastrophic OOM on typical servers.
+/// 100M entries * (16 bytes data + ~32 bytes DashMap overhead) ≈ 4.8GB RAM.
+const MAX_MAPPINGS_COUNT: usize = 100_000_000;
+
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
     match metric {
@@ -1424,6 +1436,14 @@ fn load_mappings_with_integrity(
     // Parse count
     let count = u64::from_le_bytes(header[5..13].try_into().unwrap()) as usize;
 
+    // Security Check: Enforce maximum mappings count to prevent OOM DoS
+    if count > MAX_MAPPINGS_COUNT {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Mappings count {} exceeds maximum allowed {}",
+            count, MAX_MAPPINGS_COUNT
+        ))));
+    }
+
     // Verify data size with checked arithmetic
     // Cast to u64 for file size comparison
     let data_size = (count as u64).checked_mul(16).ok_or_else(|| {
@@ -2417,12 +2437,12 @@ mod tests {
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
                 assert!(
-                    msg.contains("overflow"),
-                    "Expected overflow error, got: {}",
+                    msg.contains("overflow") || msg.contains("exceeds maximum allowed"),
+                    "Expected overflow or max limit error, got: {}",
                     msg
                 );
             }
-            Ok(_) => panic!("Expected IndexError with overflow message, got: Ok(_)"),
+            Ok(_) => panic!("Expected IndexError with overflow/limit message, got: Ok(_)"),
             Err(e) => panic!(
                 "Expected IndexError with overflow message, got: Err({:?})",
                 e
