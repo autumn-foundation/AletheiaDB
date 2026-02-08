@@ -421,6 +421,46 @@ fn test_with_unified_config_returns_result() {
     );
 }
 
+#[test]
+fn test_cold_storage_configuration() {
+    use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+    use std::time::Duration;
+
+    // Create a temporary directory for test data
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let cold_storage_path = temp_dir.path().join("cold.redb");
+
+    // Create config with cold storage enabled but index persistence disabled
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(temp_dir.path().join("wal"))
+                .build(),
+        )
+        .persistence(crate::storage::index_persistence::PersistenceConfig {
+            enabled: false, // Disable index persistence for clean test
+            ..Default::default()
+        })
+        .historical(
+            HistoricalConfigBuilder::new()
+                .enable_cold_storage(true)
+                .cold_storage_path(&cold_storage_path)
+                .migration_age_threshold(Duration::from_secs(3600))
+                .max_hot_versions(1000)
+                .build(),
+        )
+        .build();
+
+    // Initialize database with cold storage
+    let _db = AletheiaDB::with_unified_config(config).expect("Failed to create database");
+
+    // Verify cold storage file was created
+    assert!(
+        cold_storage_path.exists(),
+        "Cold storage file should be created"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_wal_creation_failure_propagates_error() {

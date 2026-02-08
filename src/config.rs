@@ -341,6 +341,25 @@ pub struct HistoricalConfig {
     /// Maximum delta chain length before forcing an anchor (default: 20).
     /// Ensures reconstruction cost is bounded.
     pub max_delta_chain: u32,
+
+    /// Enable cold storage (Redb-based tiered storage) for unlimited historical depth.
+    /// When enabled, old versions are migrated to disk automatically.
+    /// Default: false
+    pub enable_cold_storage: bool,
+
+    /// Path to the cold storage Redb file.
+    /// Required if `enable_cold_storage` is true.
+    /// Default: None
+    pub cold_storage_path: Option<std::path::PathBuf>,
+
+    /// Age threshold for migrating versions to cold storage.
+    /// Versions older than this duration are eligible for migration.
+    /// Default: 1 hour
+    pub migration_age_threshold: std::time::Duration,
+
+    /// Maximum number of hot versions to keep per entity before triggering migration.
+    /// Default: 1000 (same as max_versions_per_entity)
+    pub max_hot_versions: usize,
 }
 
 impl Default for HistoricalConfig {
@@ -352,6 +371,10 @@ impl Default for HistoricalConfig {
             reconstruction_cache_size: 10000,
             anchor_interval: anchor_defaults.anchor_interval,
             max_delta_chain: anchor_defaults.max_delta_chain,
+            enable_cold_storage: false,
+            cold_storage_path: None,
+            migration_age_threshold: std::time::Duration::from_secs(3600), // 1 hour
+            max_hot_versions: 1000,
         }
     }
 }
@@ -453,9 +476,126 @@ impl HistoricalConfigBuilder {
         Ok(self)
     }
 
+    /// Enable cold storage (Redb-based tiered storage).
+    ///
+    /// When enabled, old versions are automatically migrated to disk, allowing
+    /// unlimited historical depth without consuming RAM.
+    ///
+    /// # Note
+    ///
+    /// You must also call [`cold_storage_path`](Self::cold_storage_path) to specify
+    /// where the Redb file should be stored, or the database will fail to initialize.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use aletheiadb::config::HistoricalConfigBuilder;
+    ///
+    /// let config = HistoricalConfigBuilder::new()
+    ///     .enable_cold_storage(true)
+    ///     .cold_storage_path("data/cold.redb")
+    ///     .build();
+    /// ```
+    pub fn enable_cold_storage(mut self, enabled: bool) -> Self {
+        self.config.enable_cold_storage = enabled;
+        self
+    }
+
+    /// Set the path to the cold storage Redb file.
+    ///
+    /// This is required if [`enable_cold_storage`](Self::enable_cold_storage) is true.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use aletheiadb::config::HistoricalConfigBuilder;
+    ///
+    /// let config = HistoricalConfigBuilder::new()
+    ///     .enable_cold_storage(true)
+    ///     .cold_storage_path("data/cold.redb")
+    ///     .build();
+    /// ```
+    pub fn cold_storage_path<P: Into<std::path::PathBuf>>(mut self, path: P) -> Self {
+        self.config.cold_storage_path = Some(path.into());
+        self
+    }
+
+    /// Set the age threshold for migrating versions to cold storage.
+    ///
+    /// Versions older than this duration become eligible for migration to disk.
+    ///
+    /// # Default
+    ///
+    /// 1 hour (3600 seconds)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use aletheiadb::config::HistoricalConfigBuilder;
+    /// use std::time::Duration;
+    ///
+    /// let config = HistoricalConfigBuilder::new()
+    ///     .enable_cold_storage(true)
+    ///     .cold_storage_path("data/cold.redb")
+    ///     .migration_age_threshold(Duration::from_secs(7200)) // 2 hours
+    ///     .build();
+    /// ```
+    pub fn migration_age_threshold(mut self, threshold: std::time::Duration) -> Self {
+        self.config.migration_age_threshold = threshold;
+        self
+    }
+
+    /// Set the maximum number of hot versions to keep per entity.
+    ///
+    /// When the number of versions exceeds this threshold, older versions
+    /// are migrated to cold storage.
+    ///
+    /// # Default
+    ///
+    /// 1000 (same as `max_versions_per_entity`)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use aletheiadb::config::HistoricalConfigBuilder;
+    ///
+    /// let config = HistoricalConfigBuilder::new()
+    ///     .enable_cold_storage(true)
+    ///     .cold_storage_path("data/cold.redb")
+    ///     .max_hot_versions(500) // Keep only 500 versions in RAM
+    ///     .build();
+    /// ```
+    pub fn max_hot_versions(mut self, max: usize) -> Self {
+        self.config.max_hot_versions = max;
+        self
+    }
+
     /// Build the configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `enable_cold_storage` is true but `cold_storage_path` is not set.
+    /// Use [`build_checked`](Self::build_checked) for a non-panicking version.
     pub fn build(self) -> HistoricalConfig {
+        if self.config.enable_cold_storage && self.config.cold_storage_path.is_none() {
+            panic!("cold_storage_path must be set when enable_cold_storage is true");
+        }
         self.config
+    }
+
+    /// Build the configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `enable_cold_storage` is true
+    /// but `cold_storage_path` is not set.
+    pub fn build_checked(self) -> Result<HistoricalConfig, ConfigError> {
+        if self.config.enable_cold_storage && self.config.cold_storage_path.is_none() {
+            return Err(ConfigError::InvalidValue(
+                "cold_storage_path must be set when enable_cold_storage is true".into(),
+            ));
+        }
+        Ok(self.config)
     }
 }
 
