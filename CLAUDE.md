@@ -138,34 +138,26 @@ For high-throughput workloads with multiple operations, use `append_batch()` for
 
 **See [docs/WAL.md](docs/WAL.md) for comprehensive WAL documentation.**
 
-### Index Persistence
+### Persistence Systems
 
-Fast cold starts by loading indexes from disk instead of WAL replay.
+AletheiaDB provides three persistence layers for different needs:
 
-**Key Features:**
-- 6-30x faster startup (2-5s vs 30-60s for 1M nodes)
+**1. WAL (Write-Ahead Log)**
+- Transaction durability and crash recovery
+- Required for data safety
+- ~100K+/sec throughput (GroupCommit mode)
+
+**2. Index Persistence**
+- Fast cold starts (6-30x faster than WAL replay)
+- Saves current state to disk
 - Zstd compression (60-75% size reduction)
-- Memory-mapped loading for multi-GB indexes
-- Parallel loading (graph + temporal + vector concurrently)
 
-**Quick Start:**
-```rust
-use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
-use aletheiadb::storage::index_persistence::PersistenceConfig;
+**3. Cold Storage (Redb)**
+- Unlimited bi-temporal history on disk
+- Three-tier architecture (Hot RAM → Warm Cache → Cold Disk)
+- Enables time-travel queries over years of data
 
-let config = AletheiaDBConfig::builder()
-    .persistence(PersistenceConfig {
-        enabled: true,
-        data_dir: "data/my-database".into(),
-        load_on_startup: true,
-        ..Default::default()
-    })
-    .build();
-
-let db = AletheiaDB::with_unified_config(config);
-```
-
-**See [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md) for complete guide.**
+**See [docs/guides/PERSISTENCE.md](docs/guides/PERSISTENCE.md) for comprehensive persistence documentation.**
 
 ### Vector Storage & Indexing
 
@@ -400,6 +392,85 @@ let config = AletheiaDBConfig::builder()
 ```
 
 **See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all configuration options and presets.**
+
+## Persistence Quickstart
+
+**⚠️ Common Mistake:** There is **NO `AletheiaDB::open()` method**. Use `with_unified_config()` instead.
+
+AletheiaDB provides **two persistence systems** (cold storage requires manual setup):
+
+| System | Purpose | Setup |
+|--------|---------|-------|
+| **WAL** | Transaction durability | ✅ Via config |
+| **Index Persistence** | Fast restarts (6-30x) | ✅ Via config |
+| **Cold Storage (Redb)** | Unlimited history | ⚙️ Manual (see guide) |
+
+### Quick Setup (WAL + Index Persistence)
+
+```rust
+use aletheiadb::{AletheiaDB, AletheiaDBConfig};
+use aletheiadb::config::WalConfigBuilder;
+use aletheiadb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::storage::wal::DurabilityMode;
+
+let db_path = std::env::current_dir()?.join(".my-app-data");
+
+let config = AletheiaDBConfig::builder()
+    // 1. WAL for crash recovery
+    .wal(WalConfigBuilder::new()
+        .wal_dir(db_path.join("wal"))
+        .durability_mode(DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 200,
+        })
+        .build())
+    // 2. Index persistence for fast restarts
+    .persistence(PersistenceConfig {
+        enabled: true,
+        data_dir: db_path.join("indexes"),
+        load_on_startup: true,
+        ..Default::default()
+    })
+    .build();
+
+// ✅ Creates directories automatically!
+let db = AletheiaDB::with_unified_config(config)?;
+```
+
+**File Structure:**
+```
+.my-app-data/
+├── wal/                # WAL (transaction durability)
+└── indexes/            # Index persistence (fast restarts)
+```
+
+### Adding Cold Storage (Optional)
+
+For unlimited bi-temporal history, set up cold storage manually:
+
+```rust
+use aletheiadb::storage::tiered::{TieredStorage, TieredStorageConfig};
+use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+use std::sync::Arc;
+
+// After creating database, set up cold storage
+let cold = Arc::new(RedbColdStorage::new(
+    &db_path.join("cold.redb"),
+    RedbConfig::new()
+)?);
+
+let tiered = Arc::new(TieredStorage::new(
+    TieredStorageConfig::default(),
+    cold
+));
+
+// Manually set on historical storage (requires db internals access)
+// See docs/guides/tiered-storage-guide.md for complete setup
+```
+
+**See:**
+- **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** - Cold storage setup
+- **[examples/file_based_persistence.rs](examples/file_based_persistence.rs)** - Working example
 
 ## Development Workflow
 
