@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
@@ -23,7 +23,7 @@ fn havoc_deadlock_save_vs_add() {
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .build()
-            .unwrap()
+            .unwrap(),
     );
 
     // Populate with some data
@@ -47,10 +47,12 @@ fn havoc_deadlock_save_vs_add() {
 
                 if let Err(e) = &result {
                     let err_msg = e.to_string();
-                    if !err_msg.contains("Cannot save index from within a search_with_filter callback") {
-                         // Print error but try not to panic inside FFI if possible?
-                         // But for test, panic is the way to signal failure.
-                         panic!("Unexpected error message: {}", err_msg);
+                    if !err_msg
+                        .contains("Cannot save index from within a search_with_filter callback")
+                    {
+                        // Print error but try not to panic inside FFI if possible?
+                        // But for test, panic is the way to signal failure.
+                        panic!("Unexpected error message: {}", err_msg);
                     }
                 } else {
                     panic!("save() should have failed when called from filter");
