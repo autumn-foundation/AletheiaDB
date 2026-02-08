@@ -1713,20 +1713,26 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
         match demo.db.get_node_history(book_id) {
             Ok(history) => {
                 // Find the version whose valid_time interval contains the query year
-                let version_at_time = history.versions.iter().find(|v| {
-                    v.temporal.valid_time().contains(query_timestamp)
-                });
+                let version_at_time = history
+                    .versions
+                    .iter()
+                    .find(|v| v.temporal.valid_time().contains(query_timestamp));
 
                 match version_at_time {
                     Some(version_info) => {
                         // Reconstruct the node at this version
-                        match demo.db.get_node_at_version(book_id, version_info.version_number) {
+                        match demo
+                            .db
+                            .get_node_at_version(book_id, version_info.version_number)
+                        {
                             Ok(historical_node) => {
                                 let historical_interp = historical_node
                                     .properties
                                     .get("interpretation")
                                     .map(format_value)
-                                    .unwrap_or_else(|| "No interpretation recorded yet".to_string());
+                                    .unwrap_or_else(|| {
+                                        "No interpretation recorded yet".to_string()
+                                    });
 
                                 println!("Interpretation in {}:", year);
                                 println!("  {}\n", historical_interp);
@@ -1738,7 +1744,9 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
                                 // Show temporal context
                                 if year < 1900 {
                                     println!("In {}, literary criticism was still emerging.", year);
-                                    println!("The work would have been viewed through a 19th century lens.");
+                                    println!(
+                                        "The work would have been viewed through a 19th century lens."
+                                    );
                                 } else if year < 1950 {
                                     println!(
                                         "In {}, modernist and early psychoanalytic interpretations",
@@ -1752,8 +1760,13 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
                                     );
                                     println!("dominated literary interpretation.");
                                 } else {
-                                    println!("In {}, contemporary criticism emphasizes diverse", year);
-                                    println!("perspectives including trauma studies, postcolonial theory, etc.");
+                                    println!(
+                                        "In {}, contemporary criticism emphasizes diverse",
+                                        year
+                                    );
+                                    println!(
+                                        "perspectives including trauma studies, postcolonial theory, etc."
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -1763,7 +1776,9 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
                     }
                     None => {
                         println!("⚠️  No version of this book exists at year {}", year);
-                        println!("The book may not have been published yet, or no updates were recorded.");
+                        println!(
+                            "The book may not have been published yet, or no updates were recorded."
+                        );
                     }
                 }
             }
@@ -2489,9 +2504,10 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
             let timestamp = year_to_timestamp(year as i64);
 
             // Find the version whose valid_time interval contains this year
-            let version_at_time = history.versions.iter().find(|v| {
-                v.temporal.valid_time().contains(timestamp)
-            });
+            let version_at_time = history
+                .versions
+                .iter()
+                .find(|v| v.temporal.valid_time().contains(timestamp));
 
             match version_at_time {
                 Some(version_info) => {
@@ -2499,7 +2515,8 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
                     match timed!(
                         demo,
                         &format!("Version lookup (year {})", year),
-                        demo.db.get_node_at_version(book_id, version_info.version_number)
+                        demo.db
+                            .get_node_at_version(book_id, version_info.version_number)
                     ) {
                         Ok(historical_node) => {
                             // Debug: show available properties
@@ -2515,11 +2532,7 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
                             {
                                 let interp_text = format_value(interpretation);
 
-                                println!(
-                                    "┌─ {} {}",
-                                    year,
-                                    "─".repeat(60 - year.to_string().len())
-                                );
+                                println!("┌─ {} {}", year, "─".repeat(60 - year.to_string().len()));
                                 println!("│");
                                 let wrapped = wrap_text(&interp_text, 68, "│ ");
                                 println!("{}", wrapped);

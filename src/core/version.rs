@@ -2096,7 +2096,10 @@ mod sentry_tests {
         let old = vec![1.0f32];
         let new = vec![f32::INFINITY];
         let delta = VectorDelta::from_diff(&old, &new);
-        assert!(delta.is_some(), "Change from 1.0 to Infinity should be detected");
+        assert!(
+            delta.is_some(),
+            "Change from 1.0 to Infinity should be detected"
+        );
     }
 
     #[test]
@@ -2105,10 +2108,7 @@ mod sentry_tests {
         // Apply should not panic or corrupt memory.
         let dimension = 10;
         let changes = std::sync::Arc::new(vec![(100, 1.0f32)]); // Index 100 > dimension 10
-        let delta = VectorDelta::Sparse {
-            dimension,
-            changes,
-        };
+        let delta = VectorDelta::Sparse { dimension, changes };
 
         let base = vec![0.0f32; 10];
         let result = delta.apply(&base);
