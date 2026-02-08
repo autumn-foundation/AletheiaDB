@@ -84,6 +84,9 @@ pub mod sql;
 // Optional HTTP server module
 #[cfg(feature = "http-server")]
 pub mod http;
+// Test utilities (only available in tests)
+#[cfg(test)]
+pub mod test_utils;
 
 // Re-export commonly used types at the crate root
 pub use config::{
