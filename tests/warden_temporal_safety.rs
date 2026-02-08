@@ -3,8 +3,8 @@
 //! These tests verify that the system correctly rejects invalid temporal states
 //! and prevents time-travel paradoxes or DoS attacks via malicious timestamps.
 
-use aletheiadb::core::temporal::{TimeRange, MAX_VALID_TIMESTAMP, TIMESTAMP_MAX};
 use aletheiadb::core::hlc::HybridTimestamp;
+use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
 use aletheiadb::utils::error::TemporalError;
 
 /// 🎯 Target: TimeRange::new validation
@@ -25,7 +25,10 @@ fn test_warden_timerange_rejects_invalid_timestamps() {
     let result = TimeRange::new(invalid_ts, TIMESTAMP_MAX);
 
     // Should fail with InvalidTimestamp error
-    assert!(result.is_err(), "TimeRange::new accepted invalid start timestamp");
+    assert!(
+        result.is_err(),
+        "TimeRange::new accepted invalid start timestamp"
+    );
 
     match result {
         Err(TemporalError::InvalidTimestamp { timestamp, .. }) => {
@@ -39,7 +42,10 @@ fn test_warden_timerange_rejects_invalid_timestamps() {
     let result = TimeRange::new(valid_ts, invalid_ts);
 
     // Should fail with InvalidTimestamp error
-    assert!(result.is_err(), "TimeRange::new accepted invalid end timestamp");
+    assert!(
+        result.is_err(),
+        "TimeRange::new accepted invalid end timestamp"
+    );
 
     match result {
         Err(TemporalError::InvalidTimestamp { timestamp, .. }) => {
