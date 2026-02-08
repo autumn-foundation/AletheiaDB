@@ -1322,7 +1322,7 @@ fn load_mappings_with_integrity(
 
     // Prevent OOM by limiting file size (e.g. 2GB)
     // 100M vectors * 16 bytes = 1.6GB, so 2GB covers reasonable use cases.
-    const MAX_MAPPINGS_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+    const MAX_MAPPINGS_FILE_SIZE: u64 = 2 * 1_024 * 1_024 * 1_024;
     if file_len > MAX_MAPPINGS_FILE_SIZE {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Mappings file too large: {} bytes (max {})",
