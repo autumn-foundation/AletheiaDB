@@ -46,6 +46,33 @@ flowchart TB
 Redb is a pure Rust embedded database that provides excellent performance without
 external dependencies. It's the recommended backend for production deployments.
 
+**Recommended: Unified Configuration (v0.1.0+)**
+
+```rust
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::config::HistoricalConfigBuilder;
+use std::time::Duration;
+
+// Configure cold storage via the unified config builder
+let config = AletheiaDBConfig::builder()
+    .historical(
+        HistoricalConfigBuilder::new()
+            .enable_cold_storage(true)
+            .cold_storage_path("data/cold.redb")
+            .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
+            .max_hot_versions(1000)
+            .build(),
+    )
+    .build();
+
+// Cold storage automatically initialized!
+let db = AletheiaDB::with_unified_config(config)?;
+```
+
+**Legacy: Manual Setup**
+
+For advanced use cases requiring custom backends:
+
 ```rust
 use aletheiadb::storage::{
     HistoricalStorage, TieredStorage, TieredStorageConfig,
@@ -54,17 +81,13 @@ use aletheiadb::storage::{
 use std::sync::Arc;
 
 // 1. Create Redb cold storage
-let redb_config = RedbConfig::new();
-let cold = RedbColdStorage::new("data/cold.redb", redb_config)?;
+let cold = Arc::new(RedbColdStorage::new("data/cold.redb", RedbConfig::new())?);
 
 // 2. Create tiered storage
-let tiered = TieredStorage::with_default_config(Arc::new(cold));
+let tiered = TieredStorage::new(TieredStorageConfig::default(), cold);
 
-// 3. Configure historical storage
-let mut historical = HistoricalStorage::new();
+// 3. Wire to historical storage
 historical.set_tiered_storage(Arc::new(tiered));
-Ok(())
-}
 ```
 
 ## Configuration
