@@ -1,0 +1,374 @@
+{
+  "wrote": [
+    {
+      "author": "Alexander Pushkin",
+      "book": "Eugene Onegin",
+      "year": 1833
+    },
+    {
+      "author": "Mikhail Lermontov",
+      "book": "A Hero of Our Time",
+      "year": 1840
+    },
+    {
+      "author": "Nikolai Gogol",
+      "book": "Dead Souls",
+      "year": 1842
+    },
+    {
+      "author": "Nikolai Gogol",
+      "book": "The Overcoat",
+      "year": 1842
+    },
+    {
+      "author": "Ivan Turgenev",
+      "book": "Fathers and Sons",
+      "year": 1862
+    },
+    {
+      "author": "Fyodor Dostoevsky",
+      "book": "Crime and Punishment",
+      "year": 1866
+    },
+    {
+      "author": "Fyodor Dostoevsky",
+      "book": "The Idiot",
+      "year": 1869
+    },
+    {
+      "author": "Leo Tolstoy",
+      "book": "War and Peace",
+      "year": 1869
+    },
+    {
+      "author": "Fyodor Dostoevsky",
+      "book": "Demons",
+      "year": 1872
+    },
+    {
+      "author": "Leo Tolstoy",
+      "book": "Anna Karenina",
+      "year": 1878
+    },
+    {
+      "author": "Fyodor Dostoevsky",
+      "book": "The Brothers Karamazov",
+      "year": 1880
+    },
+    {
+      "author": "Ivan Goncharov",
+      "book": "Oblomov",
+      "year": 1859
+    },
+    {
+      "author": "Anton Chekhov",
+      "book": "The Cherry Orchard",
+      "year": 1904
+    },
+    {
+      "author": "Anton Chekhov",
+      "book": "Uncle Vanya",
+      "year": 1898
+    },
+    {
+      "author": "Maxim Gorky",
+      "book": "Mother",
+      "year": 1906
+    }
+  ],
+  "influenced_by": [
+    {
+      "source": "Mikhail Lermontov",
+      "target": "Alexander Pushkin",
+      "type": "romantic style"
+    },
+    {
+      "source": "Nikolai Gogol",
+      "target": "Alexander Pushkin",
+      "type": "narrative innovation"
+    },
+    {
+      "source": "Ivan Turgenev",
+      "target": "Nikolai Gogol",
+      "type": "realist observation"
+    },
+    {
+      "source": "Fyodor Dostoevsky",
+      "target": "Nikolai Gogol",
+      "type": "psychological depth"
+    },
+    {
+      "source": "Leo Tolstoy",
+      "target": "Alexander Pushkin",
+      "type": "literary foundation"
+    },
+    {
+      "source": "Anton Chekhov",
+      "target": "Ivan Turgenev",
+      "type": "character-driven narratives"
+    },
+    {
+      "source": "Maxim Gorky",
+      "target": "Anton Chekhov",
+      "type": "social realism"
+    }
+  ],
+  "appears_in": [
+    {
+      "character": "Eugene Onegin",
+      "book": "Eugene Onegin",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Tatyana Larina",
+      "book": "Eugene Onegin",
+      "role": "Female lead"
+    },
+    {
+      "character": "Pechorin",
+      "book": "A Hero of Our Time",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Chichikov",
+      "book": "Dead Souls",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Akaky Akakievich",
+      "book": "The Overcoat",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Bazarov",
+      "book": "Fathers and Sons",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Rodion Raskolnikov",
+      "book": "Crime and Punishment",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Sonya Marmeladova",
+      "book": "Crime and Punishment",
+      "role": "Supporting"
+    },
+    {
+      "character": "Prince Myshkin",
+      "book": "The Idiot",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Nastasya Filippovna",
+      "book": "The Idiot",
+      "role": "Female lead"
+    },
+    {
+      "character": "Pierre Bezukhov",
+      "book": "War and Peace",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Natasha Rostova",
+      "book": "War and Peace",
+      "role": "Female lead"
+    },
+    {
+      "character": "Prince Andrei Bolkonsky",
+      "book": "War and Peace",
+      "role": "Major character"
+    },
+    {
+      "character": "Anna Karenina",
+      "book": "Anna Karenina",
+      "role": "Protagonist"
+    },
+    {
+      "character": "Konstantin Levin",
+      "book": "Anna Karenina",
+      "role": "Parallel protagonist"
+    },
+    {
+      "character": "Ivan Karamazov",
+      "book": "The Brothers Karamazov",
+      "role": "Major character"
+    },
+    {
+      "character": "Dmitri Karamazov",
+      "book": "The Brothers Karamazov",
+      "role": "Major character"
+    },
+    {
+      "character": "Alyosha Karamazov",
+      "book": "The Brothers Karamazov",
+      "role": "Youngest brother"
+    },
+    {
+      "character": "Ilya Oblomov",
+      "book": "Oblomov",
+      "role": "Protagonist"
+    }
+  ],
+  "contains_theme": [
+    {
+      "book": "Eugene Onegin",
+      "theme": "Love"
+    },
+    {
+      "book": "Eugene Onegin",
+      "theme": "Fate"
+    },
+    {
+      "book": "Eugene Onegin",
+      "theme": "Alienation"
+    },
+    {
+      "book": "Eugene Onegin",
+      "theme": "Duty"
+    },
+    {
+      "book": "A Hero of Our Time",
+      "theme": "Alienation"
+    },
+    {
+      "book": "A Hero of Our Time",
+      "theme": "Fate"
+    },
+    {
+      "book": "A Hero of Our Time",
+      "theme": "Nihilism"
+    },
+    {
+      "book": "Dead Souls",
+      "theme": "Society"
+    },
+    {
+      "book": "Dead Souls",
+      "theme": "Alienation"
+    },
+    {
+      "book": "Crime and Punishment",
+      "theme": "Redemption"
+    },
+    {
+      "book": "Crime and Punishment",
+      "theme": "Suffering"
+    },
+    {
+      "book": "Crime and Punishment",
+      "theme": "Nihilism"
+    },
+    {
+      "book": "Crime and Punishment",
+      "theme": "Alienation"
+    },
+    {
+      "book": "Crime and Punishment",
+      "theme": "Mortality"
+    },
+    {
+      "book": "War and Peace",
+      "theme": "Fate"
+    },
+    {
+      "book": "War and Peace",
+      "theme": "Freedom"
+    },
+    {
+      "book": "War and Peace",
+      "theme": "Love"
+    },
+    {
+      "book": "War and Peace",
+      "theme": "Mortality"
+    },
+    {
+      "book": "War and Peace",
+      "theme": "Society"
+    },
+    {
+      "book": "Anna Karenina",
+      "theme": "Love"
+    },
+    {
+      "book": "Anna Karenina",
+      "theme": "Passion"
+    },
+    {
+      "book": "Anna Karenina",
+      "theme": "Society"
+    },
+    {
+      "book": "Anna Karenina",
+      "theme": "Duty"
+    },
+    {
+      "book": "Anna Karenina",
+      "theme": "Mortality"
+    },
+    {
+      "book": "The Brothers Karamazov",
+      "theme": "Faith"
+    },
+    {
+      "book": "The Brothers Karamazov",
+      "theme": "Suffering"
+    },
+    {
+      "book": "The Brothers Karamazov",
+      "theme": "Freedom"
+    },
+    {
+      "book": "The Brothers Karamazov",
+      "theme": "Mortality"
+    },
+    {
+      "book": "The Brothers Karamazov",
+      "theme": "Redemption"
+    },
+    {
+      "book": "The Idiot",
+      "theme": "Faith"
+    },
+    {
+      "book": "The Idiot",
+      "theme": "Love"
+    },
+    {
+      "book": "The Idiot",
+      "theme": "Society"
+    },
+    {
+      "book": "The Idiot",
+      "theme": "Suffering"
+    }
+  ],
+  "similar_to": [
+    {
+      "character1": "Eugene Onegin",
+      "character2": "Pechorin",
+      "type": "superfluous man archetype"
+    },
+    {
+      "character1": "Rodion Raskolnikov",
+      "character2": "Prince Myshkin",
+      "type": "Dostoevsky protagonists with moral struggles"
+    },
+    {
+      "character1": "Rodion Raskolnikov",
+      "character2": "Ivan Karamazov",
+      "type": "intellectual torment"
+    },
+    {
+      "character1": "Pierre Bezukhov",
+      "character2": "Konstantin Levin",
+      "type": "Tolstoy heroes seeking meaning"
+    },
+    {
+      "character1": "Anna Karenina",
+      "character2": "Nastasya Filippovna",
+      "type": "passionate women destroyed by society"
+    }
+  ]
+}
