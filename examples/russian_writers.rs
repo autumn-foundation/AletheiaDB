@@ -846,22 +846,9 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
 
         // Create book with publication year as valid_from (enables temporal evolution)
         let publication_time = year_to_timestamp(book.published_year);
-
-        // Debug: Log book creation details for Crime and Punishment
-        if book.title == "Crime and Punishment" {
-            println!("\n  [DEBUG] Creating Crime and Punishment:");
-            println!("    Published year: {}", book.published_year);
-            println!("    Valid_from timestamp: {:?}", publication_time);
-        }
-
         let node_id = demo.db.write(|tx| {
             tx.create_node_with_valid_time("Book", builder.build(), Some(publication_time))
         })?;
-
-        if book.title == "Crime and Punishment" {
-            println!("    Node ID: {:?}", node_id);
-        }
-
         demo.books.insert(book.title.clone(), node_id);
     }
 

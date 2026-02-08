@@ -33,6 +33,9 @@ Cargo.lock
 /test_data
 /data
 
+# WAL and database directories created by tests
+/aletheiadb/
+
 # Backup files
 *.bak
 *.backup
