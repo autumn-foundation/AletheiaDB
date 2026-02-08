@@ -698,6 +698,19 @@ mod tests {
             DistanceMetric::Tanimoto
         );
     }
+
+    #[test]
+    fn test_quantization_variants() {
+        assert_eq!(Quantization::F32.to_u8(), 0);
+        assert_eq!(Quantization::F16.to_u8(), 1);
+        assert_eq!(Quantization::I8.to_u8(), 2);
+
+        assert_eq!(Quantization::from_u8(0).unwrap(), Quantization::F32);
+        assert_eq!(Quantization::from_u8(1).unwrap(), Quantization::F16);
+        assert_eq!(Quantization::from_u8(2).unwrap(), Quantization::I8);
+
+        assert!(Quantization::from_u8(3).is_err());
+    }
 }
 
 // HNSW implementation
