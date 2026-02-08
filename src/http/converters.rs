@@ -361,8 +361,8 @@ mod tests {
 
     #[test]
     fn test_json_vector_pre_allocation_limit() {
-        use crate::core::property::MAX_VECTOR_DIMENSIONS;
         use crate::core::property::MAX_ARRAY_ELEMENTS;
+        use crate::core::property::MAX_VECTOR_DIMENSIONS;
 
         // Verify that numeric vectors are checked BEFORE allocation
         // This test relies on the fact that MAX_VECTOR_DIMENSIONS < MAX_ARRAY_ELEMENTS
