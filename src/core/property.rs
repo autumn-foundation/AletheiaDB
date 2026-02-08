@@ -4376,7 +4376,10 @@ mod sentry_tests {
 
         // Verify size is updated
         assert!(map_after.serialized_size() < before_size);
-        assert_eq!(map_after.serialized_size(), map_after.serialize().unwrap().len());
+        assert_eq!(
+            map_after.serialized_size(),
+            map_after.serialize().unwrap().len()
+        );
     }
 
     /// 🎯 Target: PropertyMap::deserialize trailing bytes
