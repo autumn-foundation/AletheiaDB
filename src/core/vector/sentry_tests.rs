@@ -25,7 +25,8 @@ where
     // Find a starting position that is 4-byte aligned but NOT 32-byte aligned
     let ptr = buffer.as_ptr() as usize;
     let mut offset = 0;
-    while (ptr + offset) % 4 != 0 || (ptr + offset) % 32 == 0 {
+    // Use bitwise AND to check alignment to satisfy clippy::manual_is_multiple_of
+    while (ptr + offset) & 3 != 0 || (ptr + offset) & 31 == 0 {
         offset += 1;
     }
 
