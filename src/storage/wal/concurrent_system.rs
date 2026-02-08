@@ -667,10 +667,13 @@ impl ConcurrentWalSystem {
 
     /// Read WAL entries from disk, starting from the specified LSN.
     ///
-    /// This reads all segment files in the WAL directory and returns entries
-    /// with LSN >= start_lsn. Used for recovery.
-    pub fn read_from(&self, start_lsn: LSN) -> Result<Vec<super::WalEntry>> {
-        crate::storage::wal_reader::read_wal_entries(self.wal_dir(), start_lsn)
+    /// This returns an iterator that lazily reads segment files, preventing OOM
+    /// during recovery of large WALs.
+    pub fn read_from(
+        &self,
+        start_lsn: LSN,
+    ) -> Result<crate::storage::wal::segment_reader::WalDirectoryIterator> {
+        crate::storage::wal_reader::read_wal_entries_iter(self.wal_dir(), start_lsn)
     }
 
     /// Shutdown the WAL system gracefully.

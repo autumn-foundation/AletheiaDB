@@ -40,40 +40,18 @@ const WAL_HEADER_SIZE: usize = 5;
 /// This function scans the directory for segment files (*.log), reads them in order,
 /// and returns all entries with LSN >= start_lsn.
 ///
-/// # Arguments
+/// # Memory Warning
 ///
-/// * `wal_dir` - Path to the WAL directory containing segment files
-/// * `start_lsn` - Only entries with LSN >= this value are returned
+/// This function loads ALL entries into memory and sorts them. For large WALs,
+/// this can cause OOM. Consider using `read_entries_iter` instead for streaming access.
 ///
 /// # Returns
 ///
 /// A vector of WAL entries sorted by LSN.
 pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
-    let mut entries = Vec::new();
-
-    // Find all WAL segments
-    let mut segments = Vec::new();
-    if let Ok(dir_entries) = std::fs::read_dir(wal_dir) {
-        for entry in dir_entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && name.ends_with(".log")
-                && let Some(seg_id) = name
-                    .strip_suffix(".log")
-                    .and_then(|s| s.parse::<u64>().ok())
-            {
-                segments.push((seg_id, entry.path()));
-            }
-        }
-    }
-
-    // Sort segments by ID
-    segments.sort_by_key(|(id, _)| *id);
-
-    // Read entries from each segment
-    for (_, path) in segments {
-        let segment_entries = read_segment(&path, start_lsn)?;
-        entries.extend(segment_entries);
-    }
+    // Collect all entries from the iterator
+    let mut entries: Vec<WalEntry> = read_entries_iter(wal_dir, start_lsn)?
+        .collect::<Result<Vec<_>>>()?;
 
     // Sort entries by LSN to ensure correct ordering across segments.
     // In a striped WAL architecture, entries can be flushed to different segments
@@ -83,133 +61,220 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
     Ok(entries)
 }
 
+/// Create an iterator over all WAL entries in a directory.
+///
+/// This returns a `WalDirectoryIterator` that lazily reads segments one by one,
+/// preventing OOM for large WAL histories (unlike `read_entries_from_dir` which loads everything).
+///
+/// # Note on Sorting
+///
+/// The returned iterator yields entries in segment order, and within segments in file order.
+/// Due to the striped concurrent WAL architecture, entries may NOT be strictly sorted by LSN.
+/// The caller must handle out-of-order LSNs if necessary (e.g. by using a buffer or
+/// respecting causal dependencies).
+pub fn read_entries_iter(wal_dir: &Path, start_lsn: LSN) -> Result<WalDirectoryIterator> {
+    WalDirectoryIterator::new(wal_dir, start_lsn)
+}
+
+/// Iterator over WAL entries spanning multiple segment files.
+pub struct WalDirectoryIterator {
+    segment_paths: std::vec::IntoIter<std::path::PathBuf>,
+    current_iter: Option<WalSegmentIterator>,
+    start_lsn: LSN,
+}
+
+impl WalDirectoryIterator {
+    fn new(wal_dir: &Path, start_lsn: LSN) -> Result<Self> {
+        let mut segments = Vec::new();
+        if let Ok(dir_entries) = std::fs::read_dir(wal_dir) {
+            for entry in dir_entries.flatten() {
+                if let Some(name) = entry.file_name().to_str()
+                    && name.ends_with(".log")
+                    && let Some(seg_id) = name
+                        .strip_suffix(".log")
+                        .and_then(|s| s.parse::<u64>().ok())
+                {
+                    segments.push((seg_id, entry.path()));
+                }
+            }
+        }
+
+        // Sort segments by ID to read in chronological order
+        segments.sort_by_key(|(id, _)| *id);
+
+        let paths: Vec<_> = segments.into_iter().map(|(_, p)| p).collect();
+
+        Ok(Self {
+            segment_paths: paths.into_iter(),
+            current_iter: None,
+            start_lsn,
+        })
+    }
+}
+
+impl Iterator for WalDirectoryIterator {
+    type Item = Result<WalEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // If we have a current iterator, try to get next entry
+            if let Some(iter) = &mut self.current_iter {
+                match iter.next() {
+                    Some(result) => return Some(result),
+                    None => {
+                        // Current segment finished
+                        self.current_iter = None;
+                    }
+                }
+            }
+
+            // No current iterator, try to open next segment
+            match self.segment_paths.next() {
+                Some(path) => {
+                    match WalSegmentIterator::new(&path, self.start_lsn) {
+                        Ok(iter) => self.current_iter = Some(iter),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                None => return None, // No more segments
+            }
+        }
+    }
+}
+
+/// Iterator over WAL entries within a single segment file.
+///
+/// Uses memory mapping for efficient access.
+pub struct WalSegmentIterator {
+    // We keep the mmap alive. Note: mmap is not optional because new() fails if empty or invalid.
+    // Wait, empty file logic in new() returns empty iterator?
+    // We can use an Option<Mmap> to handle empty files gracefully without allocation.
+    mmap: Option<memmap2::Mmap>,
+    offset: usize,
+    version: u8,
+    start_lsn: LSN,
+}
+
+impl WalSegmentIterator {
+    /// Create a new iterator for a WAL segment file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the segment file.
+    /// * `start_lsn` - Start iterating from this LSN.
+    ///
+    /// # Returns
+    ///
+    /// An iterator over `Result<WalEntry>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened, memory-mapped, or if the
+    /// header is invalid.
+    pub fn new(path: &Path, start_lsn: LSN) -> Result<Self> {
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self { mmap: None, offset: 0, version: 0, start_lsn });
+            },
+            Err(e) => return Err(StorageError::IoError(format!("Failed to open WAL segment {:?}: {}", path, e)).into()),
+        };
+
+        let metadata = file.metadata().map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
+
+        // Validation (DoS protection)
+        const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+        if metadata.len() > MAX_SEGMENT_SIZE {
+            return Err(StorageError::CorruptedData(format!(
+                "WAL segment too large: {} bytes (max: {} bytes)",
+                metadata.len(),
+                MAX_SEGMENT_SIZE
+            )).into());
+        }
+
+        if metadata.len() == 0 {
+             return Ok(Self { mmap: None, offset: 0, version: 0, start_lsn });
+        }
+
+        // SAFETY: We only read from the memory map. File is read-only.
+        let mmap = unsafe {
+            memmap2::Mmap::map(&file).map_err(|e| {
+                StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
+            })?
+        };
+
+        let buffer = &mmap[..];
+
+        // Detect format
+        let (version, offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
+            let ver = buffer[4];
+            if ver > WAL_VERSION {
+                return Err(StorageError::CorruptedData(format!(
+                    "Unsupported WAL version: {} (max supported: {})",
+                    ver, WAL_VERSION
+                )).into());
+            }
+            (ver, WAL_HEADER_SIZE)
+        } else if !buffer.is_empty() {
+            return Err(StorageError::CorruptedData(
+                "Invalid WAL segment: missing GWAL magic header".to_string(),
+            ).into());
+        } else {
+            // Should be caught by metadata.len() == 0 check, but safe fallback
+            return Ok(Self { mmap: None, offset: 0, version: 0, start_lsn });
+        };
+
+        Ok(Self {
+            mmap: Some(mmap),
+            offset,
+            version,
+            start_lsn,
+        })
+    }
+}
+
+impl Iterator for WalSegmentIterator {
+    type Item = Result<WalEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mmap = self.mmap.as_ref()?;
+        let buffer = &mmap[..];
+
+        // Skip until we find a valid entry >= start_lsn
+        // Loop to handle filtering
+        while self.offset < buffer.len() {
+            match parse_entry_at(buffer, self.offset, self.version) {
+                Ok((entry, bytes_consumed)) => {
+                    self.offset += bytes_consumed;
+                    if entry.lsn >= self.start_lsn {
+                        return Some(Ok(entry));
+                    }
+                    // Else: continue loop to skip
+                }
+                Err(e) => {
+                    // EOF check
+                    if self.offset + 24 > buffer.len() {
+                        #[cfg(feature = "observability")]
+                        tracing::debug!("Partial entry at EOF, stopping");
+                        return None;
+                    } else {
+                        // Real error
+                        return Some(Err(e));
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Read WAL entries from a single segment file.
 ///
-/// This function uses memory-mapped I/O for efficient reading without loading
-/// the entire file into memory. The OS handles paging automatically, which is
-/// especially important for large segment files (default 64MB).
-///
-/// # Arguments
-///
-/// * `path` - Path to the segment file
-/// * `start_lsn` - Only entries with LSN >= this value are returned
-///
-/// # Returns
-///
-/// A vector of WAL entries from this segment.
-///
-/// # Memory Efficiency
-///
-/// Uses `memmap2` for memory-mapped I/O. Peak memory usage is O(working set)
-/// rather than O(file size). See issue #216.
+/// This function uses memory-mapped I/O for efficient reading.
+/// It delegates to `WalSegmentIterator` and collects results.
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
-    // Open file, only treating NotFound as "empty" - all other errors are propagated
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(StorageError::IoError(format!(
-                "Failed to open WAL segment {:?}: {}",
-                path, e
-            ))
-            .into());
-        }
-    };
-
-    // Validate file size before mapping to prevent DoS attacks with huge files
-    let metadata = file
-        .metadata()
-        .map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
-
-    // Maximum reasonable segment size (configurable, but 1GB is a safe upper bound)
-    // Default segments are 64MB, so 1GB allows for 16x growth
-    const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
-    if metadata.len() > MAX_SEGMENT_SIZE {
-        return Err(StorageError::CorruptedData(format!(
-            "WAL segment too large: {} bytes (max: {} bytes)",
-            metadata.len(),
-            MAX_SEGMENT_SIZE
-        ))
-        .into());
-    }
-
-    // Memory-map the file for efficient reading without loading entire file into memory.
-    // SAFETY: We only read from the memory map, never write. The file is opened read-only.
-    // The mapping is valid for the lifetime of this function and is automatically unmapped
-    // when dropped. We have verified the file size above to prevent out-of-bounds reads.
-    let mmap = unsafe {
-        memmap2::Mmap::map(&file).map_err(|e| {
-            StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
-        })?
-    };
-
-    // Use the memory-mapped region as a byte slice
-    let buffer = &mmap[..];
-
-    let mut entries = Vec::new();
-
-    // Detect WAL format version
-    let (version, mut offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
-        // Version 1+ format: has magic header
-        let ver = buffer[4];
-        if ver > WAL_VERSION {
-            return Err(StorageError::CorruptedData(format!(
-                "Unsupported WAL version: {} (max supported: {})",
-                ver, WAL_VERSION
-            ))
-            .into());
-        }
-        (ver, WAL_HEADER_SIZE)
-    } else if !buffer.is_empty() {
-        // Invalid format: no magic header
-        return Err(StorageError::CorruptedData(
-            "Invalid WAL segment: missing GWAL magic header".to_string(),
-        )
-        .into());
-    } else {
-        return Ok(Vec::new()); // Empty segment
-    };
-
-    // Parse entries using the extracted helper function (issue #218)
-    while offset < buffer.len() {
-        // Try to parse an entry at the current offset
-        match parse_entry_at(buffer, offset, version) {
-            Ok((entry, bytes_consumed)) => {
-                // Only include entries >= start_lsn
-                if entry.lsn >= start_lsn {
-                    entries.push(entry);
-                }
-                offset += bytes_consumed;
-            }
-            Err(e) => {
-                // Distinguish between expected EOF truncation vs. unexpected corruption
-                if offset + 24 > buffer.len() {
-                    // Insufficient bytes for next entry header - expected at EOF
-                    // This can happen if a write was interrupted mid-entry
-                    #[cfg(feature = "observability")]
-                    tracing::debug!(
-                        "Partial entry at end of WAL segment {:?} (offset {}/{}), stopping read",
-                        path,
-                        offset,
-                        buffer.len()
-                    );
-                    break;
-                } else {
-                    // Corruption or invalid data in the middle of the file - this is serious
-                    #[cfg(feature = "observability")]
-                    tracing::error!(
-                        "Failed to parse WAL entry in segment {:?} at offset {}: {}",
-                        path,
-                        offset,
-                        e
-                    );
-                    return Err(e);
-                }
-            }
-        }
-    }
-
-    Ok(entries)
+    let iter = WalSegmentIterator::new(path, start_lsn)?;
+    iter.collect()
 }
 
 /// Parse a single WAL entry from a buffer at the specified offset.

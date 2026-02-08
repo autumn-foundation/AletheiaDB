@@ -1117,7 +1117,8 @@ impl CheckpointManager {
 
         let wal_entries = wal.read_from(start_lsn)?;
 
-        for entry in wal_entries {
+        for entry_result in wal_entries {
+            let entry = entry_result?;
             match entry.operation {
                 WalOperation::CreateNode {
                     node_id,

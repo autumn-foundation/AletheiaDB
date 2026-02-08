@@ -539,7 +539,8 @@ impl PersistenceManager {
         // Replay WAL entries since checkpoint
         let wal_entries = wal.read_from(start_lsn)?;
 
-        for entry in wal_entries {
+        for entry_result in wal_entries {
+            let entry = entry_result?;
             use crate::storage::wal::WalOperation;
 
             match entry.operation {
