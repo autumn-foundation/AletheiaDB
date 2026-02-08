@@ -160,6 +160,28 @@ pub const MAX_GRAPH_INDEX_FILE_SIZE: u64 = if cfg!(test) {
     100 * 1024 * 1024 * 1024
 };
 
+/// Maximum allowed decompressed size for graph index files (DoS protection).
+///
+/// Prevents "zip bomb" attacks where a small compressed file expands to fill memory.
+/// The compressed file size is already checked by `MAX_GRAPH_INDEX_FILE_SIZE`, but a
+/// crafted file with extreme compression ratios could still expand to gigabytes.
+///
+/// Default: 16GB in production (64-bit), 2GB (32-bit), 100MB in tests.
+#[cfg(target_pointer_width = "64")]
+pub const MAX_GRAPH_DECOMPRESSED_SIZE: usize = if cfg!(test) {
+    100 * 1024 * 1024
+} else {
+    16 * 1024 * 1024 * 1024
+};
+
+/// See 64-bit variant for documentation.
+#[cfg(not(target_pointer_width = "64"))]
+pub const MAX_GRAPH_DECOMPRESSED_SIZE: usize = if cfg!(test) {
+    100 * 1024 * 1024
+} else {
+    2 * 1024 * 1024 * 1024
+};
+
 /// Maximum size of a vector index metadata/mappings file (DoS protection).
 ///
 /// Limits the amount of memory allocated when loading vector index metadata.
