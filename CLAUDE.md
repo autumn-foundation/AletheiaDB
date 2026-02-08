@@ -247,19 +247,24 @@ Three-tier storage architecture for unlimited historical depth while preserving 
 
 **Quick Start:**
 ```rust
-use aletheiadb::storage::{
-    TieredStorage, TieredStorageConfig,
-    RedbColdStorage, RedbConfig,
-};
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::config::HistoricalConfigBuilder;
+use std::time::Duration;
 
-// Create Redb cold storage backend
-let cold = RedbColdStorage::new("data/cold.redb", RedbConfig::new())?;
+// Configure cold storage via unified config builder
+let config = AletheiaDBConfig::builder()
+    .historical(
+        HistoricalConfigBuilder::new()
+            .enable_cold_storage(true)
+            .cold_storage_path("data/cold.redb")
+            .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
+            .max_hot_versions(1000)
+            .build(),
+    )
+    .build();
 
-// Create tiered storage
-let tiered = TieredStorage::new(TieredStorageConfig::default(), Box::new(cold));
-
-// Configure historical storage to use tiered access
-historical.set_tiered_storage(Arc::new(tiered));
+// Cold storage automatically initialized!
+let db = AletheiaDB::with_unified_config(config)?;
 ```
 
 **Key Features:**
