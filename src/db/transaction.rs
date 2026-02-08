@@ -19,12 +19,13 @@ impl AletheiaDB {
         // Capture current time before acquiring lock to minimize lock contention
         let now = crate::core::temporal::time::now();
 
-        let last_commit = *self
-            .current_timestamp
-            .lock()
-            .map_err(|_| TransactionError::LockPoisoned {
-                resource: "current_timestamp".to_string(),
-            })?;
+        let last_commit =
+            *self
+                .current_timestamp
+                .lock()
+                .map_err(|_| TransactionError::LockPoisoned {
+                    resource: "current_timestamp".to_string(),
+                })?;
 
         if now > last_commit {
             // Wallclock advanced past the last commit — now is sufficient
