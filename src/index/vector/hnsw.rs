@@ -1115,6 +1115,16 @@ impl VectorIndex for HnswIndex {
     /// If executed outside a Tokio runtime, or in a single-threaded runtime (where `block_in_place`
     /// would panic), it falls back to standard synchronous execution.
     fn save(&self, path: &Path) -> Result<()> {
+        // Check for re-entrant modification during filtered search (prevents deadlock)
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot save index from within a search_with_filter callback. \
+                 This would cause a deadlock due to lock re-entrancy. \
+                 Consider saving after the search completes."
+                    .to_string(),
+            )));
+        }
+
         #[cfg(any(feature = "tokio", feature = "embeddings"))]
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             // Note: Clippy suggests collapsing this if, but 'let chains' are unstable in this context
