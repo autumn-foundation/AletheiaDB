@@ -21,9 +21,8 @@ use aletheiadb::{
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 use tempfile::TempDir;

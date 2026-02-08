@@ -15,7 +15,8 @@ mod common;
 use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
 use aletheiadb::storage::version::PropertyDelta;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /// Benchmark: PropertyDelta::from_diff with varying numbers of changed properties
 ///

@@ -11,7 +11,8 @@ use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::core::temporal::time;
 use aletheiadb::storage::historical::HistoricalStorage;
 use aletheiadb::storage::version::AnchorConfig;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /// Benchmark: Add node versions with varying anchor intervals
 ///

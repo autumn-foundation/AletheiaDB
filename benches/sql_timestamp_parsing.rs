@@ -9,7 +9,9 @@
 #[cfg(feature = "sql")]
 use aletheiadb::sql::TemporalClause;
 #[cfg(feature = "sql")]
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(feature = "sql")]
+use std::hint::black_box;
 
 #[cfg(feature = "sql")]
 fn bench_timestamp_parsing(c: &mut Criterion) {

@@ -6,7 +6,8 @@
 //! Expected improvement: 2-10x speedup for typical embedding sizes (384-1536 dimensions)
 
 use aletheiadb::core::property::{deserialize_vector, serialize_vector};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /// Benchmark serialization for various embedding sizes
 fn bench_serialize_vector(c: &mut Criterion) {

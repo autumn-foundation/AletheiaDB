@@ -9,7 +9,8 @@ use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
 use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::index::current::CurrentIndexes;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn bench_iter_edges(c: &mut Criterion) {
     let indexes = CurrentIndexes::new();

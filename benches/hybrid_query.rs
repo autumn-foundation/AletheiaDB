@@ -19,8 +19,9 @@ use aletheiadb::index::vector::temporal::{
 };
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::query::hybrid::{find_similar_as_of, traverse_and_rank};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::cmp::Ordering;
+use std::hint::black_box;
 
 // ============================================================================
 // Data Generation Helpers
