@@ -1724,8 +1724,12 @@ mod sentry_tests {
         // by copying to an aligned buffer instead of panicking.
         let distance_fn = Arc::new(|a: &[f32], b: &[f32]| {
             // Verify data integrity
-            if a[0] != 1.0 { return -1.0; }
-            if b[0] != 0.0 { return -1.0; }
+            if a[0] != 1.0 {
+                return -1.0;
+            }
+            if b[0] != 0.0 {
+                return -1.0;
+            }
             42.0
         });
         let wrapper = create_metric_wrapper(4, distance_fn);
