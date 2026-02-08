@@ -1989,8 +1989,8 @@ fn find_semantic_path(
 
     let path_result = timed!(
         demo,
-        "Semantic pathfinding",
-        pathfinder.find_path(from_id, to_id, &concept_embedding, max_depth)
+        "Semantic pathfinding (bidirectional)",
+        pathfinder.find_path(from_id, to_id, &concept_embedding, max_depth, true)
     )?;
 
     match path_result {

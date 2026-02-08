@@ -77,6 +77,7 @@ impl<'a> SemanticPathfinder<'a> {
     /// * `end` - Target node ID.
     /// * `query_embedding` - Vector representing the semantic concept to follow.
     /// * `max_depth` - Maximum path length (to prevent infinite loops in large graphs).
+    /// * `bidirectional` - If true, traverses both outgoing and incoming edges.
     ///
     /// # Returns
     /// A vector of NodeIds representing the path, or None if no path found.
@@ -86,6 +87,7 @@ impl<'a> SemanticPathfinder<'a> {
         end: NodeId,
         query_embedding: &[f32],
         max_depth: usize,
+        bidirectional: bool,
     ) -> Result<Option<Vec<NodeId>>> {
         let mut pq = BinaryHeap::new();
         let mut dist = HashMap::new();
@@ -117,13 +119,27 @@ impl<'a> SemanticPathfinder<'a> {
                 continue;
             }
 
+            // Collect neighbors (outgoing, or both directions if bidirectional)
+            let mut neighbors = Vec::new();
+
             // Get outgoing edges
-            let edges = self.db.get_outgoing_edges(node);
+            for edge_id in self.db.get_outgoing_edges(node) {
+                if let Ok(target) = self.db.get_edge_target(edge_id) {
+                    neighbors.push(target);
+                }
+            }
 
-            for edge_id in edges {
-                // For "current" pathfinding, we assume current edges are valid.
-                let target = self.db.get_edge_target(edge_id)?;
+            // Also get incoming edges if bidirectional
+            if bidirectional {
+                for edge_id in self.db.get_incoming_edges(node) {
+                    if let Ok(edge) = self.db.get_edge(edge_id) {
+                        neighbors.push(edge.source);
+                    }
+                }
+            }
 
+            // Process all neighbors
+            for target in neighbors {
                 // Calculate semantic cost of moving to target
                 let semantic_cost = self.calculate_semantic_cost(target, query_embedding)?;
 
@@ -159,6 +175,7 @@ impl<'a> SemanticPathfinder<'a> {
     /// * `query_embedding` - Vector representing the semantic concept to follow.
     /// * `time` - The timestamp at which to evaluate the graph.
     /// * `max_depth` - Maximum path length (to prevent infinite loops in large graphs).
+    /// * `bidirectional` - If true, traverses both outgoing and incoming edges.
     pub fn find_path_at_time(
         &self,
         start: NodeId,
@@ -166,6 +183,7 @@ impl<'a> SemanticPathfinder<'a> {
         query_embedding: &[f32],
         time: Timestamp,
         max_depth: usize,
+        bidirectional: bool,
     ) -> Result<Option<Vec<NodeId>>> {
         let mut pq = BinaryHeap::new();
         let mut dist = HashMap::new();
@@ -200,14 +218,30 @@ impl<'a> SemanticPathfinder<'a> {
                 continue;
             }
 
-            // Get outgoing edges at the specified time using temporal adjacency index
-            // This includes edges that have been deleted from current storage
-            let temporal_edges = self.db.get_outgoing_edges_at_time(node, time, time);
+            // Collect neighbors (outgoing, or both directions if bidirectional)
+            let mut neighbor_edges = Vec::new();
 
-            for edge_id in temporal_edges {
+            // Get outgoing edges at the specified time
+            for edge_id in self.db.get_outgoing_edges_at_time(node, time, time) {
+                neighbor_edges.push((edge_id, true)); // true = outgoing
+            }
+
+            // Also get incoming edges if bidirectional
+            if bidirectional {
+                for edge_id in self.db.get_incoming_edges_at_time(node, time, time) {
+                    neighbor_edges.push((edge_id, false)); // false = incoming
+                }
+            }
+
+            for (edge_id, is_outgoing) in neighbor_edges {
                 // Get edge details at the specified time
                 if let Ok(edge) = self.db.get_edge_at_time(edge_id, time, time) {
-                    let target = edge.target;
+                    // For outgoing edges, target is the neighbor; for incoming, source is the neighbor
+                    let target = if is_outgoing {
+                        edge.target
+                    } else {
+                        edge.source
+                    };
 
                     // Check if target node existed at time T (and get embedding)
                     if let Ok(target_node) = self.db.get_node_at_time(target, time, time) {
@@ -360,7 +394,7 @@ mod tests {
 
         let pathfinder = SemanticPathfinder::new(&db, "embedding");
         let path = pathfinder
-            .find_path(start, end, &query, 10)
+            .find_path(start, end, &query, 10, false)
             .unwrap()
             .unwrap();
 
@@ -413,7 +447,7 @@ mod tests {
 
         // Query at t0: Path should exist (BEFORE DELETION)
         let path_t0 = pathfinder
-            .find_path_at_time(start, end, &query, t0, 10)
+            .find_path_at_time(start, end, &query, t0, 10, false)
             .unwrap();
         assert!(path_t0.is_some(), "Path should exist at t0 before deletion");
 
@@ -430,7 +464,7 @@ mod tests {
         // Query at t0 AFTER deletion: With temporal adjacency index (enabled by default),
         // the path SHOULD be found even though edges are deleted from current storage
         let path_t0_after_delete = pathfinder
-            .find_path_at_time(start, end, &query, t0, 10)
+            .find_path_at_time(start, end, &query, t0, 10, false)
             .unwrap();
         assert!(
             path_t0_after_delete.is_some(),
@@ -465,7 +499,7 @@ mod tests {
 
         // Path exists at t2
         let path_t2 = pathfinder
-            .find_path_at_time(start, end, &query, t2, 10)
+            .find_path_at_time(start, end, &query, t2, 10, false)
             .unwrap();
         assert!(path_t2.is_some(), "Path should exist at t2");
 
@@ -474,7 +508,7 @@ mod tests {
         // With temporal adjacency index, deleted edges are still accessible
         // when querying at times before they were deleted.
         let path_t0_check = pathfinder
-            .find_path_at_time(start, end, &query, t0, 10)
+            .find_path_at_time(start, end, &query, t0, 10, false)
             .unwrap();
         assert!(
             path_t0_check.is_some(),
