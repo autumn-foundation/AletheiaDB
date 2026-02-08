@@ -2595,12 +2595,22 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
 /// Predict missing links using Prophet (topology + semantics).
 #[cfg(feature = "nova")]
 fn predict_missing_links(demo: &DemoData, args: &str) -> Result<()> {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let entity_name = parts.first().map(|s| strip_quotes(s)).unwrap_or("");
-    let k = parts
-        .get(1)
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(10);
+    // Parse arguments: handle quoted entity names and optional k parameter
+    // Examples: "Dostoevsky", "Fyodor Dostoevsky" 5, Tolstoy 10
+    let trimmed = args.trim();
+    let (entity_name, k) = if let Some(last_space_idx) = trimmed.rfind(' ') {
+        let (name_part, k_part) = trimmed.split_at(last_space_idx);
+        if let Ok(k_val) = k_part.trim().parse::<usize>() {
+            // Last token is a number, use it as k
+            (strip_quotes(name_part.trim()), k_val)
+        } else {
+            // Last token is not a number, entire string is the name
+            (strip_quotes(trimmed), 10)
+        }
+    } else {
+        // No spaces, entire string is the name
+        (strip_quotes(trimmed), 10)
+    };
 
     if let Some(node_id) = demo.get_node(entity_name) {
         let node = demo.db.get_node(node_id)?;
