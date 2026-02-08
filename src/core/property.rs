@@ -4324,4 +4324,106 @@ mod sentry_tests {
             deserialize_vector(&bytes).expect("Should deserialize empty vector");
         assert!(deserialized.is_empty());
     }
+
+    /// 🎯 Target: PropertyMap::deserialize (MAX_PROPERTY_MAP_CAPACITY)
+    /// 💣 Risk: Deserialization should fail if the count exceeds the maximum allowed capacity.
+    /// 🧪 Strategy: Manually construct a serialized buffer claiming to have MAX_PROPERTY_MAP_CAPACITY + 1 elements.
+    /// 🔬 Verification: Expect error "exceeds maximum allowed".
+    #[test]
+    fn test_property_map_capacity_limit() {
+        let mut bytes = Vec::new();
+        let count = (MAX_PROPERTY_MAP_CAPACITY + 1) as u32;
+        bytes.extend_from_slice(&count.to_le_bytes());
+
+        // Don't need payload, should fail immediately on count check
+        let result = PropertyMap::deserialize(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("exceeds maximum allowed"),
+                    "Unexpected error message: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected CorruptedData error"),
+        }
+    }
+
+    /// 🎯 Target: PropertyMapBuilder::remove correctness
+    /// 💣 Risk: Removing a key should actually remove it and update size/len correctly.
+    /// 🧪 Strategy: Insert keys, remove one, verify map state.
+    /// 🔬 Verification: Check len(), contains_key(), and cached_size().
+    #[test]
+    fn test_property_map_builder_remove_correctness() {
+        let builder = PropertyMapBuilder::new()
+            .insert("keep", 1)
+            .insert("remove_me", 2);
+
+        let map_before = builder.build();
+        assert_eq!(map_before.len(), 2);
+        assert!(map_before.contains_key("remove_me"));
+
+        let before_size = map_before.serialized_size();
+
+        // Use clone() to keep map_before for comparison
+        let builder = map_before.clone().builder().remove("remove_me");
+        let map_after = builder.build();
+
+        assert_eq!(map_after.len(), 1);
+        assert!(!map_after.contains_key("remove_me"));
+        assert!(map_after.contains_key("keep"));
+
+        // Verify size is updated
+        assert!(map_after.serialized_size() < before_size);
+        assert_eq!(
+            map_after.serialized_size(),
+            map_after.serialize().unwrap().len()
+        );
+    }
+
+    /// 🎯 Target: PropertyMap::deserialize trailing bytes
+    /// 💣 Risk: Deserialization should consume exactly what is needed and return the count, ignoring trailing data.
+    /// 🧪 Strategy: Serialize a valid map, append garbage, deserialize.
+    /// 🔬 Verification: Check consumed bytes matches map size, not buffer size.
+    #[test]
+    fn test_property_map_deserialize_trailing_bytes() {
+        let map = PropertyMapBuilder::new().insert("key", "value").build();
+        let mut bytes = map.serialize().unwrap();
+        let expected_size = bytes.len();
+
+        // Append trailing garbage
+        bytes.extend_from_slice(&[0xFF, 0xEE, 0xDD]);
+
+        let (deserialized, consumed) = PropertyMap::deserialize(&bytes).unwrap();
+
+        assert_eq!(deserialized, map);
+        assert_eq!(consumed, expected_size);
+        assert!(consumed < bytes.len());
+    }
+
+    /// 🎯 Target: PropertyMap::deserialize pre-allocation check
+    /// 💣 Risk: Large count with small buffer could trigger massive allocation (DoS).
+    /// 🧪 Strategy: Construct buffer with large valid count but insufficient data length.
+    /// 🔬 Verification: Expect error "Insufficient buffer size".
+    #[test]
+    fn test_property_map_deserialize_insufficient_buffer_preallocation() {
+        let mut bytes = Vec::new();
+        let count = 50_000u32; // Valid count (< MAX=100_000) but requires ~250KB buffer
+        bytes.extend_from_slice(&count.to_le_bytes());
+        // No payload, so buffer is just 4 bytes
+
+        let result = PropertyMap::deserialize(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("Insufficient buffer size"),
+                    "Unexpected error message: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected CorruptedData error"),
+        }
+    }
 }

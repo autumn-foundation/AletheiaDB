@@ -10,6 +10,8 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::tracker::PersistenceTracker;
 use crate::storage::index_persistence::worker::spawn_background_persistence_thread;
+use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+use crate::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 use crate::utils::error::Result;
@@ -136,6 +138,10 @@ impl AletheiaDB {
             None
         };
 
+        // Extract cold storage configuration before config.historical is moved
+        let enable_cold_storage = config.historical.enable_cold_storage;
+        let cold_storage_path = config.historical.cold_storage_path.clone();
+
         let mut db = AletheiaDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
@@ -203,6 +209,24 @@ impl AletheiaDB {
         db.historical
             .write()
             .set_temporal_adjacency_index(temporal_adjacency_index);
+
+        // Initialize cold storage if enabled
+        if enable_cold_storage && let Some(cold_storage_path) = cold_storage_path {
+            // Create Redb cold storage backend
+            let cold_storage =
+                Arc::new(RedbColdStorage::new(&cold_storage_path, RedbConfig::new())?);
+
+            // Create tiered storage with warm cache configuration
+            let tiered_config = TieredStorageConfig::default();
+            let tiered_storage = TieredStorage::new(tiered_config, cold_storage);
+
+            // Wire tiered storage to historical storage
+            // Note: migration_age_threshold and max_hot_versions from config.historical
+            // are used by HistoricalStorage's migration logic, not by TieredStorage
+            db.historical
+                .write()
+                .set_tiered_storage(Arc::new(tiered_storage));
+        }
 
         Ok(db)
     }
