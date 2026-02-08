@@ -64,6 +64,29 @@ impl TimeRange {
         if start > end {
             return Err(TemporalError::InvalidTimeRange { start, end });
         }
+
+        // Warden: Validate that timestamps don't exceed MAX_VALID_TIMESTAMP
+        // This prevents invalid timestamps from entering via unchecked constructors
+        if start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: start,
+                reason: format!(
+                    "Start timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+
+        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: end,
+                reason: format!(
+                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+
         Ok(TimeRange { start, end })
     }
 
