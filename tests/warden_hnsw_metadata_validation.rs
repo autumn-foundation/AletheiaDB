@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, Quantization};
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, Quantization};
 
 #[test]
 fn test_havoc_quantization_mismatch_crash() {
@@ -9,8 +9,7 @@ fn test_havoc_quantization_mismatch_crash() {
     let index_path = dir.path().join("quantized.index");
 
     {
-        let config = HnswConfig::new(4, DistanceMetric::Cosine)
-            .with_quantization(Quantization::I8); // Use I8
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_quantization(Quantization::I8); // Use I8
 
         let index = HnswIndex::new(config).unwrap();
 
@@ -36,14 +35,19 @@ fn test_havoc_quantization_mismatch_crash() {
 
     match result {
         Ok(idx) => {
-             // If we loaded successfully, we are vulnerable!
-             println!("Index loaded successfully. Quantization: {:?}", idx.quantization());
+            // If we loaded successfully, we are vulnerable!
+            println!(
+                "Index loaded successfully. Quantization: {:?}",
+                idx.quantization()
+            );
 
-             // Trigger search to demonstrate crash/garbage
-             let query = vec![0.0; 4];
-             let _ = idx.search(&query, 1);
+            // Trigger search to demonstrate crash/garbage
+            let query = vec![0.0; 4];
+            let _ = idx.search(&query, 1);
 
-             panic!("Security Vulnerability: Successfully loaded I8 index with F32 config and custom metric! This allows buffer over-read.");
+            panic!(
+                "Security Vulnerability: Successfully loaded I8 index with F32 config and custom metric! This allows buffer over-read."
+            );
         }
         Err(e) => {
             println!("Load failed as expected: {}", e);
@@ -59,8 +63,7 @@ fn test_havoc_dimension_mismatch_rejection() {
     let index_path = dir.path().join("small_dim.index");
 
     {
-        let index = HnswIndex::new(HnswConfig::new(4, DistanceMetric::Cosine))
-            .unwrap();
+        let index = HnswIndex::new(HnswConfig::new(4, DistanceMetric::Cosine)).unwrap();
 
         let node1 = NodeId::new(1).unwrap();
         // Add a vector
@@ -79,7 +82,7 @@ fn test_havoc_dimension_mismatch_rejection() {
     // We want this to fail at load time, not search time
     match result {
         Ok(_) => {
-             panic!("Security Vulnerability: Successfully loaded 4-dim index with 1024-dim config!");
+            panic!("Security Vulnerability: Successfully loaded 4-dim index with 1024-dim config!");
         }
         Err(e) => {
             println!("Load failed as expected: {}", e);

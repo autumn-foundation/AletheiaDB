@@ -1268,7 +1268,11 @@ impl HnswIndex {
         write_and_hash(writer, &mut hasher, &[MAPPING_VERSION])?;
 
         // Version 2 fields: Dimensions, Quantization, Metric
-        write_and_hash(writer, &mut hasher, &(config.dimensions as u64).to_le_bytes())?;
+        write_and_hash(
+            writer,
+            &mut hasher,
+            &(config.dimensions as u64).to_le_bytes(),
+        )?;
         write_and_hash(writer, &mut hasher, &[config.quantization.to_u8()])?;
         write_and_hash(writer, &mut hasher, &[config.metric.to_u8()])?;
 
@@ -1528,13 +1532,11 @@ fn load_mappings_with_integrity(
             "Mapping count too large (overflow)".to_string(),
         ))
     })?;
-    let expected_size = data_size
-        .checked_add(header_overhead)
-        .ok_or_else(|| {
-            Error::Vector(VectorError::IndexError(
-                "Mapping file size too large (overflow)".to_string(),
-            ))
-        })?;
+    let expected_size = data_size.checked_add(header_overhead).ok_or_else(|| {
+        Error::Vector(VectorError::IndexError(
+            "Mapping file size too large (overflow)".to_string(),
+        ))
+    })?;
 
     // Critical Security Check: Verify file size matches expected size BEFORE reading data.
     // This prevents reading until EOF if the file is truncated or huge.
