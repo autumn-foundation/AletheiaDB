@@ -244,6 +244,33 @@ mutants-branch:
     git diff origin/trunk.. > mutants-diff.tmp
     cargo mutants --in-place -vV --in-diff mutants-diff.tmp
 
+# === Miri (Undefined Behavior Detection) ===
+
+# Install miri component
+miri-setup:
+    rustup +nightly component add miri
+    cargo +nightly miri setup
+
+# Run miri on all tests (excludes FFI-heavy tests automatically via cfg)
+miri:
+    cargo +nightly miri test
+
+# Run miri on a specific test
+miri-test TEST:
+    cargo +nightly miri test {{TEST}}
+
+# Run miri with extra verbose output for debugging
+miri-verbose:
+    cargo +nightly miri test -- --nocapture --test-threads=1
+
+# Run miri with tree-borrows instead of stacked-borrows (experimental)
+miri-tree-borrows:
+    MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test
+
+# Run miri on library only (faster than all tests)
+miri-lib:
+    cargo +nightly miri test --lib
+
 # === Git Worktree Commands ===
 # These commands enable parallel development with multiple Claude instances
 
