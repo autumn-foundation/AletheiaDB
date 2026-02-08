@@ -50,8 +50,8 @@ const WAL_HEADER_SIZE: usize = 5;
 /// A vector of WAL entries sorted by LSN.
 pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     // Collect all entries from the iterator
-    let mut entries: Vec<WalEntry> = read_entries_iter(wal_dir, start_lsn)?
-        .collect::<Result<Vec<_>>>()?;
+    let mut entries: Vec<WalEntry> =
+        read_entries_iter(wal_dir, start_lsn)?.collect::<Result<Vec<_>>>()?;
 
     // Sort entries by LSN to ensure correct ordering across segments.
     // In a striped WAL architecture, entries can be flushed to different segments
@@ -130,12 +130,10 @@ impl Iterator for WalDirectoryIterator {
 
             // No current iterator, try to open next segment
             match self.segment_paths.next() {
-                Some(path) => {
-                    match WalSegmentIterator::new(&path, self.start_lsn) {
-                        Ok(iter) => self.current_iter = Some(iter),
-                        Err(e) => return Some(Err(e)),
-                    }
-                }
+                Some(path) => match WalSegmentIterator::new(&path, self.start_lsn) {
+                    Ok(iter) => self.current_iter = Some(iter),
+                    Err(e) => return Some(Err(e)),
+                },
                 None => return None, // No more segments
             }
         }
@@ -175,12 +173,25 @@ impl WalSegmentIterator {
         let file = match File::open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self { mmap: None, offset: 0, version: 0, start_lsn });
-            },
-            Err(e) => return Err(StorageError::IoError(format!("Failed to open WAL segment {:?}: {}", path, e)).into()),
+                return Ok(Self {
+                    mmap: None,
+                    offset: 0,
+                    version: 0,
+                    start_lsn,
+                });
+            }
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "Failed to open WAL segment {:?}: {}",
+                    path, e
+                ))
+                .into());
+            }
         };
 
-        let metadata = file.metadata().map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
 
         // Validation (DoS protection)
         const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
@@ -189,11 +200,17 @@ impl WalSegmentIterator {
                 "WAL segment too large: {} bytes (max: {} bytes)",
                 metadata.len(),
                 MAX_SEGMENT_SIZE
-            )).into());
+            ))
+            .into());
         }
 
         if metadata.len() == 0 {
-             return Ok(Self { mmap: None, offset: 0, version: 0, start_lsn });
+            return Ok(Self {
+                mmap: None,
+                offset: 0,
+                version: 0,
+                start_lsn,
+            });
         }
 
         // SAFETY: We only read from the memory map. File is read-only.
@@ -212,16 +229,23 @@ impl WalSegmentIterator {
                 return Err(StorageError::CorruptedData(format!(
                     "Unsupported WAL version: {} (max supported: {})",
                     ver, WAL_VERSION
-                )).into());
+                ))
+                .into());
             }
             (ver, WAL_HEADER_SIZE)
         } else if !buffer.is_empty() {
             return Err(StorageError::CorruptedData(
                 "Invalid WAL segment: missing GWAL magic header".to_string(),
-            ).into());
+            )
+            .into());
         } else {
             // Should be caught by metadata.len() == 0 check, but safe fallback
-            return Ok(Self { mmap: None, offset: 0, version: 0, start_lsn });
+            return Ok(Self {
+                mmap: None,
+                offset: 0,
+                version: 0,
+                start_lsn,
+            });
         };
 
         Ok(Self {
@@ -259,6 +283,8 @@ impl Iterator for WalSegmentIterator {
                         return None;
                     } else {
                         // Real error
+                        // Stop iteration for this segment to avoid infinite loop
+                        self.offset = buffer.len();
                         return Some(Err(e));
                     }
                 }
