@@ -74,6 +74,23 @@ impl Default for VersionMetadata {
 /// embedding use cases while avoiding spurious deltas.
 const VECTOR_EPSILON: f32 = 1e-7;
 
+/// Helper function to compare float values with epsilon, correctly handling NaN.
+///
+/// # Logic
+/// - If both are NaN -> Equal (no change)
+/// - If one is NaN and the other is not -> Not Equal (change)
+/// - Otherwise -> Equal if difference <= epsilon
+#[inline]
+fn floats_approx_equal(a: f32, b: f32) -> bool {
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if a.is_nan() || b.is_nan() {
+        return false;
+    }
+    (a - b).abs() <= VECTOR_EPSILON
+}
+
 /// Sparse representation of vector changes.
 ///
 /// Stores only the changed elements to minimize storage overhead when
@@ -139,8 +156,8 @@ impl VectorDelta {
         // Collect changed indices with epsilon-based comparison
         let mut changes = Vec::new();
         for (idx, (old_val, new_val)) in old.iter().zip(new.iter()).enumerate() {
-            // Use epsilon-based comparison to avoid spurious deltas from floating-point precision
-            if (old_val - new_val).abs() > VECTOR_EPSILON {
+            // Use robust float comparison that handles NaN correctly
+            if !floats_approx_equal(*old_val, *new_val) {
                 // Validate index fits in u32 (should always pass given MAX_VECTOR_DIMENSIONS check)
                 let idx_u32 = u32::try_from(idx).ok()?;
                 changes.push((idx_u32, *new_val));
@@ -255,7 +272,7 @@ impl PartialEq for VectorDelta {
 
                 // Compare each (index, value) pair with epsilon for floats
                 for ((idx1, val1), (idx2, val2)) in changes1.iter().zip(changes2.iter()) {
-                    if idx1 != idx2 || (val1 - val2).abs() > VECTOR_EPSILON {
+                    if idx1 != idx2 || !floats_approx_equal(*val1, *val2) {
                         return false;
                     }
                 }
@@ -270,7 +287,7 @@ impl PartialEq for VectorDelta {
 
                 // Compare each element with epsilon
                 for (v1, v2) in vec1.iter().zip(vec2.iter()) {
-                    if (v1 - v2).abs() > VECTOR_EPSILON {
+                    if !floats_approx_equal(*v1, *v2) {
                         return false;
                     }
                 }
@@ -2057,5 +2074,63 @@ mod sentry_tests {
         // Should return None due to dimension limit
         let result = VectorDelta::from_diff(&v1, &v2);
         assert!(result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod sentry_nan_tests {
+    use super::*;
+    use crate::core::property::PropertyMapBuilder;
+
+    /// 🎯 Target: VectorDelta::from_diff
+    /// 💣 Risk: Delta ignores change from Value to NaN due to epsilon check returning false for NaN.
+    /// 🧪 Strategy: Create PropertyMap with [1.0] and another with [NaN]. Compute delta.
+    /// 🔬 Verification: Delta should NOT be empty. Apply should result in [NaN].
+    #[test]
+    fn test_vector_delta_handles_nan_injection() {
+        let old_vec = vec![1.0f32];
+        let new_vec = vec![f32::NAN];
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("vec", PropertyValue::vector(&old_vec))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("vec", PropertyValue::try_vector(&new_vec).unwrap())
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // BUG REPRODUCTION:
+        // Current behavior: abs(1.0 - NaN) is NaN. NaN > epsilon is false.
+        // So it thinks there is no change.
+        // We expect this assertion to FAIL before the fix.
+        if delta.vector_deltas.is_empty() {
+            // If delta is empty, check if it fell back to "changed" (full replace)
+            // But logic says: if both are vectors -> use VectorDelta::from_diff
+            // VectorDelta::from_diff returns None if no changes found.
+            // So delta.vector_deltas will be empty, and delta.changed will be empty (for that key).
+            assert!(!delta.is_empty(), "Delta should not be empty when changing 1.0 to NaN");
+        }
+
+        let applied_props = delta.apply(&old_props);
+        let applied_val = applied_props.get("vec").unwrap().as_vector().unwrap();
+
+        assert!(applied_val[0].is_nan(), "Applied value should be NaN, got {}", applied_val[0]);
+    }
+
+    /// 🎯 Target: VectorDelta equality
+    /// 💣 Risk: VectorDelta(1.0) == VectorDelta(NaN) due to epsilon check.
+    /// 🧪 Strategy: Compare two VectorDeltas.
+    /// 🔬 Verification: Should be Not Equal.
+    #[test]
+    fn test_vector_delta_equality_with_nan() {
+        // Create two full deltas
+        let d1 = VectorDelta::Full(Arc::from(vec![1.0f32].into_boxed_slice()));
+        let d2 = VectorDelta::Full(Arc::from(vec![f32::NAN].into_boxed_slice()));
+
+        // BUG REPRODUCTION:
+        // Current behavior: abs(1.0 - NaN) > epsilon is false. Returns true (Equal).
+        assert_ne!(d1, d2, "VectorDelta(1.0) should not equal VectorDelta(NaN)");
     }
 }
