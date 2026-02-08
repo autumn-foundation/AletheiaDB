@@ -1719,40 +1719,6 @@ mod sentry_tests {
     use super::*;
 
     #[test]
-    fn test_metric_wrapper_handles_unaligned() {
-        // This test ensures that the metric wrapper correctly handles unaligned pointers
-        // by copying to an aligned buffer instead of panicking.
-        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| {
-            // Verify data integrity
-            if a[0] != 1.0 {
-                return -1.0;
-            }
-            if b[0] != 0.0 {
-                return -1.0;
-            }
-            42.0
-        });
-        let wrapper = create_metric_wrapper(4, distance_fn);
-
-        // Create a buffer and get an unaligned pointer
-        let mut buffer = [0u8; 32];
-        // Fill buffer with 1.0f32 at offset 1
-        let val_bytes = 1.0f32.to_ne_bytes();
-        buffer[1] = val_bytes[0];
-        buffer[2] = val_bytes[1];
-        buffer[3] = val_bytes[2];
-        buffer[4] = val_bytes[3];
-
-        // Address + 1 is definitely unaligned for f32 (align 4)
-        let unaligned_ptr = unsafe { buffer.as_ptr().add(1) } as *const f32;
-        let aligned_vec = [0.0f32; 4];
-        let aligned_ptr = aligned_vec.as_ptr();
-
-        let result = wrapper(unaligned_ptr, aligned_ptr);
-        assert_eq!(result, 42.0);
-    }
-
-    #[test]
     fn test_is_retryable_error_matching() {
         assert!(is_retryable_usearch_error(
             "Error: No available threads to lock for search"
@@ -1784,44 +1750,92 @@ mod tests {
     }
 
     #[test]
-    fn test_metric_wrapper_handles_unaligned_buffer() {
-        // This test ensures that the metric wrapper correctly handles unaligned pointers
-        // by verifying data integrity after copy.
-        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| {
-            assert_eq!(a[0], 1.0);
-            assert_eq!(b[0], 2.0);
+    fn test_metric_wrapper_verifies_full_copy() {
+        // Catches mutants where copy length is wrong (e.g. dims + 4 vs dims * 4)
+        let dims = 4;
+        let distance_fn = Arc::new(move |a: &[f32], b: &[f32]| {
+            // Verify ALL elements to ensure full copy
+            for i in 0..dims {
+                assert_eq!(a[i], i as f32, "Mismatch at index {}", i);
+                assert_eq!(b[i], (i + 10) as f32, "Mismatch at index {}", i);
+            }
             42.0
         });
-        let wrapper = create_metric_wrapper(4, distance_fn);
+        let wrapper = create_metric_wrapper(dims, distance_fn);
 
-        // Create a larger buffer to hold two vectors without overlap
-        // a at 0..16
-        // b at 33..49 (offset 33 is unaligned for f32)
-        let mut buffer = vec![0u8; 64];
+        // Create unaligned buffers
+        let mut buffer = vec![0u8; 128];
+        let offset = 1; // Unaligned
 
-        // Populate values
-        // aligned part (valid_ptr will point here)
-        let val_a = 1.0f32.to_ne_bytes();
-        buffer[0..4].copy_from_slice(&val_a);
+        // Setup A: 0.0, 1.0, 2.0, 3.0
+        let a_ptr = unsafe { buffer.as_mut_ptr().add(offset) } as *mut f32;
+        let b_ptr = unsafe { buffer.as_mut_ptr().add(offset + 32) } as *mut f32; // Also unaligned
 
-        // unaligned part (offset 33)
-        let val_b = 2.0f32.to_ne_bytes();
-        buffer[33] = val_b[0];
-        buffer[34] = val_b[1];
-        buffer[35] = val_b[2];
-        buffer[36] = val_b[3];
+        unsafe {
+            // We must use unaligned writes to set up the test data!
+            for i in 0..dims {
+                let val_a = (i as f32).to_ne_bytes();
+                let dst_a = (a_ptr as *mut u8).add(i * 4);
+                std::ptr::copy_nonoverlapping(val_a.as_ptr(), dst_a, 4);
 
-        // Get an aligned pointer
-        let aligned_ptr = buffer.as_mut_ptr();
+                let val_b = ((i + 10) as f32).to_ne_bytes();
+                let dst_b = (b_ptr as *mut u8).add(i * 4);
+                std::ptr::copy_nonoverlapping(val_b.as_ptr(), dst_b, 4);
+            }
+        }
 
-        // Create an unaligned pointer by adding 33 bytes offset
-        // SAFETY: We allocated enough space. This pointer is valid but unaligned for f32.
-        let unaligned_ptr = unsafe { aligned_ptr.add(33) } as *const f32;
-        let valid_ptr = aligned_ptr as *const f32;
+        wrapper(a_ptr, b_ptr);
+    }
 
-        // Pass unaligned pointer - should succeed
-        let result = wrapper(valid_ptr, unaligned_ptr);
-        assert_eq!(result, 42.0);
+    #[test]
+    fn test_metric_wrapper_optimization_and_correctness() {
+        // Catches mutants that break alignment check logic or force slow path
+        let dims = 4;
+
+        let mut buffer = vec![0u8; 256];
+        let base_ptr = buffer.as_ptr() as usize;
+        // Ensure base is aligned to 4 (Vec usually is, but explicit check is safer)
+        let aligned_offset = if base_ptr % 4 == 0 {
+            0
+        } else {
+            4 - (base_ptr % 4)
+        };
+
+        let aligned_addr_a = unsafe { buffer.as_ptr().add(aligned_offset) } as *const f32;
+        let aligned_addr_b = unsafe { buffer.as_ptr().add(aligned_offset + 32) } as *const f32;
+
+        // Offset 2 is unaligned (2 % 4 != 0), but (2 & 5 == 0) catches the specific bad mask mutant
+        let unaligned_addr_a =
+            unsafe { buffer.as_ptr().add(aligned_offset + 2) } as *const f32;
+
+        // Use AtomicUsize to store the pointer seen inside the metric function
+        // (Avoiding f32 cast which loses precision for 64-bit pointers)
+        let seen_ptr = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_ptr_clone = seen_ptr.clone();
+
+        let check_fn = Arc::new(move |a: &[f32], _: &[f32]| {
+            seen_ptr_clone.store(a.as_ptr() as usize, std::sync::atomic::Ordering::SeqCst);
+            42.0
+        });
+
+        let wrapper = create_metric_wrapper(dims, check_fn);
+
+        // Case 1: Aligned input -> Fast path (Zero Copy)
+        wrapper(aligned_addr_a, aligned_addr_b);
+        let ptr_inside = seen_ptr.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            ptr_inside, aligned_addr_a as usize,
+            "Should use zero-copy for aligned input"
+        );
+
+        // Case 2: Unaligned input (offset 2) -> Slow path (Copy)
+        // This catches the `replace - with +` mutant which falsely classifies offset 2 as aligned
+        wrapper(unaligned_addr_a, aligned_addr_b);
+        let ptr_inside = seen_ptr.load(std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(
+            ptr_inside, unaligned_addr_a as usize,
+            "Should use copy for unaligned input (offset 2)"
+        );
     }
 
     #[test]
