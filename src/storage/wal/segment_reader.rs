@@ -306,7 +306,7 @@ pub(crate) fn parse_entry_at(
     let operation = match op_type {
         1 => {
             // CreateNode
-            if current_offset.checked_add(12).ok_or_else(|| {
+            if current_offset.checked_add(8).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -404,7 +404,7 @@ pub(crate) fn parse_entry_at(
         }
         2 => {
             // CreateEdge
-            if current_offset.checked_add(28).ok_or_else(|| {
+            if current_offset.checked_add(24).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -509,7 +509,7 @@ pub(crate) fn parse_entry_at(
         }
         3 => {
             // UpdateNode
-            if current_offset.checked_add(20).ok_or_else(|| {
+            if current_offset.checked_add(16).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -1752,5 +1752,184 @@ mod tests {
         } else {
             panic!("Wrong operation type");
         }
+    }
+
+    // =============================================================================
+    // V2 Error Handling Coverage Tests
+    // These tests specifically target error paths in V2 label deserialization
+    // =============================================================================
+
+    fn construct_v2_header(buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // LSN
+        time::now().serialize_into(buffer); // Timestamp
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // Checksum placeholder
+    }
+
+    #[test]
+    fn test_wal_v2_create_node_truncated_label_length() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(1); // Op: CreateNode
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+
+        // Truncate here (missing 4 bytes for label length)
+        buffer.push(0);
+
+        let result = parse_entry_at(&buffer, 0, 2); // Version 2
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Insufficient buffer size for CreateNode label length"));
+    }
+
+    #[test]
+    fn test_wal_v2_create_node_truncated_label_data() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(1); // Op: CreateNode
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+
+        // Label length: 10 bytes
+        buffer.extend_from_slice(&10u32.to_le_bytes());
+
+        // Label data: only 5 bytes provided
+        buffer.extend_from_slice(b"short");
+
+        let result = parse_entry_at(&buffer, 0, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Insufficient buffer size for CreateNode label data"));
+    }
+
+    #[test]
+    fn test_wal_v2_create_node_invalid_utf8() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(1); // Op: CreateNode
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+
+        // Label length: 4 bytes
+        buffer.extend_from_slice(&4u32.to_le_bytes());
+
+        // Invalid UTF-8 sequence
+        buffer.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+
+        let result = parse_entry_at(&buffer, 0, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid UTF-8 in label"));
+    }
+
+    #[test]
+    fn test_wal_v2_create_edge_truncated_label_length() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(2); // Op: CreateEdge
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // EdgeId
+        buffer.extend_from_slice(&2u64.to_le_bytes()); // Source
+        buffer.extend_from_slice(&3u64.to_le_bytes()); // Target
+
+        // Truncate here
+        buffer.push(0);
+
+        let result = parse_entry_at(&buffer, 0, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Insufficient buffer size for CreateEdge label length"));
+    }
+
+    #[test]
+    fn test_wal_v2_create_edge_truncated_label_data() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(2); // Op: CreateEdge
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // EdgeId
+        buffer.extend_from_slice(&2u64.to_le_bytes()); // Source
+        buffer.extend_from_slice(&3u64.to_le_bytes()); // Target
+
+        // Length 10
+        buffer.extend_from_slice(&10u32.to_le_bytes());
+        // Data too short
+        buffer.extend_from_slice(b"short");
+
+        let result = parse_entry_at(&buffer, 0, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Insufficient buffer size for CreateEdge label data"));
+    }
+
+    #[test]
+    fn test_wal_v2_update_node_truncated_label_length() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(3); // Op: UpdateNode
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        // Truncate
+        buffer.push(0);
+
+        let result = parse_entry_at(&buffer, 0, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Insufficient buffer size for UpdateNode label length"));
+    }
+
+    #[test]
+    fn test_wal_v2_update_node_truncated_label_data() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(3); // Op: UpdateNode
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        buffer.extend_from_slice(&10u32.to_le_bytes());
+        buffer.extend_from_slice(b"short");
+
+        let result = parse_entry_at(&buffer, 0, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Insufficient buffer size for UpdateNode label data"));
+    }
+
+    #[test]
+    fn test_wal_v2_update_edge_truncated_label_length() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(4); // Op: UpdateEdge
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // EdgeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        buffer.push(0);
+
+        let result = parse_entry_at(&buffer, 0, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Insufficient buffer size for UpdateEdge label length"));
+    }
+
+    #[test]
+    fn test_wal_v2_update_edge_truncated_label_data() {
+        let mut buffer = Vec::new();
+        construct_v2_header(&mut buffer);
+
+        buffer.push(4); // Op: UpdateEdge
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // EdgeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        buffer.extend_from_slice(&10u32.to_le_bytes());
+        buffer.extend_from_slice(b"short");
+
+        let result = parse_entry_at(&buffer, 0, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Insufficient buffer size for UpdateEdge label data"));
     }
 }
