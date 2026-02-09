@@ -1805,8 +1805,7 @@ mod tests {
         let aligned_addr_b = unsafe { buffer.as_ptr().add(aligned_offset + 32) } as *const f32;
 
         // Offset 2 is unaligned (2 % 4 != 0), but (2 & 5 == 0) catches the specific bad mask mutant
-        let unaligned_addr_a =
-            unsafe { buffer.as_ptr().add(aligned_offset + 2) } as *const f32;
+        let unaligned_addr_a = unsafe { buffer.as_ptr().add(aligned_offset + 2) } as *const f32;
 
         // Use AtomicUsize to store the pointer seen inside the metric function
         // (Avoiding f32 cast which loses precision for 64-bit pointers)
