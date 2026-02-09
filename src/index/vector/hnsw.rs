@@ -2140,9 +2140,9 @@ mod tests {
             );
         }
 
-        // 3. DotProduct: similarity = -distance
-        // usearch IP distance is -dot_product
-        // So similarity = -(-dot_product) = dot_product
+        // 3. DotProduct: similarity = 1.0 - distance
+        // usearch IP distance is 1.0 - dot_product
+        // So similarity = 1.0 - (1.0 - dot_product) = dot_product
         {
             let index = HnswIndexBuilder::new(2, DistanceMetric::DotProduct).build()?;
             let n1 = NodeId::new(1).unwrap();
