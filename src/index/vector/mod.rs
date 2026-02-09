@@ -109,6 +109,40 @@ pub enum Quantization {
     I8,
 }
 
+impl Quantization {
+    /// Encode quantization level as a byte for serialization.
+    ///
+    /// Encoding:
+    /// - 0 = F32
+    /// - 1 = F16
+    /// - 2 = I8
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Quantization::F32 => 0,
+            Quantization::F16 => 1,
+            Quantization::I8 => 2,
+        }
+    }
+
+    /// Decode quantization level from a byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the byte value is not a valid quantization encoding (>= 3).
+    pub fn from_u8(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Quantization::F32),
+            1 => Ok(Quantization::F16),
+            2 => Ok(Quantization::I8),
+            _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
+                "Invalid quantization encoding: {}",
+                value
+            ))
+            .into()),
+        }
+    }
+}
+
 /// Storage mode for the vector index.
 ///
 /// - InMemory: All data in RAM (default, fastest queries)
@@ -663,6 +697,19 @@ mod tests {
             DistanceMetric::from_u8(5).unwrap(),
             DistanceMetric::Tanimoto
         );
+    }
+
+    #[test]
+    fn test_quantization_variants() {
+        assert_eq!(Quantization::F32.to_u8(), 0);
+        assert_eq!(Quantization::F16.to_u8(), 1);
+        assert_eq!(Quantization::I8.to_u8(), 2);
+
+        assert_eq!(Quantization::from_u8(0).unwrap(), Quantization::F32);
+        assert_eq!(Quantization::from_u8(1).unwrap(), Quantization::F16);
+        assert_eq!(Quantization::from_u8(2).unwrap(), Quantization::I8);
+
+        assert!(Quantization::from_u8(3).is_err());
     }
 }
 

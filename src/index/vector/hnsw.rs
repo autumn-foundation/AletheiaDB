@@ -125,7 +125,14 @@ impl Drop for FilterCallbackGuard {
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
 /// Current mapping file format version
-const MAPPING_VERSION: u8 = 1;
+const MAPPING_VERSION: u8 = 2;
+
+/// Metadata stored in the mappings file (Version 2+)
+struct IndexMetadata {
+    dimensions: usize,
+    quantization: Quantization,
+    metric: DistanceMetric,
+}
 
 /// Maximum number of results that can be requested in a search.
 ///
@@ -1216,16 +1223,16 @@ impl HnswIndex {
         drop(index);
 
         // Save mappings to companion file with integrity checks
-        // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
+        // Format: [MAGIC:4][VERSION:2][DIMS:8][QUANT:1][METRIC:1][COUNT:8][DATA:16*count][CRC32:4]
         let mappings_path = path.with_extension("usearch.mappings");
 
-        // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
+        // Calculate total size: Magic(4) + Version(1) + Dims(8) + Quant(1) + Metric(1) + Count(8) + Data(count * 16) + CRC(4)
         // Use checked arithmetic to prevent overflow
         let count_size = count
             .checked_mul(16)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
         let _total_size = count_size
-            .checked_add(4 + 1 + 8 + 4)
+            .checked_add(4 + 1 + 8 + 1 + 1 + 8 + 4)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
 
         // Open file with streaming writer
@@ -1238,12 +1245,17 @@ impl HnswIndex {
         let mut writer = BufWriter::new(file);
 
         // Use Vec iterator instead of DashMap iterator
-        Self::write_mappings_to_writer(&mut writer, mappings.into_iter(), count)
+        Self::write_mappings_to_writer(&mut writer, mappings.into_iter(), count, &self.config)
     }
 
     /// Helper method to stream mappings to a writer with CRC calculation.
     /// Extracted for testability of error paths.
-    fn write_mappings_to_writer<W, I>(writer: &mut W, mappings_iter: I, count: usize) -> Result<()>
+    fn write_mappings_to_writer<W, I>(
+        writer: &mut W,
+        mappings_iter: I,
+        count: usize,
+        config: &HnswConfig,
+    ) -> Result<()>
     where
         W: Write,
         I: Iterator<Item = (NodeId, u64)>,
@@ -1276,6 +1288,16 @@ impl HnswIndex {
         // Write header
         write_and_hash(writer, &mut hasher, MAPPING_MAGIC)?;
         write_and_hash(writer, &mut hasher, &[MAPPING_VERSION])?;
+
+        // Version 2 fields: Dimensions, Quantization, Metric
+        write_and_hash(
+            writer,
+            &mut hasher,
+            &(config.dimensions as u64).to_le_bytes(),
+        )?;
+        write_and_hash(writer, &mut hasher, &[config.quantization.to_u8()])?;
+        write_and_hash(writer, &mut hasher, &[config.metric.to_u8()])?;
+
         write_and_hash(writer, &mut hasher, &count_u64.to_le_bytes())?;
 
         // Write data directly
@@ -1300,6 +1322,41 @@ impl HnswIndex {
             )))
         })?;
 
+        Ok(())
+    }
+
+    /// Validate loaded index metadata against configuration.
+    fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswConfig) -> Result<()> {
+        if let Some(meta) = metadata {
+            if meta.dimensions != config.dimensions {
+                return Err(Error::Vector(VectorError::IndexError(format!(
+                    "Index dimension mismatch: expected {}, found {}",
+                    config.dimensions, meta.dimensions
+                ))));
+            }
+            if meta.quantization != config.quantization {
+                return Err(Error::Vector(VectorError::IndexError(format!(
+                    "Index quantization mismatch: expected {:?}, found {:?}",
+                    config.quantization, meta.quantization
+                ))));
+            }
+            if meta.metric != config.metric {
+                return Err(Error::Vector(VectorError::IndexError(format!(
+                    "Index metric mismatch: expected {:?}, found {:?}",
+                    config.metric, meta.metric
+                ))));
+            }
+        } else {
+            // Legacy index (Version 1)
+            // Prevent usage of custom metric with legacy index to avoid buffer over-read vulnerability
+            // (since we cannot verify dimensions/quantization)
+            if config.custom_metric.is_some() {
+                return Err(Error::Vector(VectorError::IndexError(
+                    "Cannot use custom metric with legacy index (missing metadata validation)"
+                        .to_string(),
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1372,18 +1429,24 @@ impl HnswIndex {
 }
 
 /// Load and verify mappings from a companion file.
-/// Returns (id_mapping, reverse_mapping, max_key) or error if integrity check fails.
-/// Format: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
+/// Returns (id_mapping, reverse_mapping, max_key, metadata) or error if integrity check fails.
+/// Format V1: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
+/// Format V2: `[MAGIC:4][VERSION:2][DIMS:8][QUANT:1][METRIC:1][COUNT:8][DATA:16*count][CRC32:4]`
 #[allow(clippy::type_complexity)]
 fn load_mappings_with_integrity(
     mappings_path: &Path,
-) -> Result<(DashMap<NodeId, u64>, DashMap<u64, NodeId>, u64)> {
+) -> Result<(
+    DashMap<NodeId, u64>,
+    DashMap<u64, NodeId>,
+    u64,
+    Option<IndexMetadata>,
+)> {
     let id_mapping = DashMap::new();
     let reverse_mapping = DashMap::new();
     let mut max_key = 0u64;
 
     if !mappings_path.exists() {
-        return Ok((id_mapping, reverse_mapping, max_key));
+        return Ok((id_mapping, reverse_mapping, max_key, None));
     }
 
     // Use streaming (File + BufReader) instead of reading entire file to memory (fs::read).
@@ -1405,7 +1468,8 @@ fn load_mappings_with_integrity(
         })?
         .len();
 
-    // Minimum size: magic(4) + version(1) + count(8) + crc(4) = 17 bytes
+    // Minimum size check (V1 min size)
+    // Magic(4) + Version(1) + Count(8) + CRC(4) = 17 bytes
     if file_len < 17 {
         return Err(Error::Vector(VectorError::IndexError(
             "Mapping file too small or corrupted".to_string(),
@@ -1415,36 +1479,73 @@ fn load_mappings_with_integrity(
     let mut reader = std::io::BufReader::new(file);
     let mut hasher = Hasher::new();
 
-    // 1. Read Header (13 bytes)
-    let mut header = [0u8; 13];
-    reader.read_exact(&mut header).map_err(|e| {
+    // 1. Read Start of Header (5 bytes: Magic + Version)
+    let mut header_start = [0u8; 5];
+    reader.read_exact(&mut header_start).map_err(|e| {
         Error::Vector(VectorError::IndexError(format!(
-            "Failed to read mappings header: {}",
+            "Failed to read mappings header start: {}",
             e
         )))
     })?;
 
-    // Update hasher with header
-    hasher.update(&header);
+    hasher.update(&header_start);
 
     // Verify magic bytes
-    if &header[0..4] != MAPPING_MAGIC {
+    if &header_start[0..4] != MAPPING_MAGIC {
         return Err(Error::Vector(VectorError::IndexError(
             "Invalid mapping file: bad magic bytes".to_string(),
         )));
     }
 
-    // Check version
-    let version = header[4];
-    if version != MAPPING_VERSION {
-        return Err(Error::Vector(VectorError::IndexError(format!(
-            "Unsupported mapping file version: {} (expected {})",
-            version, MAPPING_VERSION
-        ))));
-    }
+    let version = header_start[4];
 
-    // Parse count
-    let count = u64::from_le_bytes(header[5..13].try_into().unwrap()) as usize;
+    // Read remaining header based on version
+    let (count, metadata, header_overhead) = match version {
+        1 => {
+            // V1: Count(8)
+            let mut buf = [0u8; 8];
+            reader.read_exact(&mut buf).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to read V1 header fields: {}",
+                    e
+                )))
+            })?;
+            hasher.update(&buf);
+            let count = u64::from_le_bytes(buf) as usize;
+            // Overhead: Magic(4) + Version(1) + Count(8) + CRC(4) = 17
+            (count, None, 17)
+        }
+        2 => {
+            // V2: Dims(8) + Quant(1) + Metric(1) + Count(8)
+            let mut buf = [0u8; 18];
+            reader.read_exact(&mut buf).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to read V2 header fields: {}",
+                    e
+                )))
+            })?;
+            hasher.update(&buf);
+
+            let dims = u64::from_le_bytes(buf[0..8].try_into().unwrap()) as usize;
+            let quant = Quantization::from_u8(buf[8])?;
+            let metric = DistanceMetric::from_u8(buf[9])?;
+            let count = u64::from_le_bytes(buf[10..18].try_into().unwrap()) as usize;
+
+            let meta = IndexMetadata {
+                dimensions: dims,
+                quantization: quant,
+                metric,
+            };
+            // Overhead: Magic(4) + Version(1) + Dims(8) + Quant(1) + Metric(1) + Count(8) + CRC(4) = 27
+            (count, Some(meta), 27)
+        }
+        v => {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Unsupported mapping file version: {} (expected 1 or {})",
+                v, MAPPING_VERSION
+            ))));
+        }
+    };
 
     // Security Check: Enforce maximum mappings count to prevent OOM DoS
     if count > MAX_MAPPINGS_COUNT {
@@ -1461,7 +1562,7 @@ fn load_mappings_with_integrity(
             "Mapping count too large (overflow)".to_string(),
         ))
     })?;
-    let expected_size = data_size.checked_add(4 + 1 + 8 + 4).ok_or_else(|| {
+    let expected_size = data_size.checked_add(header_overhead).ok_or_else(|| {
         Error::Vector(VectorError::IndexError(
             "Mapping file size too large (overflow)".to_string(),
         ))
@@ -1531,7 +1632,7 @@ fn load_mappings_with_integrity(
         ))));
     }
 
-    Ok((id_mapping, reverse_mapping, max_key))
+    Ok((id_mapping, reverse_mapping, max_key, metadata))
 }
 
 impl HnswIndex {
@@ -1643,7 +1744,11 @@ impl HnswIndex {
 
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
-        let (id_mapping, reverse_mapping, max_key) = load_mappings_with_integrity(&mappings_path)?;
+        let (id_mapping, reverse_mapping, max_key, metadata) =
+            load_mappings_with_integrity(&mappings_path)?;
+
+        // Validate metadata
+        Self::validate_metadata(metadata, &config)?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
@@ -1684,13 +1789,31 @@ impl HnswIndex {
 
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
-        let (id_mapping, reverse_mapping, max_key) = load_mappings_with_integrity(&mappings_path)?;
+        let (id_mapping, reverse_mapping, max_key, metadata) =
+            load_mappings_with_integrity(&mappings_path)?;
+
+        // Restore configuration from metadata if available
+        let (quantization, metric) = if let Some(meta) = metadata {
+            // Verify dimensions match what usearch reports
+            if meta.dimensions != dimensions {
+                return Err(Error::Vector(VectorError::IndexError(format!(
+                    "Index dimension mismatch: usearch reported {}, metadata says {}",
+                    dimensions, meta.dimensions
+                ))));
+            }
+            (meta.quantization, meta.metric)
+        } else {
+            // Legacy index: fallback to defaults
+            (Quantization::default(), DistanceMetric::Cosine)
+        };
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
             config: HnswConfig {
                 dimensions,
                 m: connectivity,
+                quantization,
+                metric,
                 storage: StorageMode::MemoryMapped {
                     path: path.to_path_buf(),
                 },
@@ -2322,10 +2445,11 @@ mod tests {
 
         // Corrupt data (which invalidates CRC)
         let mut data = std::fs::read(&mappings_path).unwrap();
-        // Modify the node ID part of the data (after header: 4+1+8 = 13 bytes)
-        // Data format: [NodeId:8][Key:8]...
-        if data.len() > 13 {
-            data[13] = data[13].wrapping_add(1);
+        // Modify the node ID part of the data
+        // Header V2 size: 4(Magic) + 1(Ver) + 8(Dims) + 1(Quant) + 1(Metric) + 8(Count) = 23 bytes
+        let header_size = 23;
+        if data.len() > header_size {
+            data[header_size] = data[header_size].wrapping_add(1);
         }
         std::fs::write(&mappings_path, &data).unwrap();
 
@@ -2380,9 +2504,9 @@ mod tests {
 
         // Modify count to be larger (mismatch with actual size), then fix CRC to pass CRC check
         let mut data = std::fs::read(&mappings_path).unwrap();
-        // Count is at offset 5 (Magic 4 + Version 1)
+        // Count is at offset 15 (Magic 4 + Version 1 + Dims 8 + Quant 1 + Metric 1)
         // Original count is 1. Let's make it 2.
-        let count_offset = 5;
+        let count_offset = 15;
         data[count_offset] = 2;
 
         // Recompute CRC so we pass the CRC check and hit the size check
@@ -2426,7 +2550,7 @@ mod tests {
 
         // Modify count to be HUGE (u64::MAX) to trigger arithmetic overflow check
         let mut data = std::fs::read(&mappings_path).unwrap();
-        let count_offset = 5;
+        let count_offset = 15; // V2 offset
         let huge_count = u64::MAX;
 
         // Write huge count
@@ -2526,6 +2650,8 @@ mod tests {
             (NodeId::new(2).unwrap(), 200),
         ];
 
+        let config = HnswConfig::default();
+
         // Case 1: Fail during header (MAGIC)
         // Magic is 4 bytes. Fail at byte 3.
         let mut writer = MockFailWriter::new(3);
@@ -2533,6 +2659,7 @@ mod tests {
             &mut writer,
             mappings.iter().copied(),
             mappings.len(),
+            &config,
         );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
@@ -2542,14 +2669,15 @@ mod tests {
         }
 
         // Case 2: Fail during data writing
-        // Magic(4) + Version(1) + Count(8) = 13 bytes header
+        // V2 Header: Magic(4) + Version(1) + Dims(8) + Quant(1) + Metric(1) + Count(8) = 23 bytes
         // Data is 16 bytes per item.
         // Fail after header + 1st item (16 bytes) + 1 byte
-        let mut writer = MockFailWriter::new(13 + 16 + 1);
+        let mut writer = MockFailWriter::new(23 + 16 + 1);
         let result = HnswIndex::write_mappings_to_writer(
             &mut writer,
             mappings.iter().copied(),
             mappings.len(),
+            &config,
         );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
@@ -2557,14 +2685,15 @@ mod tests {
         }
 
         // Case 3: Fail during CRC writing
-        // Total data size = 13 + 32 = 45 bytes.
+        // Total data size = 23 + 32 = 55 bytes.
         // CRC is 4 bytes.
-        // Fail at 45 + 1 byte (during CRC write)
-        let mut writer = MockFailWriter::new(45 + 1);
+        // Fail at 55 + 1 byte (during CRC write)
+        let mut writer = MockFailWriter::new(55 + 1);
         let result = HnswIndex::write_mappings_to_writer(
             &mut writer,
             mappings.iter().copied(),
             mappings.len(),
+            &config,
         );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
@@ -2585,11 +2714,13 @@ mod tests {
     #[test]
     fn test_save_mappings_flush_error() {
         let mappings = [];
+        let config = HnswConfig::default();
         let mut writer = MockFlushFailWriter;
         let result = HnswIndex::write_mappings_to_writer(
             &mut writer,
             mappings.iter().copied(),
             mappings.len(),
+            &config,
         );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
