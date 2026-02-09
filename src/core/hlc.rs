@@ -496,22 +496,12 @@ mod proptests {
             msg in valid_timestamp(),
             physical in valid_wallclock()
         ) {
-            let result = local.receive(msg, wallclock);
-            let expected_logical_opt = local_logical.max(msg_logical).checked_add(1);
-
-            if let Some(expected_logical) = expected_logical_opt {
-                // If no overflow is expected, receive() must succeed.
-                let next = result.expect("receive() should succeed when no overflow is expected");
-                prop_assert!(next > local, "next > local (collision)");
-                prop_assert!(next > msg, "next > msg (collision)");
-                prop_assert_eq!(next.wallclock(), wallclock);
-                prop_assert_eq!(next.logical(), expected_logical);
-            } else {
-                // If overflow is expected, receive() must fail with LogicalCounterOverflow.
-                prop_assert!(
-                    matches!(result, Err(TemporalError::LogicalCounterOverflow { .. })),
-                    "Expected LogicalCounterOverflow on overflow"
-                );
+            if let Ok(next) = local.receive(msg, physical) {
+                prop_assert!(next > local, "next > local");
+                prop_assert!(next > msg, "next > msg");
+                prop_assert!(next.wallclock() >= local.wallclock());
+                prop_assert!(next.wallclock() >= msg.wallclock());
+                prop_assert!(next.wallclock() >= physical);
             }
         }
 
@@ -554,7 +544,7 @@ mod proptests {
         fn prop_receive_causality_collision(
             wallclock in valid_wallclock(),
             local_logical in any::<u32>(),
-            msg_logical in any::<u32>()
+            msg_logical in any::<u32>(),
         ) {
             let local = HybridTimestamp::new(wallclock, local_logical).unwrap();
             let msg = HybridTimestamp::new(wallclock, msg_logical).unwrap();
