@@ -104,6 +104,23 @@ fn json_to_predicate_value(v: &serde_json::Value) -> Option<PredicateValue> {
     }
 }
 
+/// Validate pagination parameters to prevent DoS via deep pagination.
+///
+/// Returns Ok(()) if the combination of offset and limit is safe,
+/// or an error message if it exceeds the maximum allowed depth.
+fn validate_pagination(offset: usize, limit: usize) -> Result<(), String> {
+    // Prevent deep pagination attacks (CPU DoS)
+    // Use saturating_add to prevent integer overflow bypass
+    let max_deep_pagination = 10_000;
+    if offset.saturating_add(limit) > max_deep_pagination {
+        return Err(format!(
+            "Pagination limit exceeded: offset + limit must be <= {}",
+            max_deep_pagination
+        ));
+    }
+    Ok(())
+}
+
 /// Query endpoint handler.
 pub async fn handle_query(
     state: web::Data<AppState>,
@@ -196,14 +213,8 @@ pub async fn handle_query(
             let limit_val = limit.unwrap_or(100);
             let offset_val = offset.unwrap_or(0);
 
-            // Prevent deep pagination attacks (CPU DoS)
-            // Use saturating_add to prevent integer overflow bypass
-            let max_deep_pagination = 10_000;
-            if offset_val.saturating_add(limit_val) > max_deep_pagination {
-                return HttpResponse::BadRequest().json(ApiResponse::error(format!(
-                    "Pagination limit exceeded: offset + limit must be <= {}",
-                    max_deep_pagination
-                )));
+            if let Err(e) = validate_pagination(offset_val, limit_val) {
+                return HttpResponse::BadRequest().json(ApiResponse::error(e));
             }
 
             if let Some(skip) = offset {
@@ -248,6 +259,10 @@ pub async fn handle_query(
 
                     let limit_val = limit.unwrap_or(100).min(max_limit);
                     let offset_val = offset.unwrap_or(0);
+
+                    if let Err(e) = validate_pagination(offset_val, limit_val) {
+                        return HttpResponse::BadRequest().json(ApiResponse::error(e));
+                    }
 
                     // Deduplication
                     let mut seen_ids = HashSet::new();
