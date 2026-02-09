@@ -771,7 +771,16 @@ impl VectorIndex for HnswIndex {
 
         // Optimistic concurrency loop for updates
         // This ensures we always acquire Inner lock BEFORE holding DashMap lock for long durations
+        let mut attempts = 0;
+        const MAX_RETRIES: usize = 1000;
         loop {
+            if attempts >= MAX_RETRIES {
+                return Err(Error::Vector(VectorError::IndexError(
+                    "Failed to update index after multiple attempts due to high contention".to_string(),
+                )));
+            }
+            attempts += 1;
+
             // Get or create key for this NodeId
             match self.id_mapping.entry(id) {
                 dashmap::mapref::entry::Entry::Occupied(entry) => {
