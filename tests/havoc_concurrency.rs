@@ -55,9 +55,6 @@ fn test_havoc_deadlock_save_add() {
     }
 
     // If we reach here, no deadlock occurred.
-    // The previous implementation had a deadlock where `add` held DashMap lock then Inner lock,
-    // while `save` held Inner lock then DashMap lock.
-    // The current implementation is supposed to be fixed (PR #751).
 }
 
 #[test]
@@ -65,6 +62,7 @@ fn test_havoc_race_inconsistency() {
     // This test attempts to create a "Zombie Vector" scenario
     // Threads race to add/remove the same ID.
     // We check if the index state is consistent at the end.
+    // INCREASED iterations to ensure coverage of Occupied retry logic.
 
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
@@ -73,7 +71,7 @@ fn test_havoc_race_inconsistency() {
     );
 
     let num_threads = 8;
-    let iterations = 1000;
+    let iterations = 5000; // Increased from 1000 to 5000 for coverage
     let target_id = NodeId::new(1).unwrap();
     let barrier = Arc::new(Barrier::new(num_threads));
 
@@ -101,14 +99,6 @@ fn test_havoc_race_inconsistency() {
     }
 
     // Check consistency
-    // If the ID is in mapping, it MUST be in inner index.
-    // If it's not in mapping, it MUST NOT be in inner index.
-    // NOTE: This check depends on internal implementation details which we can't easily access publicly.
-    // However, `len()` returns inner size. `get_id_mappings` (crate-private) returns mapping.
-    // Since we are in `tests/`, we can only access public API unless we use `#[cfg(test)]` tricks in lib.rs
-    // But wait, `HnswIndex` has `len()` which delegates to `inner.read().size()`.
-    // And we can infer mapping existence by `search` returning the ID.
-
     let inner_count = index.len();
     let search_results = index.search(&[1.0, 0.0, 0.0, 0.0], 10).unwrap();
     let found = search_results.iter().any(|(id, _)| *id == target_id);
@@ -117,14 +107,6 @@ fn test_havoc_race_inconsistency() {
         // If found in search, it must be in inner index
         assert!(inner_count >= 1, "Found via search but index empty?");
     } else {
-        // If not found in search, it might be removed from mapping but still in inner (zombie),
-        // OR removed from both.
-        // Ideally, if not in mapping, search shouldn't return it.
-        // But if `inner_count > 0` and search returns nothing (and we only ever added 1 node ID),
-        // then we have a zombie vector in `inner` that is unreachable via mapping.
-        // Note: we only used `target_id`. So if `inner_count > 0` but `!found`,
-        // it means `inner` has vectors but `reverse_mapping` doesn't map them to `target_id`.
-        // This is exactly a Zombie Vector.
         if inner_count > 0 {
             panic!(
                 "Zombie Vector Detected! Inner count: {}, but ID not found in search.",
@@ -138,44 +120,41 @@ fn test_havoc_race_inconsistency() {
 fn test_concurrent_adds_race() {
     // Specifically target the "Vacant" path race condition where multiple threads
     // try to add the SAME new ID simultaneously.
-    // This aims to trigger the rollback logic:
-    // 1. Entry::Vacant (lock dropped)
-    // 2. Inner add (success)
-    // 3. Re-acquire map (Entry::Occupied -> Rollback)
+    // Run in a loop to ensure we hit the specific timing window for code coverage.
 
-    let index = Arc::new(
-        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-            .build()
-            .unwrap(),
-    );
+    let num_iterations = 50; // Repeat race attempt multiple times
 
-    let num_threads = 16; // Higher contention
-    let target_id = NodeId::new(100).unwrap();
-    let barrier = Arc::new(Barrier::new(num_threads));
+    for _ in 0..num_iterations {
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
 
-    let mut handles = vec![];
+        let num_threads = 16; // Higher contention
+        let target_id = NodeId::new(100).unwrap();
+        let barrier = Arc::new(Barrier::new(num_threads));
 
-    for _ in 0..num_threads {
-        let index = index.clone();
-        let barrier = barrier.clone();
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            // Try to add the same ID concurrently.
-            // One should succeed, others might fail with the specific error or succeed if serialized.
-            // But we hope to hit the race window where multiple see Vacant.
-            // We ignore errors because "Concurrent add detected" is an expected error here.
-            let _ = index.add(target_id, &[0.5, 0.5, 0.5, 0.5]);
-        }));
+        let mut handles = vec![];
+
+        for _ in 0..num_threads {
+            let index = index.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                // Try to add the same ID concurrently.
+                let _ = index.add(target_id, &[0.5, 0.5, 0.5, 0.5]);
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify consistency for this iteration
+        assert_eq!(index.len(), 1, "Should have exactly 1 vector");
+        let results = index.search(&[0.5, 0.5, 0.5, 0.5], 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, target_id);
     }
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    // Verify consistency
-    // Should have exactly 1 vector in index and it should be searchable.
-    assert_eq!(index.len(), 1, "Should have exactly 1 vector");
-    let results = index.search(&[0.5, 0.5, 0.5, 0.5], 10).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, target_id);
 }
