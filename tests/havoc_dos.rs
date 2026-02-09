@@ -24,12 +24,25 @@ fn test_billion_laughs_dos() {
     let result = value.serialized_size();
     println!("Result in {:?}: {:?}", start.elapsed(), result);
 
-    assert!(result.is_err(), "serialized_size should error out on exponential expansion");
+    assert!(
+        result.is_err(),
+        "serialized_size should error out on exponential expansion"
+    );
     let err = result.unwrap_err();
-    assert!(format!("{}", err).contains("limit exceeded"), "Error should be about limits: {}", err);
+    assert!(
+        format!("{}", err).contains("limit exceeded"),
+        "Error should be about limits: {}",
+        err
+    );
 
     println!("Attempting serialization (should also fail gracefully)...");
     let ser_result = value.serialize();
     assert!(ser_result.is_err(), "serialize should error out");
     assert!(format!("{}", ser_result.unwrap_err()).contains("limit exceeded"));
+
+    println!("Attempting direct serialize_into (should also fail gracefully)...");
+    let mut buffer = Vec::new();
+    let into_result = value.serialize_into(&mut buffer);
+    assert!(into_result.is_err(), "serialize_into should error out");
+    assert!(format!("{}", into_result.unwrap_err()).contains("limit exceeded"));
 }
