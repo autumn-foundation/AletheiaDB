@@ -461,8 +461,7 @@ mod proptests {
 
     /// Strategy for generating valid HybridTimestamp instances.
     fn valid_timestamp() -> impl Strategy<Value = HybridTimestamp> {
-        (valid_wallclock(), any::<u32>())
-            .prop_map(|(w, l)| HybridTimestamp::new(w, l).unwrap())
+        (valid_wallclock(), any::<u32>()).prop_map(|(w, l)| HybridTimestamp::new(w, l).unwrap())
     }
 
     proptest! {
