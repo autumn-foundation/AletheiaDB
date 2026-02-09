@@ -786,7 +786,7 @@ impl VectorIndex for HnswIndex {
                     // Test hook: Inject delay to force race conditions (Occupied path)
                     #[cfg(test)]
                     if INJECT_OCCUPIED_DELAY.load(Ordering::Relaxed) {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                     }
 
                     // 3. Acquire Inner Write Lock
@@ -2900,7 +2900,8 @@ mod coverage_tests {
                 // T1 updates existing node (Occupied path)
                 // Will sleep after dropping map lock
                 // Upon waking, mapping is gone. Should switch to Vacant path.
-                let _ = index.add(id, &[0.2, 0.2, 0.2, 0.2]);
+                let res = index.add(id, &[0.2, 0.2, 0.2, 0.2]);
+                assert!(res.is_ok(), "T1 add failed: {:?}", res.err());
             })
         };
 
@@ -2909,10 +2910,11 @@ mod coverage_tests {
             let barrier = barrier.clone();
             thread::spawn(move || {
                 barrier.wait();
-                // Ensure T1 is sleeping
-                thread::sleep(std::time::Duration::from_millis(50));
+                // Ensure T1 is sleeping (hook sleeps 500ms, we wait 100ms to be safe but beat T1)
+                thread::sleep(std::time::Duration::from_millis(100));
                 // Remove the node T1 is trying to update
-                let _ = index.remove(id);
+                let res = index.remove(id);
+                assert!(res.is_ok(), "T2 remove failed: {:?}", res.err());
             })
         };
 

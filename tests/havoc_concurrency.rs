@@ -106,13 +106,11 @@ fn test_havoc_race_inconsistency() {
     if found {
         // If found in search, it must be in inner index
         assert!(inner_count >= 1, "Found via search but index empty?");
-    } else {
-        if inner_count > 0 {
-            panic!(
-                "Zombie Vector Detected! Inner count: {}, but ID not found in search.",
-                inner_count
-            );
-        }
+    } else if inner_count > 0 {
+        panic!(
+            "Zombie Vector Detected! Inner count: {}, but ID not found in search.",
+            inner_count
+        );
     }
 }
 
