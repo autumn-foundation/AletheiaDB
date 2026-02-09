@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::tempdir;
@@ -126,7 +126,10 @@ fn test_havoc_race_inconsistency() {
         // it means `inner` has vectors but `reverse_mapping` doesn't map them to `target_id`.
         // This is exactly a Zombie Vector.
         if inner_count > 0 {
-             panic!("Zombie Vector Detected! Inner count: {}, but ID not found in search.", inner_count);
+            panic!(
+                "Zombie Vector Detected! Inner count: {}, but ID not found in search.",
+                inner_count
+            );
         }
     }
 }

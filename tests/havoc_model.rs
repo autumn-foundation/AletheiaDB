@@ -31,16 +31,28 @@ fn havoc_model_deadlock() {
             })
         };
 
-        // Thread B: add (Occupied path)
-        // 1. Acquire mapping lock (via entry API)
+        // Thread B: add (Occupied path) - FIXED
+        // 1. Acquire mapping lock (via entry API), then RELEASE it
         // 2. Acquire inner write lock (to update vector)
+        // 3. Re-acquire mapping lock (to verify)
         let t2 = {
             let model = model.clone();
             thread::spawn(move || {
-                // Simulate add (Occupied)
+                // Simulate add (Occupied) with Optimistic Concurrency Fix
+
+                // 1. Get initial mapping state
+                {
+                    let _map_guard = model.mapping.lock().unwrap();
+                    // Release lock immediately
+                }
+
+                // 2. Acquire Inner Write Lock
+                let _inner_guard = model.inner.write().unwrap();
+
+                // 3. Re-verify mapping (matches Inner -> Mapping order)
                 let _map_guard = model.mapping.lock().unwrap();
-                // Try to update inner index
-                let _guard = model.inner.write().unwrap();
+
+                // (In real code, if verification fails, we release inner and retry, but here we model the lock acquisition success path)
             })
         };
 
