@@ -149,6 +149,7 @@ Store periodic outputs:
 - `mutants.out/` (weekly)
 - fuzz corpus and crash artifacts (nightly/weekly)
 - Kani/Verus reports under `docs/verification/`
+- module score artifacts under `verification/mutation/`
 
 Recommended dashboard metrics:
 
@@ -156,6 +157,7 @@ Recommended dashboard metrics:
 - mutant kill rate trend
 - fuzz coverage growth and unique crash count
 - proof count and status (Kani + Verus)
+- module-level mutation kill-rate trend (WAL, temporal vector, query planner)
 
 ## Current Status (Implementation)
 
@@ -169,6 +171,12 @@ Recommended dashboard metrics:
   - PR: Loom subset + Kani smoke + Verus smoke + fuzz smoke
   - Nightly: full Loom + broader Kani (higher unwind) + longer fuzz
   - Weekly: mutants + Miri + extended fuzz with corpus minimization + Verus full core invariants
+    - mutation sweep runs by module:
+      - `wal` (`src/storage/wal/**/*.rs`)
+      - `temporal_vector` (`src/index/vector/**/*.rs`)
+      - `query_planner` (`src/query/planner/**/*.rs`, `src/query/plan.rs`)
+    - per-module scores emitted to `verification/mutation/mutation_metrics.json`
+    - previous-vs-current trend table published in CI summary when prior artifact is available
 - MC/DC-style hotspot tests added for critical decision logic:
   - WAL durability mode branching (`src/storage/wal/concurrent_system.rs`)
   - Temporal range validation/paradox guards (`src/core/temporal.rs`)

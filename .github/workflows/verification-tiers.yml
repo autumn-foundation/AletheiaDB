@@ -196,8 +196,32 @@ jobs:
       - name: Install cargo-mutants
         run: cargo binstall --no-confirm cargo-mutants
 
-      - name: Weekly mutant sweep
-        run: cargo mutants --in-place -vV --features "config-toml,mcp-server,sharding-rpc"
+      - name: Weekly mutation sweep by module
+        run: bash scripts/verification/run_mutation_sweep.sh
+
+      - name: Fetch previous mutation metrics
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/verification/fetch_previous_mutation_metrics.py \
+            verification/mutation/previous_mutation_metrics.json
+
+      - name: Publish mutation trend summary
+        run: |
+          if [ -f verification/mutation/previous_mutation_metrics.json ]; then
+            python3 scripts/verification/compare_mutation_metrics.py \
+              verification/mutation/mutation_metrics.json \
+              verification/mutation/previous_mutation_metrics.json \
+              verification/mutation/mutation_trend.md
+            cat verification/mutation/mutation_trend.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Mutation Score Trend"
+              echo
+              echo "Previous metrics artifact not found. This run establishes the baseline."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cat verification/mutation/mutation_summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Rust nightly with miri
         uses: dtolnay/rust-toolchain@nightly
@@ -281,8 +305,19 @@ jobs:
         with:
           name: weekly-verification-artifacts
           path: |
-            mutants.out
+            verification/mutation
             fuzz/artifacts
             fuzz/corpus
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Upload mutation metrics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-metrics
+          path: |
+            verification/mutation/mutation_metrics.json
+            verification/mutation/mutation_summary.md
+          if-no-files-found: error
+          retention-days: 90
