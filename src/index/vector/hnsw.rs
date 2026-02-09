@@ -787,25 +787,6 @@ impl VectorIndex for HnswIndex {
             // Path 2: Vacant (New Node)
             const MAX_VALID_KEY: u64 = u64::MAX - 1000;
 
-            // Atomically allocate a unique key (no locks held)
-            let key = loop {
-                let current = self.next_key.load(Ordering::SeqCst);
-                if current > MAX_VALID_KEY {
-                    return Err(Error::Vector(VectorError::IndexError(
-                        "Maximum number of vectors exceeded (key overflow protection)".to_string(),
-                    )));
-                }
-                match self.next_key.compare_exchange(
-                    current,
-                    current + 1,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
-                    Ok(key) => break key,
-                    Err(_) => continue,
-                }
-            };
-
             // Acquire inner lock FIRST
             let index = self.inner.write();
 
@@ -830,6 +811,28 @@ impl VectorIndex for HnswIndex {
                     continue;
                 }
                 dashmap::mapref::entry::Entry::Vacant(e) => {
+                    // ALLOCATE KEY HERE (inside lock scope) to prevent gaps/exhaustion
+                    // If we allocated outside, and then hit the 'Occupied' race above,
+                    // we'd leak a key index.
+                    let key = loop {
+                        let current = self.next_key.load(Ordering::SeqCst);
+                        if current > MAX_VALID_KEY {
+                            return Err(Error::Vector(VectorError::IndexError(
+                                "Maximum number of vectors exceeded (key overflow protection)"
+                                    .to_string(),
+                            )));
+                        }
+                        match self.next_key.compare_exchange(
+                            current,
+                            current + 1,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(key) => break key,
+                            Err(_) => continue,
+                        }
+                    };
+
                     // Add to inner usearch index
                     index.add(key, vector).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
