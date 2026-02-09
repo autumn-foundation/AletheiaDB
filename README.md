@@ -360,13 +360,16 @@ println!("Created Alice: {:?}", alice);
 ### Time-Travel Queries
 
 ```rust
-use aletheiadb::core::temporal::Timestamp;
+use aletheiadb::core::temporal::{Timestamp, time};
+
+// Get current time
+let now = time::now();
 
 // Get node at a specific point in time
 let historical_alice = db.get_node_at_time(
     alice_id,
-    Timestamp::from(past_time),  // valid time
-    Timestamp::from(past_time),  // transaction time
+    now,  // valid time
+    now,  // transaction time
 )?;
 
 // Track how properties changed
@@ -378,12 +381,14 @@ println!("Alice's age was: {:?}", historical_alice.properties.get("age"));
 ```rust
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
 let db = AletheiaDB::new().unwrap();
 
-// Enable vector indexing
+// Enable vector indexing with temporal support
 db.vector_index("embedding")
     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .temporal(TemporalVectorConfig::default())
     .enable()?;
 
 let embedding = vec![0.1f32; 384];
@@ -406,6 +411,11 @@ let similar = db.find_similar(doc_id, 10)?;
 use aletheiadb::query::QueryBuilder;
 use aletheiadb::query::ir::Predicate;
 
+// Setup query parameters
+let query_embedding = vec![0.1f32; 384];
+let valid_time = aletheiadb::core::temporal::time::now();
+let tx_time = aletheiadb::core::temporal::time::now();
+
 // Simple: Graph + Vector hybrid
 let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
 
@@ -422,7 +432,7 @@ let results = db.query()
 // Property-specific vector queries
 let results = db.query()
     .find_similar_builder(&embedding, 10)
-    .property("content_embedding")  // Query specific property
+    .property("embedding")  // Query specific property
     .metric(DistanceMetric::Cosine)
     .finish()
     .execute(&db)?;
@@ -436,8 +446,12 @@ See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** f
 use aletheiadb::index::vector::temporal::DriftMetric;
 use aletheiadb::core::temporal::TimeRange;
 
+// Define time range
+let timestamp_2023 = aletheiadb::core::temporal::time::from_secs(1672531200);
+let timestamp_2024 = aletheiadb::core::temporal::time::from_secs(1704067200);
+
 // Find all nodes with significant semantic drift
-let time_range = TimeRange::new(timestamp_2023, timestamp_2024);
+let time_range = TimeRange::new(timestamp_2023, timestamp_2024)?;
 let drifted_nodes = db.find_drift_in(
     "embedding",              // Property name
     0.3,                      // Cosine distance threshold
@@ -505,7 +519,7 @@ See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-gui
 ### Configuration
 
 ```rust
-use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::storage::wal::DurabilityMode;
 
 // Load from TOML file
