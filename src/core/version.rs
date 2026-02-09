@@ -74,6 +74,26 @@ impl Default for VersionMetadata {
 /// embedding use cases while avoiding spurious deltas.
 const VECTOR_EPSILON: f32 = 1e-7;
 
+/// Helper for approximate float equality that handles NaN and Infinity correctly.
+///
+/// Ensures that:
+/// - NaN == NaN (treated as equal for change detection)
+/// - NaN != Finite
+/// - Inf == Inf (same sign)
+/// - Finite values compared with epsilon
+fn floats_approx_equal(a: f32, b: f32) -> bool {
+    if a.is_nan() {
+        return b.is_nan();
+    }
+    if b.is_nan() {
+        return false;
+    }
+    if a.is_infinite() || b.is_infinite() {
+        return a == b;
+    }
+    (a - b).abs() <= VECTOR_EPSILON
+}
+
 /// Sparse representation of vector changes.
 ///
 /// Stores only the changed elements to minimize storage overhead when
@@ -140,7 +160,7 @@ impl VectorDelta {
         let mut changes = Vec::new();
         for (idx, (old_val, new_val)) in old.iter().zip(new.iter()).enumerate() {
             // Use epsilon-based comparison to avoid spurious deltas from floating-point precision
-            if (old_val - new_val).abs() > VECTOR_EPSILON {
+            if !floats_approx_equal(*old_val, *new_val) {
                 // Validate index fits in u32 (should always pass given MAX_VECTOR_DIMENSIONS check)
                 let idx_u32 = u32::try_from(idx).ok()?;
                 changes.push((idx_u32, *new_val));
@@ -255,7 +275,7 @@ impl PartialEq for VectorDelta {
 
                 // Compare each (index, value) pair with epsilon for floats
                 for ((idx1, val1), (idx2, val2)) in changes1.iter().zip(changes2.iter()) {
-                    if idx1 != idx2 || (val1 - val2).abs() > VECTOR_EPSILON {
+                    if idx1 != idx2 || !floats_approx_equal(*val1, *val2) {
                         return false;
                     }
                 }
@@ -270,7 +290,7 @@ impl PartialEq for VectorDelta {
 
                 // Compare each element with epsilon
                 for (v1, v2) in vec1.iter().zip(vec2.iter()) {
-                    if (v1 - v2).abs() > VECTOR_EPSILON {
+                    if !floats_approx_equal(*v1, *v2) {
                         return false;
                     }
                 }
@@ -2058,4 +2078,43 @@ mod sentry_tests {
         let result = VectorDelta::from_diff(&v1, &v2);
         assert!(result.is_none());
     }
-}
+
+    #[test]
+    fn test_vector_delta_from_diff_nan_change() {
+        // 💣 Risk: (a - b).abs() > EPSILON returns false if one is NaN.
+        // This means changes involving NaN are silently ignored!
+        let old = vec![1.0f32];
+        let new = vec![f32::NAN];
+        let delta = VectorDelta::from_diff(&old, &new);
+        assert!(delta.is_some(), "Change from 1.0 to NaN should be detected");
+
+        let old = vec![f32::NAN];
+        let new = vec![1.0f32];
+        let delta = VectorDelta::from_diff(&old, &new);
+        assert!(delta.is_some(), "Change from NaN to 1.0 should be detected");
+
+        let old = vec![1.0f32];
+        let new = vec![f32::INFINITY];
+        let delta = VectorDelta::from_diff(&old, &new);
+        assert!(
+            delta.is_some(),
+            "Change from 1.0 to Infinity should be detected"
+        );
+    }
+
+    #[test]
+    fn test_vector_delta_apply_manual_construction_oob() {
+        // 💣 Risk: Manual construction or deserialization could create invalid indices.
+        // Apply should not panic or corrupt memory.
+        let dimension = 10;
+        let changes = std::sync::Arc::new(vec![(100, 1.0f32)]); // Index 100 > dimension 10
+        let delta = VectorDelta::Sparse { dimension, changes };
+
+        let base = vec![0.0f32; 10];
+        let result = delta.apply(&base);
+
+        // Should return base unchanged or with ignored OOB updates
+        assert_eq!(result.len(), 10);
+        assert_eq!(result[0], 0.0);
+    }
+} // End of sentry_tests mod (wait, verify existing file structure)
