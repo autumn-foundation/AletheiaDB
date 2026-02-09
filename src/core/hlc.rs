@@ -95,8 +95,8 @@ impl HybridTimestamp {
     /// # Errors
     /// - Returns `TemporalError::InvalidTimestamp` if `new_wallclock` exceeds `MAX_VALID_TIMESTAMP`.
     /// - Returns `TemporalError::LogicalCounterOverflow` if the logical counter would exceed u32::MAX.
-    /// This theoretically requires 4+ billion events at the same microsecond, indicating severe
-    /// clock drift or pathological workload.
+    ///   This theoretically requires 4+ billion events at the same microsecond, indicating severe
+    ///   clock drift or pathological workload.
     #[inline]
     pub fn send(&self, new_wallclock: i64) -> Result<Self, TemporalError> {
         // Validate new_wallclock to prevent invalid timestamps
