@@ -2117,4 +2117,120 @@ mod sentry_tests {
         assert_eq!(result.len(), 10);
         assert_eq!(result[0], 0.0);
     }
-} // End of sentry_tests mod (wait, verify existing file structure)
+
+    #[test]
+    fn test_floats_approx_equal_edge_cases() {
+        // 🧪 Strategy: Comprehensive matrix of float comparisons.
+        let values = [
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            1.0 + VECTOR_EPSILON / 2.0, // Within epsilon
+            1.0 + VECTOR_EPSILON * 2.0, // Outside epsilon
+        ];
+
+        for &a in &values {
+            for &b in &values {
+                let equal = floats_approx_equal(a, b);
+
+                if a.is_nan() {
+                    // NaN == NaN (for change detection purposes)
+                    assert_eq!(equal, b.is_nan(), "NaN should equal NaN, but nothing else");
+                } else if b.is_nan() {
+                    assert!(!equal, "Finite/Inf should not equal NaN");
+                } else if a.is_infinite() {
+                    // Inf == Inf (same sign)
+                    assert_eq!(equal, a == b, "Inf equality check failed");
+                } else if b.is_infinite() {
+                    assert!(!equal, "Finite should not equal Inf");
+                } else {
+                    // Finite comparison
+                    let diff = (a - b).abs();
+                    if diff <= VECTOR_EPSILON {
+                        assert!(equal, "Values within epsilon should be equal: {} vs {}", a, b);
+                    } else {
+                        assert!(
+                            !equal,
+                            "Values outside epsilon should not be equal: {} vs {}",
+                            a, b
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_vector_delta_sparse_threshold_exact() {
+        // 🧪 Strategy: Verify exact threshold for Sparse vs Full.
+        // Threshold: changes * 2 < dimension
+        let dim = 100;
+        let threshold = dim / 2; // 50
+
+        // Case 1: Just below threshold (49 changes) -> Sparse
+        // 49 * 2 = 98 < 100. True.
+        let mut v1 = vec![0.0f32; dim];
+        let mut v2 = vec![0.0f32; dim];
+        for i in 0..49 {
+            v2[i] = 1.0;
+        }
+        let delta = VectorDelta::from_diff(&v1, &v2).unwrap();
+        assert!(matches!(delta, VectorDelta::Sparse { .. }), "Should be Sparse");
+
+        // Case 2: Exactly at threshold (50 changes) -> Full
+        // 50 * 2 = 100 < 100. False.
+        for i in 0..50 {
+            v2[i] = 1.0;
+        }
+        let delta = VectorDelta::from_diff(&v1, &v2).unwrap();
+        assert!(matches!(delta, VectorDelta::Full(_)), "Should be Full at threshold");
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_vector_delta_apply_dimension_mismatch_safety_release() {
+        // 💣 Risk: In release mode, dimension mismatch should not panic or corrupt memory.
+        // It should silently return the base vector unchanged.
+        let delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes: std::sync::Arc::new(vec![(0, 1.0f32)]),
+        };
+        let base = vec![0.0f32; 5]; // Mismatch
+        let result = delta.apply(&base);
+
+        assert_eq!(result, base, "Should return base unchanged on mismatch");
+    }
+
+    #[test]
+    fn test_vector_delta_serialization_roundtrip_simulated() {
+        // 🧪 Strategy: Simulate serialization by reconstructing from components.
+        // Since we don't have public serialization API for VectorDelta, we verified
+        // logic via apply().
+        let base = vec![0.0f32; 100];
+        let mut target = base.clone();
+        target[0] = 1.0;
+        target[99] = 2.0;
+
+        let delta = VectorDelta::from_diff(&base, &target).unwrap();
+
+        // Simulate persistence: apply delta to base
+        let reconstructed = delta.apply(&base);
+        assert_eq!(reconstructed, target);
+
+        // Verify with sparse delta specifically
+        if let VectorDelta::Sparse { dimension, changes } = delta {
+            assert_eq!(dimension, 100);
+            assert_eq!(changes.len(), 2);
+            // Verify indices
+            let indices: Vec<u32> = changes.iter().map(|(i, _)| *i).collect();
+            assert!(indices.contains(&0));
+            assert!(indices.contains(&99));
+        } else {
+            panic!("Expected Sparse delta");
+        }
+    }
+}
