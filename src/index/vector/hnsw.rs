@@ -729,6 +729,24 @@ impl std::fmt::Debug for HnswIndex {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingAddOutcome {
+    UpdateExisting,
+    InsertNew,
+    RollbackAfterRace,
+}
+
+#[inline]
+fn classify_mapping_add_outcome(existing_mapping: bool, race_detected: bool) -> MappingAddOutcome {
+    if existing_mapping {
+        MappingAddOutcome::UpdateExisting
+    } else if race_detected {
+        MappingAddOutcome::RollbackAfterRace
+    } else {
+        MappingAddOutcome::InsertNew
+    }
+}
+
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         // Check for re-entrant modification during filtered search (prevents deadlock)
@@ -763,6 +781,10 @@ impl VectorIndex for HnswIndex {
         // Use entry API for atomic check-and-update to prevent race conditions
         match self.id_mapping.entry(id) {
             dashmap::mapref::entry::Entry::Occupied(entry) => {
+                debug_assert_eq!(
+                    classify_mapping_add_outcome(true, false),
+                    MappingAddOutcome::UpdateExisting
+                );
                 // Re-adding existing node: remove old vector from usearch if it exists
                 // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
                 // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
@@ -881,7 +903,9 @@ impl VectorIndex for HnswIndex {
                     }
                 };
 
-                if race_detected {
+                if classify_mapping_add_outcome(false, race_detected)
+                    == MappingAddOutcome::RollbackAfterRace
+                {
                     // Race detected: Another thread added this NodeId concurrently
                     // Our vector is in inner with key=key, but someone else claimed the ID.
                     // We must rollback our addition to avoid phantom vectors.
@@ -1908,6 +1932,30 @@ mod sentry_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_mcdc_classify_mapping_add_outcome() {
+        // A=false, B=false
+        assert_eq!(
+            classify_mapping_add_outcome(false, false),
+            MappingAddOutcome::InsertNew
+        );
+        // A=true, B=false
+        assert_eq!(
+            classify_mapping_add_outcome(true, false),
+            MappingAddOutcome::UpdateExisting
+        );
+        // A=false, B=true
+        assert_eq!(
+            classify_mapping_add_outcome(false, true),
+            MappingAddOutcome::RollbackAfterRace
+        );
+        // A=true, B=true (existing mapping dominates decision)
+        assert_eq!(
+            classify_mapping_add_outcome(true, true),
+            MappingAddOutcome::UpdateExisting
+        );
+    }
 
     #[test]
     fn test_hnsw_basic() -> Result<()> {

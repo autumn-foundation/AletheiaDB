@@ -1,0 +1,50 @@
+name: Kani Model Checking
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  kani:
+    name: Kani (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Kani
+        run: cargo install --locked --version 0.67.0 kani-verifier
+
+      - name: Setup Kani model checker
+        run: |
+          set -euo pipefail
+          printf "y\n" | cargo kani setup-model-checker
+
+      - name: Run Kani harnesses (bounded state machines)
+        run: |
+          set -euo pipefail
+          cargo kani --harness kani_lsn_allocator_single_step_monotonic
+          cargo kani --harness kani_lsn_allocator_batch_range_size
+          cargo kani --harness kani_restore_global_lsn_order_sorts
+          cargo kani --harness kani_wal_bounded_state_machine_transitions
+          cargo kani --harness kani_snapshot_metadata_rollover_bounded
+          cargo kani --harness kani_lsn_allocator_bounded_sequence_monotonic
+          cargo kani --harness kani_lsn_single_then_batch_non_overlapping
+          cargo kani --harness kani_lsn_batch_then_single_non_overlapping
+          cargo kani --harness kani_wal_close_is_sticky_and_append_fails_after_close
+          cargo kani --harness kani_snapshot_full_reset_clears_accumulated_changes

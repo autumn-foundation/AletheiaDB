@@ -81,6 +81,7 @@ proptest = "1.4"
 rand = "0.8"
 tempfile = "3.8"
 serial_test = "3.0"
+loom = "0.7"
 # Tokio for async tests
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"] }
 # Mutex for serializing env var tests
@@ -370,3 +371,6 @@ required-features = []
 [[example]]
 name = "story_demo"
 required-features = ["nova"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
