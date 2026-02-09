@@ -58,17 +58,6 @@ fn test_hnsw_config_deserialize_backward_compatibility() -> Result<()> {
 
 #[test]
 fn test_hnsw_config_deserialize_io_error_propagation() {
-    // Create a reader that returns a generic IO error (not UnexpectedEof)
-    struct ErrorReader;
-    impl std::io::Read for ErrorReader {
-        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Generic failure",
-            ))
-        }
-    }
-
     // We need to pass the first few reads to get to the quantization part?
     // Actually, deserialize_from reads many fields first.
     // If we want to test the specific error path at the END (quantization read),
@@ -89,10 +78,7 @@ fn test_hnsw_config_deserialize_io_error_propagation() {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.pos >= self.data.len() {
                 // If we've read all data (41 bytes), return an error instead of 0 (EOF)
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Simulated read error",
-                ));
+                return Err(std::io::Error::other("Simulated read error"));
             }
             let len = std::cmp::min(buf.len(), self.data.len() - self.pos);
             buf[..len].copy_from_slice(&self.data[self.pos..self.pos + len]);
