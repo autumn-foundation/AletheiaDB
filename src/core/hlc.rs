@@ -93,11 +93,27 @@ impl HybridTimestamp {
     /// This ensures monotonicity while preserving wallclock semantics.
     ///
     /// # Errors
-    /// Returns `TemporalError::LogicalCounterOverflow` if the logical counter would exceed u32::MAX.
+    /// - Returns `TemporalError::InvalidTimestamp` if `new_wallclock` exceeds `MAX_VALID_TIMESTAMP`.
+    /// - Returns `TemporalError::LogicalCounterOverflow` if the logical counter would exceed u32::MAX.
     /// This theoretically requires 4+ billion events at the same microsecond, indicating severe
     /// clock drift or pathological workload.
     #[inline]
     pub fn send(&self, new_wallclock: i64) -> Result<Self, TemporalError> {
+        // Validate new_wallclock to prevent invalid timestamps
+        if new_wallclock > MAX_VALID_TIMESTAMP {
+            let invalid_ts = HybridTimestamp {
+                wallclock: new_wallclock,
+                logical: 0,
+            };
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: invalid_ts,
+                reason: format!(
+                    "Send wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
+                    new_wallclock, MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+
         if new_wallclock > self.wallclock {
             // Wallclock advanced - reset logical counter
             Ok(HybridTimestamp {
@@ -130,7 +146,8 @@ impl HybridTimestamp {
     /// - `physical_wallclock`: Current physical clock reading
     ///
     /// # Errors
-    /// Returns `TemporalError::LogicalCounterOverflow` if the logical counter would exceed u32::MAX.
+    /// - Returns `TemporalError::InvalidTimestamp` if the resulting wallclock exceeds `MAX_VALID_TIMESTAMP`.
+    /// - Returns `TemporalError::LogicalCounterOverflow` if the logical counter would exceed u32::MAX.
     ///
     /// # Examples
     ///
@@ -172,6 +189,21 @@ impl HybridTimestamp {
     ) -> Result<Self, TemporalError> {
         // Compute maximum wallclock across all three values
         let new_wallclock = self.wallclock.max(msg.wallclock).max(physical_wallclock);
+
+        // Validate resulting wallclock
+        if new_wallclock > MAX_VALID_TIMESTAMP {
+            let invalid_ts = HybridTimestamp {
+                wallclock: new_wallclock,
+                logical: 0,
+            };
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: invalid_ts,
+                reason: format!(
+                    "Receive wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
+                    new_wallclock, MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
 
         // Determine logical counter based on which wallclock(s) were chosen
         let logical = if new_wallclock > self.wallclock && new_wallclock > msg.wallclock {
@@ -414,5 +446,112 @@ mod tests {
         let sentinel = HybridTimestamp::new_unchecked(i64::MAX, 0);
         let bytes = sentinel.serialize();
         assert!(HybridTimestamp::deserialize(&bytes).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy for generating valid wallclock values (within MAX_VALID_TIMESTAMP).
+    fn valid_wallclock() -> impl Strategy<Value = i64> {
+        0..=MAX_VALID_TIMESTAMP
+    }
+
+    /// Strategy for generating valid HybridTimestamp instances.
+    fn valid_timestamp() -> impl Strategy<Value = HybridTimestamp> {
+        (valid_wallclock(), any::<u32>())
+            .prop_map(|(w, l)| HybridTimestamp::new(w, l).unwrap())
+    }
+
+    proptest! {
+        /// Property: Timestamp ordering is lexicographic (wallclock, then logical).
+        #[test]
+        fn prop_ordering_lexicographic(
+            w1 in valid_wallclock(), l1 in any::<u32>(),
+            w2 in valid_wallclock(), l2 in any::<u32>()
+        ) {
+            let t1 = HybridTimestamp::new(w1, l1).unwrap();
+            let t2 = HybridTimestamp::new(w2, l2).unwrap();
+
+            if w1 < w2 {
+                prop_assert!(t1 < t2);
+            } else if w1 > w2 {
+                prop_assert!(t1 > t2);
+            } else {
+                // Wallclocks equal, compare logical
+                if l1 < l2 {
+                    prop_assert!(t1 < t2);
+                } else if l1 > l2 {
+                    prop_assert!(t1 > t2);
+                } else {
+                    prop_assert_eq!(t1, t2);
+                }
+            }
+        }
+
+        /// Property: send() always produces a strictly greater timestamp.
+        #[test]
+        fn prop_send_monotonicity(
+            current in valid_timestamp(),
+            new_wallclock in valid_wallclock()
+        ) {
+            // send() might fail if logical overflows, but for random inputs probability is low.
+            // However, we should handle the Result.
+            if let Ok(next) = current.send(new_wallclock) {
+                prop_assert!(next > current);
+                prop_assert!(next.wallclock() >= new_wallclock);
+                prop_assert!(next.wallclock() >= current.wallclock());
+            }
+        }
+
+        /// Property: receive() result is >= local, >= msg, and >= physical (wallclock).
+        #[test]
+        fn prop_receive_causality(
+            local in valid_timestamp(),
+            msg in valid_timestamp(),
+            physical in valid_wallclock()
+        ) {
+            if let Ok(next) = local.receive(msg, physical) {
+                prop_assert!(next > local, "next > local");
+                prop_assert!(next > msg, "next > msg");
+                prop_assert!(next.wallclock() >= local.wallclock());
+                prop_assert!(next.wallclock() >= msg.wallclock());
+                prop_assert!(next.wallclock() >= physical);
+            }
+        }
+
+        /// Property: Serialization roundtrip preserves equality.
+        #[test]
+        fn prop_serialization_roundtrip(ts in valid_timestamp()) {
+            let bytes = ts.serialize();
+            let (deserialized, consumed) = HybridTimestamp::deserialize(&bytes).unwrap();
+            prop_assert_eq!(ts, deserialized);
+            prop_assert_eq!(consumed, 12);
+        }
+
+        /// Property: send() rejects invalid wallclocks.
+        #[test]
+        fn prop_send_rejects_invalid(
+            ts in valid_timestamp(),
+            invalid_wc in (MAX_VALID_TIMESTAMP + 1)..i64::MAX
+        ) {
+            let result = ts.send(invalid_wc);
+            let is_invalid = matches!(result, Err(TemporalError::InvalidTimestamp { .. }));
+            prop_assert!(is_invalid);
+        }
+
+        /// Property: receive() rejects invalid physical clocks.
+        #[test]
+        fn prop_receive_rejects_invalid_physical(
+            local in valid_timestamp(),
+            msg in valid_timestamp(),
+            invalid_phy in (MAX_VALID_TIMESTAMP + 1)..i64::MAX
+        ) {
+            let result = local.receive(msg, invalid_phy);
+            let is_invalid = matches!(result, Err(TemporalError::InvalidTimestamp { .. }));
+            prop_assert!(is_invalid);
+        }
     }
 }
