@@ -776,7 +776,8 @@ impl VectorIndex for HnswIndex {
         loop {
             if attempts >= MAX_RETRIES {
                 return Err(Error::Vector(VectorError::IndexError(
-                    "Failed to update index after multiple attempts due to high contention".to_string(),
+                    "Failed to update index after multiple attempts due to high contention"
+                        .to_string(),
                 )));
             }
             attempts += 1;
