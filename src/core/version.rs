@@ -2179,8 +2179,8 @@ mod sentry_tests {
         // 49 * 2 = 98 < 100. True.
         let v1 = vec![0.0f32; dim];
         let mut v2 = vec![0.0f32; dim];
-        for i in 0..49 {
-            v2[i] = 1.0;
+        for item in v2.iter_mut().take(49) {
+            *item = 1.0;
         }
         let delta = VectorDelta::from_diff(&v1, &v2).unwrap();
         assert!(
@@ -2190,8 +2190,8 @@ mod sentry_tests {
 
         // Case 2: Exactly at threshold (50 changes) -> Full
         // 50 * 2 = 100 < 100. False.
-        for i in 0..50 {
-            v2[i] = 1.0;
+        for item in v2.iter_mut().take(50) {
+            *item = 1.0;
         }
         let delta = VectorDelta::from_diff(&v1, &v2).unwrap();
         assert!(
