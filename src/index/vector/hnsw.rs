@@ -2571,4 +2571,135 @@ mod tests {
             panic!("Expected IndexError, got {:?}", result);
         }
     }
+
+    #[test]
+    fn test_havoc_add_contention_coverage() {
+        // This test forces the "Vacant -> Occupied" retry loop in add().
+        // Multiple threads race to add the SAME node ID.
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
+        let node_id = NodeId::new(1).unwrap();
+        let vector = vec![1.0, 0.0, 0.0, 0.0];
+
+        let num_threads = 20;
+        let mut handles = vec![];
+
+        // Barrier to synchronize start for maximum contention
+        let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+
+        for _ in 0..num_threads {
+            let index_clone = Arc::clone(&index);
+            let vector_clone = vector.clone();
+            let barrier_clone = Arc::clone(&barrier);
+
+            handles.push(std::thread::spawn(move || {
+                barrier_clone.wait();
+                // Everyone tries to add the same node
+                index_clone.add(node_id, &vector_clone).unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn test_havoc_save_index_failure_coverage() {
+        // Test failure path when saving index
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let node_id = NodeId::new(1).unwrap();
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Try to save to a path in a non-existent directory
+        // This should fail at index.save() step
+        let path = std::path::Path::new("/non_existent_directory_xyz/test.index");
+        let result = index.save(path);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                // Verify it's the expected error message from save_internal
+                assert!(msg.contains("Failed to save index"));
+            }
+            _ => panic!("Expected IndexError, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_havoc_add_remove_race() {
+        // This test attempts to trigger the "Occupied" path retry loop where
+        // the mapping exists initially but is removed/changed before the inner lock is acquired.
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
+        let node_id = NodeId::new(1).unwrap();
+        let vector = vec![1.0, 0.0, 0.0, 0.0];
+
+        let _num_threads = 10;
+        let mut handles = vec![];
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        // Thread A: Adds/Updates repeatedly
+        let index_a = Arc::clone(&index);
+        let vector_a = vector.clone();
+        let running_a = Arc::clone(&running);
+        handles.push(std::thread::spawn(move || {
+            while running_a.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = index_a.add(node_id, &vector_a);
+                // No sleep - spin as fast as possible
+            }
+        }));
+
+        // Thread B: Removes repeatedly
+        let index_b = Arc::clone(&index);
+        let running_b = Arc::clone(&running);
+        handles.push(std::thread::spawn(move || {
+            while running_b.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = index_b.remove(node_id);
+            }
+        }));
+
+        // Let them fight for a bit
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_save_invalid_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        // Create path with invalid UTF-8 bytes (0xFF)
+        let bytes = b"test_invalid_utf8_\xff.index";
+        let os_str = OsStr::from_bytes(bytes);
+        let path = std::path::Path::new(os_str);
+
+        let result = index.save(path);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Path contains invalid UTF-8"));
+            }
+            _ => panic!("Expected invalid UTF-8 error, got {:?}", result),
+        }
+    }
 }
