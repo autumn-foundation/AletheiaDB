@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::VectorIndex;
 use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
+use aletheiadb::index::VectorIndex;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::tempdir;
@@ -132,4 +132,50 @@ fn test_havoc_race_inconsistency() {
             );
         }
     }
+}
+
+#[test]
+fn test_concurrent_adds_race() {
+    // Specifically target the "Vacant" path race condition where multiple threads
+    // try to add the SAME new ID simultaneously.
+    // This aims to trigger the rollback logic:
+    // 1. Entry::Vacant (lock dropped)
+    // 2. Inner add (success)
+    // 3. Re-acquire map (Entry::Occupied -> Rollback)
+
+    let index = Arc::new(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap(),
+    );
+
+    let num_threads = 16; // Higher contention
+    let target_id = NodeId::new(100).unwrap();
+    let barrier = Arc::new(Barrier::new(num_threads));
+
+    let mut handles = vec![];
+
+    for _ in 0..num_threads {
+        let index = index.clone();
+        let barrier = barrier.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            // Try to add the same ID concurrently.
+            // One should succeed, others might fail with the specific error or succeed if serialized.
+            // But we hope to hit the race window where multiple see Vacant.
+            // We ignore errors because "Concurrent add detected" is an expected error here.
+            let _ = index.add(target_id, &[0.5, 0.5, 0.5, 0.5]);
+        }));
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // Verify consistency
+    // Should have exactly 1 vector in index and it should be searchable.
+    assert_eq!(index.len(), 1, "Should have exactly 1 vector");
+    let results = index.search(&[0.5, 0.5, 0.5, 0.5], 10).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, target_id);
 }
