@@ -101,9 +101,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
-/// Flag to inject artificial delays for race condition testing.
+/// Flag to inject artificial delays for race condition testing (Vacant path).
 #[cfg(test)]
-pub static INJECT_RACE_DELAY: AtomicBool = AtomicBool::new(false);
+pub static INJECT_VACANT_DELAY: AtomicBool = AtomicBool::new(false);
+
+/// Flag to inject artificial delays for race condition testing (Occupied path).
+#[cfg(test)]
+pub static INJECT_OCCUPIED_DELAY: AtomicBool = AtomicBool::new(false);
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 // This prevents deadlocks when user filter callbacks try to modify the index.
@@ -779,9 +783,9 @@ impl VectorIndex for HnswIndex {
                     // This prevents the Inner -> DashMap deadlock (PR #751 / #924).
                     drop(entry);
 
-                    // Test hook: Inject delay to force race conditions
+                    // Test hook: Inject delay to force race conditions (Occupied path)
                     #[cfg(test)]
-                    if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
+                    if INJECT_OCCUPIED_DELAY.load(Ordering::Relaxed) {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
 
@@ -846,9 +850,9 @@ impl VectorIndex for HnswIndex {
                     // This prevents lock ordering inversion (dashmap -> inner is FORBIDDEN)
                     drop(entry);
 
-                    // Test hook: Inject delay to force race conditions
+                    // Test hook: Inject delay to force race conditions (Vacant path)
                     #[cfg(test)]
-                    if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
+                    if INJECT_VACANT_DELAY.load(Ordering::Relaxed) {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
 
@@ -2820,7 +2824,7 @@ mod coverage_tests {
         // 6. Thread A triggers rollback.
 
         // Enable race injection
-        INJECT_RACE_DELAY.store(true, Ordering::SeqCst);
+        INJECT_VACANT_DELAY.store(true, Ordering::SeqCst);
 
         let index = Arc::new(
             HnswIndexBuilder::new(4, DistanceMetric::Cosine)
@@ -2856,10 +2860,71 @@ mod coverage_tests {
         t2.join().unwrap();
 
         // Disable race injection
-        INJECT_RACE_DELAY.store(false, Ordering::SeqCst);
+        INJECT_VACANT_DELAY.store(false, Ordering::SeqCst);
 
         // Verify consistency
         assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn test_coverage_occupied_retry() {
+        // This test forces the "Occupied" path retry logic (mapping changed under us).
+        // 1. T1 starts add(id1) (Occupied).
+        // 2. T1 drops lock, sleeps (hook).
+        // 3. T2 remove(id1). (Mapping for id1 is gone).
+        // 4. T1 wakes, locks Inner.
+        // 5. T1 checks mapping. Sees None (or different).
+        // 6. T1 loop continues.
+        // 7. T1 loop sees Vacant (since T2 removed it).
+        // 8. T1 proceeds with Vacant path.
+
+        INJECT_OCCUPIED_DELAY.store(true, Ordering::SeqCst);
+
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
+
+        let id = NodeId::new(1).unwrap();
+        // Initial state: id exists
+        index.add(id, &[0.1, 0.1, 0.1, 0.1]).unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        let t1 = {
+            let index = index.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                // T1 updates existing node (Occupied path)
+                // Will sleep after dropping map lock
+                // Upon waking, mapping is gone. Should switch to Vacant path.
+                let _ = index.add(id, &[0.2, 0.2, 0.2, 0.2]);
+            })
+        };
+
+        let t2 = {
+            let index = index.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                // Ensure T1 is sleeping
+                thread::sleep(std::time::Duration::from_millis(50));
+                // Remove the node T1 is trying to update
+                let _ = index.remove(id);
+            })
+        };
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        INJECT_OCCUPIED_DELAY.store(false, Ordering::SeqCst);
+
+        // Final state: T1 should have successfully re-added the node (via Vacant path)
+        assert_eq!(index.len(), 1);
+        let results = index.search(&[0.2, 0.2, 0.2, 0.2], 1).unwrap();
+        assert_eq!(results[0].0, id);
     }
 
     #[test]
