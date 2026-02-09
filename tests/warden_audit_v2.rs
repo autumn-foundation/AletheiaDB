@@ -1,4 +1,4 @@
-use aletheiadb::core::property::{deserialize_sparse_vector, MAX_VECTOR_DIMENSIONS};
+use aletheiadb::core::property::{MAX_VECTOR_DIMENSIONS, deserialize_sparse_vector};
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndexBuilder, Quantization};
 use aletheiadb::utils::error::{Error, StorageError, VectorError};
 
