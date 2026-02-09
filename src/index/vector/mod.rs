@@ -706,9 +706,9 @@ mod tests {
         let result = Quantization::from_u8(3);
         assert!(result.is_err());
         match result {
-            Err(crate::utils::Error::Storage(crate::utils::error::StorageError::CorruptedData(
-                msg,
-            ))) => {
+            Err(crate::utils::Error::Storage(
+                crate::utils::error::StorageError::CorruptedData(msg),
+            )) => {
                 assert!(msg.contains("Invalid quantization encoding: 3"));
             }
             _ => panic!("Expected CorruptedData error"),

@@ -2659,7 +2659,8 @@ mod tests {
 
         // Attempt to deserialize
         let mut cursor = std::io::Cursor::new(buffer);
-        let config = HnswConfig::deserialize_from(&mut cursor).expect("Legacy deserialization failed");
+        let config =
+            HnswConfig::deserialize_from(&mut cursor).expect("Legacy deserialization failed");
 
         // Should default to F32
         assert_eq!(config.quantization, Quantization::F32);
@@ -2679,7 +2680,10 @@ mod tests {
         struct ErrorReader;
         impl Read for ErrorReader {
             fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "Custom IO error"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Custom IO error",
+                ))
             }
         }
 
