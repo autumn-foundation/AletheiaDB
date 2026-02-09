@@ -87,6 +87,7 @@ tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"
 lazy_static = "1.4"
 # Readline with auto-complete for examples
 rustyline = "14.0"
+usearch = { git = "https://github.com/madmax983/USearch", rev = "ca8a0213cc56f43354b35ffc83e12f033993fd4a" }
 
 [features]
 # Nova experimental features
