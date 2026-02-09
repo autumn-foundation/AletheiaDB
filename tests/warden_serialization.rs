@@ -1,4 +1,3 @@
-
 use aletheiadb::index::vector::hnsw::HnswConfig;
 use aletheiadb::index::vector::{DistanceMetric, Quantization};
 use std::io::Cursor;
