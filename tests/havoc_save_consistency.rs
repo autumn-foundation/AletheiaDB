@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::Arc;
 use std::thread;
 
@@ -16,7 +16,11 @@ fn test_havoc_save_consistency_race() {
         let path = dir.path().join("test_index.usearch");
 
         // Create index
-        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
 
         let index_clone_add = Arc::clone(&index);
         let index_clone_save = Arc::clone(&index);
@@ -55,7 +59,7 @@ fn test_havoc_save_consistency_race() {
 
         if let Ok(loaded) = aletheiadb::index::HnswIndex::load(
             &path,
-            aletheiadb::index::vector::HnswConfig::new(4, DistanceMetric::Cosine)
+            aletheiadb::index::vector::HnswConfig::new(4, DistanceMetric::Cosine),
         ) {
             let len = loaded.len();
             if len > 0 {
