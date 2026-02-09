@@ -2648,32 +2648,40 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let vector = vec![1.0, 0.0, 0.0, 0.0];
 
-        let _num_threads = 10;
+        // We need extreme contention to hit the tiny race window between
+        // "check id_mapping" and "acquire inner lock".
+        let num_pairs = 4; // 4 pairs of Adder/Remover threads
         let mut handles = vec![];
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let barrier = Arc::new(std::sync::Barrier::new(num_pairs * 2));
 
-        // Thread A: Adds/Updates repeatedly
-        let index_a = Arc::clone(&index);
-        let vector_a = vector.clone();
-        let running_a = Arc::clone(&running);
-        handles.push(std::thread::spawn(move || {
-            while running_a.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = index_a.add(node_id, &vector_a);
-                // No sleep - spin as fast as possible
-            }
-        }));
+        for _ in 0..num_pairs {
+            // Thread A: Adds/Updates repeatedly
+            let index_a = Arc::clone(&index);
+            let vector_a = vector.clone();
+            let running_a = Arc::clone(&running);
+            let barrier_a = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier_a.wait();
+                while running_a.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = index_a.add(node_id, &vector_a);
+                }
+            }));
 
-        // Thread B: Removes repeatedly
-        let index_b = Arc::clone(&index);
-        let running_b = Arc::clone(&running);
-        handles.push(std::thread::spawn(move || {
-            while running_b.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = index_b.remove(node_id);
-            }
-        }));
+            // Thread B: Removes repeatedly
+            let index_b = Arc::clone(&index);
+            let running_b = Arc::clone(&running);
+            let barrier_b = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier_b.wait();
+                while running_b.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = index_b.remove(node_id);
+                }
+            }));
+        }
 
-        // Let them fight for a bit
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Let them fight for a longer duration to increase probability of hitting the race
+        std::thread::sleep(std::time::Duration::from_millis(500));
         running.store(false, std::sync::atomic::Ordering::Relaxed);
 
         for handle in handles {
@@ -2703,6 +2711,66 @@ mod tests {
                 assert!(msg.contains("Path contains invalid UTF-8"));
             }
             _ => panic!("Expected invalid UTF-8 error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_save_internal_write_mappings_error() {
+        // Test failure when writing mappings file specifically.
+        // We create a directory where the mappings file should be, forcing open/create to fail.
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("test_write_map.index");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let node_id = NodeId::new(1).unwrap();
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Save index first to ensure that part succeeds
+        // We do this manually to setup the state where index exists but mappings creation will fail
+
+        // Block mappings file creation
+        let mappings_path = index_path.with_extension("usearch.mappings");
+        std::fs::create_dir(&mappings_path).unwrap();
+        // Make it read-only directory so we can't overwrite it (if logic tried to)
+        let mut perms = std::fs::metadata(&mappings_path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&mappings_path, perms).unwrap();
+
+        let result = index.save(&index_path);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Failed to create mappings file"));
+            }
+            _ => panic!("Expected IndexError, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_vacant_path_key_allocation_error() {
+        // Test error handling in Vacant path key allocation logic.
+        // We need to exhaust the key space to trigger the error.
+        // Since we can't easily iterate 2^64 times, we'll manually set the next_key to MAX_VALID_KEY.
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+
+        // MAX_VALID_KEY is u64::MAX - 1000
+        let max_valid = u64::MAX - 1000;
+        index.next_key.store(max_valid + 1, std::sync::atomic::Ordering::SeqCst);
+
+        let node_id = NodeId::new(1).unwrap();
+        let vector = vec![1.0, 0.0, 0.0, 0.0];
+
+        // add() should fail with overflow protection error
+        let result = index.add(node_id, &vector);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Maximum number of vectors exceeded"));
+            }
+            _ => panic!("Expected overflow error, got {:?}", result),
         }
     }
 }
