@@ -1286,6 +1286,13 @@ impl TemporalIndexes {
             .sum()
     }
 
+    /// Get a list of all entity IDs currently indexed.
+    ///
+    /// This returns a snapshot of keys in the index.
+    pub fn get_all_entity_ids(&self) -> Vec<EntityId> {
+        self.index.iter().map(|entry| *entry.key()).collect()
+    }
+
     /// Clear all indexes.
     pub fn clear(&self) {
         self.index.clear();
