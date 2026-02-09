@@ -744,6 +744,8 @@ impl VectorIndex for HnswIndex {
 
                 // Re-verify mapping while holding inner lock
                 // This prevents race where another thread removed/updated the ID
+                // Note: We cannot collapse this if due to unstable let_chains
+                #[allow(clippy::collapsible_if)]
                 if let Some(current_key) = self.id_mapping.get(&id).map(|k| *k) {
                     if current_key == existing_key {
                         // Confirmed: Update existing node
