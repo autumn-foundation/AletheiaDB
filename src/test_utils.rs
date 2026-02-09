@@ -53,8 +53,15 @@ pub fn create_test_db() -> Result<(tempfile::TempDir, AletheiaDB)> {
     let temp_dir = tempfile::tempdir().map_err(crate::utils::error::Error::Io)?;
 
     let wal_dir = temp_dir.path().join("wal");
+    let data_dir = temp_dir.path().join("data");
+
+    use crate::storage::index_persistence::PersistenceConfig;
 
     let config = AletheiaDBConfig::builder()
+        .persistence(PersistenceConfig {
+            data_dir,
+            ..Default::default()
+        })
         .wal(
             WalConfigBuilder::new()
                 .wal_dir(wal_dir)
@@ -114,6 +121,8 @@ pub fn create_test_db_with_config(
 
     // Override wal_dir to use temp directory
     config.wal.wal_dir = temp_dir.path().join("wal");
+    // Override persistence data_dir to use temp directory
+    config.persistence.data_dir = temp_dir.path().join("data");
 
     let db = AletheiaDB::with_unified_config(config)?;
 

@@ -11,7 +11,6 @@ use aletheiadb::core::temporal::time;
 use aletheiadb::storage::persistence::{CheckpointConfig, PersistenceManager};
 use aletheiadb::storage::wal::WalOperation;
 use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
-use aletheiadb::utils::error::Error;
 use tempfile::TempDir;
 
 /// Test that WAL replay rejects invalid InternedString IDs
@@ -37,33 +36,20 @@ fn test_wal_replay_rejects_invalid_interned_string() {
     };
 
     // Write the operation to WAL
-    wal.append(op).unwrap();
-    wal.flush().unwrap();
+    // This should fail immediately because we need to resolve the string to serialize it (V2 format)
+    let result = wal.append(op);
+    assert!(
+        result.is_err(),
+        "WAL append should fail for invalid label ID"
+    );
 
-    // Now try to recover from this WAL
-    // This should fail with a CorruptedData error because the InternedString ID
-    // doesn't exist in the interner
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config).unwrap();
-    let recovery_result = manager.recover(&wal);
-
-    match recovery_result {
-        Err(Error::Storage(storage_err)) => {
-            let err_msg = format!("{}", storage_err);
-            assert!(
-                err_msg.contains("InternedString ID") && err_msg.contains("not found in interner"),
-                "Expected error message about InternedString not found, got: {}",
-                err_msg
-            );
-        }
-        Err(other) => panic!("Expected StorageError::CorruptedData, got: {:?}", other),
-        Ok(_) => {
-            panic!("Expected recovery to fail with corrupted InternedString ID, but it succeeded")
-        }
-    }
+    // Check error message
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("InternedString ID") && err_msg.contains("not found"),
+        "Expected error message about InternedString not found, got: {}",
+        err_msg
+    );
 }
 
 /// Test that valid InternedString IDs are accepted during WAL replay
@@ -135,30 +121,11 @@ fn test_wal_replay_rejects_corrupted_interned_string() {
             valid_from: time::now(),
         };
 
-        wal.append(op).unwrap();
-    }
-
-    wal.flush().unwrap();
-
-    // Recovery should fail on the first corrupted entry
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config).unwrap();
-    let recovery_result = manager.recover(&wal);
-
-    assert!(
-        recovery_result.is_err(),
-        "Expected recovery to fail with corrupted WAL, but it succeeded"
-    );
-
-    if let Err(e) = recovery_result {
-        let err_msg = format!("{}", e);
+        // Should fail to append
+        let result = wal.append(op);
         assert!(
-            err_msg.contains("InternedString ID") && err_msg.contains("not found"),
-            "Expected error about InternedString not found, got: {}",
-            err_msg
+            result.is_err(),
+            "WAL append should fail for invalid label ID"
         );
     }
 }

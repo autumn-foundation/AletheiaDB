@@ -30,7 +30,7 @@ use super::{LSN, WalEntry, WalOperation};
 const WAL_MAGIC: [u8; 4] = *b"GWAL";
 
 /// Current WAL format version.
-const WAL_VERSION: u8 = 1;
+const WAL_VERSION: u8 = 2;
 
 /// Size of the WAL segment header (magic + version).
 const WAL_HEADER_SIZE: usize = 5;
@@ -320,32 +320,71 @@ pub(crate) fn parse_entry_at(
             let node_id = deserialize_node_id(buffer, current_offset, "CreateNode")?;
             add_offset!(8);
 
-            // Read 4-byte InternedString ID
-            if current_offset.checked_add(4).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for CreateNode label".to_string(),
-                )
-                .into());
-            }
-            let label_id = u32::from_le_bytes(
-                buffer[current_offset..current_offset + 4]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            );
-            add_offset!(4);
+            let label = if version >= 2 {
+                // Read 4-byte string length
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for CreateNode label length".to_string(),
+                    )
+                    .into());
+                }
+                let label_len = u32::from_le_bytes(
+                    buffer[current_offset..current_offset + 4]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                add_offset!(4);
 
-            // Reconstruct InternedString from ID
-            // During recovery, the string should already be in the interner
-            // (either from checkpoint or previous WAL entries)
-            let label = crate::core::interning::InternedString::from_raw(label_id);
+                // Read string bytes
+                if current_offset.checked_add(label_len).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for CreateNode label data".to_string(),
+                    )
+                    .into());
+                }
+                let label_bytes = &buffer[current_offset..current_offset + label_len];
+                let label_str = std::str::from_utf8(label_bytes).map_err(|e| {
+                    StorageError::CorruptedData(format!("Invalid UTF-8 in label: {}", e))
+                })?;
+                add_offset!(label_len);
+
+                // Intern it (recovering the string mapping)
+                crate::core::interning::GLOBAL_INTERNER.intern(label_str)?
+            } else {
+                // Read 4-byte InternedString ID
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for CreateNode label".to_string(),
+                    )
+                    .into());
+                }
+                let label_id = u32::from_le_bytes(
+                    buffer[current_offset..current_offset + 4]
+                        .try_into()
+                        .unwrap(), // Safe due to buffer length check above
+                );
+                add_offset!(4);
+
+                crate::core::interning::InternedString::from_raw(label_id)
+            };
 
             // V1+: deserialize properties and temporal
-            let (properties, valid_from) = if version >= WAL_VERSION {
+            let (properties, valid_from) = if version >= 1 {
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
                 add_offset!(props_len);
                 let (valid_from_ts, ts_len) =
@@ -385,29 +424,70 @@ pub(crate) fn parse_entry_at(
             let target = deserialize_node_id(buffer, current_offset, "CreateEdge target")?;
             add_offset!(8);
 
-            // Read 4-byte InternedString ID
-            if current_offset.checked_add(4).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for CreateEdge label".to_string(),
-                )
-                .into());
-            }
-            let label_id = u32::from_le_bytes(
-                buffer[current_offset..current_offset + 4]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            );
-            add_offset!(4);
+            let label = if version >= 2 {
+                // Read 4-byte string length
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for CreateEdge label length".to_string(),
+                    )
+                    .into());
+                }
+                let label_len = u32::from_le_bytes(
+                    buffer[current_offset..current_offset + 4]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                add_offset!(4);
 
-            // Reconstruct InternedString from ID
-            let label = crate::core::interning::InternedString::from_raw(label_id);
+                // Read string bytes
+                if current_offset.checked_add(label_len).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for CreateEdge label data".to_string(),
+                    )
+                    .into());
+                }
+                let label_bytes = &buffer[current_offset..current_offset + label_len];
+                let label_str = std::str::from_utf8(label_bytes).map_err(|e| {
+                    StorageError::CorruptedData(format!("Invalid UTF-8 in label: {}", e))
+                })?;
+                add_offset!(label_len);
 
-            let (properties, valid_from) = if version >= WAL_VERSION {
+                // Intern it (recovering the string mapping)
+                crate::core::interning::GLOBAL_INTERNER.intern(label_str)?
+            } else {
+                // Read 4-byte InternedString ID
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for CreateEdge label".to_string(),
+                    )
+                    .into());
+                }
+                let label_id = u32::from_le_bytes(
+                    buffer[current_offset..current_offset + 4]
+                        .try_into()
+                        .unwrap(), // Safe due to buffer length check above
+                );
+                add_offset!(4);
+
+                crate::core::interning::InternedString::from_raw(label_id)
+            };
+
+            let (properties, valid_from) = if version >= 1 {
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
                 add_offset!(props_len);
                 let (valid_from_ts, ts_len) =
@@ -446,7 +526,54 @@ pub(crate) fn parse_entry_at(
             let version_id = deserialize_version_id(buffer, current_offset, "UpdateNode")?;
             add_offset!(8);
 
-            let (label, properties, valid_from) = if version >= WAL_VERSION {
+            let (label, properties, valid_from) = if version >= 2 {
+                // Read 4-byte string length
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateNode label length".to_string(),
+                    )
+                    .into());
+                }
+                let label_len = u32::from_le_bytes(
+                    buffer[current_offset..current_offset + 4]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                add_offset!(4);
+
+                // Read string bytes
+                if current_offset.checked_add(label_len).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateNode label data".to_string(),
+                    )
+                    .into());
+                }
+                let label_bytes = &buffer[current_offset..current_offset + label_len];
+                let label_str = std::str::from_utf8(label_bytes).map_err(|e| {
+                    StorageError::CorruptedData(format!("Invalid UTF-8 in label: {}", e))
+                })?;
+                add_offset!(label_len);
+
+                // Intern it (recovering the string mapping)
+                let lbl = crate::core::interning::GLOBAL_INTERNER.intern(label_str)?;
+
+                let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
+                add_offset!(props_len);
+                let (valid_from_ts, ts_len) =
+                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
+                add_offset!(ts_len);
+                (lbl, props, valid_from_ts)
+            } else if version >= 1 {
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -501,7 +628,54 @@ pub(crate) fn parse_entry_at(
             let version_id = deserialize_version_id(buffer, current_offset, "UpdateEdge")?;
             add_offset!(8);
 
-            let (label, properties, valid_from) = if version >= WAL_VERSION {
+            let (label, properties, valid_from) = if version >= 2 {
+                // Read 4-byte string length
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label length".to_string(),
+                    )
+                    .into());
+                }
+                let label_len = u32::from_le_bytes(
+                    buffer[current_offset..current_offset + 4]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                add_offset!(4);
+
+                // Read string bytes
+                if current_offset.checked_add(label_len).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label data".to_string(),
+                    )
+                    .into());
+                }
+                let label_bytes = &buffer[current_offset..current_offset + label_len];
+                let label_str = std::str::from_utf8(label_bytes).map_err(|e| {
+                    StorageError::CorruptedData(format!("Invalid UTF-8 in label: {}", e))
+                })?;
+                add_offset!(label_len);
+
+                // Intern it (recovering the string mapping)
+                let lbl = crate::core::interning::GLOBAL_INTERNER.intern(label_str)?;
+
+                let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
+                add_offset!(props_len);
+                let (valid_from_ts, ts_len) =
+                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
+                add_offset!(ts_len);
+                (lbl, props, valid_from_ts)
+            } else if version >= 1 {
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -1485,6 +1659,98 @@ mod tests {
                 assert_eq!(msg, "WAL offset overflow");
             }
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
+        }
+    }
+
+    /// 🎯 Target: WAL Label Interning Persistence
+    /// 💣 Risk: WAL V1 format only stored the 4-byte InternedString ID. V2 stores the string.
+    /// 🧪 Strategy: Serialize an entry with a long unique label. Verify the buffer size
+    ///    includes the string content. Verify that parsing it restores the string.
+    #[test]
+    fn test_wal_v2_label_persistence() {
+        let unique_label = "Sentry_V2_Persistence_Test_Label";
+        let label_id = GLOBAL_INTERNER.intern(unique_label).unwrap();
+
+        let operation = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: label_id,
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(100), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Check size: Header (24) + Op (1) + NodeId (8) + LabelLen (4) + LabelBytes + Props (4) + ValidFrom (12)
+        // = 53 + LabelBytes.len()
+        let expected_size = 53 + unique_label.len();
+        assert_eq!(
+            buffer.len(),
+            expected_size,
+            "WAL V2 buffer should include label string"
+        );
+
+        // Parse it back (using V2)
+        // Note: we can't easily clear GLOBAL_INTERNER safely here, but we can check that
+        // parsing works and returns the correct label ID (which matches the existing one)
+        let (parsed_entry, consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        assert_eq!(consumed, expected_size);
+
+        if let WalOperation::CreateNode { label, .. } = parsed_entry.operation {
+            assert_eq!(label, label_id);
+            // Verify resolution works (though it was already there)
+            let resolved = GLOBAL_INTERNER
+                .resolve_with(label, |s| s.to_string())
+                .unwrap();
+            assert_eq!(resolved, unique_label);
+        } else {
+            panic!("Wrong operation type");
+        }
+    }
+
+    /// 🎯 Target: WAL V1 Backward Compatibility
+    /// 💣 Risk: We must be able to read old V1 WAL files (even if labels are unrecoverable, we shouldn't crash).
+    /// 🧪 Strategy: Manually construct a V1 buffer (with ID only) and parse it with version=1.
+    #[test]
+    fn test_wal_v1_backward_compatibility() {
+        let mut buffer = Vec::new();
+
+        // Header
+        buffer.extend_from_slice(&100u64.to_le_bytes()); // LSN
+        time::now().serialize_into(&mut buffer); // Timestamp
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // Checksum placeholder
+
+        // Op: CreateNode
+        buffer.push(1);
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+
+        // V1 Label: ID only (4 bytes)
+        // We use a known ID (e.g., for "name" which is common) or just 0
+        let label_id = GLOBAL_INTERNER.intern("name").unwrap();
+        buffer.extend_from_slice(&label_id.as_u32().to_le_bytes());
+
+        // Props (empty)
+        PropertyMap::new().serialize_into(&mut buffer).unwrap();
+        // ValidFrom
+        time::now().serialize_into(&mut buffer);
+
+        // Compute checksum
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..checksum_offset]);
+        hasher.update(&buffer[checksum_offset + 4..]);
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        // Parse with version=1
+        let (parsed_entry, _) = parse_entry_at(&buffer, 0, 1).unwrap();
+
+        // Should succeed and return the ID
+        if let WalOperation::CreateNode { label, .. } = parsed_entry.operation {
+            assert_eq!(label, label_id);
+        } else {
+            panic!("Wrong operation type");
         }
     }
 }
