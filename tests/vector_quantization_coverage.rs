@@ -1,4 +1,4 @@
-use aletheiadb::index::vector::{HnswConfig, Quantization, DistanceMetric};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, Quantization};
 use aletheiadb::utils::Result;
 use std::io::Cursor;
 
@@ -62,7 +62,10 @@ fn test_hnsw_config_deserialize_io_error_propagation() {
     struct ErrorReader;
     impl std::io::Read for ErrorReader {
         fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "Generic failure"))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Generic failure",
+            ))
         }
     }
 
@@ -86,7 +89,10 @@ fn test_hnsw_config_deserialize_io_error_propagation() {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.pos >= self.data.len() {
                 // If we've read all data (41 bytes), return an error instead of 0 (EOF)
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, "Simulated read error"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Simulated read error",
+                ));
             }
             let len = std::cmp::min(buf.len(), self.data.len() - self.pos);
             buf[..len].copy_from_slice(&self.data[self.pos..self.pos + len]);
