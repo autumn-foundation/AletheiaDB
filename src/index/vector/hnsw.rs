@@ -458,7 +458,7 @@ where
                 std::ptr::copy_nonoverlapping(
                     b as *const u8,
                     vec_b.as_mut_ptr() as *mut u8,
-                    dims * 4,
+                    dims * std::mem::size_of::<f32>(),
                 );
                 vec_b.set_len(dims);
             }
