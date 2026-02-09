@@ -86,6 +86,7 @@
 //! - Searches can run concurrently with additions
 
 use crate::core::id::NodeId;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
@@ -537,6 +538,15 @@ impl HnswIndexBuilder {
         if self.config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+
+        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum {}",
+                    self.config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
             }));
         }
 
@@ -1701,6 +1711,16 @@ impl HnswIndex {
 
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        // Validate dimensions
+        if config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum {}",
+                    config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         // Security Check: Custom metrics require F32 quantization
         if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -1798,6 +1818,16 @@ impl HnswIndex {
 
         let dimensions = index.dimensions();
         let connectivity = index.connectivity();
+
+        // Validate dimensions from index
+        if dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum {}",
+                    dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
 
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
