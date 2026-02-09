@@ -2721,7 +2721,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let index_path = dir.path().join("test_write_map.index");
 
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
         let node_id = NodeId::new(1).unwrap();
         index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
@@ -2753,11 +2755,15 @@ mod tests {
         // We need to exhaust the key space to trigger the error.
         // Since we can't easily iterate 2^64 times, we'll manually set the next_key to MAX_VALID_KEY.
 
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
 
         // MAX_VALID_KEY is u64::MAX - 1000
         let max_valid = u64::MAX - 1000;
-        index.next_key.store(max_valid + 1, std::sync::atomic::Ordering::SeqCst);
+        index
+            .next_key
+            .store(max_valid + 1, std::sync::atomic::Ordering::SeqCst);
 
         let node_id = NodeId::new(1).unwrap();
         let vector = vec![1.0, 0.0, 0.0, 0.0];
