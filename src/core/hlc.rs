@@ -101,12 +101,11 @@ impl HybridTimestamp {
     pub fn send(&self, new_wallclock: i64) -> Result<Self, TemporalError> {
         // Validate new_wallclock to prevent invalid timestamps
         if new_wallclock > MAX_VALID_TIMESTAMP {
-            let invalid_ts = HybridTimestamp {
-                wallclock: new_wallclock,
-                logical: 0,
-            };
             return Err(TemporalError::InvalidTimestamp {
-                timestamp: invalid_ts,
+                timestamp: Self {
+                    wallclock: new_wallclock,
+                    logical: 0,
+                },
                 reason: format!(
                     "Send wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
                     new_wallclock, MAX_VALID_TIMESTAMP
@@ -192,12 +191,11 @@ impl HybridTimestamp {
 
         // Validate resulting wallclock
         if new_wallclock > MAX_VALID_TIMESTAMP {
-            let invalid_ts = HybridTimestamp {
-                wallclock: new_wallclock,
-                logical: 0,
-            };
             return Err(TemporalError::InvalidTimestamp {
-                timestamp: invalid_ts,
+                timestamp: Self {
+                    wallclock: new_wallclock,
+                    logical: 0,
+                },
                 reason: format!(
                     "Receive wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
                     new_wallclock, MAX_VALID_TIMESTAMP
@@ -473,21 +471,7 @@ mod proptests {
         ) {
             let t1 = HybridTimestamp::new(w1, l1).unwrap();
             let t2 = HybridTimestamp::new(w2, l2).unwrap();
-
-            if w1 < w2 {
-                prop_assert!(t1 < t2);
-            } else if w1 > w2 {
-                prop_assert!(t1 > t2);
-            } else {
-                // Wallclocks equal, compare logical
-                if l1 < l2 {
-                    prop_assert!(t1 < t2);
-                } else if l1 > l2 {
-                    prop_assert!(t1 > t2);
-                } else {
-                    prop_assert_eq!(t1, t2);
-                }
-            }
+            prop_assert_eq!(t1.cmp(&t2), (w1, l1).cmp(&(w2, l2)));
         }
 
         /// Property: send() always produces a strictly greater timestamp.
