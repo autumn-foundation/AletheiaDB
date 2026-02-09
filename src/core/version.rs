@@ -2151,7 +2151,11 @@ mod sentry_tests {
                     // Finite comparison
                     let diff = (a - b).abs();
                     if diff <= VECTOR_EPSILON {
-                        assert!(equal, "Values within epsilon should be equal: {} vs {}", a, b);
+                        assert!(
+                            equal,
+                            "Values within epsilon should be equal: {} vs {}",
+                            a, b
+                        );
                     } else {
                         assert!(
                             !equal,
@@ -2169,17 +2173,20 @@ mod sentry_tests {
         // 🧪 Strategy: Verify exact threshold for Sparse vs Full.
         // Threshold: changes * 2 < dimension
         let dim = 100;
-        let threshold = dim / 2; // 50
+        let _threshold = dim / 2; // 50
 
         // Case 1: Just below threshold (49 changes) -> Sparse
         // 49 * 2 = 98 < 100. True.
-        let mut v1 = vec![0.0f32; dim];
+        let v1 = vec![0.0f32; dim];
         let mut v2 = vec![0.0f32; dim];
         for i in 0..49 {
             v2[i] = 1.0;
         }
         let delta = VectorDelta::from_diff(&v1, &v2).unwrap();
-        assert!(matches!(delta, VectorDelta::Sparse { .. }), "Should be Sparse");
+        assert!(
+            matches!(delta, VectorDelta::Sparse { .. }),
+            "Should be Sparse"
+        );
 
         // Case 2: Exactly at threshold (50 changes) -> Full
         // 50 * 2 = 100 < 100. False.
@@ -2187,7 +2194,10 @@ mod sentry_tests {
             v2[i] = 1.0;
         }
         let delta = VectorDelta::from_diff(&v1, &v2).unwrap();
-        assert!(matches!(delta, VectorDelta::Full(_)), "Should be Full at threshold");
+        assert!(
+            matches!(delta, VectorDelta::Full(_)),
+            "Should be Full at threshold"
+        );
     }
 
     #[test]
