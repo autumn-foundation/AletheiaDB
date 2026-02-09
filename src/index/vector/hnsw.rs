@@ -96,8 +96,14 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
+
+/// Flag to inject artificial delays for race condition testing.
+#[cfg(test)]
+pub static INJECT_RACE_DELAY: AtomicBool = AtomicBool::new(false);
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 // This prevents deadlocks when user filter callbacks try to modify the index.
@@ -773,6 +779,12 @@ impl VectorIndex for HnswIndex {
                     // This prevents the Inner -> DashMap deadlock (PR #751 / #924).
                     drop(entry);
 
+                    // Test hook: Inject delay to force race conditions
+                    #[cfg(test)]
+                    if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+
                     // 3. Acquire Inner Write Lock
                     // This is safe because we hold no other locks.
                     let index = self.inner.write();
@@ -833,6 +845,12 @@ impl VectorIndex for HnswIndex {
                     // CRITICAL: Drop the entry to release DashMap lock BEFORE acquiring inner lock
                     // This prevents lock ordering inversion (dashmap -> inner is FORBIDDEN)
                     drop(entry);
+
+                    // Test hook: Inject delay to force race conditions
+                    #[cfg(test)]
+                    if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
 
                     // Step 1: Atomically allocate a unique key (no locks held)
                     let key = loop {
@@ -1775,6 +1793,12 @@ impl HnswIndex {
             max_k: MAX_K,
             is_mmap: false,
         })
+    }
+
+    /// Set the next key for testing key overflow scenarios.
+    #[cfg(test)]
+    pub fn set_next_key_for_test(&self, key: u64) {
+        self.next_key.store(key, Ordering::SeqCst);
     }
 
     /// Opens a memory-mapped index from a file path.
@@ -2776,5 +2800,87 @@ mod tests {
             // Then save_mappings should fail.
             panic!("Expected IndexError, got {:?}", result);
         }
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn test_coverage_race_condition_rollback() {
+        // This test forces the "Vacant" path rollback logic by injecting a delay.
+        // 1. Thread A sees Vacant.
+        // 2. Thread A drops lock and sleeps (via hook).
+        // 3. Thread B sees Vacant, inserts key, finishes.
+        // 4. Thread A wakes up, acquires inner lock, adds vector.
+        // 5. Thread A tries to insert mapping, sees Occupied (by B).
+        // 6. Thread A triggers rollback.
+
+        // Enable race injection
+        INJECT_RACE_DELAY.store(true, Ordering::SeqCst);
+
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
+
+        let target_id = NodeId::new(100).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let t1 = {
+            let index = index.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                // This thread will sleep inside `add` because of the flag
+                let _ = index.add(target_id, &[0.5, 0.5, 0.5, 0.5]);
+            })
+        };
+
+        let t2 = {
+            let index = index.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                // Give T1 time to reach the sleep point
+                thread::sleep(std::time::Duration::from_millis(50));
+                let _ = index.add(target_id, &[0.5, 0.5, 0.5, 0.5]);
+            })
+        };
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        // Disable race injection
+        INJECT_RACE_DELAY.store(false, Ordering::SeqCst);
+
+        // Verify consistency
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn test_coverage_overflow_protection() {
+        // Test the MAX_VALID_KEY check coverage
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        // Use internal helper to set next_key near limit
+        // Note: MAX_VALID_KEY is u64::MAX - 1000
+        let limit = u64::MAX - 1000;
+        index.set_next_key_for_test(limit + 1);
+
+        // Try to add - should fail with overflow
+        let res = index.add(NodeId::new(1).unwrap(), &[0.1, 0.2, 0.3, 0.4]);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Maximum number of vectors exceeded")
+        );
     }
 }
