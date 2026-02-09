@@ -306,6 +306,7 @@ impl HnswConfig {
         writer.write_all(&(self.ef_construction as u64).to_le_bytes())?;
         writer.write_all(&(self.ef_search as u64).to_le_bytes())?;
         writer.write_all(&(self.capacity as u64).to_le_bytes())?;
+        writer.write_all(&[self.quantization.to_u8()])?;
         Ok(())
     }
 
@@ -332,6 +333,17 @@ impl HnswConfig {
         reader.read_exact(&mut buf_u64)?;
         let capacity = u64::from_le_bytes(buf_u64) as usize;
 
+        // Try to read quantization, default to F32 if EOF (backward compatibility)
+        let quantization = match reader.read_exact(&mut buf_u8) {
+            Ok(_) => Quantization::from_u8(buf_u8[0])?,
+            Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Backward compatibility: Old configs don't have quantization byte.
+                // Default to F32 (which was the implicit behavior before).
+                Quantization::F32
+            }
+            Err(e) => return Err(e.into()),
+        };
+
         Ok(HnswConfig {
             dimensions,
             metric,
@@ -339,6 +351,7 @@ impl HnswConfig {
             ef_construction,
             ef_search,
             capacity,
+            quantization,
             ..Default::default()
         })
     }
