@@ -100,7 +100,10 @@ fn test_deserialize_truncated_buffer() {
     let short_buffer = vec![0u8; 11]; // Need 12 bytes
 
     let result = HybridTimestamp::deserialize(&short_buffer);
-    assert!(matches!(result, Err(StorageError::CorruptedData(_))), "Expected CorruptedData error");
+    assert!(
+        matches!(result, Err(StorageError::CorruptedData(_))),
+        "Expected CorruptedData error"
+    );
 }
 
 #[test]
