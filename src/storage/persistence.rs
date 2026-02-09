@@ -1346,9 +1346,10 @@ mod tests {
         // - Magic (4) + Version (4) = 8
         // - LSN (8) + Timestamp (12) + NodeCount (8) + EdgeCount (8) + VersionCount (8) = 44
         //   (Phase 2: Timestamp is now HybridTimestamp: 8-byte wallclock + 4-byte logical = 12 bytes)
-        // - Vector config: enabled (1) + name_len (4) + "test_property" (13) + HnswConfig (41) = 59
-        // Total = 111 bytes (was 107 before Phase 2)
-        assert_eq!(metadata.len(), 111);
+        // - Vector config: enabled (1) + name_len (4) + "test_property" (13) + HnswConfig (42) = 60
+        //   (HnswConfig grew from 41 to 42 bytes due to quantization field)
+        // Total = 112 bytes
+        assert_eq!(metadata.len(), 112);
 
         Ok(())
     }

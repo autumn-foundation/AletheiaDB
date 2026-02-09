@@ -1,6 +1,6 @@
-use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
-use aletheiadb::index::VectorIndex;
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -10,7 +10,7 @@ fn test_havoc_deadlock_scenario() {
     let index = Arc::new(
         HnswIndexBuilder::new(128, DistanceMetric::Cosine)
             .build()
-            .unwrap()
+            .unwrap(),
     );
 
     let start_time = std::time::Instant::now();
@@ -59,7 +59,7 @@ fn test_havoc_deadlock_scenario() {
     let handle_d = thread::spawn(move || {
         let vector = vec![0.0f32; 128];
         while start_time.elapsed() < duration {
-             let _ = index_clone_d.search_with_filter(&vector, 10, |_| true);
+            let _ = index_clone_d.search_with_filter(&vector, 10, |_| true);
         }
     });
 
