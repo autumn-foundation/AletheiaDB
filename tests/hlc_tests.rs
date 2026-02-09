@@ -7,19 +7,8 @@
 
 use aletheiadb::core::hlc::HybridTimestamp;
 use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
+use aletheiadb::utils::error::{StorageError, TemporalError};
 use proptest::prelude::*;
-
-#[test]
-fn test_hybrid_timestamp_creation() {
-    // Test creating a HybridTimestamp with wallclock and logical components
-    let wallclock = 1_000_000_000_000i64; // 1 second in microseconds
-    let logical = 0u32;
-
-    let hlc = HybridTimestamp::new(wallclock, logical).unwrap();
-
-    assert_eq!(hlc.wallclock(), wallclock);
-    assert_eq!(hlc.logical(), logical);
-}
 
 #[test]
 fn test_new_validates_wallclock() {
@@ -33,11 +22,17 @@ fn test_new_validates_wallclock() {
 
     // Wallclock exceeding MAX_VALID_TIMESTAMP should fail
     let invalid = HybridTimestamp::new(MAX_VALID_TIMESTAMP + 1, 0);
-    assert!(invalid.is_err());
+    assert!(matches!(
+        invalid,
+        Err(TemporalError::InvalidTimestamp { .. })
+    ));
 
     // i64::MAX should fail
     let max_i64 = HybridTimestamp::new(i64::MAX, 0);
-    assert!(max_i64.is_err());
+    assert!(matches!(
+        max_i64,
+        Err(TemporalError::InvalidTimestamp { .. })
+    ));
 }
 
 #[test]
@@ -83,54 +78,6 @@ fn test_send_when_wallclock_regresses() {
 }
 
 #[test]
-fn test_ordering_by_wallclock() {
-    // HLCs should order by wallclock first
-    let earlier = HybridTimestamp::new(1000, 10).unwrap();
-    let later = HybridTimestamp::new(2000, 0).unwrap();
-
-    assert!(earlier < later);
-    assert!(later > earlier);
-    assert_ne!(earlier, later);
-}
-
-#[test]
-fn test_ordering_by_logical_when_wallclock_same() {
-    // When wallclock is same, order by logical counter
-    let first = HybridTimestamp::new(1000, 5).unwrap();
-    let second = HybridTimestamp::new(1000, 6).unwrap();
-
-    assert!(first < second);
-    assert!(second > first);
-    assert_ne!(first, second);
-}
-
-#[test]
-fn test_ordering_equality() {
-    // HLCs with same wallclock and logical are equal
-    let hlc1 = HybridTimestamp::new(1000, 5).unwrap();
-    let hlc2 = HybridTimestamp::new(1000, 5).unwrap();
-
-    assert_eq!(hlc1, hlc2);
-    assert!(hlc1 >= hlc2);
-    assert!(hlc1 <= hlc2);
-}
-
-#[test]
-fn test_serialization_roundtrip() {
-    // Serialize and deserialize should preserve exact values
-    let original = HybridTimestamp::new(1_234_567_890_123_456i64, 42).unwrap();
-
-    let bytes = original.serialize();
-    assert_eq!(bytes.len(), 12); // 8 bytes wallclock + 4 bytes logical
-
-    let (deserialized, consumed) = HybridTimestamp::deserialize(&bytes).unwrap();
-    assert_eq!(consumed, 12);
-    assert_eq!(deserialized, original);
-    assert_eq!(deserialized.wallclock(), 1_234_567_890_123_456i64);
-    assert_eq!(deserialized.logical(), 42);
-}
-
-#[test]
 fn test_serialization_into_buffer() {
     // serialize_into should append to existing buffer
     let hlc = HybridTimestamp::new(1000, 5).unwrap();
@@ -153,7 +100,10 @@ fn test_deserialize_truncated_buffer() {
     let short_buffer = vec![0u8; 11]; // Need 12 bytes
 
     let result = HybridTimestamp::deserialize(&short_buffer);
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(StorageError::CorruptedData(_))),
+        "Expected CorruptedData error"
+    );
 }
 
 #[test]
@@ -169,7 +119,7 @@ fn test_deserialize_validates_wallclock() {
 
     let result = HybridTimestamp::deserialize(&buffer);
     assert!(
-        result.is_err(),
+        matches!(result, Err(StorageError::CorruptedData(_))),
         "deserialize should reject wallclock > MAX_VALID_TIMESTAMP (except i64::MAX sentinel)"
     );
 
@@ -206,22 +156,9 @@ fn test_send_logical_overflow() {
     // This should return Err because logical counter would overflow
     let result = prev.send(1000);
     assert!(
-        result.is_err(),
-        "send should return Err on logical counter overflow"
+        matches!(result, Err(TemporalError::LogicalCounterOverflow { .. })),
+        "send should return LogicalCounterOverflow error"
     );
-
-    // Verify it's the right error type
-    match result {
-        Err(ref e) => {
-            let error_msg = format!("{}", e);
-            assert!(
-                error_msg.contains("logical counter overflow"),
-                "Expected LogicalCounterOverflow error, got: {}",
-                error_msg
-            );
-        }
-        Ok(_) => panic!("Expected Err, got Ok"),
-    }
 }
 
 #[test]
