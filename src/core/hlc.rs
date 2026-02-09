@@ -536,5 +536,31 @@ mod proptests {
             let is_invalid = matches!(result, Err(TemporalError::InvalidTimestamp { .. }));
             prop_assert!(is_invalid);
         }
+
+        /// Property: receive() preserves causality even when wallclocks collide.
+        /// This specifically targets the "logical counter increment" logic when
+        /// local.wallclock == msg.wallclock == physical_clock.
+        #[test]
+        fn prop_receive_causality_collision(
+            wallclock in valid_wallclock(),
+            local_logical in any::<u32>(),
+            msg_logical in any::<u32>()
+        ) {
+            let local = HybridTimestamp::new(wallclock, local_logical).unwrap();
+            let msg = HybridTimestamp::new(wallclock, msg_logical).unwrap();
+
+            // Force physical clock to match, triggering the collision path
+            if let Ok(next) = local.receive(msg, wallclock) {
+                prop_assert!(next > local, "next > local (collision)");
+                prop_assert!(next > msg, "next > msg (collision)");
+                prop_assert_eq!(next.wallclock(), wallclock);
+
+                // Specifically verify the logical counter logic: max(l1, l2) + 1
+                let expected_logical = local_logical.max(msg_logical).checked_add(1);
+                if let Some(expected) = expected_logical {
+                    prop_assert_eq!(next.logical(), expected);
+                }
+            }
+        }
     }
 }
