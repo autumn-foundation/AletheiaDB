@@ -2644,4 +2644,61 @@ mod tests {
             panic!("Expected IndexError, got {:?}", result);
         }
     }
+
+    #[test]
+    fn test_deserialize_legacy_config() {
+        // Construct a legacy buffer (missing quantization byte)
+        // Format: [dimensions:8][metric:1][m:8][ef_construction:8][ef_search:8][capacity:8]
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&128u64.to_le_bytes()); // dimensions
+        buffer.push(DistanceMetric::Cosine.to_u8()); // metric
+        buffer.extend_from_slice(&16u64.to_le_bytes()); // m
+        buffer.extend_from_slice(&200u64.to_le_bytes()); // ef_construction
+        buffer.extend_from_slice(&100u64.to_le_bytes()); // ef_search
+        buffer.extend_from_slice(&1000u64.to_le_bytes()); // capacity
+
+        // Attempt to deserialize
+        let mut cursor = std::io::Cursor::new(buffer);
+        let config = HnswConfig::deserialize_from(&mut cursor).expect("Legacy deserialization failed");
+
+        // Should default to F32
+        assert_eq!(config.quantization, Quantization::F32);
+        assert_eq!(config.dimensions, 128);
+        assert_eq!(config.metric, DistanceMetric::Cosine);
+    }
+
+    #[test]
+    fn test_deserialize_config_io_error() {
+        // Construct a buffer that is truncated before quantization byte
+        // Format: [dimensions:8][metric:1]...
+        // But let's make it fail *during* reading quantization byte with a non-EOF error
+        // Since Cursor only returns EOF, we need a custom reader to simulate other errors.
+        // Alternatively, we can just verify that truncation *earlier* in the stream fails correctly,
+        // but to hit the specific quantization error path (not EOF), we need a custom reader.
+
+        struct ErrorReader;
+        impl Read for ErrorReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "Custom IO error"))
+            }
+        }
+
+        // We need the reader to succeed for the first fields then fail at quantization.
+        // Let's use a chain of Cursor and ErrorReader.
+        let mut valid_part = Vec::new();
+        valid_part.extend_from_slice(&128u64.to_le_bytes());
+        valid_part.push(DistanceMetric::Cosine.to_u8());
+        valid_part.extend_from_slice(&16u64.to_le_bytes());
+        valid_part.extend_from_slice(&200u64.to_le_bytes());
+        valid_part.extend_from_slice(&100u64.to_le_bytes());
+        valid_part.extend_from_slice(&1000u64.to_le_bytes());
+
+        let cursor = std::io::Cursor::new(valid_part);
+        let mut reader = cursor.chain(ErrorReader);
+
+        let result = HnswConfig::deserialize_from(&mut reader);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Custom IO error"));
+    }
 }
