@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["AletheiaDB Contributors"]
 description = "A high-performance bi-temporal graph database for LLM integration"
 license = "MIT"
-repository = "https://github.com/yourusername/aletheiadb"
+repository = "https://github.com/madmax983/AletheiaDB"
 keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations"]
 
