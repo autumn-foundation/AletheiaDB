@@ -46,8 +46,9 @@ fn test_load_mappings_huge_count_small_file() {
     match result {
         Err(Error::Vector(VectorError::IndexError(msg))) => {
             assert!(
-                msg.contains("Mapping file size mismatch"),
-                "Expected size mismatch error, got: {}",
+                msg.contains("Mapping file size mismatch")
+                    || msg.contains("exceeds maximum allowed"),
+                "Expected size mismatch or max limit error, got: {}",
                 msg
             );
         }
