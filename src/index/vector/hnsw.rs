@@ -451,14 +451,14 @@ where
                 std::ptr::copy_nonoverlapping(
                     a as *const u8,
                     vec_a.as_mut_ptr() as *mut u8,
-                    dims * std::mem::size_of::<f32>(),
+                    dims * 4,
                 );
                 vec_a.set_len(dims);
 
                 std::ptr::copy_nonoverlapping(
                     b as *const u8,
                     vec_b.as_mut_ptr() as *mut u8,
-                    dims * std::mem::size_of::<f32>(),
+                    dims * 4,
                 );
                 vec_b.set_len(dims);
             }
@@ -1894,20 +1894,52 @@ mod sentry_tests {
 
     #[test]
     fn test_metric_wrapper_handles_unaligned() {
-        // Updated to verify safe handling (copy fallback) instead of panic
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 42.0);
-        let wrapper = create_metric_wrapper(4, distance_fn);
+        // Updated to verify safe handling (copy fallback) and CORRECTNESS.
+        // We use a real distance function to ensure the copy logic is correct.
+        // This catches mutants like replacing `dims * 4` with `dims + 4`.
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>()
+        });
 
-        // Create a buffer and get an unaligned pointer
-        let buffer = [0u8; 32];
-        // Address + 1 is definitely unaligned for f32 (align 4)
-        let unaligned_ptr = unsafe { buffer.as_ptr().add(1) } as *const f32;
-        let aligned_vec = [0.0f32; 4];
-        let aligned_ptr = aligned_vec.as_ptr();
+        let dims = 10;
+        let wrapper = create_metric_wrapper(dims, distance_fn);
 
-        // Should not panic, and return expected value
-        let result = wrapper(unaligned_ptr, aligned_ptr);
-        assert_eq!(result, 42.0);
+        // Prepare data:
+        // A = [1.0, ..., 1.0]
+        // B = [2.0, ..., 2.0]
+        // Expected Squared L2 = 10 * (1-2)^2 = 10.0
+        let vec_a_data = vec![1.0f32; dims];
+        let vec_b_data = vec![2.0f32; dims];
+
+        // Create misaligned buffers
+        // Need space for data + 1 byte offset
+        let mut buffer_a = vec![0u8; dims * 4 + 1];
+        let mut buffer_b = vec![0u8; dims * 4 + 1];
+
+        // Write data at offset 1
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                vec_a_data.as_ptr() as *const u8,
+                buffer_a.as_mut_ptr().add(1),
+                dims * 4,
+            );
+            std::ptr::copy_nonoverlapping(
+                vec_b_data.as_ptr() as *const u8,
+                buffer_b.as_mut_ptr().add(1),
+                dims * 4,
+            );
+        }
+
+        // Get unaligned pointers
+        let ptr_a = unsafe { buffer_a.as_ptr().add(1) as *const f32 };
+        let ptr_b = unsafe { buffer_b.as_ptr().add(1) as *const f32 };
+
+        // Should not panic, and return CORRECT distance
+        let result = wrapper(ptr_a, ptr_b);
+        assert!((result - 10.0).abs() < 1e-5, "Expected 10.0, got {}", result);
     }
 
     #[test]
