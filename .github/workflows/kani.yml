@@ -33,7 +33,7 @@ jobs:
       - name: Setup Kani model checker
         run: |
           set -euo pipefail
-          printf "y\n" | cargo kani setup-model-checker
+          printf "y\n" | cargo kani setup
 
       - name: Run Kani harnesses (bounded state machines)
         run: |

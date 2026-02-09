@@ -355,7 +355,7 @@ fuzz-run TARGET SECONDS="600":
 # Install Kani (one-time)
 kani-setup:
     cargo install --locked --version 0.67.0 kani-verifier
-    cargo kani setup-model-checker
+    cargo kani setup
 
 # Run Kani proofs configured in workspace (requires harnesses)
 kani:

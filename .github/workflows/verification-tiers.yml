@@ -61,7 +61,7 @@ jobs:
         run: cargo install --locked --version 0.67.0 kani-verifier
 
       - name: Setup Kani model checker
-        run: printf "y\n" | cargo kani setup-model-checker
+        run: printf "y\n" | cargo kani setup
 
       - name: Kani smoke
         run: |
@@ -140,7 +140,7 @@ jobs:
         run: cargo install --locked --version 0.67.0 kani-verifier
 
       - name: Setup Kani model checker
-        run: printf "y\n" | cargo kani setup-model-checker
+        run: printf "y\n" | cargo kani setup
 
       - name: Broader Kani with deeper unwind
         run: |
