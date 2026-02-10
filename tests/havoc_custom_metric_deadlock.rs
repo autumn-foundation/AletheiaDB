@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 
 #[test]
+#[allow(clippy::collapsible_if)]
 fn test_custom_metric_reentrancy_prevention() {
     eprintln!("👺 Havoc: Test starting (Re-entrancy Prevention)...");
 
