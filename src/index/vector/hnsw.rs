@@ -108,18 +108,21 @@ std::thread_local! {
 
 /// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
 /// This ensures the flag is always reset, even if the callback panics.
-struct ReentrancyGuard;
+/// It also handles nested usage correctly by restoring the previous state.
+struct ReentrancyGuard {
+    prev: bool,
+}
 
 impl ReentrancyGuard {
     fn new() -> Self {
-        REENTRANCY_GUARD.with(|flag| flag.set(true));
-        ReentrancyGuard
+        let prev = REENTRANCY_GUARD.with(|flag| flag.replace(true));
+        ReentrancyGuard { prev }
     }
 }
 
 impl Drop for ReentrancyGuard {
     fn drop(&mut self) {
-        REENTRANCY_GUARD.with(|flag| flag.set(false));
+        REENTRANCY_GUARD.with(|flag| flag.set(self.prev));
     }
 }
 
