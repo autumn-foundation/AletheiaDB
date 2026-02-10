@@ -99,26 +99,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
-// Thread-local flag to detect re-entrant modification attempts during filtered search.
-// This prevents deadlocks when user filter callbacks try to modify the index.
+// Thread-local flag to detect re-entrant modification attempts.
+// This prevents deadlocks when user filter callbacks or custom metrics try to modify the index
+// while holding the inner lock (read).
 std::thread_local! {
-    static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REENTRANCY_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// RAII guard that sets IN_FILTER_CALLBACK to true on creation and false on drop.
+/// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
 /// This ensures the flag is always reset, even if the callback panics.
-struct FilterCallbackGuard;
+/// It also handles nested usage correctly by restoring the previous state.
+struct ReentrancyGuard {
+    prev: bool,
+}
 
-impl FilterCallbackGuard {
+impl ReentrancyGuard {
     fn new() -> Self {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
-        FilterCallbackGuard
+        let prev = REENTRANCY_GUARD.with(|flag| flag.replace(true));
+        ReentrancyGuard { prev }
     }
 }
 
-impl Drop for FilterCallbackGuard {
+impl Drop for ReentrancyGuard {
     fn drop(&mut self) {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+        REENTRANCY_GUARD.with(|flag| flag.set(self.prev));
     }
 }
 
@@ -427,6 +431,10 @@ where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
 {
     Box::new(move |a: *const f32, b: *const f32| {
+        // Set re-entrancy guard to prevent deadlock if custom metric calls back into index
+        // This is critical because usearch holds a read lock while calling this metric.
+        let _guard = ReentrancyGuard::new();
+
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
             // This should never happen with a correct usearch implementation.
@@ -749,12 +757,12 @@ fn classify_mapping_add_outcome(existing_mapping: bool, race_detected: bool) -> 
 
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+        // Check for re-entrant modification during callbacks (prevents deadlock)
+        if REENTRANCY_GUARD.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot modify index from within a search_with_filter callback. \
+                "Cannot modify index from within a callback (filter or metric). \
                  This would cause a deadlock due to lock re-entrancy. \
-                 Consider collecting modifications and applying them after the search completes."
+                 Consider collecting modifications and applying them after the operation completes."
                     .to_string(),
             )));
         }
@@ -938,12 +946,12 @@ impl VectorIndex for HnswIndex {
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+        // Check for re-entrant modification during callbacks (prevents deadlock)
+        if REENTRANCY_GUARD.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot modify index from within a search_with_filter callback. \
+                "Cannot modify index from within a callback (filter or metric). \
                  This would cause a deadlock due to lock re-entrancy. \
-                 Consider collecting modifications and applying them after the search completes."
+                 Consider collecting modifications and applying them after the operation completes."
                     .to_string(),
             )));
         }
@@ -1071,13 +1079,13 @@ impl VectorIndex for HnswIndex {
         // For searches examining 1,000 nodes, this saves ~1-2μs total.
         //
         // DEADLOCK PREVENTION (PR #870):
-        // We set IN_FILTER_CALLBACK flag when calling the user's predicate to detect
+        // We set REENTRANCY_GUARD flag when calling the user's predicate to detect
         // and prevent re-entrant modification attempts that would cause deadlock.
         let reverse_mapping = &self.reverse_mapping;
         let filter = |key: u64| -> bool {
             if let Some(node_id_ref) = reverse_mapping.get(&key) {
                 // Set flag to prevent modifications during callback
-                let _guard = FilterCallbackGuard::new();
+                let _guard = ReentrancyGuard::new();
                 predicate(node_id_ref.value())
             } else {
                 false
@@ -1170,12 +1178,12 @@ impl VectorIndex for HnswIndex {
     /// If executed outside a Tokio runtime, or in a single-threaded runtime (where `block_in_place`
     /// would panic), it falls back to standard synchronous execution.
     fn save(&self, path: &Path) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+        // Check for re-entrant modification during callbacks (prevents deadlock)
+        if REENTRANCY_GUARD.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot save index from within a search_with_filter callback. \
+                "Cannot save index from within a callback (filter or metric). \
                  This would cause a deadlock due to lock re-entrancy. \
-                 Consider saving after the search completes."
+                 Consider saving after the operation completes."
                     .to_string(),
             )));
         }
