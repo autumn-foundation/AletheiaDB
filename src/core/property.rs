@@ -897,7 +897,7 @@ impl PropertyValue {
 /// ```
 pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(1 + 4 + v.len() * 4);
-    try_serialize_vector_into(v, &mut buffer).unwrap_or_else(|e| panic!("{}", e));
+    try_serialize_vector_into(v, &mut buffer).unwrap_or_else(|e| panic!("{}", e)); // LCOV_EXCL_LINE
     buffer
 }
 
@@ -924,7 +924,7 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 /// use [`try_serialize_vector_into`].
 #[deprecated(since = "0.1.0", note = "Use try_serialize_vector_into instead")]
 pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
-    try_serialize_vector_into(v, buffer).unwrap_or_else(|e| panic!("{}", e))
+    try_serialize_vector_into(v, buffer).unwrap_or_else(|e| panic!("{}", e)) // LCOV_EXCL_LINE
 }
 
 /// Serialize a vector into an existing buffer (fallible).
@@ -3997,7 +3997,7 @@ mod sentry_tests {
             )) => {
                 // Expected error
             }
-            _ => panic!("Expected DimensionTooLarge error"),
+            _ => panic!("Expected DimensionTooLarge error"), // LCOV_EXCL_LINE
         }
     }
 
