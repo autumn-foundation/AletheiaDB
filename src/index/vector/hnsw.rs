@@ -424,8 +424,6 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
 #[inline(never)]
 fn ffi_abort(reason: &str) -> ! {
     // LCOV_EXCL_START
-    // Use write! to avoid panicking if stderr is broken (eprintln! panics on failure)
-    // We must not unwind here as we might be called from FFI context.
     use std::io::Write;
     let _ = writeln!(
         std::io::stderr(),
@@ -451,9 +449,7 @@ where
             // If it does, we MUST abort to prevent UB from dereferencing null or
             // unwinding across the FFI boundary (which is UB).
             // We cannot return an error here because the signature is fixed by usearch trait.
-            // LCOV_EXCL_START
-            ffi_abort("usearch passed null pointer to metric function");
-            // LCOV_EXCL_STOP
+            ffi_abort("usearch passed null pointer to metric function"); // LCOV_EXCL_LINE
         }
 
         // Check for alignment to prevent UB
@@ -461,9 +457,7 @@ where
         let align_mask = std::mem::align_of::<f32>() - 1;
         if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
             // Abort for same reason as above: unwinding across FFI is UB.
-            // LCOV_EXCL_START
-            ffi_abort("usearch passed unaligned pointer to metric function");
-            // LCOV_EXCL_STOP
+            ffi_abort("usearch passed unaligned pointer to metric function"); // LCOV_EXCL_LINE
         }
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
