@@ -103,11 +103,18 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 // This prevents deadlocks when user filter callbacks or custom metrics try to modify the index
 // while holding the inner lock (read).
 std::thread_local! {
+    pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REENTRANCY_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
 /// This ensures the flag is always reset, even if the callback panics.
+pub(crate) struct FilterCallbackGuard;
+
+impl FilterCallbackGuard {
+    pub(crate) fn new() -> Self {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
+        FilterCallbackGuard
 /// It also handles nested usage correctly by restoring the previous state.
 struct ReentrancyGuard {
     prev: bool,
