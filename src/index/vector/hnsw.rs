@@ -102,15 +102,15 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 // This prevents deadlocks when user filter callbacks try to modify the index.
 std::thread_local! {
-    static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and false on drop.
 /// This ensures the flag is always reset, even if the callback panics.
-struct FilterCallbackGuard;
+pub(crate) struct FilterCallbackGuard;
 
 impl FilterCallbackGuard {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         IN_FILTER_CALLBACK.with(|flag| flag.set(true));
         FilterCallbackGuard
     }
