@@ -194,11 +194,26 @@ impl VectorDelta {
     ///
     /// # Panics (Debug Only)
     ///
-    /// In debug builds, panics if the base vector dimension doesn't match the
-    /// expected dimension. In release builds, returns base unchanged on mismatch.
+    /// In debug builds, panics if:
+    /// - The base vector dimension doesn't match the expected dimension.
+    /// - The delta dimension exceeds `MAX_VECTOR_DIMENSIONS`.
+    ///
+    /// In release builds, returns base unchanged on error to avoid corruption or OOM.
     pub fn apply(&self, base: &[f32]) -> Vec<f32> {
         match self {
             VectorDelta::Sparse { dimension, changes } => {
+                // Safety check: dimension must not exceed global maximum
+                // This prevents DoS via memory exhaustion if a malicious delta is constructed/deserialized
+                if *dimension > MAX_VECTOR_DIMENSIONS {
+                    debug_assert!(
+                        *dimension <= MAX_VECTOR_DIMENSIONS,
+                        "VectorDelta dimension {} exceeds maximum {}",
+                        *dimension,
+                        MAX_VECTOR_DIMENSIONS
+                    );
+                    return base.to_vec();
+                }
+
                 if base.len() != *dimension {
                     // Dimension mismatch - this should never happen in correct usage
                     debug_assert!(
@@ -219,7 +234,20 @@ impl VectorDelta {
                 }
                 result
             }
-            VectorDelta::Full(new_vec) => new_vec.to_vec(),
+            VectorDelta::Full(new_vec) => {
+                // Safety check: dimension must not exceed global maximum
+                // This prevents DoS via memory exhaustion if a malicious delta is constructed/deserialized
+                if new_vec.len() > MAX_VECTOR_DIMENSIONS {
+                    debug_assert!(
+                        new_vec.len() <= MAX_VECTOR_DIMENSIONS,
+                        "VectorDelta dimension {} exceeds maximum {}",
+                        new_vec.len(),
+                        MAX_VECTOR_DIMENSIONS
+                    );
+                    return base.to_vec();
+                }
+                new_vec.to_vec()
+            }
         }
     }
 
@@ -2118,3 +2146,64 @@ mod sentry_tests {
         assert_eq!(result[0], 0.0);
     }
 } // End of sentry_tests mod (wait, verify existing file structure)
+
+#[cfg(test)]
+mod additional_sentry_tests {
+    use super::*;
+    use crate::core::property::MAX_VECTOR_DIMENSIONS;
+
+    /// 🎯 Target: VectorDelta::apply bounds checking
+    /// 💣 Risk: OOM DoS if VectorDelta is constructed with huge dimensions (e.g. from disk).
+    /// 🧪 Strategy: Manually construct oversized VectorDeltas and verify apply rejects them.
+    /// 🔬 Verification: Expect panic in debug (correctness check) or safe fallback in release.
+    #[test]
+    #[cfg(debug_assertions)] // We expect debug_assert! to panic in debug mode
+    #[should_panic(expected = "VectorDelta dimension")]
+    fn test_vector_delta_apply_enforces_max_dimensions_full() {
+        // Construct oversized vector
+        let huge_vec = vec![0.0f32; MAX_VECTOR_DIMENSIONS + 1];
+        let delta = VectorDelta::Full(Arc::from(huge_vec));
+
+        // Base vector doesn't matter for Full application, but supply valid one
+        let base = vec![0.0f32; 10];
+
+        // Should panic in debug due to our added check
+        let _ = delta.apply(&base);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "VectorDelta dimension")]
+    fn test_vector_delta_apply_enforces_max_dimensions_sparse() {
+        // Construct sparse delta with valid changes but invalid dimension metadata
+        let dimension = MAX_VECTOR_DIMENSIONS + 1;
+        let changes = Arc::new(vec![]);
+        let delta = VectorDelta::Sparse { dimension, changes };
+
+        // Base vector matching the HUGE dimension (simulated, we can't allocate it)
+        // But apply checks base.len() == dimension.
+        // So we can only trigger this if we actually HAVE a huge base vector.
+        // Or if we check dimension limit *before* checking base length match.
+        // We want to verify that even if someone manages to allocate a huge base,
+        // we reject the delta application to prevent FURTHER allocation/copying.
+
+        // However, if we can't allocate a huge base in test, we can't trigger the
+        // "base.len() == dimension" success path for Sparse.
+        // But wait, Sparse application creates a NEW vector of size .
+        // result = base.to_vec().
+
+        // So if base IS huge, result is huge.
+        // If we can't allocate base, we can't test this for Sparse easily without mocking.
+
+        // BUT, we can test that apply checks  limit regardless of base match.
+        // If we pass a small base, it fails length match anyway.
+        // We want to ensure it fails on dimension limit FIRST or AS WELL.
+
+        // Let's rely on the Full test for now as it's easier to construct.
+        // But for completeness, let's try to verify Sparse variant logic too.
+
+        // If we just check , we can panic.
+        let base = vec![0.0f32; 10]; // Mismatch
+        let _ = delta.apply(&base);
+    }
+}
