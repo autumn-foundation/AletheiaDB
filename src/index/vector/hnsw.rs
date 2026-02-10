@@ -458,6 +458,12 @@ where
 
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+
+        // Prevent re-entrant modifications during metric calculation (deadlock prevention)
+        // This sets the thread-local flag so that add() and other methods fail gracefully.
+        // Without this, a custom metric calling add() would deadlock on the inner RwLock.
+        let _guard = FilterCallbackGuard::new();
+
         distance_fn(slice_a, slice_b)
     })
 }
