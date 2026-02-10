@@ -2256,9 +2256,9 @@ mod sentry_tests {
 
         // Expectation: "embedding" remains 42i64 (delta ignored)
         assert_eq!(
-            result.get("embedding").and_then(|v| v.as_int()),
-            Some(42),
-            "Sparse delta should be silently ignored if base property is wrong type"
+            result.get("embedding"),
+            base.get("embedding"),
+            "Sparse delta should be silently ignored if base property is wrong type, leaving it unchanged"
         );
     }
 }
