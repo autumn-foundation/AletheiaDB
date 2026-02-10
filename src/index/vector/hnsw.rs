@@ -430,19 +430,23 @@ where
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
             // This should never happen with a correct usearch implementation.
-            // If it does, we panic to prevent UB from dereferencing null.
+            // If it does, we MUST abort to prevent UB from dereferencing null or
+            // unwinding across the FFI boundary (which is UB).
             // We cannot return an error here because the signature is fixed by usearch trait.
-            panic!("usearch passed null pointer to metric function");
+            eprintln!("CRITICAL SECURITY ERROR: usearch passed null pointer to metric function. Aborting to prevent UB.");
+            std::process::abort();
         }
 
         // Check for alignment to prevent UB
         // Use bitwise check for power-of-2 alignment (f32 align is 4)
         let align_mask = std::mem::align_of::<f32>() - 1;
         if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
-            panic!(
-                "usearch passed unaligned pointer to metric function (expected alignment {})",
+            // Abort for same reason as above: unwinding across FFI is UB.
+            eprintln!(
+                "CRITICAL SECURITY ERROR: usearch passed unaligned pointer to metric function (expected alignment {}). Aborting to prevent UB.",
                 std::mem::align_of::<f32>()
             );
+            std::process::abort();
         }
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
@@ -453,7 +457,8 @@ where
         if a.align_offset(std::mem::align_of::<f32>()) != 0
             || b.align_offset(std::mem::align_of::<f32>()) != 0
         {
-            panic!("usearch passed unaligned pointer to metric function");
+            eprintln!("CRITICAL SECURITY ERROR: usearch passed unaligned pointer to metric function. Aborting to prevent UB.");
+            std::process::abort();
         }
 
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
@@ -1904,21 +1909,10 @@ unsafe impl Sync for HnswIndex {}
 mod sentry_tests {
     use super::*;
 
-    #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
-    fn test_metric_wrapper_panic_on_unaligned() {
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
-        let wrapper = create_metric_wrapper(4, distance_fn);
-
-        // Create a buffer and get an unaligned pointer
-        let buffer = [0u8; 32];
-        // Address + 1 is definitely unaligned for f32 (align 4)
-        let unaligned_ptr = unsafe { buffer.as_ptr().add(1) } as *const f32;
-        let aligned_vec = [0.0f32; 4];
-        let aligned_ptr = aligned_vec.as_ptr();
-
-        wrapper(unaligned_ptr, aligned_ptr);
-    }
+    // TEST REMOVED: test_metric_wrapper_panic_on_unaligned
+    // Reason: The metric wrapper now calls std::process::abort() instead of panic!
+    // for security reasons (preventing FFI unwind UB).
+    // Abort terminates the test runner and cannot be caught by #[should_panic].
 
     #[test]
     fn test_is_retryable_error_matching() {
@@ -1975,28 +1969,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
-    fn test_metric_wrapper_panic_on_unaligned() {
-        // This test ensures that the metric wrapper correctly detects unaligned pointers.
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
-        let wrapper = create_metric_wrapper(4, distance_fn);
-
-        // Create a buffer that we can misalign
-        // We need at least 4 f32s (16 bytes) + 1 byte offset
-        let mut buffer = vec![0u8; 16 + 8];
-
-        // Get an aligned pointer
-        let aligned_ptr = buffer.as_mut_ptr();
-
-        // Create an unaligned pointer by adding 1 byte offset
-        // SAFETY: We allocated enough space. This pointer is valid but unaligned for f32.
-        let unaligned_ptr = unsafe { aligned_ptr.add(1) } as *const f32;
-        let valid_ptr = aligned_ptr as *const f32;
-
-        // Pass unaligned pointer - should panic
-        wrapper(valid_ptr, unaligned_ptr);
-    }
+    // TEST REMOVED: test_metric_wrapper_panic_on_unaligned
+    // Reason: The metric wrapper now calls std::process::abort() instead of panic!
+    // for security reasons (preventing FFI unwind UB).
+    // Abort terminates the test runner and cannot be caught by #[should_panic].
 
     #[test]
     fn test_hnsw_remove() -> Result<()> {
@@ -2411,22 +2387,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    #[should_panic(expected = "usearch passed null pointer")]
-    fn test_metric_wrapper_panic_on_null() {
-        // This test ensures that the metric wrapper correctly detects null pointers
-        // and panics to prevent UB. This covers the safety check added for FFI.
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
-        let wrapper = create_metric_wrapper(4, distance_fn);
-
-        // Create a valid pointer for one argument
-        let vec = [0.0f32; 4];
-        let valid_ptr = vec.as_ptr();
-        let null_ptr = std::ptr::null();
-
-        // Pass null pointer - should panic
-        wrapper(valid_ptr, null_ptr);
-    }
+    // TEST REMOVED: test_metric_wrapper_panic_on_null
+    // Reason: The metric wrapper now calls std::process::abort() instead of panic!
+    // for security reasons (preventing FFI unwind UB).
+    // Abort terminates the test runner and cannot be caught by #[should_panic].
 
     #[test]
     fn test_load_mappings_bad_magic() -> Result<()> {
