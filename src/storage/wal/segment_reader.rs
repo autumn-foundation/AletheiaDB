@@ -1512,27 +1512,30 @@ mod tests {
 
     #[test]
     fn test_update_node_insufficient_buffer_for_label() {
-        let mut buffer = Vec::new();
+        // Create a valid UpdateNode entry
+        let node_id = NodeId::new(42).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let operation = WalOperation::UpdateNode {
+            node_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(1), operation);
 
-        // LSN (8) + Timestamp (12) + Checksum (4) = 24 bytes header
-        buffer.extend_from_slice(&1u64.to_le_bytes()); // LSN
-        time::now().serialize_into(&mut buffer); // Timestamp
-        buffer.extend_from_slice(&0u32.to_le_bytes()); // Checksum placeholder
+        // Serialize it
+        let mut full_buffer = Vec::new();
+        serialize_entry_into(&entry, &mut full_buffer).unwrap();
 
-        // Op type: UpdateNode (3)
-        buffer.push(3);
+        // Calculate expected cut point
+        // Header (24) + Op (1) + NodeID (8) + VersionID (8) = 41 bytes
+        // We want to pass the first check (41 bytes) but fail the next (Label ID, +4 bytes)
+        // So we truncate to EXACTLY 41 bytes.
+        let truncated_buffer = &full_buffer[0..41];
 
-        // Node ID (8 bytes)
-        buffer.extend_from_slice(&1u64.to_le_bytes());
-
-        // Version ID (8 bytes)
-        buffer.extend_from_slice(&1u64.to_le_bytes());
-
-        // Now we stop here. The next expected field is Label ID (4 bytes).
-        // But we provide NO more bytes.
         // This should trigger "Insufficient buffer size for UpdateNode label"
-
-        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
         assert!(result.is_err());
         if let Err(Error::Storage(StorageError::CorruptedData(msg))) = result {
             assert_eq!(msg, "Insufficient buffer size for UpdateNode label");
@@ -1543,27 +1546,30 @@ mod tests {
 
     #[test]
     fn test_update_edge_insufficient_buffer_for_label() {
-        let mut buffer = Vec::new();
+        // Create a valid UpdateEdge entry
+        let edge_id = EdgeId::new(100).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let operation = WalOperation::UpdateEdge {
+            edge_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("UPDATED_KNOWS").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(1), operation);
 
-        // LSN (8) + Timestamp (12) + Checksum (4) = 24 bytes header
-        buffer.extend_from_slice(&1u64.to_le_bytes()); // LSN
-        time::now().serialize_into(&mut buffer); // Timestamp
-        buffer.extend_from_slice(&0u32.to_le_bytes()); // Checksum placeholder
+        // Serialize it
+        let mut full_buffer = Vec::new();
+        serialize_entry_into(&entry, &mut full_buffer).unwrap();
 
-        // Op type: UpdateEdge (4)
-        buffer.push(4);
+        // Calculate expected cut point
+        // Header (24) + Op (1) + EdgeID (8) + VersionID (8) = 41 bytes
+        // We want to pass the first check (41 bytes) but fail the next (Label ID, +4 bytes)
+        // So we truncate to EXACTLY 41 bytes.
+        let truncated_buffer = &full_buffer[0..41];
 
-        // Edge ID (8 bytes)
-        buffer.extend_from_slice(&1u64.to_le_bytes());
-
-        // Version ID (8 bytes)
-        buffer.extend_from_slice(&1u64.to_le_bytes());
-
-        // Now we stop here. The next expected field is Label ID (4 bytes).
-        // But we provide NO more bytes.
         // This should trigger "Insufficient buffer size for UpdateEdge label"
-
-        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
         assert!(result.is_err());
         if let Err(Error::Storage(StorageError::CorruptedData(msg))) = result {
             assert_eq!(msg, "Insufficient buffer size for UpdateEdge label");
