@@ -1904,3 +1904,53 @@ fn test_find_nodes_by_property_float_value() {
     let results = storage.find_nodes_by_property("Sensor", "temp", &PropertyValue::Float(98.6));
     assert_eq!(results, vec![n1]);
 }
+
+#[test]
+fn test_find_similar_filters_ghost_nodes() {
+    // 💣 Risk: If vector index contains a node but main storage doesn't (Ghost Node),
+    // find_similar would return it, leading to "NodeNotFound" later when accessed.
+    use crate::index::vector::DistanceMetric;
+    use crate::index::vector::hnsw::HnswConfig;
+
+    let storage = CurrentStorage::new();
+
+    // 1. Enable vector indexing
+    let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+    storage.enable_vector_index("embedding", config).unwrap();
+
+    // 2. Create a node with a vector
+    let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+    let node_id = storage
+        .create_node(
+            "Ghost",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &v1)
+                .build(),
+        )
+        .unwrap();
+
+    // Verify it exists and is searchable
+    let _results = storage.find_similar(node_id, 10).unwrap();
+    // Excludes query node, so empty result is expected for self-query if no other nodes
+    // Let's check with find_similar_by_embedding to be sure
+    let results = storage.find_similar_by_embedding(&v1, 10).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, node_id);
+
+    // 3. Simulate state corruption: Remove from graph storage but NOT from vector index
+    // This requires access to private 'indexes' field (allowed in tests submodule)
+    storage.indexes.remove_node(node_id);
+
+    // Verify node is gone from main storage
+    assert!(storage.get_node(node_id).is_err());
+
+    // 4. Perform search. Without fix, HNSW returns the ghost node.
+    let results = storage.find_similar_by_embedding(&v1, 10).unwrap();
+
+    // 5. Assert ghost node is filtered out
+    assert!(
+        results.is_empty(),
+        "Ghost node should be filtered out from results, but found: {:?}",
+        results
+    );
+}
