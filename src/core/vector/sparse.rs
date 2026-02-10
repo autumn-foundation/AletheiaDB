@@ -491,6 +491,15 @@ pub fn sparse_dot_product(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 /// - Space: O(1)
 /// - Much faster than dense cosine for sparse data
 pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
+    // Check dimensions match
+    if a.dimension() != b.dimension() {
+        return Err(VectorError::DimensionMismatch {
+            expected: a.dimension(),
+            actual: b.dimension(),
+        }
+        .into());
+    }
+
     let dot = sparse_dot_product(a, b)?;
     let mag_a = a.magnitude();
     let mag_b = b.magnitude();

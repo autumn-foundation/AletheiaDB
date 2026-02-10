@@ -1509,4 +1509,24 @@ mod tests {
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
     }
+
+    #[test]
+    fn test_fuzz_crash_repro() {
+        // Failing input from fuzzing artifact
+        let input = vec![
+            71, 87, 65, 76, 1, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 78, 1, 1, 1,
+            1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1, 0, 78, 78, 78, 78, 78, 78, 78,
+        ];
+
+        // Header is 5 bytes (GWAL + ver 1)
+        // Entry starts at offset 5
+        let offset = 5;
+        let version = 1;
+
+        // This should return an error, NOT panic
+        let result = parse_entry_at(&input, offset, version);
+
+        // We expect an error because the input is corrupted/incomplete
+        assert!(result.is_err());
+    }
 }
