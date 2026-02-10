@@ -38,37 +38,6 @@ use vector::{TemporalVectorIndexEntry, TemporalVectorIndexState, VectorIndexEntr
 /// Override via configuration if your use case requires more properties.
 pub const DEFAULT_MAX_VECTOR_PROPERTIES: usize = 10;
 
-/// Validate property name to prevent path traversal and other issues.
-fn validate_property_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        return Err(crate::utils::error::Error::Vector(
-            crate::utils::error::VectorError::IndexError("Property name cannot be empty".to_string()),
-        ));
-    }
-
-    // Check for path traversal attempts and invalid file characters
-    if name.contains("..") || name.contains('/') || name.contains('\\') {
-        return Err(crate::utils::error::Error::Vector(
-            crate::utils::error::VectorError::IndexError(format!(
-                "Property name '{}' contains invalid characters. Path separators and '..' are not allowed.",
-                name
-            )),
-        ));
-    }
-
-    // Check for excessive length (filename limits)
-    if name.len() > 255 {
-        return Err(crate::utils::error::Error::Vector(
-            crate::utils::error::VectorError::IndexError(format!(
-                "Property name '{}' is too long (max 255 chars)",
-                name
-            )),
-        ));
-    }
-
-    Ok(())
-}
-
 /// Current-state storage engine.
 ///
 /// This storage engine maintains the current version of all nodes and edges,
@@ -233,8 +202,12 @@ impl CurrentStorage {
     /// storage.enable_vector_index("body_embedding", config_1536)?;
     /// ```
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
-        // Validate property name (security check)
-        validate_property_name(property_name)?;
+        // Validate property name to prevent path traversal
+        validate_property_name(property_name).map_err(|e| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                format!("Invalid property name: {}", e),
+            ))
+        })?;
 
         // Check property limit before attempting to add
         if self.vector_indexes.len() >= DEFAULT_MAX_VECTOR_PROPERTIES {
@@ -1419,9 +1392,6 @@ impl CurrentStorage {
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
-        // Validate property name (security check)
-        validate_property_name(property_name)?;
-
         // Check if already enabled for this specific property
         if self.temporal_vector_indexes.contains_key(property_name) {
             return Err(crate::utils::error::Error::Vector(
@@ -2215,6 +2185,20 @@ impl Default for CurrentStorage {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Validate property name to prevent path traversal and special characters.
+fn validate_property_name(name: &str) -> std::result::Result<(),String> {
+    if name.is_empty() {
+        return Err("Property name cannot be empty".to_string());
+    }
+    if name.contains("..") {
+        return Err("Property name cannot contain '..'".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("Property name cannot contain path separators".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

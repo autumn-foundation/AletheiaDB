@@ -1957,11 +1957,30 @@ fn test_find_similar_filters_ghost_nodes() {
 
 #[test]
 fn test_enable_vector_index_path_traversal() {
-    use crate::index::vector::DistanceMetric;
     let storage = CurrentStorage::new();
-    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+    let config = HnswConfig::new(4, crate::index::vector::DistanceMetric::Cosine);
 
-    // This should fail validation but currently succeeds
-    let result = storage.enable_vector_index("../traversal", config);
-    assert!(result.is_err(), "Should reject path traversal characters in property name");
+    // Test simple traversal
+    let result = storage.enable_vector_index("../bad", config.clone());
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("cannot contain '..'"));
+
+    // Test deep traversal
+    let result = storage.enable_vector_index("../../etc/passwd", config.clone());
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("cannot contain '..'"));
+
+    // Test absolute path
+    let result = storage.enable_vector_index("/tmp/evil", config.clone());
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("cannot contain path separators"));
+
+    // Test empty
+    let result = storage.enable_vector_index("", config.clone());
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("cannot be empty"));
 }
