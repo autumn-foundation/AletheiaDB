@@ -527,6 +527,12 @@ pub(crate) fn scale_in_place(v: &mut [f32], scalar: f32) {
 #[inline]
 pub(crate) fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     assert_eq!(a.len(), b.len());
+    if let (Some(dot), Some(mag_a), Some(mag_b)) =
+        (simsimd_dot(a, b), simsimd_dot(a, a), simsimd_dot(b, b))
+    {
+        return (dot, mag_a, mag_b);
+    }
+
     #[cfg(target_arch = "x86_64")]
     {
         // Use runtime detection for best available instruction set
@@ -570,6 +576,10 @@ pub(crate) fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
 #[inline]
 pub(crate) fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
+    if let Some(sq) = simsimd_sqeuclidean(a, b) {
+        return sq;
+    }
+
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         // Use runtime detection for best available instruction set.
@@ -598,6 +608,10 @@ pub(crate) fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
 #[inline]
 pub(crate) fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
+    if let Some(dot) = simsimd_dot(a, b) {
+        return dot;
+    }
+
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         // Use runtime detection for best available instruction set.
@@ -615,4 +629,49 @@ pub(crate) fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
 
     // Fallback for non-x86 platforms or x86 CPUs without SSE2.
     dot_product_scalar(a, b)
+}
+
+#[inline]
+fn simsimd_dot(a: &[f32], b: &[f32]) -> Option<f32> {
+    let mut result = 0.0f64;
+    // SAFETY: Pointers originate from valid slices with equal lengths.
+    // SimSIMD writes a single distance scalar into `result`.
+    unsafe {
+        simsimd_dot_f32(
+            a.as_ptr(),
+            b.as_ptr(),
+            a.len() as u64,
+            &mut result as *mut f64,
+        );
+    }
+    if result.is_nan() {
+        None
+    } else {
+        Some(result as f32)
+    }
+}
+
+#[inline]
+fn simsimd_sqeuclidean(a: &[f32], b: &[f32]) -> Option<f32> {
+    let mut result = 0.0f64;
+    // SAFETY: Pointers originate from valid slices with equal lengths.
+    // SimSIMD writes a single distance scalar into `result`.
+    unsafe {
+        simsimd_l2sq_f32(
+            a.as_ptr(),
+            b.as_ptr(),
+            a.len() as u64,
+            &mut result as *mut f64,
+        );
+    }
+    if result.is_nan() {
+        None
+    } else {
+        Some(result as f32)
+    }
+}
+
+unsafe extern "C" {
+    fn simsimd_dot_f32(a: *const f32, b: *const f32, n: u64, d: *mut f64);
+    fn simsimd_l2sq_f32(a: *const f32, b: *const f32, n: u64, d: *mut f64);
 }

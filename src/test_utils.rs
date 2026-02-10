@@ -4,6 +4,7 @@
 
 use crate::AletheiaDB;
 use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+use crate::storage::index_persistence::PersistenceConfig;
 use crate::storage::wal::DurabilityMode;
 use crate::utils::error::Result;
 use std::path::PathBuf;
@@ -53,6 +54,7 @@ pub fn create_test_db() -> Result<(tempfile::TempDir, AletheiaDB)> {
     let temp_dir = tempfile::tempdir().map_err(crate::utils::error::Error::Io)?;
 
     let wal_dir = temp_dir.path().join("wal");
+    let data_dir = temp_dir.path().join("data");
 
     let config = AletheiaDBConfig::builder()
         .wal(
@@ -63,6 +65,12 @@ pub fn create_test_db() -> Result<(tempfile::TempDir, AletheiaDB)> {
                 })
                 .build(),
         )
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir,
+            load_on_startup: false,
+            ..Default::default()
+        })
         .build();
 
     let db = AletheiaDB::with_unified_config(config)?;
@@ -112,8 +120,11 @@ pub fn create_test_db_with_config(
 ) -> Result<(tempfile::TempDir, AletheiaDB)> {
     let temp_dir = tempfile::tempdir().map_err(crate::utils::error::Error::Io)?;
 
-    // Override wal_dir to use temp directory
+    // Override storage directories to keep all test artifacts isolated.
     config.wal.wal_dir = temp_dir.path().join("wal");
+    config.persistence.data_dir = temp_dir.path().join("data");
+    // Avoid loading stale indexes in helpers meant for fresh test databases.
+    config.persistence.load_on_startup = false;
 
     let db = AletheiaDB::with_unified_config(config)?;
 
