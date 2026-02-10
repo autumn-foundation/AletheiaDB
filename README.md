@@ -279,12 +279,25 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 - [x] Latency metrics with percentiles
 - [x] LSN-based WAL truncation
 
+### Verification & Correctness (Tiered CI Active ✅)
+- [x] Loom model checks for WAL, temporal, and vector concurrency paths
+- [x] Kani harnesses for bounded state transitions, snapshot counters, and LSN monotonicity
+- [x] Verus proofs for core temporal and vector-mapping invariants
+- [x] cargo-fuzz targets in CI (PR smoke, nightly longer runs, weekly extended + corpus minimization)
+- [x] Weekly Miri run for UB detection on library tests
+- [x] Mutation testing in CI (PR diff checks + weekly module sweep with trend reporting)
+- [x] Verification-tier workflow in CI:
+  - PR: loom subset + kani smoke + verus smoke + fuzz smoke
+  - Nightly: full loom + broader kani + longer fuzz runtime
+  - Weekly: mutation sweep + miri + extended fuzz + verus core proofs
+
 ### In Progress / Planned
 - [ ] Vector Search Phase 5: Streaming and incremental updates
 - [ ] Custom Honeycomb client wrapper ([#271](https://github.com/madmax983/AletheiaDB/issues/271))
 - [ ] Comprehensive Prometheus metrics suite ([#272](https://github.com/madmax983/AletheiaDB/issues/272))
 - [ ] GraphQL/REST API layer
 - [ ] Distributed replication
+- [ ] Expand Verus/Kani coverage to additional persistence and query-planner invariants
 
 **Test Coverage**: 671+ tests passing, 86%+ line coverage (enforced: 85% minimum)
 
