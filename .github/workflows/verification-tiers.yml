@@ -106,6 +106,20 @@ jobs:
           fi
           VERUS_BIN=$(find .verus -type f -name verus | head -n 1)
           chmod +x "$VERUS_BIN"
+          # Verus releases are tied to a specific Rust toolchain. Detect and install it if needed.
+          set +e
+          "$VERUS_BIN" --version >/tmp/verus-version.out 2>/tmp/verus-version.err
+          VERUS_STATUS=$?
+          set -e
+          if [ $VERUS_STATUS -ne 0 ]; then
+            REQUIRED_TOOLCHAIN=$(grep -oE "required rust toolchain [^ ]+" /tmp/verus-version.err | awk '{print $4}' || true)
+            if [ -n "$REQUIRED_TOOLCHAIN" ]; then
+              rustup toolchain install "$REQUIRED_TOOLCHAIN"
+            else
+              cat /tmp/verus-version.err
+              exit $VERUS_STATUS
+            fi
+          fi
           "$VERUS_BIN" verification/verus/temporal_invariants.rs
 
       - name: Install cargo-fuzz
@@ -260,6 +274,20 @@ jobs:
           fi
           VERUS_BIN=$(find .verus -type f -name verus | head -n 1)
           chmod +x "$VERUS_BIN"
+          # Verus releases are tied to a specific Rust toolchain. Detect and install it if needed.
+          set +e
+          "$VERUS_BIN" --version >/tmp/verus-version.out 2>/tmp/verus-version.err
+          VERUS_STATUS=$?
+          set -e
+          if [ $VERUS_STATUS -ne 0 ]; then
+            REQUIRED_TOOLCHAIN=$(grep -oE "required rust toolchain [^ ]+" /tmp/verus-version.err | awk '{print $4}' || true)
+            if [ -n "$REQUIRED_TOOLCHAIN" ]; then
+              rustup toolchain install "$REQUIRED_TOOLCHAIN"
+            else
+              cat /tmp/verus-version.err
+              exit $VERUS_STATUS
+            fi
+          fi
           echo "VERUS_BIN=$VERUS_BIN" >> "$GITHUB_ENV"
 
       - name: Weekly Verus full core invariants
