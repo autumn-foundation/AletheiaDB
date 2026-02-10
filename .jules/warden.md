@@ -19,3 +19,7 @@
 **2026-02-15 - Buffer Over-read in WAL Segment Parsing**
 **Threat:** The `UpdateEdge` operation parser in `src/storage/wal/segment_reader.rs` failed to check bounds before reading the 4-byte `label_id` field when processing legacy WAL versions. This allowed a malformed WAL entry (truncated payload) to trigger a panic (index out of bounds), leading to a Denial of Service (DoS) during recovery or replication.
 **Defense:** Added an explicit `checked_add` bounds check before reading the `label_id` field, ensuring the buffer has sufficient capacity before access.
+
+**2026-02-15 - Unchecked Buffer Access in UpdateNode Operation**
+**Threat:** Similar to `UpdateEdge`, the `UpdateNode` operation parser in `src/storage/wal/segment_reader.rs` lacked a bounds check for the `label_id` field when processing `WAL_VERSION` entries. This exposed the parser to the same buffer over-read panic (DoS) if a truncated entry was processed.
+**Defense:** Added an identical `checked_add` bounds check for `UpdateNode`, ensuring consistency and safety across all operations.
