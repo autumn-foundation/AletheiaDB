@@ -11,50 +11,47 @@
 //! # API Styles
 //!
 //! **Closure-based (recommended)**:
-//! ```rust,no_run
-//! # use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
-//! # use aletheiadb::core::NodeId;
-//! # use aletheiadb::api::transaction::{ReadOps, WriteOps};
+//! ```rust
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
+//! use aletheiadb::core::NodeId;
+//! use aletheiadb::api::transaction::{ReadOps, WriteOps};
+//!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let db = AletheiaDB::new()?;
-//! # let id = NodeId::new(1)?;
-//! # let other = NodeId::new(2)?;
-//! # let props = PropertyMapBuilder::new().build();
-//! # let edge_props = PropertyMapBuilder::new().build();
-//! // Read-only
-//! let result = db.read(|tx| {
-//!     // get_node might fail if node doesn't exist
-//!     if let Ok(node) = tx.get_node(id) {
-//!         Ok::<_, Box<dyn std::error::Error>>(node.get_property("name").cloned())
-//!     } else {
-//!         Ok::<_, Box<dyn std::error::Error>>(None)
-//!     }
+//! let db = AletheiaDB::new()?;
+//!
+//! // Write transaction (auto-commit on Ok, auto-rollback on Err)
+//! let (alice_id, bob_id) = db.write(|tx| {
+//!     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+//!     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+//!     tx.create_edge(alice, bob, "KNOWS", properties! { "since" => 2024 })?;
+//!     Ok((alice, bob))
 //! })?;
 //!
-//! // Read-write (auto-commit on Ok, auto-rollback on Err)
-//! let node_id = db.write(|tx| {
-//!     let node_id = tx.create_node("Person", props)?;
-//!     tx.create_edge(node_id, other, "KNOWS", edge_props)?;
-//!     Ok::<_, Box<dyn std::error::Error>>(node_id)
+//! // Read-only transaction
+//! db.read(|tx| {
+//!     let alice = tx.get_node(alice_id)?;
+//!     assert_eq!(alice.get_property("name").and_then(|v| v.as_str()), Some("Alice"));
+//!     Ok(())
 //! })?;
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! **Explicit handles**:
-//! ```rust,no_run
-//! # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
-//! # use aletheiadb::core::NodeId;
-//! # use aletheiadb::api::transaction::WriteOps;
+//! ```rust
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
+//! use aletheiadb::api::transaction::WriteOps;
+//!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let db = AletheiaDB::new()?;
-//! # let n1 = NodeId::new(1)?;
-//! # let n2 = NodeId::new(2)?;
-//! # let props = PropertyMapBuilder::new().build();
+//! let db = AletheiaDB::new()?;
+//!
 //! let mut tx = db.write_transaction()?;
-//! tx.create_node("Person", props.clone())?;
-//! tx.create_edge(n1, n2, "KNOWS", props)?;
-//! tx.commit()?;  // or tx.rollback()
+//! let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+//! let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+//! tx.create_edge(alice, bob, "KNOWS", properties! { "since" => 2024 })?;
+//!
+//! // Must explicitly commit!
+//! tx.commit()?;
 //! # Ok(())
 //! # }
 //! ```
@@ -72,8 +69,6 @@ pub use write::WriteTransaction;
 pub use write_buffer::{BufferedWrite, WriteBuffer};
 
 use crate::core::graph::{Edge, Node};
-#[cfg(test)]
-use crate::core::id::MAX_VALID_ID;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
@@ -130,12 +125,22 @@ pub trait ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let edges = tx.get_outgoing_edges(node_id);
-    /// for edge_id in edges {
-    ///     let edge = tx.get_edge(edge_id)?;
-    ///     println!("-> {}", edge.target);
-    /// }
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::{ReadOps, WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = db.write(|tx| tx.create_node("Person", properties! {}))?;
+    /// db.read(|tx| {
+    ///     let edges = tx.get_outgoing_edges(node_id);
+    ///     for edge_id in edges {
+    ///         let edge = tx.get_edge(edge_id)?;
+    ///         println!("-> {}", edge.target);
+    ///     }
+    ///     Ok(())
+    /// })?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
 
@@ -240,11 +245,18 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node(
     ///     "Person",
     ///     properties! { "name" => "Alice", "age" => 30 }
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn create_node(&mut self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.create_node_with_valid_time(label, properties, None)
@@ -266,13 +278,22 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let alice_id = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let bob_id = tx.create_node("Person", properties! { "name" => "Bob" })?;
     /// let edge_id = tx.create_edge(
     ///     alice_id,
     ///     bob_id,
     ///     "KNOWS",
     ///     properties! { "since" => 2024 }
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn create_edge(
         &mut self,
@@ -303,12 +324,20 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let node_id = tx.create_node("Person", properties! { "name" => "Alice", "age" => 30 })?;
     /// // Only updates "age", preserves "name"
     /// tx.update_node(
     ///     node_id,
     ///     properties! { "age" => 31 }
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn update_node(&mut self, node_id: NodeId, properties: PropertyMap) -> Result<()> {
         self.update_node_with_valid_time(node_id, properties, None)
@@ -331,11 +360,21 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    /// # let edge_id = tx.create_edge(alice, bob, "KNOWS", properties! { "strength" => 0.5 })?;
     /// tx.update_edge(
     ///     edge_id,
     ///     properties! { "strength" => 0.95 }
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn update_edge(&mut self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
         self.update_edge_with_valid_time(edge_id, properties, None)
@@ -380,7 +419,7 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use aletheiadb::{AletheiaDB, properties};
     /// # use aletheiadb::api::transaction::WriteOps;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -410,102 +449,4 @@ pub trait WriteOps: ReadOps {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::AletheiaDB;
-    use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::time;
-
-    #[test]
-    fn test_create_node_with_valid_time_trait_method_exists() {
-        // This test verifies the trait method signature compiles
-        fn assert_write_ops<T: WriteOps>(_tx: &mut T) {
-            // Trait bound check - if this compiles, the method exists
-        }
-
-        let db = AletheiaDB::new().unwrap();
-        let mut tx = db.write_transaction().unwrap();
-        assert_write_ops(&mut tx);
-    }
-
-    #[test]
-    fn test_create_node_default_delegates_to_with_valid_time() {
-        let db = AletheiaDB::new().unwrap();
-        let mut tx = db.write_transaction().unwrap();
-
-        // Both should work identically when valid_from is None
-        let props1 = PropertyMapBuilder::new().insert("name", "Test1").build();
-        let props2 = PropertyMapBuilder::new().insert("name", "Test2").build();
-
-        // Both should succeed
-        let result1 = tx.create_node("Test", props1);
-        assert!(result1.is_ok(), "create_node failed: {:?}", result1.err());
-        let id1 = result1.unwrap();
-
-        let result2 = tx.create_node_with_valid_time("Test", props2, None);
-        assert!(
-            result2.is_ok(),
-            "create_node_with_valid_time failed: {:?}",
-            result2.err()
-        );
-        let id2 = result2.unwrap();
-
-        // IDs should be different (sequential generation)
-        assert_ne!(id1, id2, "IDs should be unique");
-
-        // Both methods should work - IDs are generated successfully
-        // Note: First ID may be 0 due to IdGenerator starting at 0 (known issue)
-        assert!(id1.as_u64() < id2.as_u64(), "IDs should increment");
-    }
-
-    #[test]
-    fn test_create_node_with_backdated_valid_time() {
-        let db = AletheiaDB::new().unwrap();
-        let mut tx = db.write_transaction().unwrap();
-
-        // Create node with valid_time = 1 hour ago
-        let one_hour_ago = time::now().wallclock() - 3_600_000_000;
-        let valid_from = crate::core::hlc::HybridTimestamp::new(one_hour_ago, 0).unwrap();
-
-        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
-        let node_id = tx
-            .create_node_with_valid_time("Person", props, Some(valid_from))
-            .unwrap();
-
-        // Verify node was created with a valid ID (0 is valid!)
-        assert!(node_id.as_u64() <= MAX_VALID_ID);
-    }
-
-    #[test]
-    fn test_create_edge_with_valid_time_trait_method_exists() {
-        fn assert_write_ops<T: WriteOps>(_tx: &mut T) {
-            // Trait bound check
-        }
-
-        let db = AletheiaDB::new().unwrap();
-        let mut tx = db.write_transaction().unwrap();
-        assert_write_ops(&mut tx);
-    }
-
-    #[test]
-    fn test_update_node_with_valid_time_trait_method_exists() {
-        fn assert_write_ops<T: WriteOps>(_tx: &mut T) {
-            // Trait bound check
-        }
-
-        let db = AletheiaDB::new().unwrap();
-        let mut tx = db.write_transaction().unwrap();
-        assert_write_ops(&mut tx);
-    }
-
-    #[test]
-    fn test_delete_node_with_valid_time_trait_method_exists() {
-        fn assert_write_ops<T: WriteOps>(_tx: &mut T) {
-            // Trait bound check
-        }
-
-        let db = AletheiaDB::new().unwrap();
-        let mut tx = db.write_transaction().unwrap();
-        assert_write_ops(&mut tx);
-    }
-}
+mod tests;
