@@ -435,8 +435,8 @@ where
             // LCOV_EXCL_START
             let _ = std::io::stderr().write_all(b"CRITICAL: usearch passed null pointer to metric function. Aborting to prevent UB.\n");
             std::process::abort();
+            // LCOV_EXCL_STOP
         }
-        // LCOV_EXCL_STOP
 
         // Check for alignment to prevent UB
         // Use bitwise check for power-of-2 alignment (f32 align is 4)
@@ -445,8 +445,8 @@ where
             // LCOV_EXCL_START
             let _ = std::io::stderr().write_all(b"CRITICAL: usearch passed unaligned pointer to metric function. Aborting to prevent UB.\n");
             std::process::abort();
+            // LCOV_EXCL_STOP
         }
-        // LCOV_EXCL_STOP
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
@@ -459,8 +459,8 @@ where
             // LCOV_EXCL_START
             let _ = std::io::stderr().write_all(b"CRITICAL: usearch passed unaligned pointer to metric function. Aborting to prevent UB.\n");
             std::process::abort();
+            // LCOV_EXCL_STOP
         }
-        // LCOV_EXCL_STOP
 
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
