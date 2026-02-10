@@ -293,6 +293,22 @@ jobs:
           fi
           echo "VERUS_BIN=$VERUS_BIN" >> "$GITHUB_ENV"
 
+          # Check for missing toolchain
+          set +e
+          OUTPUT=$("$VERUS_BIN" --version 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          if [[ $EXIT_CODE -ne 0 ]] && echo "$OUTPUT" | grep -q "required rust toolchain"; then
+            TOOLCHAIN=$(echo "$OUTPUT" | grep "required rust toolchain" | sed -n 's/.*required rust toolchain \([^ ]*\) not found.*/\1/p')
+            if [ -n "$TOOLCHAIN" ]; then
+              echo "Verus requires toolchain $TOOLCHAIN. Installing..."
+              rustup install "$TOOLCHAIN"
+            else
+              echo "Could not parse toolchain version from output: $OUTPUT"
+            fi
+          fi
+
       - name: Weekly Verus full core invariants
         run: |
           # Helper function to run verus with toolchain auto-install
