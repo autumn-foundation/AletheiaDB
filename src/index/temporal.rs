@@ -1286,11 +1286,12 @@ impl TemporalIndexes {
             .sum()
     }
 
-    /// Get a list of all entity IDs currently indexed.
+    /// Iterate over all entity IDs currently indexed.
     ///
-    /// This returns a snapshot of keys in the index.
-    pub fn get_all_entity_ids(&self) -> Vec<EntityId> {
-        self.index.iter().map(|entry| *entry.key()).collect()
+    /// This allows processing entities without collecting all IDs into memory,
+    /// avoiding O(N) memory allocation.
+    pub fn entity_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.index.iter().map(|entry| *entry.key())
     }
 
     /// Clear all indexes.
@@ -3693,7 +3694,7 @@ mod tests {
             )
             .unwrap();
 
-        let ids = indexes.get_all_entity_ids();
+        let ids: Vec<_> = indexes.entity_ids().collect();
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&EntityId::Node(node_id)));
         assert!(ids.contains(&EntityId::Edge(edge_id)));

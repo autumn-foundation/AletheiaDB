@@ -7,7 +7,7 @@ use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
-use crate::utils::{Result, StorageError};
+use crate::utils::Result;
 use std::collections::HashMap;
 
 /// A report of changes between two timestamps.
@@ -61,11 +61,29 @@ impl<'a> TemporalDiff<'a> {
     /// It uses `valid_time` = T and `transaction_time` = T for both points,
     /// effectively comparing "What we knew at T1 about T1" vs "What we knew at T2 about T2".
     /// This is the standard "Snapshot Diff".
-    pub fn compute_diff(&self, t1: Timestamp, t2: Timestamp) -> Result<DiffReport> {
-        let entities = self.db.temporal_indexes.get_all_entity_ids();
+    ///
+    /// # Arguments
+    /// * `t1`: The first timestamp (baseline).
+    /// * `t2`: The second timestamp (comparison).
+    /// * `limit`: Optional maximum number of entities to process. If None, processes all entities.
+    ///            **Warning**: Without a limit, this operation is O(N) and may consume significant memory.
+    pub fn compute_diff(
+        &self,
+        t1: Timestamp,
+        t2: Timestamp,
+        limit: Option<usize>,
+    ) -> Result<DiffReport> {
+        let iterator = self.db.temporal_indexes.entity_ids();
         let mut changes = Vec::new();
 
-        for entity_id in entities {
+        // Apply limit if provided, otherwise iterate all
+        let entity_iter: Box<dyn Iterator<Item = EntityId>> = if let Some(limit) = limit {
+            Box::new(iterator.take(limit))
+        } else {
+            Box::new(iterator)
+        };
+
+        for entity_id in entity_iter {
             // Find version visible at t1
             let v1 = self.find_version(entity_id, t1);
             // Find version visible at t2
@@ -134,19 +152,13 @@ impl<'a> TemporalDiff<'a> {
         let historical = self.db.historical.read();
         match entity_id {
             EntityId::Node(_) => {
-                // Ensure version exists first
-                historical
-                    .get_node_version(version_id)
-                    .ok_or_else(|| StorageError::VersionNotFound(version_id))?;
-
-                // Reconstruct properties (handles deltas)
+                // Reconstruct properties (handles deltas).
+                // This will return an error if the version is not found.
                 historical.reconstruct_node_properties(version_id)
             }
             EntityId::Edge(_) => {
-                historical
-                    .get_edge_version(version_id)
-                    .ok_or_else(|| StorageError::VersionNotFound(version_id))?;
-
+                // Reconstruct properties (handles deltas).
+                // This will return an error if the version is not found.
                 historical.reconstruct_edge_properties(version_id)
             }
         }
@@ -248,7 +260,7 @@ mod tests {
         let diff_engine = TemporalDiff::new(&db);
 
         // Diff T0 -> T1 (Added)
-        let report_0_1 = diff_engine.compute_diff(t0, t1).unwrap();
+        let report_0_1 = diff_engine.compute_diff(t0, t1, None).unwrap();
         assert_eq!(report_0_1.changes.len(), 1);
         if let EntityChange::Node { id, change } = &report_0_1.changes[0] {
             assert_eq!(*id, node_id);
@@ -258,7 +270,7 @@ mod tests {
         }
 
         // Diff T1 -> T2 (Modified)
-        let report_1_2 = diff_engine.compute_diff(t1, t2).unwrap();
+        let report_1_2 = diff_engine.compute_diff(t1, t2, None).unwrap();
         assert_eq!(report_1_2.changes.len(), 1);
         if let EntityChange::Node { id, change } = &report_1_2.changes[0] {
             assert_eq!(*id, node_id);
@@ -268,6 +280,15 @@ mod tests {
                     assert!(diff.changed.contains_key("level"));
                     // "status" added.
                     assert!(diff.added.contains(&"status".to_string()));
+                    // "name" unchanged, should NOT be in diff.
+                    assert!(
+                        !diff.changed.contains_key("name"),
+                        "Unchanged property 'name' should not be in diff"
+                    );
+                    assert!(
+                        !diff.removed.contains(&"name".to_string()),
+                        "Unchanged property 'name' should not be removed"
+                    );
                 }
                 _ => panic!("Expected Modified, got {:?}", change),
             }
@@ -276,7 +297,7 @@ mod tests {
         }
 
         // Diff T2 -> T3 (Removed)
-        let report_2_3 = diff_engine.compute_diff(t2, t3).unwrap();
+        let report_2_3 = diff_engine.compute_diff(t2, t3, None).unwrap();
         assert_eq!(report_2_3.changes.len(), 1);
         if let EntityChange::Node { id, change } = &report_2_3.changes[0] {
             assert_eq!(*id, node_id);
@@ -284,5 +305,37 @@ mod tests {
         } else {
             panic!("Expected Node change");
         }
+    }
+
+    #[test]
+    fn test_temporal_diff_limit() {
+        let db = AletheiaDB::new().unwrap();
+
+        // Create 10 nodes
+        for i in 0..10 {
+            let props = PropertyMapBuilder::new().insert("idx", i as i64).build();
+            db.create_node("Node", props).unwrap();
+        }
+
+        let t1 = time::now();
+        let t0 = Timestamp::from(0); // Before creation
+
+        let diff_engine = TemporalDiff::new(&db);
+
+        // Limit = 5
+        let report = diff_engine.compute_diff(t0, t1, Some(5)).unwrap();
+        assert_eq!(
+            report.changes.len(),
+            5,
+            "Should only report 5 changes due to limit"
+        );
+
+        // Limit = None (All)
+        let report_all = diff_engine.compute_diff(t0, t1, None).unwrap();
+        assert_eq!(
+            report_all.changes.len(),
+            10,
+            "Should report all 10 changes without limit"
+        );
     }
 }
