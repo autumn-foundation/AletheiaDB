@@ -1,6 +1,6 @@
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, HnswConfig};
-use aletheiadb::index::VectorIndex;
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndexBuilder};
 use aletheiadb::utils::Error;
 
 #[test]
@@ -10,8 +10,12 @@ fn test_havoc_dimension_recovery() {
 
     // 1. Create a valid index with dimension 4
     {
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
         index.save(&path).unwrap();
     }
 
@@ -21,21 +25,29 @@ fn test_havoc_dimension_recovery() {
     // HnswIndex::load should REJECT this because the file dimensions (4) do not match
     // the expected configuration (128). This prevents inconsistent state.
 
-    let config = HnswConfig::new(128, DistanceMetric::Cosine)
-        .with_custom_metric("spy", |_a, _b| {
-             0.0
-        });
+    let config =
+        HnswConfig::new(128, DistanceMetric::Cosine).with_custom_metric("spy", |_a, _b| 0.0);
 
     let result = aletheiadb::index::vector::HnswIndex::load(&path, config);
 
-    assert!(result.is_err(), "Load should fail due to dimension mismatch between config and file");
+    assert!(
+        result.is_err(),
+        "Load should fail due to dimension mismatch between config and file"
+    );
 
     match result {
         Err(Error::Vector(aletheiadb::utils::error::VectorError::IndexError(msg))) => {
-            assert!(msg.contains("Index dimension mismatch"), "Error message should mention dimension mismatch. Got: {}", msg);
-            assert!(msg.contains("expected 128"), "Error should expect 128 (config)");
+            assert!(
+                msg.contains("Index dimension mismatch"),
+                "Error message should mention dimension mismatch. Got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("expected 128"),
+                "Error should expect 128 (config)"
+            );
             assert!(msg.contains("found 4"), "Error should find 4 (file)");
-        },
+        }
         _ => panic!("Expected VectorError::IndexError, got {:?}", result),
     }
 }
@@ -47,8 +59,12 @@ fn test_havoc_tampered_metadata_detection() {
 
     // 1. Create a valid index with dimension 4
     {
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
         index.save(&path).unwrap();
     }
 
@@ -59,7 +75,7 @@ fn test_havoc_tampered_metadata_detection() {
     // V2 Format: Magic(4) + Ver(1) + Dims(8) ...
     let dims_offset = 5;
     let new_dims: u64 = 128;
-    data[dims_offset..dims_offset+8].copy_from_slice(&new_dims.to_le_bytes());
+    data[dims_offset..dims_offset + 8].copy_from_slice(&new_dims.to_le_bytes());
 
     // Fix CRC
     let crc_offset = data.len() - 4;
@@ -81,10 +97,20 @@ fn test_havoc_tampered_metadata_detection() {
 
     match result {
         Err(Error::Vector(aletheiadb::utils::error::VectorError::IndexError(msg))) => {
-            assert!(msg.contains("Index dimension mismatch"), "Error message should mention dimension mismatch. Got: {}", msg);
-            assert!(msg.contains("expected 4"), "Error should expect 4 (config/index)");
-            assert!(msg.contains("found 128"), "Error should find 128 (metadata)");
-        },
+            assert!(
+                msg.contains("Index dimension mismatch"),
+                "Error message should mention dimension mismatch. Got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("expected 4"),
+                "Error should expect 4 (config/index)"
+            );
+            assert!(
+                msg.contains("found 128"),
+                "Error should find 128 (metadata)"
+            );
+        }
         _ => panic!("Expected VectorError::IndexError, got {:?}", result),
     }
 }
