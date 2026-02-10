@@ -95,6 +95,9 @@ pub(crate) mod simd;
 mod sentry_tests;
 
 #[cfg(test)]
+mod sentry_sparse_consistency_tests;
+
+#[cfg(test)]
 mod tests;
 
 pub use constants::*;

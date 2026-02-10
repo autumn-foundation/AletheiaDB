@@ -107,14 +107,25 @@ std::thread_local! {
     static REENTRANCY_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
+/// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
 /// This ensures the flag is always reset, even if the callback panics.
-pub(crate) struct FilterCallbackGuard;
+pub(crate) struct FilterCallbackGuard {
+    prev: bool,
+}
 
 impl FilterCallbackGuard {
     pub(crate) fn new() -> Self {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
-        FilterCallbackGuard
+        let prev = IN_FILTER_CALLBACK.with(|flag| flag.replace(true));
+        FilterCallbackGuard { prev }
+    }
+}
+
+impl Drop for FilterCallbackGuard {
+    fn drop(&mut self) {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(self.prev));
+    }
+}
+
 /// It also handles nested usage correctly by restoring the previous state.
 struct ReentrancyGuard {
     prev: bool,
