@@ -2162,6 +2162,10 @@ impl CurrentStorage {
             results
         };
 
+        // Filter out ghost nodes (nodes in vector index but not in graph)
+        // This ensures consistency even if vector index delete failed or is pending
+        results.retain(|(id, _)| self.indexes.contains_node(*id));
+
         results.truncate(k);
         Ok(results)
     }
