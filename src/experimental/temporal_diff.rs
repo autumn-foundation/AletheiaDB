@@ -41,14 +41,14 @@ pub enum EntityChange {
         /// The ID of the node.
         id: NodeId,
         /// The type of change.
-        change: ChangeType
+        change: ChangeType,
     },
     /// An edge changed.
     Edge {
         /// The ID of the edge.
         id: EdgeId,
         /// The type of change.
-        change: ChangeType
+        change: ChangeType,
     },
 }
 
@@ -62,7 +62,7 @@ pub enum ChangeType {
     /// Entity exists at both but properties differ.
     Modified {
         /// The difference in properties.
-        diff: PropertyDiff
+        diff: PropertyDiff,
     },
 }
 
@@ -345,7 +345,11 @@ mod tests {
 
         // No-Op Diff: T1 -> T1
         let report_same = diff_engine.compute_diff(t1, t1, None).unwrap();
-        assert_eq!(report_same.changes.len(), 0, "No changes expected for same timestamp");
+        assert_eq!(
+            report_same.changes.len(),
+            0,
+            "No changes expected for same timestamp"
+        );
     }
 
     #[test]
@@ -389,13 +393,19 @@ mod tests {
             added: vec!["key".to_string()],
             ..Default::default()
         };
-        assert!(!diff_added.is_empty(), "Diff with added should not be empty");
+        assert!(
+            !diff_added.is_empty(),
+            "Diff with added should not be empty"
+        );
 
         let diff_removed = PropertyDiff {
             removed: vec!["key".to_string()],
             ..Default::default()
         };
-        assert!(!diff_removed.is_empty(), "Diff with removed should not be empty");
+        assert!(
+            !diff_removed.is_empty(),
+            "Diff with removed should not be empty"
+        );
 
         let mut changed = HashMap::new();
         changed.insert("key".to_string(), ("old".to_string(), "new".to_string()));
@@ -403,6 +413,9 @@ mod tests {
             changed,
             ..Default::default()
         };
-        assert!(!diff_changed.is_empty(), "Diff with changed should not be empty");
+        assert!(
+            !diff_changed.is_empty(),
+            "Diff with changed should not be empty"
+        );
     }
 }
