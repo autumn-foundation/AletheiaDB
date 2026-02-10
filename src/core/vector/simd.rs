@@ -633,6 +633,7 @@ pub(crate) fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
 
 #[inline]
 fn simsimd_dot(a: &[f32], b: &[f32]) -> Option<f32> {
+    assert_eq!(a.len(), b.len());
     let mut result = 0.0f64;
     // SAFETY: Pointers originate from valid slices with equal lengths.
     // SimSIMD writes a single distance scalar into `result`.
@@ -653,6 +654,7 @@ fn simsimd_dot(a: &[f32], b: &[f32]) -> Option<f32> {
 
 #[inline]
 fn simsimd_sqeuclidean(a: &[f32], b: &[f32]) -> Option<f32> {
+    assert_eq!(a.len(), b.len());
     let mut result = 0.0f64;
     // SAFETY: Pointers originate from valid slices with equal lengths.
     // SimSIMD writes a single distance scalar into `result`.
@@ -674,4 +676,27 @@ fn simsimd_sqeuclidean(a: &[f32], b: &[f32]) -> Option<f32> {
 unsafe extern "C" {
     fn simsimd_dot_f32(a: *const f32, b: *const f32, n: u64, d: *mut f64);
     fn simsimd_l2sq_f32(a: *const f32, b: *const f32, n: u64, d: *mut f64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic]
+    fn test_simsimd_dot_dimension_mismatch_panics() {
+        let a = vec![1.0, 2.0];
+        let b = vec![1.0];
+        // This function is private, but we are inside the module (submodule tests)
+        let _ = simsimd_dot(&a, &b);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_simsimd_sqeuclidean_dimension_mismatch_panics() {
+        let a = vec![1.0, 2.0];
+        let b = vec![1.0];
+        // This function is private, but we are inside the module
+        let _ = simsimd_sqeuclidean(&a, &b);
+    }
 }
