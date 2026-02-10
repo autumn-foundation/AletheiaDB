@@ -897,7 +897,7 @@ impl PropertyValue {
 /// ```
 pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(1 + 4 + v.len() * 4);
-    serialize_vector_into(v, &mut buffer);
+    try_serialize_vector_into(v, &mut buffer).unwrap_or_else(|e| panic!("{}", e));
     buffer
 }
 
@@ -922,6 +922,7 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 ///
 /// For a fallible version that returns `Result` instead of panicking,
 /// use [`try_serialize_vector_into`].
+#[deprecated(since = "0.1.0", note = "Use try_serialize_vector_into instead")]
 pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
     try_serialize_vector_into(v, buffer).unwrap_or_else(|e| panic!("{}", e))
 }
@@ -3983,12 +3984,21 @@ mod sentry_tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "Vector dimension")]
     fn test_serialize_vector_into_panics_on_overflow() {
         // 💣 Risk: serialize_vector_into panics on large inputs instead of returning Result.
+        // Updated to use try_serialize_vector_into and verify error
         let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
         let mut buffer = Vec::new();
-        serialize_vector_into(&large_vector, &mut buffer);
+        let result = try_serialize_vector_into(&large_vector, &mut buffer);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::DimensionTooLarge { .. },
+            )) => {
+                // Expected error
+            }
+            _ => panic!("Expected DimensionTooLarge error"),
+        }
     }
 
     #[test]
@@ -3998,7 +4008,7 @@ mod sentry_tests {
         let mut buffer = vec![0xAA, 0xBB, 0xCC]; // Existing data
         let vector = vec![1.0f32, 2.0, 3.0];
 
-        serialize_vector_into(&vector, &mut buffer);
+        try_serialize_vector_into(&vector, &mut buffer).unwrap();
 
         // Verify prefix is intact
         assert_eq!(buffer[0], 0xAA);
