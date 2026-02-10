@@ -359,7 +359,7 @@ kani-setup:
 
 # Run Kani proofs configured in workspace (requires harnesses)
 kani:
-    cargo kani
+    cargo kani --lib
 
 # Install Verus toolchain (manual step helper)
 verus-setup:

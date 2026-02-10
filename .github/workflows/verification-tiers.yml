@@ -65,8 +65,8 @@ jobs:
 
       - name: Kani smoke
         run: |
-          cargo kani --harness kani_wal_bounded_state_machine_transitions
-          cargo kani --harness kani_lsn_allocator_bounded_sequence_monotonic
+          cargo kani --lib --harness kani_wal_bounded_state_machine_transitions
+          cargo kani --lib --harness kani_lsn_allocator_bounded_sequence_monotonic
 
       - name: Install Verus (latest Linux release)
         run: |
@@ -144,16 +144,16 @@ jobs:
 
       - name: Broader Kani with deeper unwind
         run: |
-          cargo kani --default-unwind 12 --harness kani_lsn_allocator_single_step_monotonic
-          cargo kani --default-unwind 12 --harness kani_lsn_allocator_batch_range_size
-          cargo kani --default-unwind 12 --harness kani_wal_bounded_state_machine_transitions
-          cargo kani --default-unwind 12 --harness kani_snapshot_metadata_rollover_bounded
-          cargo kani --default-unwind 12 --harness kani_lsn_allocator_bounded_sequence_monotonic
-          cargo kani --default-unwind 12 --harness kani_restore_global_lsn_order_sorts
-          cargo kani --default-unwind 12 --harness kani_lsn_single_then_batch_non_overlapping
-          cargo kani --default-unwind 12 --harness kani_lsn_batch_then_single_non_overlapping
-          cargo kani --default-unwind 12 --harness kani_wal_close_is_sticky_and_append_fails_after_close
-          cargo kani --default-unwind 12 --harness kani_snapshot_full_reset_clears_accumulated_changes
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_allocator_single_step_monotonic
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_allocator_batch_range_size
+          cargo kani --lib --default-unwind 12 --harness kani_wal_bounded_state_machine_transitions
+          cargo kani --lib --default-unwind 12 --harness kani_snapshot_metadata_rollover_bounded
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_allocator_bounded_sequence_monotonic
+          cargo kani --lib --default-unwind 12 --harness kani_restore_global_lsn_order_sorts
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_single_then_batch_non_overlapping
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_batch_then_single_non_overlapping
+          cargo kani --lib --default-unwind 12 --harness kani_wal_close_is_sticky_and_append_fails_after_close
+          cargo kani --lib --default-unwind 12 --harness kani_snapshot_full_reset_clears_accumulated_changes
 
       - name: Install cargo-fuzz
         run: cargo install --locked cargo-fuzz
