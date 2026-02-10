@@ -821,11 +821,12 @@ impl PropertyValue {
         // This ensures that malicious or excessively nested structures are
         // considered "large" by cache eviction policies, rather than "small" (0),
         // preventing them from monopolizing the cache.
-        self.estimated_heap_size_recursive(0)
+        let mut budget = MAX_SERIALIZATION_SIZE;
+        self.estimated_heap_size_recursive(0, &mut budget)
             .unwrap_or(10 * 1024 * 1024)
     }
 
-    fn estimated_heap_size_recursive(&self, depth: usize) -> Result<usize> {
+    fn estimated_heap_size_recursive(&self, depth: usize, budget: &mut usize) -> Result<usize> {
         if depth > MAX_RECURSION_DEPTH {
             return Err(StorageError::CorruptedData(format!(
                 "Property value recursion depth limit exceeded (max {})",
@@ -833,6 +834,10 @@ impl PropertyValue {
             ))
             .into());
         }
+
+        // Consume a small amount of budget per node visited to prevent infinite loops/hangs
+        // on massive DAGs even if they don't allocate much heap memory.
+        consume_budget(budget, 1)?;
 
         match self {
             PropertyValue::Null
@@ -845,7 +850,7 @@ impl PropertyValue {
                 // Vec capacity overhead + recursive element sizes
                 let mut size = arr.capacity() * std::mem::size_of::<PropertyValue>();
                 for item in arr.iter() {
-                    size += item.estimated_heap_size_recursive(depth + 1)?;
+                    size += item.estimated_heap_size_recursive(depth + 1, budget)?;
                 }
                 Ok(size)
             }
@@ -1650,19 +1655,48 @@ impl PropertyMap {
     ///
     /// Returns `StorageError::InconsistentState` if any PropertyKey cannot be
     /// resolved from the interner, indicating data corruption.
+    ///
+    /// Returns `StorageError::CorruptedData` if serialization budget is exceeded.
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<()> {
         // Reserve space for the entire map to avoid reallocations
         buffer.reserve(self.cached_size);
 
+        // Initialize a shared budget for the entire map serialization operation.
+        // This prevents DoS attacks where a map contains many large items that individually
+        // fit within the per-item budget but collectively exceed safe limits.
+        let mut budget = MAX_SERIALIZATION_SIZE;
+
+        consume_budget(&mut budget, 4)?; // Count field
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
+
         for (key, value) in self.inner.iter() {
             // Serialize key: resolve InternedString to actual string
             // Use with_str to avoid Arc cloning overhead
             GLOBAL_INTERNER
                 .resolve_with(*key, |key_str| {
                     let key_bytes = key_str.as_bytes();
-                    buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+                    // Budget for key length prefix (4) + key bytes
+                    // We can't easily return Result from resolve_with, so we panic/log if budget
+                    // exceeded? No, we should check budget before writing.
+                    // But we don't know key len until we resolve it.
+                    // This closure must not fail.
+                    //
+                    // Workaround: We trust the key length is reasonable (it's an interned string)
+                    // but we must still account for it in the budget.
+                    // Since we can't propagate error from closure easily without refactoring,
+                    // we accept a minor risk here or use a mutable flag.
+                    //
+                    // Better approach: Get len first, check budget, then write.
+                    // resolve_with return value is generic.
+                    let len = key_str.len();
+                    buffer.extend_from_slice(&(len as u32).to_le_bytes());
                     buffer.extend_from_slice(key_bytes);
+                    len
+                })
+                .map(|len| {
+                    // Account for the key bytes + length prefix written inside the closure
+                    // If budget is exhausted, this will return Error which we propagate.
+                    consume_budget(&mut budget, 4 + len)
                 })
                 .ok_or_else(|| {
                     crate::utils::error::Error::Storage(StorageError::InconsistentState {
@@ -1671,10 +1705,11 @@ impl PropertyMap {
                             key.as_u32()
                         ),
                     })
-                })?;
+                })??;
 
-            // Serialize value
-            value.serialize_into(buffer)?;
+            // Serialize value using the SHARED budget
+            // We call serialize_recursive directly to avoid resetting the budget
+            value.serialize_recursive(buffer, 0, &mut budget)?;
         }
         Ok(())
     }
