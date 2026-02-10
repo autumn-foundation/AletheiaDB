@@ -431,6 +431,10 @@ where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
 {
     Box::new(move |a: *const f32, b: *const f32| {
+        // Set re-entrancy guard to prevent deadlock if custom metric calls back into index
+        // This is critical because usearch holds a read lock while calling this metric.
+        let _guard = ReentrancyGuard::new();
+
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
             // This should never happen with a correct usearch implementation.
