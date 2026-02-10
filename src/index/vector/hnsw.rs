@@ -1818,6 +1818,17 @@ impl HnswIndex {
         // Validate metadata
         Self::validate_metadata(metadata, &config)?;
 
+        // Verify loaded index dimensions match configuration
+        // This protects against legacy indexes (no metadata) having mismatched dimensions,
+        // which could lead to buffer over-reads if usearch didn't have its own checks.
+        let loaded_dims = index.dimensions();
+        if loaded_dims != config.dimensions {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Index dimension mismatch: config={}, actual loaded={}",
+                config.dimensions, loaded_dims
+            ))));
+        }
+
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
             config,
