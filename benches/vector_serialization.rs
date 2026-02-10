@@ -153,6 +153,7 @@ fn bench_serialize_into(c: &mut Criterion) {
 
             b.iter(|| {
                 let mut buffer = Vec::new();
+                #[allow(deprecated)]
                 aletheiadb::core::property::serialize_vector_into(black_box(&vector), &mut buffer);
                 black_box(buffer);
             });

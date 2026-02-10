@@ -4002,6 +4002,16 @@ mod sentry_tests {
     }
 
     #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_serialize_vector_into_coverage() {
+        // Ensure the deprecated function is covered by tests
+        let vector = vec![1.0f32, 2.0, 3.0];
+        let mut buffer = Vec::new();
+        serialize_vector_into(&vector, &mut buffer);
+        assert!(!buffer.is_empty());
+    }
+
+    #[test]
     fn test_serialize_vector_into_buffer_appending() {
         // 🧪 Strategy: Verify that serialize_vector_into correctly appends to an existing buffer
         // and doesn't overwrite data or corrupt offsets.
