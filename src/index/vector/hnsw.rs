@@ -1766,10 +1766,16 @@ impl HnswIndex {
                 )))
             })?;
 
+        // Update config with actual dimensions from loaded index
+        // This handles cases where metadata validation was bypassed or
+        // where usearch loaded a file with different dimensions than requested.
+        let mut actual_config = config;
+        actual_config.dimensions = index.dimensions();
+
         // Apply custom metric if configured (must happen after load, before use)
         // This ensures custom metrics are preserved across save/load cycles
-        if let Some(ref custom) = config.custom_metric {
-            let dims = config.dimensions;
+        if let Some(ref custom) = actual_config.custom_metric {
+            let dims = actual_config.dimensions;
             let distance_fn = Arc::clone(&custom.distance_fn);
 
             // Create a wrapper that converts usearch's raw pointer API to our safe slice API
@@ -1783,12 +1789,12 @@ impl HnswIndex {
         let (id_mapping, reverse_mapping, max_key, metadata) =
             load_mappings_with_integrity(&mappings_path)?;
 
-        // Validate metadata
-        Self::validate_metadata(metadata, &config)?;
+        // Validate metadata against the actual loaded configuration
+        Self::validate_metadata(metadata, &actual_config)?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
-            config,
+            config: actual_config,
             id_mapping: Arc::new(id_mapping),
             reverse_mapping: Arc::new(reverse_mapping),
             next_key: AtomicU64::new(max_key + 1),
