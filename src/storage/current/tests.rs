@@ -1954,3 +1954,14 @@ fn test_find_similar_filters_ghost_nodes() {
         results
     );
 }
+
+#[test]
+fn test_enable_vector_index_path_traversal() {
+    use crate::index::vector::DistanceMetric;
+    let storage = CurrentStorage::new();
+    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+
+    // This should fail validation but currently succeeds
+    let result = storage.enable_vector_index("../traversal", config);
+    assert!(result.is_err(), "Should reject path traversal characters in property name");
+}

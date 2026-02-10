@@ -7,3 +7,11 @@
 **2026-02-15 - FFI Unwind Safety in HNSW Metric Wrapper**
 **Threat:** The `create_metric_wrapper` function in `src/index/vector/hnsw.rs` used `panic!` when encountering null or unaligned pointers from the C++ `usearch` library. Panicking across an FFI boundary is Undefined Behavior (UB) and can lead to memory corruption or exploitable crashes.
 **Defense:** Replaced `panic!` with `std::process::abort()` and added explicit error logging. This ensures the process terminates safely and immediately if the integrity of the FFI boundary is violated, preventing UB.
+
+**2026-02-15 - Path Traversal in Vector Index Creation**
+**Threat:** The `enable_vector_index` API accepted arbitrary strings as property names. These names were used to construct filesystem paths for index persistence. A malicious actor could supply a property name containing `..` or path separators to traverse outside the intended directory and potentially overwrite critical files during persistence operations.
+**Defense:** Implemented `validate_property_name` in `src/storage/current/mod.rs` to strictly validate property names. It rejects names containing `..`, `/`, or `\` and enforces a length limit. This validation is applied at the API entry point, preventing invalid paths from entering the system.
+
+**2026-02-15 - Broken RAII Guard in HNSW Index**
+**Threat:** The `FilterCallbackGuard` in `src/index/vector/hnsw.rs` was missing a `Drop` implementation, meaning the `IN_FILTER_CALLBACK` thread-local flag was never reset to `false` after a callback finished. This could leave a thread permanently unable to modify indexes if a callback was ever invoked, leading to a Denial of Service (DoS) for write operations on that thread.
+**Defense:** Implemented `Drop` for `FilterCallbackGuard` to ensure the flag is always reset when the guard goes out of scope, guaranteeing correct state management even during panics.
