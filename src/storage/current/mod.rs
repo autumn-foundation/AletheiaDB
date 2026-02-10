@@ -2159,12 +2159,15 @@ impl CurrentStorage {
             if let Some(exclude_id) = exclude_node {
                 results.retain(|(id, _)| *id != exclude_id);
             }
+
+            // Filter out ghost nodes (nodes in vector index but not in graph)
+            // This ensures consistency even if vector index delete failed or is pending.
+            // Note: We don't do this for the filtered case above because search_with_filter
+            // already checks node existence (get_node_label returns None for missing nodes).
+            results.retain(|(id, _)| self.indexes.contains_node(*id));
+
             results
         };
-
-        // Filter out ghost nodes (nodes in vector index but not in graph)
-        // This ensures consistency even if vector index delete failed or is pending
-        results.retain(|(id, _)| self.indexes.contains_node(*id));
 
         results.truncate(k);
         Ok(results)
