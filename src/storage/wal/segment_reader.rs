@@ -447,6 +447,19 @@ pub(crate) fn parse_entry_at(
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
+                // Check bounds for label_id
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateNode label".to_string(),
+                    )
+                    .into());
+                }
+
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -502,6 +515,19 @@ pub(crate) fn parse_entry_at(
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
+                // Check bounds for label_id
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    )
+                    .into());
+                }
+
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -1486,5 +1512,33 @@ mod tests {
             }
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
+    }
+}
+
+#[cfg(test)]
+mod repro_tests {
+    use super::*;
+
+    #[test]
+    fn test_fuzz_crash_repro_update_edge() {
+        // Reproduction for panic in UpdateEdge due to missing bounds check
+        // Input: [71, 87, 65, 76, 1, 10, 0, 0, 10, 43, 199, 46, 0, 0, 138, 87, 35, 46, 0, 0, 37, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 253, 1, 4, 4, 255, 255, 251, 4, 4, 71, 46]
+        let data = vec![
+            71, 87, 65, 76, 1, 10, 0, 0, 10, 43, 199, 46, 0, 0, 138, 87, 35, 46, 0, 0, 37, 6, 6,
+            6, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 253, 1, 4, 4, 255, 255, 251, 4, 4, 71, 46,
+        ];
+
+        // This should return an error, not panic
+        // Offset 5 because first 5 bytes are header (GWAL + version)
+        // However, parse_entry_at expects buffer to start at offset?
+        // No, it takes buffer and offset.
+        // But read_segment passes the whole buffer.
+
+        // Wait, the fuzz input includes the header:
+        // 71, 87, 65, 76 (GWAL)
+        // 1 (Version)
+
+        let result = parse_entry_at(&data, 5, 1);
+        assert!(result.is_err());
     }
 }
