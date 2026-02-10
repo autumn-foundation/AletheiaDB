@@ -447,6 +447,19 @@ pub(crate) fn parse_entry_at(
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
+                // Ensure we have enough bytes for label_id
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    )
+                    .into());
+                }
+
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],

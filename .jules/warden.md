@@ -15,3 +15,7 @@
 **2026-02-15 - Broken RAII Guard in HNSW Index**
 **Threat:** The `FilterCallbackGuard` in `src/index/vector/hnsw.rs` was missing a `Drop` implementation, meaning the `IN_FILTER_CALLBACK` thread-local flag was never reset to `false` after a callback finished. This could leave a thread permanently unable to modify indexes if a callback was ever invoked, leading to a Denial of Service (DoS) for write operations on that thread.
 **Defense:** Implemented `Drop` for `FilterCallbackGuard` to ensure the flag is always reset when the guard goes out of scope, guaranteeing correct state management even during panics.
+
+**2026-02-15 - Buffer Over-read in WAL Segment Parsing**
+**Threat:** The `UpdateEdge` operation parser in `src/storage/wal/segment_reader.rs` failed to check bounds before reading the 4-byte `label_id` field when processing legacy WAL versions. This allowed a malformed WAL entry (truncated payload) to trigger a panic (index out of bounds), leading to a Denial of Service (DoS) during recovery or replication.
+**Defense:** Added an explicit `checked_add` bounds check before reading the `label_id` field, ensuring the buffer has sufficient capacity before access.
