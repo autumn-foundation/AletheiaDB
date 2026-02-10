@@ -1,0 +1,326 @@
+name: Verification Tiers
+
+on:
+  pull_request:
+    branches: [ trunk ]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "verification/**"
+      - "fuzz/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/verification-tiers.yml"
+  schedule:
+    # Nightly tier: every day at 01:00 UTC
+    - cron: "0 1 * * *"
+    # Weekly tier: Sunday at 03:00 UTC
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Tier to run"
+        required: true
+        default: "pr"
+        type: choice
+        options:
+          - pr
+          - nightly
+          - weekly
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pr-tier:
+    name: PR Tier (Loom subset + Kani smoke + Verus smoke + fuzz smoke)
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'pr')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Loom subset (fast PR confidence)
+        run: cargo test --test loom_wal --test loom_temporal
+
+      - name: Install Kani
+        run: cargo install --locked --version 0.67.0 kani-verifier
+
+      - name: Setup Kani model checker
+        run: printf "y\n" | cargo kani setup
+
+      - name: Kani smoke
+        run: |
+          cargo kani --lib --harness kani_wal_bounded_state_machine_transitions
+          cargo kani --lib --harness kani_lsn_allocator_bounded_sequence_monotonic
+
+      - name: Install Verus (latest Linux release)
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, re, sys
+          url = "https://api.github.com/repos/verus-lang/verus/releases/latest"
+          data = json.load(urllib.request.urlopen(url))
+          asset_url = None
+          for asset in data.get("assets", []):
+              name = asset.get("name", "").lower()
+              dl = asset.get("browser_download_url", "")
+              if "linux" in name and (name.endswith(".zip") or name.endswith(".tar.gz")) and "sha" not in name:
+                  asset_url = dl
+                  break
+          if not asset_url:
+              sys.exit("No Linux Verus release asset found")
+          print(asset_url)
+          PY
+          VERUS_URL=$(python3 - <<'PY'
+          import json, urllib.request, sys
+          data = json.load(urllib.request.urlopen("https://api.github.com/repos/verus-lang/verus/releases/latest"))
+          for asset in data.get("assets", []):
+              name = asset.get("name", "").lower()
+              dl = asset.get("browser_download_url", "")
+              if "linux" in name and (name.endswith(".zip") or name.endswith(".tar.gz")) and "sha" not in name:
+                  print(dl)
+                  raise SystemExit(0)
+          raise SystemExit("No Linux Verus release asset found")
+          PY
+          )
+          curl -fsSL "$VERUS_URL" -o verus-asset
+          mkdir -p .verus
+          if [[ "$VERUS_URL" == *.tar.gz ]]; then
+            tar -xzf verus-asset -C .verus
+          else
+            unzip -q verus-asset -d .verus
+          fi
+          VERUS_BIN=$(find .verus -type f -name verus | head -n 1)
+          chmod +x "$VERUS_BIN"
+          "$VERUS_BIN" verification/verus/temporal_invariants.rs
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Fuzz smoke
+        run: |
+          cargo fuzz run aql_parser -- -max_total_time=30
+          cargo fuzz run wal_segment_metadata_from_bytes -- -max_total_time=30
+          cargo fuzz run wal_segment_reader_from_bytes -- -max_total_time=30
+          cargo fuzz run vector_mappings_from_bytes -- -max_total_time=30
+
+  nightly-tier:
+    name: Nightly Tier (full Loom + broader Kani + longer fuzz)
+    if: github.event.schedule == '0 1 * * *' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'nightly')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Full Loom suite
+        run: cargo test --test loom_wal --test loom_vector --test loom_temporal
+
+      - name: Install Kani
+        run: cargo install --locked --version 0.67.0 kani-verifier
+
+      - name: Setup Kani model checker
+        run: printf "y\n" | cargo kani setup
+
+      - name: Broader Kani with deeper unwind
+        run: |
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_allocator_single_step_monotonic
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_allocator_batch_range_size
+          cargo kani --lib --default-unwind 12 --harness kani_wal_bounded_state_machine_transitions
+          cargo kani --lib --default-unwind 12 --harness kani_snapshot_metadata_rollover_bounded
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_allocator_bounded_sequence_monotonic
+          cargo kani --lib --default-unwind 12 --harness kani_restore_global_lsn_order_sorts
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_single_then_batch_non_overlapping
+          cargo kani --lib --default-unwind 12 --harness kani_lsn_batch_then_single_non_overlapping
+          cargo kani --lib --default-unwind 12 --harness kani_wal_close_is_sticky_and_append_fails_after_close
+          cargo kani --lib --default-unwind 12 --harness kani_snapshot_full_reset_clears_accumulated_changes
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Longer fuzz runtime
+        run: |
+          cargo fuzz run aql_parser -- -max_total_time=300
+          cargo fuzz run wal_segment_metadata_from_bytes -- -max_total_time=300
+          cargo fuzz run wal_segment_reader_from_bytes -- -max_total_time=300
+          cargo fuzz run vector_mappings_from_bytes -- -max_total_time=300
+
+      - name: Upload nightly fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz-artifacts
+          path: |
+            fuzz/artifacts
+            fuzz/corpus
+          if-no-files-found: ignore
+          retention-days: 14
+
+  weekly-tier:
+    name: Weekly Tier (mutants + miri + extended fuzz minimization)
+    if: github.event.schedule == '0 3 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'weekly')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts (stable)
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@cargo-binstall
+
+      - name: Install cargo-mutants
+        run: cargo binstall --no-confirm cargo-mutants
+
+      - name: Weekly mutation sweep by module
+        run: bash scripts/verification/run_mutation_sweep.sh
+
+      - name: Fetch previous mutation metrics
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/verification/fetch_previous_mutation_metrics.py \
+            verification/mutation/previous_mutation_metrics.json
+
+      - name: Publish mutation trend summary
+        run: |
+          if [ -f verification/mutation/previous_mutation_metrics.json ]; then
+            python3 scripts/verification/compare_mutation_metrics.py \
+              verification/mutation/mutation_metrics.json \
+              verification/mutation/previous_mutation_metrics.json \
+              verification/mutation/mutation_trend.md
+            cat verification/mutation/mutation_trend.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Mutation Score Trend"
+              echo
+              echo "Previous metrics artifact not found. This run establishes the baseline."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cat verification/mutation/mutation_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Rust nightly with miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Setup miri
+        run: cargo +nightly miri setup
+
+      - name: Weekly Miri sweep
+        run: cargo +nightly miri test --lib
+
+      - name: Install Verus (latest Linux release)
+        run: |
+          VERUS_URL=$(python3 - <<'PY'
+          import json, urllib.request, sys
+          data = json.load(urllib.request.urlopen("https://api.github.com/repos/verus-lang/verus/releases/latest"))
+          for asset in data.get("assets", []):
+              name = asset.get("name", "").lower()
+              dl = asset.get("browser_download_url", "")
+              if "linux" in name and (name.endswith(".zip") or name.endswith(".tar.gz")) and "sha" not in name:
+                  print(dl)
+                  raise SystemExit(0)
+          raise SystemExit("No Linux Verus release asset found")
+          PY
+          )
+          curl -fsSL "$VERUS_URL" -o verus-asset
+          mkdir -p .verus
+          if [[ "$VERUS_URL" == *.tar.gz ]]; then
+            tar -xzf verus-asset -C .verus
+          else
+            unzip -q verus-asset -d .verus
+          fi
+          VERUS_BIN=$(find .verus -type f -name verus | head -n 1)
+          chmod +x "$VERUS_BIN"
+          echo "VERUS_BIN=$VERUS_BIN" >> "$GITHUB_ENV"
+
+      - name: Weekly Verus full core invariants
+        run: |
+          "$VERUS_BIN" verification/verus/temporal_invariants.rs
+          "$VERUS_BIN" verification/verus/vector_mapping_invariants.rs
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Extended fuzz runtime + corpus minimization
+        run: |
+          mkdir -p \
+            fuzz/corpus/aql_parser \
+            fuzz/corpus/wal_segment_metadata_from_bytes \
+            fuzz/corpus/wal_segment_reader_from_bytes \
+            fuzz/corpus/vector_mappings_from_bytes
+          cargo fuzz run aql_parser -- -max_total_time=900
+          cargo fuzz run wal_segment_metadata_from_bytes -- -max_total_time=900
+          cargo fuzz run wal_segment_reader_from_bytes -- -max_total_time=900
+          cargo fuzz run vector_mappings_from_bytes -- -max_total_time=900
+
+          mkdir -p \
+            fuzz/corpus_min/aql_parser \
+            fuzz/corpus_min/wal_segment_metadata_from_bytes \
+            fuzz/corpus_min/wal_segment_reader_from_bytes \
+            fuzz/corpus_min/vector_mappings_from_bytes
+          cargo fuzz run aql_parser -- -merge=1 fuzz/corpus_min/aql_parser fuzz/corpus/aql_parser
+          cargo fuzz run wal_segment_metadata_from_bytes -- -merge=1 fuzz/corpus_min/wal_segment_metadata_from_bytes fuzz/corpus/wal_segment_metadata_from_bytes
+          cargo fuzz run wal_segment_reader_from_bytes -- -merge=1 fuzz/corpus_min/wal_segment_reader_from_bytes fuzz/corpus/wal_segment_reader_from_bytes
+          cargo fuzz run vector_mappings_from_bytes -- -merge=1 fuzz/corpus_min/vector_mappings_from_bytes fuzz/corpus/vector_mappings_from_bytes
+
+          rm -rf \
+            fuzz/corpus/aql_parser \
+            fuzz/corpus/wal_segment_metadata_from_bytes \
+            fuzz/corpus/wal_segment_reader_from_bytes \
+            fuzz/corpus/vector_mappings_from_bytes
+          mv fuzz/corpus_min/aql_parser fuzz/corpus/aql_parser
+          mv fuzz/corpus_min/wal_segment_metadata_from_bytes fuzz/corpus/wal_segment_metadata_from_bytes
+          mv fuzz/corpus_min/wal_segment_reader_from_bytes fuzz/corpus/wal_segment_reader_from_bytes
+          mv fuzz/corpus_min/vector_mappings_from_bytes fuzz/corpus/vector_mappings_from_bytes
+
+      - name: Upload weekly verification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-verification-artifacts
+          path: |
+            verification/mutation
+            fuzz/artifacts
+            fuzz/corpus
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload mutation metrics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-metrics
+          path: |
+            verification/mutation/mutation_metrics.json
+            verification/mutation/mutation_summary.md
+          if-no-files-found: error
+          retention-days: 90

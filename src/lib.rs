@@ -88,6 +88,10 @@ pub mod http;
 #[cfg(test)]
 pub mod test_utils;
 
+// Kani proof harnesses (only compiled under cargo-kani)
+#[cfg(kani)]
+mod verification;
+
 // Re-export commonly used types at the crate root
 pub use config::{
     AletheiaDBConfig, AletheiaDBConfigBuilder, ConfigError, HistoricalConfig,
