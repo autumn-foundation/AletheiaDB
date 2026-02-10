@@ -423,15 +423,24 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
 #[cold]
 #[inline(never)]
 fn ffi_abort(reason: &str) -> ! {
-    // LCOV_EXCL_START
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr(),
-        "CRITICAL SECURITY ERROR: {}. Aborting to prevent UB.",
-        reason
-    );
-    std::process::abort();
-    // LCOV_EXCL_STOP
+    #[cfg(test)]
+    {
+        panic!(
+            "CRITICAL SECURITY ERROR: {}. Aborting to prevent UB.",
+            reason
+        );
+    }
+
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "CRITICAL SECURITY ERROR: {}. Aborting to prevent UB.",
+            reason
+        );
+        std::process::abort();
+    }
 }
 
 // Helper to create the metric wrapper - extracted for testing
@@ -449,7 +458,7 @@ where
             // If it does, we MUST abort to prevent UB from dereferencing null or
             // unwinding across the FFI boundary (which is UB).
             // We cannot return an error here because the signature is fixed by usearch trait.
-            ffi_abort("usearch passed null pointer to metric function"); // LCOV_EXCL_LINE
+            ffi_abort("usearch passed null pointer to metric function");
         }
 
         // Check for alignment to prevent UB
@@ -457,7 +466,7 @@ where
         let align_mask = std::mem::align_of::<f32>() - 1;
         if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
             // Abort for same reason as above: unwinding across FFI is UB.
-            ffi_abort("usearch passed unaligned pointer to metric function"); // LCOV_EXCL_LINE
+            ffi_abort("usearch passed unaligned pointer to metric function");
         }
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
@@ -2787,5 +2796,39 @@ mod tests {
             // Then save_mappings should fail.
             panic!("Expected IndexError, got {:?}", result);
         }
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "usearch passed null pointer")]
+    fn test_metric_wrapper_null_pointer() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let null_ptr: *const f32 = std::ptr::null();
+        let valid_data = [0.0f32; 4];
+        let valid_ptr = valid_data.as_ptr();
+
+        // This should panic
+        wrapper(null_ptr, valid_ptr);
+    }
+
+    #[test]
+    #[should_panic(expected = "usearch passed unaligned pointer")]
+    fn test_metric_wrapper_unaligned_pointer() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let data = [0u8; 32];
+        let unaligned_ptr = unsafe { data.as_ptr().add(1) as *const f32 };
+        let valid_data = [0.0f32; 4];
+        let valid_ptr = valid_data.as_ptr();
+
+        // This should panic
+        wrapper(unaligned_ptr, valid_ptr);
     }
 }
