@@ -2247,9 +2247,7 @@ mod sentry_tests {
         delta.vector_deltas.insert(key, vec_delta);
 
         // Base has "embedding" but it's an Int
-        let base = PropertyMapBuilder::new()
-            .insert("embedding", 42i64)
-            .build();
+        let base = PropertyMapBuilder::new().insert("embedding", 42i64).build();
 
         // Apply delta
         let result = delta.apply(&base);
