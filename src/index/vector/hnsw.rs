@@ -2973,6 +2973,23 @@ mod tests {
         let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 5);
     }
+
+    #[test]
+    fn test_filter_callback_guard_drop() {
+        // Verify that FilterCallbackGuard correctly resets the thread-local flag on Drop
+
+        // Initial state should be false
+        assert!(!super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
+
+        {
+            let _guard = super::FilterCallbackGuard::new();
+            // Inside scope, flag should be true
+            assert!(super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        }
+
+        // After drop, flag should be false
+        assert!(!super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
 }
 
 #[cfg(test)]

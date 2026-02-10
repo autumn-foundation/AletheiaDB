@@ -269,24 +269,48 @@ fn test_cosine_similarity_underflow_denormal_identical() {
 }
 
 #[test]
+fn test_cosine_similarity_underflow_mixed() {
+    // One vector is normal, one is extremely small
+    let normal = vec![1.0, 0.0];
+    let small_val = f32::MIN_POSITIVE;
+    // Small vector is [small_val, 0.0]. Direction is [1, 0].
+    let small = vec![small_val, 0.0];
+
+    let sim = cosine_similarity(&normal, &small).unwrap();
+    // Directions are identical
+    assert!((sim - 1.0).abs() < 1e-6, "Should correctly handle mixed scales, got {}", sim);
+}
+
+#[test]
+fn test_cosine_similarity_robust_with_zero_vector_after_scaling() {
+    // Case: Magnitude overflows (Inf), but after scaling down it becomes zero?
+    // Not possible for Inf.
+    // Case: Magnitude underflows (0.0), but vector is truly zero?
+    // Handled by returning 0.0.
+
+    // Explicitly test the branch where robust helper returns 0.0 because vectors are truly zero
+    // (This is redundant with basic zero checks but ensures robust logic handles it too)
+    let a = vec![0.0, 0.0];
+    let b = vec![1.0, 1.0];
+    // This will hit the `mag_a_sq == 0.0` check in robust logic if forced
+    // But `cosine_similarity` handles 0.0 mag before calling robust logic?
+    // No, `cosine_similarity` checks `mag_a_sq == 0.0` inside the `if` condition for calling robust.
+    // So robust IS called for zero vectors.
+
+    let sim = cosine_similarity(&a, &b).unwrap();
+    assert_eq!(sim, 0.0);
+}
+
+#[test]
 fn test_normalize_infinite_vector() {
     let v = vec![f32::INFINITY, 1.0];
     // Should return unit vector in direction of infinity: [1.0, 0.0]
     let unit = normalize(&v);
 
     assert!(!unit[0].is_nan(), "Should not be NaN");
-    assert!(
-        (magnitude(&unit) - 1.0).abs() < 1e-6,
-        "Should be unit length"
-    );
-    assert!(
-        (unit[0] - 1.0).abs() < 1e-6,
-        "Should point along Infinity axis"
-    );
-    assert!(
-        unit[1].abs() < 1e-6,
-        "Finite component should be zero relative to Inf"
-    );
+    assert!((magnitude(&unit) - 1.0).abs() < 1e-6, "Should be unit length");
+    assert!((unit[0] - 1.0).abs() < 1e-6, "Should point along Infinity axis");
+    assert!(unit[1].abs() < 1e-6, "Finite component should be zero relative to Inf");
 }
 
 #[test]
@@ -296,20 +320,11 @@ fn test_normalize_infinite_vector_mixed_signs() {
     let unit = normalize(&v);
 
     assert!(!unit[0].is_nan(), "Should not be NaN");
-    assert!(
-        (magnitude(&unit) - 1.0).abs() < 1e-6,
-        "Should be unit length"
-    );
+    assert!((magnitude(&unit) - 1.0).abs() < 1e-6, "Should be unit length");
 
     let expected = 1.0 / 2.0_f32.sqrt();
-    assert!(
-        (unit[0] - -expected).abs() < 1e-6,
-        "First component should be -1/sqrt(2)"
-    );
-    assert!(
-        (unit[1] - expected).abs() < 1e-6,
-        "Second component should be 1/sqrt(2)"
-    );
+    assert!((unit[0] - -expected).abs() < 1e-6, "First component should be -1/sqrt(2)");
+    assert!((unit[1] - expected).abs() < 1e-6, "Second component should be 1/sqrt(2)");
 }
 
 #[test]
@@ -319,8 +334,28 @@ fn test_normalize_in_place_infinite_vector() {
 
     assert!(!v[0].is_nan(), "Should not be NaN");
     assert!((magnitude(&v) - 1.0).abs() < 1e-6, "Should be unit length");
-    assert!(
-        (v[0] - 1.0).abs() < 1e-6,
-        "Should point along Infinity axis"
-    );
+    assert!((v[0] - 1.0).abs() < 1e-6, "Should point along Infinity axis");
+}
+
+#[test]
+fn test_normalize_finite_overflow_vector() {
+    // Vector that doesn't contain Inf, but squared magnitude overflows f32
+    // 1e20 * 1e20 = 1e40 (Inf)
+    let huge = 1e20_f32;
+    let v = vec![huge, 0.0];
+    let unit = normalize(&v);
+
+    assert!(!unit[0].is_nan(), "Should not be NaN");
+    assert!((magnitude(&unit) - 1.0).abs() < 1e-6, "Should be unit length");
+    assert!((unit[0] - 1.0).abs() < 1e-6, "Should point along huge axis");
+}
+
+#[test]
+fn test_normalize_in_place_finite_overflow_vector() {
+    let huge = 1e20_f32;
+    let mut v = vec![huge, 0.0];
+    normalize_in_place(&mut v);
+
+    assert!(!v[0].is_nan(), "Should not be NaN");
+    assert!((magnitude(&v) - 1.0).abs() < 1e-6, "Should be unit length");
 }

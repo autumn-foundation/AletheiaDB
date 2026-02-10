@@ -1509,4 +1509,81 @@ mod tests {
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
     }
+
+    #[test]
+    fn test_update_node_insufficient_buffer_for_label() {
+        // Construct a valid UpdateNode entry header but with truncated label
+        let node_id = NodeId::new(42).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+
+        let operation = WalOperation::UpdateNode {
+            node_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(3), operation);
+
+        // Serialize it
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Calculate truncation point: LSN(8) + TS(12) + CRC(4) + OP(1) + Node(8) + Ver(8) = 41 bytes
+        // The next 4 bytes are Label ID. Truncate in the middle of Label ID.
+        let truncate_len = 41 + 2;
+        let truncated = &buffer[..truncate_len];
+
+        // Should return corrupted data error due to insufficient buffer
+        let result = parse_entry_at(truncated, 0, WAL_VERSION);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("Insufficient buffer size"),
+                    "Got unexpected message: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_update_edge_insufficient_buffer_for_label() {
+        // Construct a valid UpdateEdge entry header but with truncated label
+        let edge_id = EdgeId::new(100).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+
+        let operation = WalOperation::UpdateEdge {
+            edge_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(4), operation);
+
+        // Serialize it
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Calculate truncation point: LSN(8) + TS(12) + CRC(4) + OP(1) + Edge(8) + Ver(8) = 41 bytes
+        // The next 4 bytes are Label ID. Truncate in the middle.
+        let truncate_len = 41 + 2;
+        let truncated = &buffer[..truncate_len];
+
+        let result = parse_entry_at(truncated, 0, WAL_VERSION);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("Insufficient buffer size"),
+                    "Got unexpected message: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", result),
+        }
+    }
 }
