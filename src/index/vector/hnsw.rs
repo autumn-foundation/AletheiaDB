@@ -418,6 +418,19 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
     error_msg.contains("No available threads to lock")
 }
 
+// Helper to abort on critical FFI errors
+// This is required because panicking across FFI boundaries is UB.
+// LCOV_EXCL_START
+#[cold]
+#[inline(never)]
+fn fatal_ffi_error(message: &[u8]) -> ! {
+    // Using a direct write to stderr is appropriate here, as we are about to abort
+    // and can't rely on more complex logging infrastructure.
+    let _ = std::io::stderr().write_all(message);
+    std::process::abort();
+}
+// LCOV_EXCL_STOP
+
 // Helper to create the metric wrapper - extracted for testing
 fn create_metric_wrapper<F>(
     dims: usize,
@@ -432,20 +445,14 @@ where
             // This should never happen with a correct usearch implementation.
             // If it does, we MUST abort because panicking across FFI boundaries is UB.
             // We cannot return an error here because the signature is fixed by usearch trait.
-            // LCOV_EXCL_START
-            let _ = std::io::stderr().write_all(b"CRITICAL: usearch passed null pointer to metric function. Aborting to prevent UB.\n");
-            std::process::abort();
-            // LCOV_EXCL_STOP
+            fatal_ffi_error(b"CRITICAL: usearch passed null pointer to metric function. Aborting to prevent UB.\n");
         }
 
         // Check for alignment to prevent UB
         // Use bitwise check for power-of-2 alignment (f32 align is 4)
         let align_mask = std::mem::align_of::<f32>() - 1;
         if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
-            // LCOV_EXCL_START
-            let _ = std::io::stderr().write_all(b"CRITICAL: usearch passed unaligned pointer to metric function. Aborting to prevent UB.\n");
-            std::process::abort();
-            // LCOV_EXCL_STOP
+            fatal_ffi_error(b"CRITICAL: usearch passed unaligned pointer to metric function. Aborting to prevent UB.\n");
         }
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
@@ -456,10 +463,7 @@ where
         if a.align_offset(std::mem::align_of::<f32>()) != 0
             || b.align_offset(std::mem::align_of::<f32>()) != 0
         {
-            // LCOV_EXCL_START
-            let _ = std::io::stderr().write_all(b"CRITICAL: usearch passed unaligned pointer to metric function. Aborting to prevent UB.\n");
-            std::process::abort();
-            // LCOV_EXCL_STOP
+            fatal_ffi_error(b"CRITICAL: usearch passed unaligned pointer to metric function. Aborting to prevent UB.\n");
         }
 
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };

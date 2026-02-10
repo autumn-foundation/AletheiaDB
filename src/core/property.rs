@@ -3991,14 +3991,12 @@ mod sentry_tests {
         let mut buffer = Vec::new();
         let result = try_serialize_vector_into(&large_vector, &mut buffer);
         assert!(result.is_err());
-        match result {
+        assert!(matches!(
+            result,
             Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::DimensionTooLarge { .. },
-            )) => {
-                // Expected error
-            }
-            _ => panic!("Expected DimensionTooLarge error"), // LCOV_EXCL_LINE
-        }
+                crate::utils::error::VectorError::DimensionTooLarge { .. }
+            ))
+        ));
     }
 
     #[test]
