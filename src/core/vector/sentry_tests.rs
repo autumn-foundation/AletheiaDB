@@ -227,3 +227,66 @@ fn test_cosine_similarity_both_zero() {
     let result = cosine_similarity(&a, &b).unwrap();
     assert_eq!(result, 0.0);
 }
+
+// ============================================================================
+// SIMD/FFI Robustness Tests
+// ============================================================================
+
+#[test]
+fn test_simd_dot_and_magnitudes_zero_length() {
+    // 🧪 Strategy: Explicitly test the core SIMD primitive with empty vectors
+    // to ensure safe FFI handling (no buffer over-reads).
+    let a: Vec<f32> = vec![];
+    let b: Vec<f32> = vec![];
+    let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes(&a, &b);
+    assert_eq!(dot, 0.0);
+    assert_eq!(mag_a, 0.0);
+    assert_eq!(mag_b, 0.0);
+}
+
+#[test]
+fn test_simd_dot_and_magnitudes_nan() {
+    // 💣 Risk: Verify that NaN values are propagated correctly and don't cause crashes.
+    // If simsimd returns None (due to NaN), the fallback implementation must trigger
+    // and also return NaN (or consistent result).
+    let a = vec![1.0, f32::NAN, 3.0];
+    let b = vec![1.0, 2.0, 3.0];
+    let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes(&a, &b);
+
+    // Dot product should be NaN because a[1] is NaN
+    assert!(dot.is_nan());
+    // Mag A should be NaN
+    assert!(mag_a.is_nan());
+    // Mag B should be valid (14.0)
+    assert_eq!(mag_b, 14.0);
+}
+
+#[test]
+fn test_simd_dot_and_magnitudes_inf() {
+    // 💣 Risk: Verify Infinity handling.
+    let a = vec![1.0, f32::INFINITY, 3.0];
+    let b = vec![1.0, 2.0, 3.0];
+    let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes(&a, &b);
+
+    assert!(dot.is_infinite());
+    assert!(mag_a.is_infinite());
+    assert_eq!(mag_b, 14.0);
+}
+
+#[test]
+fn test_simd_squared_diff_sum_zero_length() {
+    // 🧪 Strategy: Test squared_diff_sum with empty vectors
+    let a: Vec<f32> = vec![];
+    let b: Vec<f32> = vec![];
+    let res = super::simd::squared_diff_sum(&a, &b);
+    assert_eq!(res, 0.0);
+}
+
+#[test]
+fn test_simd_dot_product_sum_zero_length() {
+    // 🧪 Strategy: Test dot_product_sum with empty vectors
+    let a: Vec<f32> = vec![];
+    let b: Vec<f32> = vec![];
+    let res = super::simd::dot_product_sum(&a, &b);
+    assert_eq!(res, 0.0);
+}
