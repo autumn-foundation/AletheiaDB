@@ -3007,4 +3007,19 @@ mod coverage_tests {
         // This should panic
         wrapper(unaligned_ptr, valid_ptr);
     }
+
+    #[test]
+    fn test_filter_callback_guard_reset() {
+        // Ensure flag is initially false
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+
+        {
+            let _guard = FilterCallbackGuard::new();
+            // Verify flag is set to true
+            assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        }
+
+        // Verify flag is reset to false after drop
+        assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
 }
