@@ -20,6 +20,8 @@ pub mod id;
 pub mod interning;
 pub mod observer;
 pub mod property;
+#[cfg(test)]
+mod property_proptest;
 pub mod temporal;
 pub mod vector;
 
