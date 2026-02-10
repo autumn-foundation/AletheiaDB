@@ -120,24 +120,6 @@ impl ConcurrentWalSystemConfig {
     }
 }
 
-#[inline]
-fn should_use_immediate_flush(mode: DurabilityMode) -> bool {
-    matches!(mode, DurabilityMode::Synchronous)
-}
-
-#[inline]
-fn should_fsync_on_flush(mode: DurabilityMode) -> bool {
-    !matches!(mode, DurabilityMode::Async { .. })
-}
-
-#[inline]
-fn should_register_commit_epoch(mode: DurabilityMode, has_group_commit: bool) -> bool {
-    matches!(
-        mode,
-        DurabilityMode::GroupCommit { .. } | DurabilityMode::AsyncBatched { .. }
-    ) && has_group_commit
-}
-
 /// Signal for waking up the flush thread when batch is full.
 struct FlushNotifier {
     /// Lock for condvar.
@@ -523,24 +505,29 @@ impl ConcurrentWalSystem {
         }
 
         // Use the underlying WAL's batch append for async modes
-        if should_use_immediate_flush(self.durability_mode) {
-            // For synchronous mode, append batch then flush all
-            let lsns = self.wal.append_batch(operations)?;
+        match self.durability_mode {
+            DurabilityMode::Synchronous => {
+                // For synchronous mode, append batch then flush all
+                let lsns = self.wal.append_batch(operations)?;
 
-            // Drain and flush immediately for sync mode
-            let entries = self.wal.drain_all();
-            if !entries.is_empty() {
-                self.coordinator.flush(entries, true).map_err(|e| {
-                    Error::Storage(StorageError::WalError {
-                        reason: format!("Failed to flush batch after drain: {}", e),
-                    })
-                })?;
+                // Drain and flush immediately for sync mode
+                let entries = self.wal.drain_all();
+                if !entries.is_empty() {
+                    self.coordinator.flush(entries, true).map_err(|e| {
+                        Error::Storage(StorageError::WalError {
+                            reason: format!("Failed to flush batch after drain: {}", e),
+                        })
+                    })?;
+                }
+
+                Ok(lsns)
             }
-
-            Ok(lsns)
-        } else {
-            // For async modes, just batch append (background thread handles flush)
-            self.wal.append_batch(operations)
+            DurabilityMode::Async { .. }
+            | DurabilityMode::GroupCommit { .. }
+            | DurabilityMode::AsyncBatched { .. } => {
+                // For async modes, just batch append (background thread handles flush)
+                self.wal.append_batch(operations)
+            }
         }
     }
 
@@ -551,7 +538,7 @@ impl ConcurrentWalSystem {
             return Ok(FlushStats::default());
         }
 
-        let should_sync = should_fsync_on_flush(self.durability_mode);
+        let should_sync = !matches!(self.durability_mode, DurabilityMode::Async { .. });
         self.coordinator.flush(entries, should_sync)
     }
 
@@ -606,11 +593,7 @@ impl ConcurrentWalSystem {
             }
             DurabilityMode::GroupCommit { .. } | DurabilityMode::AsyncBatched { .. } => {
                 // Register with coordinator and return epoch to wait for
-                if should_register_commit_epoch(self.durability_mode, self.group_commit.is_some()) {
-                    let gc = self
-                        .group_commit
-                        .as_ref()
-                        .expect("group_commit existence checked by should_register_commit_epoch");
+                if let Some(ref gc) = self.group_commit {
                     let (epoch, should_trigger) = gc.register_transaction()?;
 
                     // If batch is full, signal flush thread to wake up immediately
@@ -733,60 +716,6 @@ mod tests {
             properties: PropertyMap::new(),
             valid_from: time::now(),
         }
-    }
-
-    #[test]
-    fn test_mcdc_should_use_immediate_flush() {
-        // Condition: mode == Synchronous
-        assert!(should_use_immediate_flush(DurabilityMode::Synchronous));
-        assert!(!should_use_immediate_flush(DurabilityMode::Async {
-            flush_interval_ms: 10,
-        }));
-    }
-
-    #[test]
-    fn test_mcdc_should_fsync_on_flush() {
-        // Condition independently controls output for Async mode.
-        assert!(!should_fsync_on_flush(DurabilityMode::Async {
-            flush_interval_ms: 10,
-        }));
-        assert!(should_fsync_on_flush(DurabilityMode::Synchronous));
-        assert!(should_fsync_on_flush(DurabilityMode::GroupCommit {
-            max_delay_ms: 10,
-            max_batch_size: 100,
-        }));
-    }
-
-    #[test]
-    fn test_mcdc_should_register_commit_epoch() {
-        // A=false, B=false
-        assert!(!should_register_commit_epoch(
-            DurabilityMode::Synchronous,
-            false
-        ));
-        // A=true, B=false
-        assert!(!should_register_commit_epoch(
-            DurabilityMode::GroupCommit {
-                max_delay_ms: 10,
-                max_batch_size: 100,
-            },
-            false
-        ));
-        // A=false, B=true
-        assert!(!should_register_commit_epoch(
-            DurabilityMode::Async {
-                flush_interval_ms: 10
-            },
-            true
-        ));
-        // A=true, B=true
-        assert!(should_register_commit_epoch(
-            DurabilityMode::AsyncBatched {
-                max_delay_ms: 10,
-                max_batch_size: 100
-            },
-            true
-        ));
     }
 
     #[test]
