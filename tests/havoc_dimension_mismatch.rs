@@ -42,12 +42,12 @@ fn havoc_dimension_mismatch_legacy_load() {
 
             // Check if reported dimensions match config or file
             if index_large.dimensions() == 100 {
-                 println!("Index thinks it has 100 dimensions (matches config).");
-                 // This is bad if underlying data is 10.
+                println!("Index thinks it has 100 dimensions (matches config).");
+                // This is bad if underlying data is 10.
             } else if index_large.dimensions() == 10 {
-                 println!("Index thinks it has 10 dimensions (matches file).");
-                 // This means usearch updated its state from file.
-                 // But HnswIndex wrapper might still rely on config.dimensions (100).
+                println!("Index thinks it has 10 dimensions (matches file).");
+                // This means usearch updated its state from file.
+                // But HnswIndex wrapper might still rely on config.dimensions (100).
             }
 
             // Try searching with dim=100 query

@@ -13,7 +13,10 @@ fn havoc_interner_capacity_overflow() {
     // 1. Fill capacity
     for i in 0..capacity {
         let s = format!("string_{}", i);
-        assert!(interner.intern(&s).is_ok(), "Failed to intern within capacity");
+        assert!(
+            interner.intern(&s).is_ok(),
+            "Failed to intern within capacity"
+        );
     }
 
     assert_eq!(interner.len(), capacity);
@@ -28,7 +31,11 @@ fn havoc_interner_capacity_overflow() {
             Err(e) => {
                 let msg = format!("{}", e);
                 // Check for the user-facing error message, not the internal enum variant name
-                assert!(msg.contains("Capacity exceeded"), "Wrong error type: {}", msg);
+                assert!(
+                    msg.contains("Capacity exceeded"),
+                    "Wrong error type: {}",
+                    msg
+                );
             }
             _ => unreachable!(),
         }
@@ -39,7 +46,10 @@ fn havoc_interner_capacity_overflow() {
 
     // 4. Verify existing strings still work
     let id = interner.intern("string_0").unwrap();
-    assert_eq!(interner.resolve_with(id, |s| s.to_string()).unwrap(), "string_0");
+    assert_eq!(
+        interner.resolve_with(id, |s| s.to_string()).unwrap(),
+        "string_0"
+    );
 }
 
 #[test]
@@ -73,6 +83,9 @@ fn havoc_interner_concurrent_flood() {
     println!("Total successful interns: {}", total_success);
 
     // Should exactly fill capacity, no more
-    assert_eq!(total_success, capacity, "Should exactly fill capacity despite race");
+    assert_eq!(
+        total_success, capacity,
+        "Should exactly fill capacity despite race"
+    );
     assert_eq!(interner.len(), capacity);
 }
