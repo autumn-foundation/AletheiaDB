@@ -2833,4 +2833,35 @@ mod tests {
             panic!("Expected IndexError, got {:?}", result);
         }
     }
+
+    #[test]
+    fn test_load_dimension_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dim_mismatch.index");
+
+        // 1. Create a valid index with dimension 4
+        {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap();
+            index
+                .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+                .unwrap();
+            index.save(&path).unwrap();
+        }
+
+        // 2. Try to load it with mismatched dimension config (128)
+        let config = HnswConfig::new(128, DistanceMetric::Cosine);
+        let result = HnswIndex::load(&path, config);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Index dimension mismatch"));
+                assert!(msg.contains("expected 128"));
+                assert!(msg.contains("found 4"));
+            }
+            _ => panic!("Expected VectorError::IndexError, got {:?}", result),
+        }
+    }
 }
