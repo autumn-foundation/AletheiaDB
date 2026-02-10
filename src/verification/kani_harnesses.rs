@@ -10,7 +10,6 @@ use crate::storage::wal::WalOperation;
 use crate::storage::wal::concurrent::restore_global_lsn_order;
 use crate::storage::wal::concurrent::{ConcurrentWal, ConcurrentWalConfig};
 use crate::storage::wal::lsn_allocator::LsnAllocator;
-use crate::storage::wal::ring_buffer::BackpressureConfig;
 use crate::storage::wal::ring_buffer::PendingEntry;
 
 /// Prove single-step monotonicity of the LSN allocator.
@@ -62,12 +61,13 @@ fn kani_restore_global_lsn_order_sorts() {
 /// open -> appending -> draining(flushing) -> closed.
 #[kani::proof]
 fn kani_wal_bounded_state_machine_transitions() {
-    let wal = ConcurrentWal::new(ConcurrentWalConfig {
-        num_stripes: 1,
-        stripe_capacity: 8,
-        max_entry_size: 16 * 1024,
-        backpressure: BackpressureConfig::default(),
-    });
+    let config = ConcurrentWalConfig::new("target/kani-wal")
+        .with_num_stripes(1)
+        .with_stripe_capacity(8);
+    let wal = match ConcurrentWal::new(config) {
+        Ok(wal) => wal,
+        Err(_) => unreachable!("bounded harness requires valid WAL construction"),
+    };
 
     let steps: u8 = kani::any();
     kani::assume(steps <= 6);
@@ -257,12 +257,13 @@ fn kani_lsn_batch_then_single_non_overlapping() {
 /// Close is sticky and append attempts after close fail while LSN still advances.
 #[kani::proof]
 fn kani_wal_close_is_sticky_and_append_fails_after_close() {
-    let wal = ConcurrentWal::new(ConcurrentWalConfig {
-        num_stripes: 1,
-        stripe_capacity: 8,
-        max_entry_size: 16 * 1024,
-        backpressure: BackpressureConfig::default(),
-    });
+    let config = ConcurrentWalConfig::new("target/kani-wal-close")
+        .with_num_stripes(1)
+        .with_stripe_capacity(8);
+    let wal = match ConcurrentWal::new(config) {
+        Ok(wal) => wal,
+        Err(_) => unreachable!("bounded harness requires valid WAL construction"),
+    };
 
     wal.close();
     assert!(wal.is_closed());
