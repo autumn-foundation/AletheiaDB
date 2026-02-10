@@ -1526,9 +1526,10 @@ mod regression_tests {
             87, 65, 76, 0, // Checksum (4 bytes)
             4, // OpType: 4 (UpdateEdge)
             0, 0, 0, 1, 40, 1, 1, 1, // EdgeId (8 bytes)
-            1, 1, 71, 87, 65, 76, 76, 0 // VersionId (8 bytes)
-            // Total length: 48 bytes
-            // Missing LabelId (4 bytes) required for Ver 1
+            1, 1, 71, 87, 65, 76, 76,
+            0, // VersionId (8 bytes)
+               // Total length: 48 bytes
+               // Missing LabelId (4 bytes) required for Ver 1
         ];
 
         // Offset 5 to skip header
@@ -1536,6 +1537,10 @@ mod regression_tests {
 
         // Before fix: Panics with index out of bounds
         // After fix: Returns Error
-        assert!(result.is_err(), "Should return error for truncated buffer, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "Should return error for truncated buffer, got {:?}",
+            result
+        );
     }
 }

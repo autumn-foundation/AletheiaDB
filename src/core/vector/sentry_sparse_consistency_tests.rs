@@ -22,7 +22,10 @@ fn test_sparse_dot_product_mismatch_behavior() {
     let result = sparse_dot_product(&a, &b);
 
     // NEW BEHAVIOR: Fails (Consistent with dense)
-    assert!(result.is_err(), "sparse_dot_product should reject dimension mismatch");
+    assert!(
+        result.is_err(),
+        "sparse_dot_product should reject dimension mismatch"
+    );
     assert!(matches!(
         result.unwrap_err(),
         Error::Vector(VectorError::DimensionMismatch { .. })
@@ -40,7 +43,10 @@ fn test_sparse_cosine_similarity_mismatch_behavior() {
     let result = sparse_cosine_similarity(&a, &b);
 
     // NEW BEHAVIOR: Fails (Consistent with dense)
-    assert!(result.is_err(), "sparse_cosine_similarity should reject dimension mismatch");
+    assert!(
+        result.is_err(),
+        "sparse_cosine_similarity should reject dimension mismatch"
+    );
     assert!(matches!(
         result.unwrap_err(),
         Error::Vector(VectorError::DimensionMismatch { .. })
@@ -58,7 +64,10 @@ fn test_sparse_euclidean_mismatch_behavior() {
     let result = sparse_squared_euclidean_distance(&a, &b);
 
     // CURRENT BEHAVIOR: Fails (Correct/Consistent)
-    assert!(result.is_err(), "sparse_squared_euclidean_distance correctly rejects mismatch");
+    assert!(
+        result.is_err(),
+        "sparse_squared_euclidean_distance correctly rejects mismatch"
+    );
     assert!(matches!(
         result.unwrap_err(),
         Error::Vector(VectorError::DimensionMismatch { .. })
