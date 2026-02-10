@@ -158,6 +158,17 @@ const MAX_K: usize = 100_000;
 /// 100M entries * (16 bytes data + ~32 bytes DashMap overhead) ≈ 4.8GB RAM.
 const MAX_MAPPINGS_COUNT: usize = 100_000_000;
 
+/// Validates dimensions to prevent OOM DoS and potential Undefined Behavior.
+fn validate_dimensions(dimensions: usize) -> Result<()> {
+    if dimensions > MAX_VECTOR_DIMENSIONS {
+        return Err(Error::Vector(VectorError::DimensionTooLarge {
+            dimension: dimensions,
+            max_allowed: MAX_VECTOR_DIMENSIONS,
+        }));
+    }
+    Ok(())
+}
+
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
     match metric {
@@ -541,14 +552,7 @@ impl HnswIndexBuilder {
             }));
         }
 
-        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "dimensions {} exceeds maximum {}",
-                    self.config.dimensions, MAX_VECTOR_DIMENSIONS
-                ),
-            }));
-        }
+        validate_dimensions(self.config.dimensions)?;
 
         // Validate M
         if self.config.m == 0 || self.config.m > 64 {
@@ -1712,14 +1716,7 @@ impl HnswIndex {
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
         // Validate dimensions
-        if config.dimensions > MAX_VECTOR_DIMENSIONS {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "dimensions {} exceeds maximum {}",
-                    config.dimensions, MAX_VECTOR_DIMENSIONS
-                ),
-            }));
-        }
+        validate_dimensions(config.dimensions)?;
 
         // Security Check: Custom metrics require F32 quantization
         if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
@@ -1820,12 +1817,12 @@ impl HnswIndex {
         let connectivity = index.connectivity();
 
         // Validate dimensions from index
-        if dimensions > MAX_VECTOR_DIMENSIONS {
+        validate_dimensions(dimensions)?;
+
+        // Validate connectivity from index to prevent excessive memory usage
+        if connectivity > 64 {
             return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "dimensions {} exceeds maximum {}",
-                    dimensions, MAX_VECTOR_DIMENSIONS
-                ),
+                reason: format!("M must be in range [1, 64], got {}", connectivity),
             }));
         }
 
