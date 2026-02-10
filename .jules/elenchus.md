@@ -46,6 +46,24 @@ This journal records the results of test quality audits.
 3.  **Lock Ordering:** Consistent `DashMap` -> `RwLock` (or sequential) ordering logic prevents lock inversion deadlocks.
 **Evidence:** Code analysis of `save_internal`, `add`, and `search_with_filter` confirms correct lock discipline and re-entrancy guards.
 **Recommendation:** None. The implementation serves as a model for other concurrent modules.
+
+**[DotProduct Metric Conversion Bug]**
+**Module:** `src/index/vector/hnsw.rs`
+**Severity:** 🔴 Critical
 **Finding:** The `DotProduct` similarity conversion was incorrect. `usearch` returns `1 - dot_product` for the IP metric, but the wrapper was converting it as `-distance`. This resulted in similarity scores being off by 1.0 (e.g., actual dot product 11 returned as 10).
 **Evidence:** The strengthened `test_distance_to_similarity_conversion` failed for `DotProduct` with the message "DotProduct n2 should be 11.0, got 10".
 **Resolution:** Updated the conversion logic for `DotProduct` to be `1.0 - distance` instead of `-distance`.
+
+**[Critical: Silent Vector Update Loss]**
+**Module:** `src/core/version.rs`
+**Severity:** 🔴 Critical
+**Finding:** `PropertyDelta::from_diff` silently ignored vector updates if `VectorDelta::from_diff` returned `None` (e.g., due to dimension mismatch). This resulted in data loss where the new vector value was discarded and the old value preserved.
+**Evidence:** Created reproduction test `test_property_delta_silently_ignores_dimension_change` which confirmed that changing a vector's dimension resulted in no change being recorded in the delta.
+**Resolution:** Modified `PropertyDelta::from_diff` to strictly fall back to a full value replacement in `delta.changed` when `VectorDelta` cannot be computed (e.g. dimension mismatch), while still respecting epsilon-equality for identical vectors. Added regression test to `sentry_tests`.
+
+**[HNSW Compilation Repair]**
+**Module:** `src/index/vector/hnsw.rs`
+**Severity:** 🔴 Critical
+**Finding:** The file contained a syntax error (unclosed delimiter) in `FilterCallbackGuard` implementation, preventing compilation.
+**Evidence:** `cargo test` failed with "this file contains an unclosed delimiter".
+**Resolution:** Repaired the syntax error by closing the `new` function and `impl` block, and implementing `Drop` correctly.
