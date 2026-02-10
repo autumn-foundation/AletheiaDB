@@ -211,7 +211,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Fails with NodeNotFound(NodeId(0)) - needs investigation
     fn test_echo_chamber_integration() {
         let db = AletheiaDB::new().unwrap();
 
