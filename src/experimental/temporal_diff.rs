@@ -13,8 +13,11 @@ use std::collections::HashMap;
 /// A report of changes between two timestamps.
 #[derive(Debug, Clone)]
 pub struct DiffReport {
+    /// The first timestamp (baseline).
     pub t1: Timestamp,
+    /// The second timestamp (comparison).
     pub t2: Timestamp,
+    /// The list of changes detected.
     pub changes: Vec<EntityChange>,
 }
 
@@ -33,8 +36,20 @@ impl Default for DiffReport {
 /// A change to a single entity.
 #[derive(Debug, Clone)]
 pub enum EntityChange {
-    Node { id: NodeId, change: ChangeType },
-    Edge { id: EdgeId, change: ChangeType },
+    /// A node changed.
+    Node {
+        /// The ID of the node.
+        id: NodeId,
+        /// The type of change.
+        change: ChangeType
+    },
+    /// An edge changed.
+    Edge {
+        /// The ID of the edge.
+        id: EdgeId,
+        /// The type of change.
+        change: ChangeType
+    },
 }
 
 /// The type of change.
@@ -45,15 +60,20 @@ pub enum ChangeType {
     /// Entity exists at T1 but not at T2.
     Removed,
     /// Entity exists at both but properties differ.
-    Modified { diff: PropertyDiff },
+    Modified {
+        /// The difference in properties.
+        diff: PropertyDiff
+    },
 }
 
 /// Difference in properties.
 #[derive(Debug, Clone, Default)]
 pub struct PropertyDiff {
+    /// Keys added in the new version.
     pub added: Vec<String>,
+    /// Keys removed in the new version.
     pub removed: Vec<String>,
-    // (Old, New)
+    /// Keys changed. Maps key -> (old_value, new_value).
     pub changed: HashMap<String, (String, String)>,
 }
 
@@ -63,6 +83,7 @@ pub struct TemporalDiff<'a> {
 }
 
 impl<'a> TemporalDiff<'a> {
+    /// Create a new TemporalDiff engine.
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
@@ -218,6 +239,7 @@ impl<'a> TemporalDiff<'a> {
 }
 
 impl PropertyDiff {
+    /// Check if the difference is empty (no changes).
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
     }
