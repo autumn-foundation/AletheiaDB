@@ -27,3 +27,20 @@
 **Finding:** Integration tests relied on weak assertions like `assert!(result.is_err())` and string matching for error messages. This made tests brittle and capable of passing for the wrong reasons (e.g., panics or different errors).
 **Evidence:** `test_deserialize_truncated_buffer` only checked `is_err()`. `test_send_logical_overflow` checked `error_msg.contains`.
 **Recommendation:** Refactored tests to use `matches!(result, Err(StorageError::CorruptedData(_)))` and `Err(TemporalError::LogicalCounterOverflow { .. })` for robust, type-safe verification. Removed redundant "mirror tests" that duplicated unit test coverage.
+
+**[Silent Vector Delta Failure]**
+**Module:** `src/core/version.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `PropertyDelta::apply` silently ignores `VectorDelta::Sparse` updates if the base property is missing or has the wrong type. This "fail open" behavior preserves the original state but leads to silent data loss regarding the intended update.
+**Evidence:** `test_property_delta_apply_sparse_ignored_on_missing_base` confirmed that applying a sparse delta to a map missing the key results in no change and no error.
+**Recommendation:** Added 2 permanent regression tests in `src/core/version.rs` to document this behavior. Future refactoring should consider returning `Result` from `apply` to enable "fail closed" behavior.
+
+**[HNSW Deadlock Prevention]**
+**Module:** `src/index/vector/hnsw.rs`
+**Severity:** ⭐ Commended
+**Finding:** The module explicitly handles complex concurrency hazards, including:
+1.  **FFI Safety:** Strict alignment and null checks for callback pointers.
+2.  **Deadlock Prevention:** `IN_FILTER_CALLBACK` thread-local guard prevents re-entrant modifications during searches, blocking a known RwLock deadlock vector.
+3.  **Lock Ordering:** Consistent `DashMap` -> `RwLock` (or sequential) ordering logic prevents lock inversion deadlocks.
+**Evidence:** Code analysis of `save_internal`, `add`, and `search_with_filter` confirms correct lock discipline and re-entrancy guards.
+**Recommendation:** None. The implementation serves as a model for other concurrent modules.

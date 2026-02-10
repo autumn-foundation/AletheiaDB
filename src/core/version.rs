@@ -2199,4 +2199,66 @@ mod sentry_tests {
         // even when PropertyValue equality says they are different. This is a design choice
         // for storage efficiency but important to document.
     }
+
+    #[test]
+    fn test_property_delta_apply_sparse_ignored_on_missing_base() {
+        // 🧪 Strategy: Verify that a sparse delta is silently ignored if the base property is missing.
+        // This is a known "best effort" behavior (fail open) rather than "fail closed".
+        // Documenting it with a test ensures it doesn't change unexpectedly.
+
+        let mut delta = PropertyDelta::new();
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        // Sparse delta: change index 0 to 1.0
+        let changes = Arc::new(vec![(0, 1.0f32)]);
+        let vec_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes,
+        };
+
+        delta.vector_deltas.insert(key, vec_delta);
+
+        // Base property map *without* "embedding"
+        let base = PropertyMapBuilder::new().insert("name", "Alice").build();
+
+        // Apply delta
+        let result = delta.apply(&base);
+
+        // Expectation: "embedding" is missing in result (delta ignored)
+        assert!(
+            result.get("embedding").is_none(),
+            "Sparse delta should be silently ignored if base property is missing"
+        );
+    }
+
+    #[test]
+    fn test_property_delta_apply_sparse_ignored_on_wrong_type() {
+        // 🧪 Strategy: Verify that a sparse delta is silently ignored if the base property has wrong type.
+
+        let mut delta = PropertyDelta::new();
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        let changes = Arc::new(vec![(0, 1.0f32)]);
+        let vec_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes,
+        };
+
+        delta.vector_deltas.insert(key, vec_delta);
+
+        // Base has "embedding" but it's an Int
+        let base = PropertyMapBuilder::new()
+            .insert("embedding", 42i64)
+            .build();
+
+        // Apply delta
+        let result = delta.apply(&base);
+
+        // Expectation: "embedding" remains 42i64 (delta ignored)
+        assert_eq!(
+            result.get("embedding").and_then(|v| v.as_int()),
+            Some(42),
+            "Sparse delta should be silently ignored if base property is wrong type"
+        );
+    }
 }
