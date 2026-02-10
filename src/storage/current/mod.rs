@@ -43,6 +43,23 @@ pub const DEFAULT_MAX_VECTOR_PROPERTIES: usize = 10;
 /// This storage engine maintains the current version of all nodes and edges,
 /// optimized for fast queries without temporal overhead. This is the "fast path"
 /// that should achieve <1µs single-hop traversals.
+///
+/// # Usage
+///
+/// `CurrentStorage` is an internal component typically accessed via
+/// [`crate::AletheiaDB`]. Direct usage is rarely needed for application
+/// code, but may be useful for specialized extensions or low-level tools.
+///
+/// ```rust
+/// // Access via AletheiaDB (recommended)
+/// use aletheiadb::AletheiaDB;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+/// // db.get_node() delegates to CurrentStorage::get_node()
+/// # Ok(())
+/// # }
+/// ```
 pub struct CurrentStorage {
     /// Indexes for nodes and edges
     indexes: CurrentIndexes,
