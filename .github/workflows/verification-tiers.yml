@@ -117,15 +117,18 @@ jobs:
 
           "$VERUS_BIN" verification/verus/temporal_invariants.rs
 
+      - name: Install Rust nightly (required for fuzzing)
+        uses: dtolnay/rust-toolchain@nightly
+
       - name: Install cargo-fuzz
         run: cargo install --locked cargo-fuzz
 
       - name: Fuzz smoke
         run: |
-          cargo fuzz run aql_parser -- -max_total_time=30
-          cargo fuzz run wal_segment_metadata_from_bytes -- -max_total_time=30
-          cargo fuzz run wal_segment_reader_from_bytes -- -max_total_time=30
-          cargo fuzz run vector_mappings_from_bytes -- -max_total_time=30
+          cargo +nightly fuzz run aql_parser -- -max_total_time=30
+          cargo +nightly fuzz run wal_segment_metadata_from_bytes -- -max_total_time=30
+          cargo +nightly fuzz run wal_segment_reader_from_bytes -- -max_total_time=30
+          cargo +nightly fuzz run vector_mappings_from_bytes -- -max_total_time=30
 
   nightly-tier:
     name: Nightly Tier (full Loom + broader Kani + longer fuzz)
