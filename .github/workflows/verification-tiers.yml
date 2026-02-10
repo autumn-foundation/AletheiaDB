@@ -106,6 +106,15 @@ jobs:
           fi
           VERUS_BIN=$(find .verus -type f -name verus | head -n 1)
           chmod +x "$VERUS_BIN"
+
+          # Check if Verus requires a specific toolchain and install it if missing
+          OUTPUT=$("$VERUS_BIN" --version 2>&1 || true)
+          if echo "$OUTPUT" | grep -q "required rust toolchain"; then
+            REQUIRED_TOOLCHAIN=$(echo "$OUTPUT" | sed -n 's/.*required rust toolchain \([^ ]*\) not found.*/\1/p')
+            echo "Verus requires toolchain: $REQUIRED_TOOLCHAIN"
+            rustup toolchain install "$REQUIRED_TOOLCHAIN"
+          fi
+
           "$VERUS_BIN" verification/verus/temporal_invariants.rs
 
       - name: Install cargo-fuzz
@@ -260,6 +269,15 @@ jobs:
           fi
           VERUS_BIN=$(find .verus -type f -name verus | head -n 1)
           chmod +x "$VERUS_BIN"
+
+          # Check if Verus requires a specific toolchain and install it if missing
+          OUTPUT=$("$VERUS_BIN" --version 2>&1 || true)
+          if echo "$OUTPUT" | grep -q "required rust toolchain"; then
+            REQUIRED_TOOLCHAIN=$(echo "$OUTPUT" | sed -n 's/.*required rust toolchain \([^ ]*\) not found.*/\1/p')
+            echo "Verus requires toolchain: $REQUIRED_TOOLCHAIN"
+            rustup toolchain install "$REQUIRED_TOOLCHAIN"
+          fi
+
           echo "VERUS_BIN=$VERUS_BIN" >> "$GITHUB_ENV"
 
       - name: Weekly Verus full core invariants
