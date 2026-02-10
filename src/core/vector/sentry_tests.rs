@@ -146,10 +146,12 @@ fn test_cosine_similarity_subnormal_handling() {
 
     let result = cosine_similarity(&a, &b).unwrap();
 
-    // If it underflows to zero, magnitude will be 0, result 0.0.
-    // If it preserves precision, result 1.0.
-    // We accept either, but mostly check for no panic.
-    assert!(!result.is_nan());
+    // With robust handling, this should now correctly return 1.0
+    assert!(
+        (result - 1.0).abs() < 1e-6,
+        "Subnormal vectors should be handled via rescaling, got {}",
+        result
+    );
 }
 
 // ============================================================================
@@ -226,4 +228,99 @@ fn test_cosine_similarity_both_zero() {
     let b = vec![0.0, 0.0];
     let result = cosine_similarity(&a, &b).unwrap();
     assert_eq!(result, 0.0);
+}
+
+// ============================================================================
+// Robustness Tests (Overflow/Underflow)
+// ============================================================================
+
+#[test]
+fn test_cosine_similarity_magnitude_overflow() {
+    // 1e20 * 1e20 = 1e40 (Inf in f32)
+    // These vectors are identical, so similarity should be 1.0.
+    // Naive implementation produces NaN (Inf/Inf).
+    let huge_val = 1e20_f32;
+    let a = vec![huge_val, 0.0];
+    let b = vec![huge_val, 0.0];
+
+    let sim = cosine_similarity(&a, &b).unwrap();
+    assert!(
+        (sim - 1.0).abs() < 1e-6,
+        "Should handle magnitude overflow and return 1.0, got {}",
+        sim
+    );
+}
+
+#[test]
+fn test_cosine_similarity_underflow_denormal_identical() {
+    // 1e-38 * 1e-38 = 1e-76 (0.0 in f32)
+    // Vectors are identical, similarity should be 1.0.
+    // Naive implementation produces 0.0 (treated as zero vector) or NaN (0/0).
+    let small_val = f32::MIN_POSITIVE; // ~1e-38
+    let a = vec![small_val, 0.0];
+    let b = vec![small_val, 0.0];
+
+    let sim = cosine_similarity(&a, &b).unwrap();
+    assert!(
+        (sim - 1.0).abs() < 1e-6,
+        "Should handle underflow and return 1.0, got {}",
+        sim
+    );
+}
+
+#[test]
+fn test_normalize_infinite_vector() {
+    let v = vec![f32::INFINITY, 1.0];
+    // Should return unit vector in direction of infinity: [1.0, 0.0]
+    let unit = normalize(&v);
+
+    assert!(!unit[0].is_nan(), "Should not be NaN");
+    assert!(
+        (magnitude(&unit) - 1.0).abs() < 1e-6,
+        "Should be unit length"
+    );
+    assert!(
+        (unit[0] - 1.0).abs() < 1e-6,
+        "Should point along Infinity axis"
+    );
+    assert!(
+        unit[1].abs() < 1e-6,
+        "Finite component should be zero relative to Inf"
+    );
+}
+
+#[test]
+fn test_normalize_infinite_vector_mixed_signs() {
+    // [-Inf, Inf] -> direction [-1, 1] normalized -> [-0.707, 0.707]
+    let v = vec![f32::NEG_INFINITY, f32::INFINITY];
+    let unit = normalize(&v);
+
+    assert!(!unit[0].is_nan(), "Should not be NaN");
+    assert!(
+        (magnitude(&unit) - 1.0).abs() < 1e-6,
+        "Should be unit length"
+    );
+
+    let expected = 1.0 / 2.0_f32.sqrt();
+    assert!(
+        (unit[0] - -expected).abs() < 1e-6,
+        "First component should be -1/sqrt(2)"
+    );
+    assert!(
+        (unit[1] - expected).abs() < 1e-6,
+        "Second component should be 1/sqrt(2)"
+    );
+}
+
+#[test]
+fn test_normalize_in_place_infinite_vector() {
+    let mut v = vec![f32::INFINITY, 1.0];
+    normalize_in_place(&mut v);
+
+    assert!(!v[0].is_nan(), "Should not be NaN");
+    assert!((magnitude(&v) - 1.0).abs() < 1e-6, "Should be unit length");
+    assert!(
+        (v[0] - 1.0).abs() < 1e-6,
+        "Should point along Infinity axis"
+    );
 }

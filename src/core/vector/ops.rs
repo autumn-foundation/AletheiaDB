@@ -102,6 +102,13 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
+    // Check for overflow (Inf) or potential underflow (0.0)
+    // Note: mag_sq == 0.0 implies either zero vector or underflow.
+    if mag_a_sq.is_infinite() || mag_b_sq.is_infinite() || mag_a_sq == 0.0 || mag_b_sq == 0.0 {
+        // Fallback for numerical stability
+        return cosine_similarity_robust(a, b, mag_a_sq, mag_b_sq);
+    }
+
     let magnitude = (mag_a_sq * mag_b_sq).sqrt();
 
     // Handle zero vectors
@@ -229,6 +236,85 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
 
     // Clamp to handle floating-point inaccuracies
     Ok(dot.clamp(-1.0, 1.0))
+}
+
+/// Helper for robust cosine similarity calculation when standard computation overflows or underflows.
+/// This handles cases where intermediate sums (like squared magnitudes) exceed f32 limits
+/// or underflow to zero despite non-zero vector elements.
+fn cosine_similarity_robust(a: &[f32], b: &[f32], mag_a_sq: f32, mag_b_sq: f32) -> Result<f32> {
+    // Helper to rescale a vector if needed
+    let handle_vector = |v: &[f32], mag_sq: f32| -> Option<Vec<f32>> {
+        if mag_sq.is_infinite() {
+            // Overflow: scale down by max element
+            let max_val = v.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+            if max_val.is_infinite() {
+                // Vector contains Infinity: map Inf to +/-1, others to 0
+                Some(
+                    v.iter()
+                        .map(|&x| {
+                            if x.is_infinite() {
+                                if x.is_sign_positive() { 1.0 } else { -1.0 }
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect(),
+                )
+            } else if max_val > 0.0 {
+                // Finite overflow (e.g. 1e20): scale down
+                let scale = 1.0 / max_val;
+                Some(v.iter().map(|&x| x * scale).collect())
+            } else {
+                None // Should not happen if mag_sq is infinite
+            }
+        } else if mag_sq == 0.0 {
+            // Potential underflow: check if vector is truly zero
+            let max_val = v.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+            if max_val > 0.0 {
+                // It was underflow (non-zero elements but sum of squares is 0)
+                // Scale up safely
+                // If max_val is extremely small (e.g. < 1e-38), 1.0/max_val might overflow.
+                // We just need to scale it enough to be in normal range.
+                // f32::MAX is ~3.4e38. Safe scale is around 1e30.
+                let scale = if max_val < 1.0e-30 {
+                    1.0e30
+                } else {
+                    1.0 / max_val
+                };
+                Some(v.iter().map(|&x| x * scale).collect())
+            } else {
+                // True zero vector
+                None
+            }
+        } else {
+            // Normal vector
+            None
+        }
+    };
+
+    let a_scaled = handle_vector(a, mag_a_sq);
+    let b_scaled = handle_vector(b, mag_b_sq);
+
+    // If either vector is truly zero (None returned when mag_sq==0), similarity is 0.0
+    if (mag_a_sq == 0.0 && a_scaled.is_none()) || (mag_b_sq == 0.0 && b_scaled.is_none()) {
+        return Ok(0.0);
+    }
+
+    // Use scaled vectors if available, otherwise original
+    // Use Cow-like behavior manually
+    let a_ref = a_scaled.as_deref().unwrap_or(a);
+    let b_ref = b_scaled.as_deref().unwrap_or(b);
+
+    // Recompute with scaled values
+    let (dot, new_mag_a_sq, new_mag_b_sq) = dot_and_magnitudes(a_ref, b_ref);
+
+    let magnitude = (new_mag_a_sq * new_mag_b_sq).sqrt();
+
+    if magnitude == 0.0 {
+        return Ok(0.0);
+    }
+
+    Ok((dot / magnitude).clamp(-1.0, 1.0))
 }
 
 // ============================================================================
@@ -572,6 +658,31 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 #[inline]
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let sq_mag = squared_magnitude(v);
+
+    // Handle overflow (Inf)
+    if sq_mag.is_infinite() {
+        let max_val = v.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+        if max_val.is_infinite() {
+            // Special handling for Infinity to avoid NaN
+            let scaled: Vec<f32> = v
+                .iter()
+                .map(|&x| {
+                    if x.is_infinite() {
+                        if x.is_sign_positive() { 1.0 } else { -1.0 }
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            return normalize(&scaled);
+        } else if max_val > 0.0 {
+            let scale = 1.0 / max_val;
+            let scaled: Vec<f32> = v.iter().map(|&x| x * scale).collect();
+            // Recurse on scaled vector which is guaranteed to be finite
+            return normalize(&scaled);
+        }
+    }
+
     // Use squared magnitude threshold to avoid denormal number issues.
     // See SQUARED_MAGNITUDE_THRESHOLD for details.
     if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {
@@ -619,6 +730,30 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
 #[inline]
 pub fn normalize_in_place(v: &mut [f32]) {
     let sq_mag = squared_magnitude(v);
+
+    // Handle overflow (Inf)
+    if sq_mag.is_infinite() {
+        let max_val = v.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+        if max_val.is_infinite() {
+            for x in v.iter_mut() {
+                if x.is_infinite() {
+                    *x = if x.is_sign_positive() { 1.0 } else { -1.0 };
+                } else {
+                    *x = 0.0;
+                }
+            }
+            normalize_in_place(v);
+            return;
+        } else if max_val > 0.0 {
+            let scale = 1.0 / max_val;
+            // Scale down in place first to bring magnitude into range
+            scale_in_place(v, scale);
+            // Then normalize normally (recursion is safe as it will be finite)
+            normalize_in_place(v);
+            return;
+        }
+    }
+
     // Use squared magnitude threshold to avoid denormal number issues.
     // See SQUARED_MAGNITUDE_THRESHOLD for details.
     if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {

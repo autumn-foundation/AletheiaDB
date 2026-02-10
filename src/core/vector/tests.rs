@@ -377,8 +377,13 @@ fn test_cosine_similarity_both_inf_same_sign() {
     let a = vec![f32::INFINITY, 0.0];
     let b = vec![f32::INFINITY, 0.0];
     let sim = cosine_similarity(&a, &b).unwrap();
-    // Inf * Inf = Inf, sqrt(Inf * Inf) = Inf, Inf/Inf = NaN
-    assert!(sim.is_nan(), "Inf/Inf should be NaN, got {}", sim);
+    // With robust handling, we treat [Inf, 0] as direction [1, 0]
+    // So similarity should be 1.0 (identical direction)
+    assert!(
+        (sim - 1.0).abs() < 1e-6,
+        "Inf/Inf with robust handling should be 1.0, got {}",
+        sim
+    );
 }
 
 // ========================================================================
