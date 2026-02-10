@@ -1455,7 +1455,9 @@ impl HnswIndex {
                 let similarity = match self.config.metric {
                     DistanceMetric::Cosine => 1.0 - distance,
                     DistanceMetric::Euclidean => -distance,
-                    DistanceMetric::DotProduct => -distance,
+                    // usearch IP metric returns (1 - dot_product)
+                    // We want to return dot_product, so: 1.0 - (1.0 - dot) = dot
+                    DistanceMetric::DotProduct => 1.0 - distance,
                     DistanceMetric::Haversine => -distance,
                     DistanceMetric::Hamming => -distance,
                     DistanceMetric::Tanimoto => 1.0 - distance,
@@ -1978,7 +1980,23 @@ mod tests {
         assert_eq!(index.len(), 2);
 
         let results = index.search(&[1.0, 0.0, 0.0, 0.0], 2)?;
+        assert_eq!(results.len(), 2);
+
+        // Verify first result (identical match)
         assert_eq!(results[0].0, node1);
+        assert!(
+            (results[0].1 - 1.0).abs() < 1e-5,
+            "Expected similarity ~1.0, got {}",
+            results[0].1
+        );
+
+        // Verify second result (orthogonal)
+        assert_eq!(results[1].0, node2);
+        assert!(
+            (results[1].1 - 0.0).abs() < 1e-5,
+            "Expected similarity ~0.0, got {}",
+            results[1].1
+        );
 
         Ok(())
     }
@@ -2105,28 +2123,113 @@ mod tests {
 
     #[test]
     fn test_distance_to_similarity_conversion() -> Result<()> {
-        // Test Cosine similarity conversion
-        let cosine_index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
+        let epsilon = 1e-4;
 
-        let n1 = NodeId::new(1).unwrap();
-        let n2 = NodeId::new(2).unwrap();
-        let n3 = NodeId::new(3).unwrap();
+        // 1. Cosine: similarity = 1.0 - distance
+        // usearch Cosine distance is 1.0 - cosine_similarity (range [0, 2])
+        // So our similarity should be cosine_similarity (range [-1, 1])
+        {
+            let index = HnswIndexBuilder::new(2, DistanceMetric::Cosine).build()?;
+            let n1 = NodeId::new(1).unwrap();
+            let n2 = NodeId::new(2).unwrap();
+            let n3 = NodeId::new(3).unwrap();
 
-        cosine_index.add(n1, &[1.0, 0.0, 0.0])?; // Identical to query
-        cosine_index.add(n2, &[0.9, 0.1, 0.0])?; // Very similar
-        cosine_index.add(n3, &[0.0, 1.0, 0.0])?; // Orthogonal
+            // v1 = [1, 0]
+            // v2 = [0, 1] (orthogonal, sim 0.0, dist 1.0)
+            // v3 = [-1, 0] (opposite, sim -1.0, dist 2.0)
+            index.add(n1, &[1.0, 0.0])?;
+            index.add(n2, &[0.0, 1.0])?;
+            index.add(n3, &[-1.0, 0.0])?;
 
-        let results = cosine_index.search(&[1.0, 0.0, 0.0], 3)?;
+            let results = index.search(&[1.0, 0.0], 3)?;
 
-        // Verify similarity values (not distances)
-        assert_eq!(results[0].0, n1);
-        assert!(results[0].1 > 0.99); // Identical: similarity ~= 1.0
+            // Expected: n1 (1.0), n2 (0.0), n3 (-1.0)
+            assert_eq!(results[0].0, n1);
+            assert!(
+                (results[0].1 - 1.0).abs() < epsilon,
+                "Cosine n1 should be 1.0, got {}",
+                results[0].1
+            );
 
-        assert_eq!(results[1].0, n2);
-        assert!(results[1].1 > 0.9); // Very similar: similarity > 0.9
+            assert_eq!(results[1].0, n2);
+            assert!(
+                (results[1].1 - 0.0).abs() < epsilon,
+                "Cosine n2 should be 0.0, got {}",
+                results[1].1
+            );
 
-        assert_eq!(results[2].0, n3);
-        assert!(results[2].1 < 0.1 && results[2].1 > -0.1); // Orthogonal: similarity ~= 0.0
+            assert_eq!(results[2].0, n3);
+            assert!(
+                (results[2].1 - -1.0).abs() < epsilon,
+                "Cosine n3 should be -1.0, got {}",
+                results[2].1
+            );
+        }
+
+        // 2. Euclidean: similarity = -distance
+        // usearch Euclidean is L2 squared.
+        {
+            let index = HnswIndexBuilder::new(2, DistanceMetric::Euclidean).build()?;
+            let n1 = NodeId::new(1).unwrap();
+            let n2 = NodeId::new(2).unwrap();
+
+            // v1 = [0, 0]
+            // v2 = [3, 4] (distance = sqrt(3^2 + 4^2) = 5. Squared = 25)
+            index.add(n1, &[0.0, 0.0])?;
+            index.add(n2, &[3.0, 4.0])?;
+
+            let results = index.search(&[0.0, 0.0], 2)?;
+
+            // Expected: n1 (sim = -0 = 0), n2 (sim = -25)
+            assert_eq!(results[0].0, n1);
+            assert!(
+                (results[0].1 - 0.0).abs() < epsilon,
+                "Euclidean n1 should be 0.0, got {}",
+                results[0].1
+            );
+
+            assert_eq!(results[1].0, n2);
+            assert!(
+                (results[1].1 - -25.0).abs() < epsilon,
+                "Euclidean n2 should be -25.0, got {}",
+                results[1].1
+            );
+        }
+
+        // 3. DotProduct: similarity = 1.0 - distance
+        // usearch IP distance is 1.0 - dot_product
+        // So similarity = 1.0 - (1.0 - dot_product) = dot_product
+        {
+            let index = HnswIndexBuilder::new(2, DistanceMetric::DotProduct).build()?;
+            let n1 = NodeId::new(1).unwrap();
+            let n2 = NodeId::new(2).unwrap();
+
+            // v1 = [1, 2]
+            // v2 = [3, 4]
+            // query = [1, 2]
+            // n1 dot query = 1*1 + 2*2 = 5.
+            // n2 dot query = 3*1 + 4*2 = 3 + 8 = 11.
+            // n2 should be first!
+            index.add(n1, &[1.0, 2.0])?;
+            index.add(n2, &[3.0, 4.0])?;
+
+            let results = index.search(&[1.0, 2.0], 2)?;
+
+            // Expected: n2 (dot 11), n1 (dot 5)
+            assert_eq!(results[0].0, n2);
+            assert!(
+                (results[0].1 - 11.0).abs() < epsilon,
+                "DotProduct n2 should be 11.0, got {}",
+                results[0].1
+            );
+
+            assert_eq!(results[1].0, n1);
+            assert!(
+                (results[1].1 - 5.0).abs() < epsilon,
+                "DotProduct n1 should be 5.0, got {}",
+                results[1].1
+            );
+        }
 
         Ok(())
     }
