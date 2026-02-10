@@ -18,6 +18,18 @@ pub struct DiffReport {
     pub changes: Vec<EntityChange>,
 }
 
+impl Default for DiffReport {
+    fn default() -> Self {
+        // Use a safe default (e.g. epoch 0) since Timestamp doesn't impl Default
+        let ts = Timestamp::from(0);
+        Self {
+            t1: ts,
+            t2: ts,
+            changes: Vec::new(),
+        }
+    }
+}
+
 /// A change to a single entity.
 #[derive(Debug, Clone)]
 pub enum EntityChange {
@@ -37,7 +49,7 @@ pub enum ChangeType {
 }
 
 /// Difference in properties.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PropertyDiff {
     pub added: Vec<String>,
     pub removed: Vec<String>,
@@ -261,7 +273,7 @@ mod tests {
 
         // Diff T0 -> T1 (Added)
         let report_0_1 = diff_engine.compute_diff(t0, t1, None).unwrap();
-        assert_eq!(report_0_1.changes.len(), 1);
+        assert_eq!(report_0_1.changes.len(), 1, "Should report 1 addition");
         if let EntityChange::Node { id, change } = &report_0_1.changes[0] {
             assert_eq!(*id, node_id);
             assert!(matches!(change, ChangeType::Added));
@@ -271,7 +283,7 @@ mod tests {
 
         // Diff T1 -> T2 (Modified)
         let report_1_2 = diff_engine.compute_diff(t1, t2, None).unwrap();
-        assert_eq!(report_1_2.changes.len(), 1);
+        assert_eq!(report_1_2.changes.len(), 1, "Should report 1 modification");
         if let EntityChange::Node { id, change } = &report_1_2.changes[0] {
             assert_eq!(*id, node_id);
             match change {
@@ -289,6 +301,9 @@ mod tests {
                         !diff.removed.contains(&"name".to_string()),
                         "Unchanged property 'name' should not be removed"
                     );
+
+                    // Explicitly verify is_empty logic by asserting this diff is NOT empty
+                    assert!(!diff.is_empty(), "PropertyDiff should not be empty");
                 }
                 _ => panic!("Expected Modified, got {:?}", change),
             }
@@ -298,13 +313,17 @@ mod tests {
 
         // Diff T2 -> T3 (Removed)
         let report_2_3 = diff_engine.compute_diff(t2, t3, None).unwrap();
-        assert_eq!(report_2_3.changes.len(), 1);
+        assert_eq!(report_2_3.changes.len(), 1, "Should report 1 removal");
         if let EntityChange::Node { id, change } = &report_2_3.changes[0] {
             assert_eq!(*id, node_id);
             assert!(matches!(change, ChangeType::Removed));
         } else {
             panic!("Expected Node change");
         }
+
+        // No-Op Diff: T1 -> T1
+        let report_same = diff_engine.compute_diff(t1, t1, None).unwrap();
+        assert_eq!(report_same.changes.len(), 0, "No changes expected for same timestamp");
     }
 
     #[test]
@@ -337,5 +356,31 @@ mod tests {
             10,
             "Should report all 10 changes without limit"
         );
+    }
+
+    #[test]
+    fn test_property_diff_is_empty() {
+        let diff = PropertyDiff::default();
+        assert!(diff.is_empty(), "Default diff should be empty");
+
+        let diff_added = PropertyDiff {
+            added: vec!["key".to_string()],
+            ..Default::default()
+        };
+        assert!(!diff_added.is_empty(), "Diff with added should not be empty");
+
+        let diff_removed = PropertyDiff {
+            removed: vec!["key".to_string()],
+            ..Default::default()
+        };
+        assert!(!diff_removed.is_empty(), "Diff with removed should not be empty");
+
+        let mut changed = HashMap::new();
+        changed.insert("key".to_string(), ("old".to_string(), "new".to_string()));
+        let diff_changed = PropertyDiff {
+            changed,
+            ..Default::default()
+        };
+        assert!(!diff_changed.is_empty(), "Diff with changed should not be empty");
     }
 }
