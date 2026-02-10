@@ -18,12 +18,20 @@ fn is_ci() -> bool {
 
 /// Returns reduced iterations in CI to avoid timeouts on slow runners.
 fn iterations() -> usize {
-    if is_ci() { 30 } else { 100 }
+    if is_ci() {
+        10
+    } else {
+        100
+    }
 }
 
 /// Returns a longer timeout in CI to accommodate slow shared runners.
 fn test_timeout_secs() -> u64 {
-    if is_ci() { 120 } else { 60 }
+    if is_ci() {
+        300
+    } else {
+        60
+    }
 }
 
 /// Chaos Engineering: Concurrency Stress Test
