@@ -496,11 +496,7 @@ impl PropertyValue {
     /// # Errors
     /// Returns `StorageError::CorruptedData` if recursion depth exceeds limits.
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        let mut buffer = Vec::with_capacity(self.serialized_size().map_err(|_| {
-            StorageError::CorruptedData(
-                "Recursion depth limit exceeded in serialized_size".to_string(),
-            )
-        })?);
+        let mut buffer = Vec::with_capacity(self.serialized_size()?);
         self.serialize_into(&mut buffer)?;
         Ok(buffer)
     }
@@ -1672,31 +1668,20 @@ impl PropertyMap {
         for (key, value) in self.inner.iter() {
             // Serialize key: resolve InternedString to actual string
             // Use with_str to avoid Arc cloning overhead
+            let mut key_error = None;
             GLOBAL_INTERNER
                 .resolve_with(*key, |key_str| {
                     let key_bytes = key_str.as_bytes();
-                    // Budget for key length prefix (4) + key bytes
-                    // We can't easily return Result from resolve_with, so we panic/log if budget
-                    // exceeded? No, we should check budget before writing.
-                    // But we don't know key len until we resolve it.
-                    // This closure must not fail.
-                    //
-                    // Workaround: We trust the key length is reasonable (it's an interned string)
-                    // but we must still account for it in the budget.
-                    // Since we can't propagate error from closure easily without refactoring,
-                    // we accept a minor risk here or use a mutable flag.
-                    //
-                    // Better approach: Get len first, check budget, then write.
-                    // resolve_with return value is generic.
                     let len = key_str.len();
+
+                    // Check budget BEFORE writing to buffer
+                    if let Err(e) = consume_budget(&mut budget, 4 + len) {
+                        key_error = Some(e);
+                        return;
+                    }
+
                     buffer.extend_from_slice(&(len as u32).to_le_bytes());
                     buffer.extend_from_slice(key_bytes);
-                    len
-                })
-                .map(|len| {
-                    // Account for the key bytes + length prefix written inside the closure
-                    // If budget is exhausted, this will return Error which we propagate.
-                    consume_budget(&mut budget, 4 + len)
                 })
                 .ok_or_else(|| {
                     crate::utils::error::Error::Storage(StorageError::InconsistentState {
@@ -1705,7 +1690,11 @@ impl PropertyMap {
                             key.as_u32()
                         ),
                     })
-                })??;
+                })?;
+
+            if let Some(e) = key_error {
+                return Err(e);
+            }
 
             // Serialize value using the SHARED budget
             // We call serialize_recursive directly to avoid resetting the budget
