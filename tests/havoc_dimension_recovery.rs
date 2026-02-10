@@ -18,32 +18,25 @@ fn test_havoc_dimension_recovery() {
     // 2. Load it with dimension 128 (mismatched config)
     // We do NOT tamper with metadata. The metadata correctly says 4.
     // The config incorrectly says 128.
-    // HnswIndex::load should detect the actual dimensions from the file (4),
-    // update the config, and validation should pass (4 == 4).
+    // HnswIndex::load should REJECT this because the file dimensions (4) do not match
+    // the expected configuration (128). This prevents inconsistent state.
 
     let config = HnswConfig::new(128, DistanceMetric::Cosine)
-        .with_custom_metric("spy", |a, b| {
-             // If we get here, and len is 128, we are reading OOB (bad!)
-             // If len is 4, we are safe (good!)
-             if a.len() != 4 {
-                 panic!("CRITICAL: Metric wrapper called with wrong dimension: {}", a.len());
-             }
+        .with_custom_metric("spy", |_a, _b| {
              0.0
         });
 
-    let index = aletheiadb::index::vector::HnswIndex::load(&path, config).expect("Load should succeed by adapting to actual index dimensions");
+    let result = aletheiadb::index::vector::HnswIndex::load(&path, config);
 
-    println!("Index reported dimensions: {}", index.dimensions());
-    assert_eq!(index.dimensions(), 4, "Index should report actual dimensions (4), not config dimensions (128)");
+    assert!(result.is_err(), "Load should fail due to dimension mismatch between config and file");
 
-    // 3. Try to add a 4-dim vector
-    // This should succeed.
-    let vec_4 = vec![0.1f32; 4];
-    match index.add(NodeId::new(2).unwrap(), &vec_4) {
-        Ok(_) => println!("Add 4-dim success"),
-        Err(e) => {
-            panic!("HnswIndex failed to accept valid vector for underlying index: {}", e);
-        }
+    match result {
+        Err(Error::Vector(aletheiadb::utils::error::VectorError::IndexError(msg))) => {
+            assert!(msg.contains("Index dimension mismatch"), "Error message should mention dimension mismatch. Got: {}", msg);
+            assert!(msg.contains("expected 128"), "Error should expect 128 (config)");
+            assert!(msg.contains("found 4"), "Error should find 4 (file)");
+        },
+        _ => panic!("Expected VectorError::IndexError, got {:?}", result),
     }
 }
 
@@ -77,21 +70,21 @@ fn test_havoc_tampered_metadata_detection() {
 
     std::fs::write(&mappings_path, &data).unwrap();
 
-    // Config claims 128 (matches tampered metadata)
-    let config = HnswConfig::new(128, DistanceMetric::Cosine);
+    // Config correctly claims 4 (matches actual index), but metadata claims 128.
+    // This tests that we verify metadata integrity even if config matches index.
+    let config = HnswConfig::new(4, DistanceMetric::Cosine);
 
-    // Load should FAIL because HnswIndex detects the actual index dimension is 4,
-    // and refuses to load it because metadata (128) contradicts reality (4).
+    // Load should FAIL because metadata (128) contradicts config/index (4).
     let result = aletheiadb::index::vector::HnswIndex::load(&path, config);
 
-    assert!(result.is_err(), "Load should fail due to metadata mismatch with actual index");
+    assert!(result.is_err(), "Load should fail due to metadata mismatch");
 
     match result {
         Err(Error::Vector(aletheiadb::utils::error::VectorError::IndexError(msg))) => {
             assert!(msg.contains("Index dimension mismatch"), "Error message should mention dimension mismatch. Got: {}", msg);
-            assert!(msg.contains("expected 4"), "Error should expect 4 (actual index dim)");
-            assert!(msg.contains("found 128"), "Error should find 128 (metadata dim)");
+            assert!(msg.contains("expected 4"), "Error should expect 4 (config/index)");
+            assert!(msg.contains("found 128"), "Error should find 128 (metadata)");
         },
-        _ => panic!("Expected VectorError::IndexError"),
+        _ => panic!("Expected VectorError::IndexError, got {:?}", result),
     }
 }

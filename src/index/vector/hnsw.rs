@@ -1766,16 +1766,21 @@ impl HnswIndex {
                 )))
             })?;
 
-        // Update config with actual dimensions from loaded index
-        // This handles cases where metadata validation was bypassed or
-        // where usearch loaded a file with different dimensions than requested.
-        let mut actual_config = config;
-        actual_config.dimensions = index.dimensions();
+        // Verify dimensions match configuration
+        // This prevents loading an index that doesn't match expectations,
+        // which avoids inconsistent state and potential security issues with custom metrics.
+        let actual_dimensions = index.dimensions();
+        if actual_dimensions != config.dimensions {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Index dimension mismatch: expected {}, found {} in file",
+                config.dimensions, actual_dimensions
+            ))));
+        }
 
         // Apply custom metric if configured (must happen after load, before use)
         // This ensures custom metrics are preserved across save/load cycles
-        if let Some(ref custom) = actual_config.custom_metric {
-            let dims = actual_config.dimensions;
+        if let Some(ref custom) = config.custom_metric {
+            let dims = config.dimensions;
             let distance_fn = Arc::clone(&custom.distance_fn);
 
             // Create a wrapper that converts usearch's raw pointer API to our safe slice API
@@ -1789,12 +1794,12 @@ impl HnswIndex {
         let (id_mapping, reverse_mapping, max_key, metadata) =
             load_mappings_with_integrity(&mappings_path)?;
 
-        // Validate metadata against the actual loaded configuration
-        Self::validate_metadata(metadata, &actual_config)?;
+        // Validate metadata
+        Self::validate_metadata(metadata, &config)?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
-            config: actual_config,
+            config,
             id_mapping: Arc::new(id_mapping),
             reverse_mapping: Arc::new(reverse_mapping),
             next_key: AtomicU64::new(max_key + 1),
