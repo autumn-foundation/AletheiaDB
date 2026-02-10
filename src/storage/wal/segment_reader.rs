@@ -1217,6 +1217,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_entry_at_update_node_truncated_label() {
+        // OpType(1) + NodeId(8) + VersionId(8) + LabelId(4) + ...
+        // We want to pass the initial 16-byte check but fail the 4-byte check
+        // Total needed before label ID read: 1 (op) + 8 (node) + 8 (version) = 17 bytes
+        // To fail "checked_add(4)", buffer must be < 17 + 4 = 21 bytes (from op start)
+
+        let mut buffer = Vec::new();
+        // LSN (8) + Timestamp (12) + Checksum (4) = 24 bytes header
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // LSN
+        time::now().serialize_into(&mut buffer); // Timestamp
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // Dummy checksum (not checked until end)
+
+        let _op_start = buffer.len();
+        buffer.push(3); // UpdateNode op code
+
+        // Write 16 bytes (NodeId + VersionId) - passes first check
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        // Write only 1 byte of Label ID (truncated)
+        // Total op len = 1 + 16 + 1 = 18 bytes.
+        // 18 < 21, so 17 + 4 check should fail.
+        buffer.push(0);
+
+        // We expect "Insufficient buffer size for UpdateNode label" or "WAL offset overflow"
+        // parse_entry_at expects valid checksum, but returns length error first if reading fails early?
+        // Actually, checksum verification happens AT THE END.
+        // So standard flow will try to read, fail bounds check, and return error.
+
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("Insufficient buffer size") || msg.contains("overflow"));
+    }
+
+    #[test]
+    fn test_parse_entry_at_update_edge_truncated_label() {
+        // Similar to above but for UpdateEdge (op 4)
+        // Initial check: 16 bytes (EdgeId + VersionId)
+        // Secondary check: 4 bytes (LabelId)
+
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+        time::now().serialize_into(&mut buffer);
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        buffer.push(4); // UpdateEdge
+
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // EdgeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        // Truncated label
+        buffer.push(0);
+
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("Insufficient buffer size") || msg.contains("overflow"));
+    }
+
     // =============================================================================
     // TDD Tests for Memory-Efficient Segment Reading - Issue #216
     // =============================================================================

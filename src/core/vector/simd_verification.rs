@@ -16,9 +16,11 @@ fn assert_approx_eq(a: f32, b: f32, context: &str) {
     }
     let diff = (a - b).abs();
     // Use a mix of absolute and relative error
+    // coverage: off
     if diff > EPSILON && diff > EPSILON * a.abs().max(b.abs()) {
         panic!("{} mismatch: {} vs {} (diff: {})", context, a, b, diff);
     }
+    // coverage: on
 }
 
 proptest! {
