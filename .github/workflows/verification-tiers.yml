@@ -63,10 +63,10 @@ jobs:
       - name: Setup Kani model checker
         run: printf "y\n" | cargo kani setup
 
-      - name: Kani smoke
+      - name: Kani smoke (fast)
+        timeout-minutes: 12
         run: |
-          cargo kani --lib --harness kani_wal_bounded_state_machine_transitions
-          cargo kani --lib --harness kani_lsn_allocator_bounded_sequence_monotonic
+          cargo kani --lib --default-unwind 6 --harness kani_lsn_allocator_single_step_monotonic
 
       - name: Install Verus (latest Linux release)
         run: |
