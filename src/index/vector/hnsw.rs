@@ -169,6 +169,16 @@ fn validate_dimensions(dimensions: usize) -> Result<()> {
     Ok(())
 }
 
+/// Validates connectivity to prevent excessive memory usage.
+fn validate_connectivity(connectivity: usize) -> Result<()> {
+    if connectivity > 64 {
+        return Err(Error::Vector(VectorError::InvalidVector {
+            reason: format!("M must be in range [1, 64], got {}", connectivity),
+        }));
+    }
+    Ok(())
+}
+
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
     match metric {
@@ -1820,11 +1830,7 @@ impl HnswIndex {
         validate_dimensions(dimensions)?;
 
         // Validate connectivity from index to prevent excessive memory usage
-        if connectivity > 64 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!("M must be in range [1, 64], got {}", connectivity),
-            }));
-        }
+        validate_connectivity(connectivity)?;
 
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
@@ -1929,6 +1935,13 @@ mod sentry_tests {
             "Error: No available threads to lock for search"
         ));
         assert!(!is_retryable_usearch_error("Other error"));
+    }
+
+    #[test]
+    fn test_validate_connectivity() {
+        assert!(validate_connectivity(16).is_ok());
+        assert!(validate_connectivity(64).is_ok());
+        assert!(validate_connectivity(65).is_err());
     }
 }
 
