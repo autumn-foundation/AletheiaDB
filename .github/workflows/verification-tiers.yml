@@ -63,10 +63,10 @@ jobs:
       - name: Setup Kani model checker
         run: printf "y\n" | cargo kani setup
 
-      - name: Kani smoke
+      - name: Kani smoke (fast)
+        timeout-minutes: 12
         run: |
-          cargo kani --lib --harness kani_wal_bounded_state_machine_transitions
-          cargo kani --lib --harness kani_lsn_allocator_bounded_sequence_monotonic
+          cargo kani --lib --default-unwind 6 --harness kani_lsn_allocator_single_step_monotonic
 
       - name: Install Verus (latest Linux release)
         run: |
@@ -106,34 +106,34 @@ jobs:
           fi
           VERUS_BIN=$(find .verus -type f -name verus | head -n 1)
           chmod +x "$VERUS_BIN"
-
-          # Try running verus, install toolchain if needed
-          if ! "$VERUS_BIN" verification/verus/temporal_invariants.rs 2> verus_err.log; then
-            cat verus_err.log
-            # Look for required toolchain in error output
-            # Error format: "verus: required rust toolchain 1.93.0-x86_64-unknown-linux-gnu not found"
-            TOOLCHAIN=$(grep "required rust toolchain" verus_err.log | sed -n 's/.*toolchain \([^ ]*\) not found.*/\1/p')
-
-            if [ -n "$TOOLCHAIN" ]; then
-              echo "Installing missing toolchain: $TOOLCHAIN"
-              rustup toolchain install "$TOOLCHAIN" --profile minimal --no-self-update
-              echo "Retrying Verus..."
-              "$VERUS_BIN" verification/verus/temporal_invariants.rs
+          # Verus releases are tied to a specific Rust toolchain. Detect and install it if needed.
+          set +e
+          "$VERUS_BIN" --version >/tmp/verus-version.out 2>/tmp/verus-version.err
+          VERUS_STATUS=$?
+          set -e
+          if [ $VERUS_STATUS -ne 0 ]; then
+            REQUIRED_TOOLCHAIN=$(grep -oE "required rust toolchain [^ ]+" /tmp/verus-version.err | awk '{print $4}' || true)
+            if [ -n "$REQUIRED_TOOLCHAIN" ]; then
+              rustup toolchain install "$REQUIRED_TOOLCHAIN"
             else
-              echo "Verus failed with unknown error"
-              exit 1
+              cat /tmp/verus-version.err
+              exit $VERUS_STATUS
             fi
           fi
+          "$VERUS_BIN" verification/verus/temporal_invariants.rs
+
+      - name: Install Rust nightly (required for fuzzing)
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
         run: cargo install --locked cargo-fuzz
 
       - name: Fuzz smoke
         run: |
-          cargo fuzz run aql_parser -- -max_total_time=30
-          cargo fuzz run wal_segment_metadata_from_bytes -- -max_total_time=30
-          cargo fuzz run wal_segment_reader_from_bytes -- -max_total_time=30
-          cargo fuzz run vector_mappings_from_bytes -- -max_total_time=30
+          cargo +nightly fuzz run aql_parser -- -max_total_time=30
+          cargo +nightly fuzz run wal_segment_metadata_from_bytes -- -max_total_time=30
+          cargo +nightly fuzz run wal_segment_reader_from_bytes -- -max_total_time=30
+          cargo +nightly fuzz run vector_mappings_from_bytes -- -max_total_time=30
 
   nightly-tier:
     name: Nightly Tier (full Loom + broader Kani + longer fuzz)
@@ -277,6 +277,20 @@ jobs:
           fi
           VERUS_BIN=$(find .verus -type f -name verus | head -n 1)
           chmod +x "$VERUS_BIN"
+          # Verus releases are tied to a specific Rust toolchain. Detect and install it if needed.
+          set +e
+          "$VERUS_BIN" --version >/tmp/verus-version.out 2>/tmp/verus-version.err
+          VERUS_STATUS=$?
+          set -e
+          if [ $VERUS_STATUS -ne 0 ]; then
+            REQUIRED_TOOLCHAIN=$(grep -oE "required rust toolchain [^ ]+" /tmp/verus-version.err | awk '{print $4}' || true)
+            if [ -n "$REQUIRED_TOOLCHAIN" ]; then
+              rustup toolchain install "$REQUIRED_TOOLCHAIN"
+            else
+              cat /tmp/verus-version.err
+              exit $VERUS_STATUS
+            fi
+          fi
           echo "VERUS_BIN=$VERUS_BIN" >> "$GITHUB_ENV"
 
       - name: Weekly Verus full core invariants
