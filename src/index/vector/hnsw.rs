@@ -3022,4 +3022,15 @@ mod coverage_tests {
         // Verify flag is reset to false after drop
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
     }
+
+    #[test]
+    fn test_filter_callback_guard_manual_drop() {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+
+        let guard = FilterCallbackGuard::new();
+        assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
+
+        drop(guard);
+        assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
 }
