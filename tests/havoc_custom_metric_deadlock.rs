@@ -37,7 +37,9 @@ fn test_custom_metric_reentrancy_prevention() {
                 let vec = vec![0.0; a.len()];
 
                 match index.add(new_id, &vec) {
-                    Ok(_) => panic!("👺 Havoc: Add succeeded unexpectedly! Should have been prevented by re-entrancy check."),
+                    Ok(_) => panic!(
+                        "👺 Havoc: Add succeeded unexpectedly! Should have been prevented by re-entrancy check."
+                    ),
                     Err(e) => {
                         let msg = e.to_string();
                         // Expected error: "Cannot modify index from within a search_with_filter callback..."
@@ -49,7 +51,7 @@ fn test_custom_metric_reentrancy_prevention() {
                             // We don't panic here because it might be another valid error, but we prefer the re-entrancy one.
                             // But for this test, let's just log it. The main thing is NO DEADLOCK.
                         }
-                    },
+                    }
                 }
             }
         }

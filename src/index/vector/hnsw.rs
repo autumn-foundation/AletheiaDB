@@ -2795,14 +2795,21 @@ mod tests {
             .build()
             .unwrap();
 
-        let id1 = NodeId::new(1).unwrap();
-        let id2 = NodeId::new(2).unwrap();
-
-        index.add(id1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(id2, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        // Add more nodes to ensure we trigger enough comparisons to hit the callback
+        for i in 0..10 {
+            let id = NodeId::new(i + 1).unwrap();
+            // Alternate vectors to create some diversity
+            let vec = if i % 2 == 0 {
+                [1.0, 0.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0, 0.0]
+            };
+            index.add(id, &vec).unwrap();
+        }
 
         // Perform search to trigger the metric execution
-        let results = index.search(&[0.9, 0.1, 0.0, 0.0], 1).unwrap();
-        assert_eq!(results.len(), 1);
+        // Search for k=5 to force more comparisons
+        let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
+        assert_eq!(results.len(), 5);
     }
 }
