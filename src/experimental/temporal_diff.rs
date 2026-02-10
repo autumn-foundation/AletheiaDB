@@ -3,10 +3,10 @@
 //! Computes the structural and semantic difference between two points in time.
 
 use crate::AletheiaDB;
-use crate::core::id::{EntityId, NodeId, EdgeId, VersionId};
-use crate::core::temporal::Timestamp;
-use crate::core::property::PropertyMap;
+use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
+use crate::core::property::PropertyMap;
+use crate::core::temporal::Timestamp;
 use crate::utils::{Result, StorageError};
 use std::collections::HashMap;
 
@@ -96,8 +96,14 @@ impl<'a> TemporalDiff<'a> {
 
             if let Some(change_type) = change {
                 match entity_id {
-                    EntityId::Node(id) => changes.push(EntityChange::Node { id, change: change_type }),
-                    EntityId::Edge(id) => changes.push(EntityChange::Edge { id, change: change_type }),
+                    EntityId::Node(id) => changes.push(EntityChange::Node {
+                        id,
+                        change: change_type,
+                    }),
+                    EntityId::Edge(id) => changes.push(EntityChange::Edge {
+                        id,
+                        change: change_type,
+                    }),
                 }
             }
         }
@@ -108,11 +114,17 @@ impl<'a> TemporalDiff<'a> {
     fn find_version(&self, entity_id: EntityId, time: Timestamp) -> Option<VersionId> {
         match entity_id {
             EntityId::Node(id) => {
-                let versions = self.db.temporal_indexes.find_node_version_at_point(id, time, time);
+                let versions = self
+                    .db
+                    .temporal_indexes
+                    .find_node_version_at_point(id, time, time);
                 versions.first().copied()
             }
             EntityId::Edge(id) => {
-                let versions = self.db.temporal_indexes.find_edge_version_at_point(id, time, time);
+                let versions = self
+                    .db
+                    .temporal_indexes
+                    .find_edge_version_at_point(id, time, time);
                 versions.first().copied()
             }
         }
@@ -123,14 +135,16 @@ impl<'a> TemporalDiff<'a> {
         match entity_id {
             EntityId::Node(_) => {
                 // Ensure version exists first
-                historical.get_node_version(version_id)
+                historical
+                    .get_node_version(version_id)
                     .ok_or_else(|| StorageError::VersionNotFound(version_id))?;
 
                 // Reconstruct properties (handles deltas)
                 historical.reconstruct_node_properties(version_id)
             }
             EntityId::Edge(_) => {
-                historical.get_edge_version(version_id)
+                historical
+                    .get_edge_version(version_id)
                     .ok_or_else(|| StorageError::VersionNotFound(version_id))?;
 
                 historical.reconstruct_edge_properties(version_id)
@@ -150,7 +164,7 @@ impl<'a> TemporalDiff<'a> {
                     if let Some(s) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string()) {
                         removed.push(s);
                     }
-                },
+                }
                 Some(val2) => {
                     // Simple comparison using PartialEq
                     if val1 != val2 {
@@ -171,7 +185,11 @@ impl<'a> TemporalDiff<'a> {
             }
         }
 
-        PropertyDiff { added, removed, changed }
+        PropertyDiff {
+            added,
+            removed,
+            changed,
+        }
     }
 }
 
@@ -184,8 +202,8 @@ impl PropertyDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMapBuilder;
     use crate::api::transaction::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
 
     #[test]
@@ -250,7 +268,7 @@ mod tests {
                     assert!(diff.changed.contains_key("level"));
                     // "status" added.
                     assert!(diff.added.contains(&"status".to_string()));
-                },
+                }
                 _ => panic!("Expected Modified, got {:?}", change),
             }
         } else {

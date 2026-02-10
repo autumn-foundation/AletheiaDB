@@ -3677,17 +3677,21 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let edge_id = EdgeId::new(2).unwrap();
 
-        indexes.insert_node_version(
-            node_id,
-            VersionId::new(1).unwrap(),
-            BiTemporalInterval::current(1000.into()),
-        ).unwrap();
+        indexes
+            .insert_node_version(
+                node_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000.into()),
+            )
+            .unwrap();
 
-        indexes.insert_edge_version(
-            edge_id,
-            VersionId::new(2).unwrap(),
-            BiTemporalInterval::current(1000.into()),
-        ).unwrap();
+        indexes
+            .insert_edge_version(
+                edge_id,
+                VersionId::new(2).unwrap(),
+                BiTemporalInterval::current(1000.into()),
+            )
+            .unwrap();
 
         let ids = indexes.get_all_entity_ids();
         assert_eq!(ids.len(), 2);
