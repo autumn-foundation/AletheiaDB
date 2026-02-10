@@ -23,7 +23,7 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```rust
 //! use aletheiadb::{AletheiaDB, properties, WriteOps};
 //! use aletheiadb::core::temporal::time;
 //!
@@ -43,11 +43,13 @@
 //!
 //! // Query current state
 //! let current = db.get_node(alice)?;
+//! assert_eq!(current.get_property("age").and_then(|v| v.as_int()), Some(31));
 //!
 //! // Time-travel to see historical state
 //! // Use current time as a placeholder for the point in time we want to query
 //! let now = time::now();
 //! let historical = db.get_node_at_time(alice, now, now)?;
+//! // Note: In a real scenario, you'd query with a past timestamp to see the old age
 //! # Ok(())
 //! # }
 //! ```
@@ -87,6 +89,10 @@ pub mod http;
 // Test utilities (only available in tests)
 #[cfg(test)]
 pub mod test_utils;
+
+// Kani proof harnesses (only compiled under cargo-kani)
+#[cfg(kani)]
+mod verification;
 
 // Re-export commonly used types at the crate root
 pub use config::{

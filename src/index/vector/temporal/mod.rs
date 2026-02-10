@@ -129,6 +129,19 @@ pub struct TemporalVectorIndex {
     config: TemporalVectorConfig,
 }
 
+/// Returns true if a snapshot at `ordinal_from_oldest` should be pruned under KeepN.
+///
+/// This encodes the exact retention policy used by `prune_snapshots`:
+/// remove the oldest `total_snapshots - keep_n` entries.
+fn keep_n_should_prune(total_snapshots: usize, keep_n: usize, ordinal_from_oldest: usize) -> bool {
+    ordinal_from_oldest < total_snapshots.saturating_sub(keep_n)
+}
+
+/// Returns true if a snapshot timestamp is older than the retention cutoff.
+fn keep_duration_should_prune(candidate: Timestamp, cutoff: Timestamp) -> bool {
+    candidate < cutoff
+}
+
 impl TemporalVectorIndex {
     /// Creates a new temporal vector index with the given configuration.
     pub fn new(config: TemporalVectorConfig) -> Result<Self> {
@@ -800,12 +813,17 @@ impl TemporalVectorIndex {
                     return Ok(0);
                 }
 
-                let to_remove = snapshot_data.snapshots.len() - n;
                 let keys_to_remove: Vec<Timestamp> = snapshot_data
                     .snapshots
                     .keys()
-                    .take(to_remove)
-                    .copied()
+                    .enumerate()
+                    .filter_map(|(ordinal, key)| {
+                        if keep_n_should_prune(snapshot_data.snapshots.len(), n, ordinal) {
+                            Some(*key)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
 
                 for key in keys_to_remove {
@@ -813,7 +831,7 @@ impl TemporalVectorIndex {
                     snapshot_data.vector_history.remove(&key);
                 }
 
-                Ok(to_remove)
+                Ok(initial_count - snapshot_data.len())
             }
             RetentionPolicy::KeepDuration(duration) => {
                 let current_time = Self::current_timestamp()?;
@@ -825,8 +843,9 @@ impl TemporalVectorIndex {
 
                 let keys_to_remove: Vec<Timestamp> = snapshot_data
                     .snapshots
-                    .range(..cutoff_time)
-                    .map(|(k, _)| *k)
+                    .keys()
+                    .filter(|&&timestamp| keep_duration_should_prune(timestamp, cutoff_time))
+                    .copied()
                     .collect();
 
                 for key in keys_to_remove {
@@ -1706,6 +1725,24 @@ mod tests {
         assert_eq!(index.snapshot_count(), 3);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_keep_n_should_prune_preserves_newest_when_n_is_one() {
+        let total = 5;
+        let keep_n = 1;
+        for ordinal in 0..(total - 1) {
+            assert!(keep_n_should_prune(total, keep_n, ordinal));
+        }
+        assert!(!keep_n_should_prune(total, keep_n, total - 1));
+    }
+
+    #[test]
+    fn test_keep_duration_should_prune_strictly_older_only() {
+        let cutoff: Timestamp = 1_000.into();
+        assert!(keep_duration_should_prune(999.into(), cutoff));
+        assert!(!keep_duration_should_prune(1_000.into(), cutoff));
+        assert!(!keep_duration_should_prune(1_001.into(), cutoff));
     }
 
     #[test]

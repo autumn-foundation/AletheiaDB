@@ -6,9 +6,6 @@ permissions:
 on:
   pull_request:
     branches: [trunk]
-  schedule:
-    # Weekly full run: Sunday at 03:00 UTC
-    - cron: "0 3 * * 0"
   workflow_dispatch:
     inputs:
       mode:
@@ -120,7 +117,7 @@ jobs:
   # ── Full mode: sharded across 4 runners (weekly + manual) ────────────
   mutants-full:
     name: Mutants (full shard ${{ matrix.shard }}/4)
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:

@@ -472,11 +472,23 @@ impl PropertyDelta {
 
         // Apply vector deltas (overwrites existing entries)
         for (key, vec_delta) in &self.vector_deltas {
-            if let Some(base_value) = base.get_by_interned_key(key)
-                && let Some(base_vec) = base_value.as_vector()
-            {
-                let new_vec = vec_delta.apply(base_vec);
-                result.insert(*key, PropertyValue::vector(&new_vec));
+            match vec_delta {
+                VectorDelta::Full(new_vec) => {
+                    // Full delta contains the complete vector, so we can apply it
+                    // regardless of whether the base property exists or what type it is.
+                    // This prevents silent data loss if the base property is missing
+                    // (e.g. schema migration or initial version).
+                    result.insert(*key, PropertyValue::Vector(Arc::clone(new_vec)));
+                }
+                VectorDelta::Sparse { .. } => {
+                    // Sparse delta requires base vector to apply changes
+                    if let Some(base_value) = base.get_by_interned_key(key)
+                        && let Some(base_vec) = base_value.as_vector()
+                    {
+                        let new_vec = vec_delta.apply(base_vec);
+                        result.insert(*key, PropertyValue::vector(&new_vec));
+                    }
+                }
             }
         }
 
@@ -2117,4 +2129,134 @@ mod sentry_tests {
         assert_eq!(result.len(), 10);
         assert_eq!(result[0], 0.0);
     }
-} // End of sentry_tests mod (wait, verify existing file structure)
+
+    #[test]
+    fn test_property_delta_apply_full_vector_missing_base() {
+        // 💣 Risk: Applying a delta containing a Full vector to a base that misses the key
+        // should NOT fail silently. Since it's a full replacement, the base isn't needed!
+        // Current implementation requires base property to exist even for Full delta.
+
+        let base = PropertyMapBuilder::new().build(); // Empty base
+
+        let mut delta = PropertyDelta::new();
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+        let new_vec = vec![1.0f32, 2.0, 3.0];
+        let vec_delta = VectorDelta::Full(Arc::from(new_vec.clone()));
+
+        delta.vector_deltas.insert(key, vec_delta);
+
+        let result = delta.apply(&base);
+
+        // Expectation: The vector should be present in the result
+        assert!(
+            result.get("embedding").is_some(),
+            "Full vector delta should be applied even if base property is missing"
+        );
+
+        if let Some(val) = result.get("embedding") {
+            assert_eq!(val.as_vector(), Some(new_vec.as_slice()));
+        }
+    }
+
+    #[test]
+    fn test_vector_delta_vs_property_value_equality() {
+        // 🧪 Strategy: Document the divergence between VectorDelta (approximate) and PropertyValue (exact).
+        // VectorDelta ignores changes < epsilon and handles NaN differently than PropertyValue.
+
+        // Case 1: Small difference (less than epsilon)
+        // Use 0.0 as base to ensure the small difference is representable in f32
+        // (1.0 + 1e-8 might be rounded to 1.0 due to f32 precision)
+        let v1 = vec![0.0f32];
+        let v2 = vec![VECTOR_EPSILON / 2.0];
+
+        // PropertyValue uses exact equality (bitwise for f32 via PartialEq)
+        let pv1 = PropertyValue::vector(&v1);
+        let pv2 = PropertyValue::vector(&v2);
+        assert_ne!(pv1, pv2, "PropertyValue should use exact equality");
+
+        // VectorDelta uses approximate equality
+        let delta = VectorDelta::from_diff(&v1, &v2);
+        assert!(
+            delta.is_none(),
+            "VectorDelta should ignore changes smaller than epsilon"
+        );
+
+        // Case 2: NaN handling
+        // PropertyValue: NaN != NaN
+        let nan_vec = vec![f32::NAN];
+        let pv_nan1 = PropertyValue::vector(&nan_vec);
+        let pv_nan2 = PropertyValue::vector(&nan_vec);
+        assert_ne!(pv_nan1, pv_nan2, "PropertyValue should treat NaN != NaN");
+
+        // VectorDelta: NaN == NaN (treated as no change)
+        let delta_nan = VectorDelta::from_diff(&nan_vec, &nan_vec);
+        assert!(
+            delta_nan.is_none(),
+            "VectorDelta should treat NaN as equal to NaN (no change)"
+        );
+
+        // This confirms that PropertyDelta (which uses VectorDelta) might report "no change"
+        // even when PropertyValue equality says they are different. This is a design choice
+        // for storage efficiency but important to document.
+    }
+
+    #[test]
+    fn test_property_delta_apply_sparse_ignored_on_missing_base() {
+        // 🧪 Strategy: Verify that a sparse delta is silently ignored if the base property is missing.
+        // This is a known "best effort" behavior (fail open) rather than "fail closed".
+        // Documenting it with a test ensures it doesn't change unexpectedly.
+
+        let mut delta = PropertyDelta::new();
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        // Sparse delta: change index 0 to 1.0
+        let changes = Arc::new(vec![(0, 1.0f32)]);
+        let vec_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes,
+        };
+
+        delta.vector_deltas.insert(key, vec_delta);
+
+        // Base property map *without* "embedding"
+        let base = PropertyMapBuilder::new().insert("name", "Alice").build();
+
+        // Apply delta
+        let result = delta.apply(&base);
+
+        // Expectation: "embedding" is missing in result (delta ignored)
+        assert!(
+            result.get("embedding").is_none(),
+            "Sparse delta should be silently ignored if base property is missing"
+        );
+    }
+
+    #[test]
+    fn test_property_delta_apply_sparse_ignored_on_wrong_type() {
+        // 🧪 Strategy: Verify that a sparse delta is silently ignored if the base property has wrong type.
+
+        let mut delta = PropertyDelta::new();
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        let changes = Arc::new(vec![(0, 1.0f32)]);
+        let vec_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes,
+        };
+
+        delta.vector_deltas.insert(key, vec_delta);
+
+        // Base has "embedding" but it's an Int
+        let base = PropertyMapBuilder::new().insert("embedding", 42i64).build();
+
+        // Apply delta
+        let result = delta.apply(&base);
+
+        // Expectation: "embedding" remains 42i64 (delta ignored)
+        assert_eq!(
+            result.get("embedding").and_then(|v| v.as_int()),
+            Some(42),
+            "Sparse delta should be silently ignored if base property is wrong type"
+        );
+    }
+}
