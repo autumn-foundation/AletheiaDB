@@ -429,7 +429,7 @@ pub(crate) fn parse_entry_at(
         }
         3 => {
             // UpdateNode
-            if current_offset.checked_add(20).ok_or_else(|| {
+            if current_offset.checked_add(16).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -455,7 +455,7 @@ pub(crate) fn parse_entry_at(
                 })? > buffer.len()
                 {
                     return Err(StorageError::CorruptedData(
-                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                        "Insufficient buffer size for UpdateNode label".to_string(),
                     )
                     .into());
                 }
@@ -523,7 +523,7 @@ pub(crate) fn parse_entry_at(
                 })? > buffer.len()
                 {
                     return Err(StorageError::CorruptedData(
-                        "Insufficient buffer size for UpdateNode label".to_string(),
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
                     )
                     .into());
                 }
@@ -1511,6 +1511,72 @@ mod tests {
                 assert_eq!(msg, "WAL offset overflow");
             }
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_update_node_truncated_at_label() {
+        // Create a buffer with valid header + UpdateNode opcode + NodeId + VersionId
+        // BUT truncated right before label_id (which caused the panic)
+        let mut buffer = Vec::new();
+
+        // Header: LSN (8) + Timestamp (12) + Checksum (4) = 24 bytes
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // LSN
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer); // Timestamp
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // Checksum placeholder
+
+        // Opcode: UpdateNode (3)
+        buffer.push(3);
+
+        // UpdateNode fixed fields: NodeId (8) + VersionId (8) = 16 bytes
+        buffer.extend_from_slice(&42u64.to_le_bytes()); // NodeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        // Total length so far: 24 + 1 + 16 = 41 bytes.
+        // The parser expects label_id (4 bytes) next.
+        // We stop here to simulate truncation exactly at the danger zone.
+
+        // Should return error for insufficient buffer size, NOT panic
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert_eq!(msg, "Insufficient buffer size for UpdateNode label");
+            }
+            _ => panic!("Expected CorruptedData error, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_update_edge_truncated_at_label() {
+        // Create a buffer with valid header + UpdateEdge opcode + EdgeId + VersionId
+        // BUT truncated right before label_id
+        let mut buffer = Vec::new();
+
+        // Header
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // LSN
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer); // Timestamp
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // Checksum placeholder
+
+        // Opcode: UpdateEdge (4)
+        buffer.push(4);
+
+        // UpdateEdge fixed fields: EdgeId (8) + VersionId (8) = 16 bytes
+        buffer.extend_from_slice(&100u64.to_le_bytes()); // EdgeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        // Truncate here.
+
+        // Should return error for insufficient buffer size, NOT panic
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert_eq!(msg, "Insufficient buffer size for UpdateEdge label");
+            }
+            _ => panic!("Expected CorruptedData error, got: {:?}", result),
         }
     }
 }
