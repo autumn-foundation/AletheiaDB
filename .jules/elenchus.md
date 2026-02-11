@@ -78,7 +78,7 @@
 **Severity:** 🔴 Critical
 **Finding:** `allocate_batch` allowed silent integer overflow/wrapping if `next_lsn + count` exceeded `u64::MAX`. This would result in an invalid range (start > end) being returned, potentially causing data corruption or logical errors in the WAL.
 **Evidence:** Created `test_allocate_batch_overflow_panics` which initialized the allocator near `u64::MAX` and triggered an overflow, observing the wrapped result.
-**Resolution:** Modified `allocate` and `allocate_batch` to panic on overflow ("LSN Allocator Overflow"). This converts a silent data corruption risk into a safe (albeit catastrophic) failure, honoring the "Theoretical Limitation" contract.
+**Resolution:** Modified `allocate` and `allocate_batch` to return Err on overflow ("LSN Allocator Overflow"). This converts a silent data corruption risk into a handled error, honoring the "Theoretical Limitation" contract.
 
 **[WAL Segment Reader Robustness]**
 **Module:** `src/storage/wal/segment_reader.rs`
