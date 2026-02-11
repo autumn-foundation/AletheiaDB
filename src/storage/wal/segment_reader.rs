@@ -1211,6 +1211,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_entry_at_update_edge_truncated_label() {
+        // Reproduction test for fuzzing panic: UpdateEdge with missing label
+        let mut buffer = Vec::new();
+
+        // LSN (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // Timestamp (12 bytes)
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+
+        // Checksum (4 bytes) - placeholders
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        // Operation type: UpdateEdge (4)
+        buffer.push(4);
+
+        // Edge ID (8 bytes)
+        buffer.extend_from_slice(&100u64.to_le_bytes());
+
+        // Version ID (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // STOP HERE - Do not write label ID. This simulates truncation.
+        // We have written 16 bytes of operation data (EdgeID + VersionID), which satisfies the initial check.
+        // But we are missing the Label ID (4 bytes) which is read immediately after.
+
+        // Compute checksum for what we have
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..checksum_offset]); // LSN + timestamp
+        hasher.update(&buffer[checksum_offset + 4..]); // Operation data
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        // Parse - this should NOT panic, but return an error
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(err_msg.contains("Insufficient buffer size"));
+    }
+
+    #[test]
+    fn test_parse_entry_at_update_node_truncated_label() {
+        // Reproduction test for fuzzing panic: UpdateNode with missing label
+        let mut buffer = Vec::new();
+
+        // LSN (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // Timestamp (12 bytes)
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+
+        // Checksum (4 bytes) - placeholders
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        // Operation type: UpdateNode (3)
+        buffer.push(3);
+
+        // Node ID (8 bytes)
+        buffer.extend_from_slice(&100u64.to_le_bytes());
+
+        // Version ID (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // STOP HERE - Do not write label ID.
+
+        // Compute checksum for what we have
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..checksum_offset]); // LSN + timestamp
+        hasher.update(&buffer[checksum_offset + 4..]); // Operation data
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        // Parse - this should NOT panic, but return an error
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(err_msg.contains("Insufficient buffer size"));
+    }
+
     // =============================================================================
     // TDD Tests for Memory-Efficient Segment Reading - Issue #216
     // =============================================================================
@@ -1700,5 +1788,39 @@ mod tests {
         // So `test_update_edge_insufficient_buffer_for_label` should cover lines 518-520 (the condition) and 524 (the error return).
         //
         // The overflow branch (inside `ok_or_else`) might remain uncovered, but that's fine if the main path is covered.
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn test_repro_fuzz_update_edge_panic() {
+        // Failing input from fuzzer:
+        // [71, 87, 65, 76, 1, 190, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 40, 1, 1, 1, 1, 1, 71, 87, 65, 76, 0, 4, 0, 0, 0, 1, 40, 1, 1, 1, 1, 1, 71, 87, 65, 76, 76, 0, 0, 0]
+        let data = vec![
+            71, 87, 65, 76, 1, // Header: GWAL, Ver 1
+            190, 0, 0, 0, 0, 0, 0, 0, // LSN: 190
+            0, 1, 1, 1, 1, 40, 1, 1, 1, 1, 1, 71, // Timestamp (12 bytes)
+            87, 65, 76, 0, // Checksum (4 bytes)
+            4, // OpType: 4 (UpdateEdge)
+            0, 0, 0, 1, 40, 1, 1, 1, // EdgeId (8 bytes)
+            1, 1, 71, 87, 65, 76, 76,
+            0, // VersionId (8 bytes)
+               // Total length: 48 bytes
+               // Missing LabelId (4 bytes) required for Ver 1
+        ];
+
+        // Offset 5 to skip header
+        let result = parse_entry_at(&data, 5, 1);
+
+        // Before fix: Panics with index out of bounds
+        // After fix: Returns Error
+        assert!(
+            result.is_err(),
+            "Should return error for truncated buffer, got {:?}",
+            result
+        );
     }
 }

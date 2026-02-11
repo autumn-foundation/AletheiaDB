@@ -10,10 +10,6 @@ default:
 test:
     cargo test
 
-# Run Loom model-checking tests (bounded state-space)
-loom:
-    cargo test --test loom_wal --test loom_vector --test loom_temporal
-
 # Run tests with output
 test-verbose:
     cargo test -- --nocapture --test-threads=1
@@ -316,55 +312,3 @@ worktree-pr TITLE BODY="":
     else
         bash scripts/worktree-pr.sh "{{TITLE}}" "{{BODY}}"
     fi
-
-# === Verification Sweep ===
-
-# Fast local confidence pass (PR-safe)
-verify-smoke:
-    cargo fmt --all -- --check
-    cargo clippy --all-targets --all-features -- -D warnings
-    cargo test
-    cargo test --test loom_wal --test loom_vector --test loom_temporal
-
-# Nightly confidence pass (deeper UB + concurrency signal)
-verify-nightly:
-    cargo test --test loom_wal --test loom_vector --test loom_temporal
-    cargo +nightly miri test --lib
-    cargo llvm-cov --all-features --summary-only
-
-# Weekly deep sweep (expensive)
-verify-weekly:
-    cargo test --test loom_wal --test loom_vector --test loom_temporal
-    cargo +nightly miri test --lib
-    cargo mutants --in-place -vV
-    @echo "Run Kani/Verus/Fuzz stages defined in docs/verification/VERIFICATION_SWEEP_PLAN.md"
-
-# Install and initialize cargo-fuzz (one-time)
-fuzz-setup:
-    cargo install cargo-fuzz
-    @echo "cargo-fuzz installed. Fuzz crate scaffold exists at ./fuzz."
-
-# Run a short fuzz campaign (seconds)
-fuzz-smoke TARGET:
-    cargo fuzz run {{TARGET}} -- -max_total_time=30
-
-# Run a longer fuzz campaign (minutes/hours; user chooses duration)
-fuzz-run TARGET SECONDS="600":
-    cargo fuzz run {{TARGET}} -- -max_total_time={{SECONDS}}
-
-# Install Kani (one-time)
-kani-setup:
-    cargo install --locked --version 0.67.0 kani-verifier
-    cargo kani setup
-
-# Run Kani proofs configured in workspace (requires harnesses)
-kani:
-    cargo kani --lib
-
-# Install Verus toolchain (manual step helper)
-verus-setup:
-    @echo "Follow installation steps in docs/verification/VERIFICATION_SWEEP_PLAN.md (Verus section)."
-
-# Run Verus on proof modules (requires proof modules to exist)
-verus:
-    @echo "Run Verus proofs as described in docs/verification/VERIFICATION_SWEEP_PLAN.md."

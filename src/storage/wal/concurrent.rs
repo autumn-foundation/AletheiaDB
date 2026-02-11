@@ -428,8 +428,8 @@ impl ConcurrentWal {
             all_entries.extend(stripe.drain());
         }
 
-        // Restore global LSN order after draining per-stripe buffers.
-        restore_global_lsn_order(&mut all_entries);
+        // Sort by LSN to restore global order
+        all_entries.sort_by_key(|e| e.lsn);
 
         all_entries
     }
@@ -473,14 +473,6 @@ impl ConcurrentWal {
     pub fn config(&self) -> &ConcurrentWalConfig {
         &self.config
     }
-}
-
-/// Restore global ordering for drained entries from multiple stripes.
-///
-/// Concurrent writers append to independent per-stripe ring buffers, so flush
-/// paths must re-establish global WAL order before persistence.
-pub(crate) fn restore_global_lsn_order(entries: &mut [PendingEntry]) {
-    entries.sort_by_key(|e| e.lsn);
 }
 
 /// Aggregate metrics for the concurrent WAL.
@@ -529,18 +521,6 @@ mod tests {
             properties: PropertyMap::new(),
             valid_from: time::now(),
         }
-    }
-
-    fn make_entry(lsn: u64) -> PendingEntry {
-        PendingEntry::new_async(LSN(lsn), vec![lsn as u8])
-    }
-
-    #[test]
-    fn test_restore_global_lsn_order() {
-        let mut entries = vec![make_entry(5), make_entry(2), make_entry(4), make_entry(1)];
-        restore_global_lsn_order(&mut entries);
-        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
-        assert_eq!(lsns, vec![1, 2, 4, 5]);
     }
 
     // ============================================================

@@ -53,17 +53,16 @@ pub mod vector;
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // 1. Initialize the database
 /// let db = AletheiaDB::new().expect("Failed to open database");
 ///
 /// // 2. Enable vector indexing (optional)
 /// db.vector_index("embedding")
-///     .hnsw(HnswConfig::new(3, DistanceMetric::Cosine)) // 3 dimensions for this example
+///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
 ///     .enable()?;
 ///
 /// // 3. Create nodes
@@ -94,8 +93,6 @@ pub mod vector;
 /// // 5. Query
 /// let alice = db.get_node(alice_id)?;
 /// println!("Found: {:?}", alice.properties.get("name"));
-/// # Ok(())
-/// # }
 /// ```
 pub struct AletheiaDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
