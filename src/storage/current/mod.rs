@@ -2188,7 +2188,7 @@ impl Default for CurrentStorage {
 }
 
 /// Validate property name to prevent path traversal and special characters.
-fn validate_property_name(name: &str) -> std::result::Result<(),String> {
+fn validate_property_name(name: &str) -> std::result::Result<(), String> {
     if name.is_empty() {
         return Err("Property name cannot be empty".to_string());
     }
