@@ -220,7 +220,6 @@ impl SemanticRule for NumericRangeRule {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
