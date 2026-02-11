@@ -756,6 +756,12 @@ impl Drop for WalRingBuffer {
         // Drain remaining entries to properly drop them
         let remaining = self.drain();
         if !remaining.is_empty() {
+            // Notify waiters to prevent deadlock
+            // If we don't notify them, they will hang forever waiting for completion
+            for entry in &remaining {
+                entry.notify_error("WalRingBuffer dropped");
+            }
+
             // Log warning about dropped entries in debug builds
             #[cfg(debug_assertions)]
             eprintln!(
@@ -771,6 +777,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn test_completion_notifier_success() {
@@ -1351,5 +1358,50 @@ mod tests {
         let final_drained = buf.drain();
         assert_eq!(final_drained.len(), 1);
         assert_eq!(final_drained[0].data, vec![100]);
+    }
+
+    #[test]
+    fn test_ring_buffer_drop_deadlock_prevention() {
+        use std::sync::{Arc, Barrier};
+
+        // This test verifies that dropping a WalRingBuffer with pending sync entries
+        // properly notifies waiters instead of causing a deadlock.
+
+        let buf = WalRingBuffer::new(16);
+
+        // Create a sync entry
+        let (entry, handle) = PendingEntry::new_sync(LSN(1), vec![1, 2, 3]);
+
+        // Append it
+        buf.try_append(entry).expect("Failed to append");
+
+        // Barrier to synchronize start of waiting
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_clone = barrier.clone();
+
+        // Spawn a thread that waits for completion
+        let waiter = thread::spawn(move || {
+            barrier_clone.wait();
+            // This wait should unblock with an error when buf is dropped
+            // If the fix is missing, this will hang forever
+            handle.wait()
+        });
+
+        // Ensure waiter is running and about to wait
+        barrier.wait();
+        // Give the waiter thread a moment to actually enter wait()
+        thread::sleep(Duration::from_millis(50));
+
+        // Drop the buffer (main thread owns it)
+        drop(buf);
+
+        // Join the waiter thread with a timeout-like check (or just join)
+        // If the fix works, this returns almost immediately.
+        // If not, the test harness will eventually time out.
+        let result = waiter.join().expect("Waiter thread panicked");
+
+        // Verify we got the expected error
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "WalRingBuffer dropped");
     }
 }
