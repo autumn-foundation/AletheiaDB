@@ -453,10 +453,12 @@ pub(crate) fn parse_entry_at(
                     Error::Storage(StorageError::CorruptedData(
                         "WAL offset overflow".to_string(),
                     ))
-                })? > buffer.len() {
+                })? > buffer.len()
+                {
                     return Err(StorageError::CorruptedData(
                         "Insufficient buffer size for UpdateNode label".to_string(),
-                    ).into());
+                    )
+                    .into());
                 }
 
                 // Check for label_id (4 bytes)
@@ -464,10 +466,12 @@ pub(crate) fn parse_entry_at(
                     Error::Storage(StorageError::CorruptedData(
                         "WAL offset overflow".to_string(),
                     ))
-                })? > buffer.len() {
+                })? > buffer.len()
+                {
                     return Err(StorageError::CorruptedData(
                         "Insufficient buffer size for UpdateEdge label".to_string(),
-                    ).into());
+                    )
+                    .into());
                 }
 
                 // Read 4-byte InternedString ID
@@ -530,10 +534,12 @@ pub(crate) fn parse_entry_at(
                     Error::Storage(StorageError::CorruptedData(
                         "WAL offset overflow".to_string(),
                     ))
-                })? > buffer.len() {
+                })? > buffer.len()
+                {
                     return Err(StorageError::CorruptedData(
                         "Insufficient buffer size for UpdateEdge label".to_string(),
-                    ).into());
+                    )
+                    .into());
                 }
 
                 // Read 4-byte InternedString ID
