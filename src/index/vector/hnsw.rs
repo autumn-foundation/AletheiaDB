@@ -115,6 +115,15 @@ impl FilterCallbackGuard {
     pub(crate) fn new() -> Self {
         IN_FILTER_CALLBACK.with(|flag| flag.set(true));
         FilterCallbackGuard
+    }
+}
+
+impl Drop for FilterCallbackGuard {
+    fn drop(&mut self) {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+    }
+}
+
 /// It also handles nested usage correctly by restoring the previous state.
 struct ReentrancyGuard {
     prev: bool,
@@ -2997,5 +3006,172 @@ mod coverage_tests {
 
         // This should panic
         wrapper(unaligned_ptr, valid_ptr);
+    }
+}
+
+#[cfg(test)]
+mod sentry_reentrancy_tests {
+    use super::*;
+
+    #[test]
+    fn test_reentrancy_protection_in_filter() -> Result<()> {
+        // Initialize an index
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        let node1 = NodeId::new(1).unwrap();
+
+        // Add a vector to search against
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
+
+        // Prepare a vector to add during the callback
+        let node2 = NodeId::new(2).unwrap();
+        let vec2 = vec![0.0, 1.0, 0.0, 0.0];
+
+        // We need to wrap index in Arc to share it with the closure if we were using threads,
+        // but here the closure captures the reference.
+        // However, search_with_filter takes &self, and the closure is Fn(&NodeId) -> bool.
+        // The closure can capture &index.
+
+        // Define a filter that attempts to modify the index
+        let filter = |_id: &NodeId| -> bool {
+            // Attempt to add a new vector - this should fail with reentrancy error
+            let result = index.add(node2, &vec2);
+
+            match result {
+                Err(Error::Vector(VectorError::IndexError(msg))) => {
+                    // Verify the specific error message
+                    assert!(msg.contains("Cannot modify index from within a callback"),
+                            "Expected reentrancy error, got: {}", msg);
+                    true // Continue search
+                },
+                Ok(_) => {
+                    panic!("Reentrant add() should have failed but succeeded!");
+                },
+                Err(e) => {
+                    panic!("Expected IndexError, got: {:?}", e);
+                }
+            }
+        };
+
+        // Execute search with the malicious filter
+        let results = index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, filter)?;
+
+        // Verify search still worked
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node1);
+
+        // Verify node2 was NOT added
+        // We can't easily check containment without search, but len() should be 1
+        assert_eq!(index.len(), 1);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sentry_metric_tests {
+    use super::*;
+
+    #[test]
+    fn test_distance_metric_variants() -> Result<()> {
+        let epsilon = 1e-3;
+
+        // 1. Haversine (2D lat/lon)
+        // Similarity = -distance (great circle distance in radians)
+        {
+            let index = HnswIndexBuilder::new(2, DistanceMetric::Haversine).build()?;
+            let n1 = NodeId::new(1).unwrap();
+            let n2 = NodeId::new(2).unwrap();
+
+            // Point 1: (0, 0)
+            // Point 2: (0, 90 degrees). usearch expects DEGREES for Haversine.
+            // Distance returned is in RADIANS (on unit sphere).
+            let v1 = [0.0, 0.0];
+            let v2 = [0.0, 90.0];
+
+            index.add(n1, &v1)?;
+            index.add(n2, &v2)?;
+
+            let results = index.search(&v1, 2)?;
+
+            // First result should be n1 (dist 0, sim 0)
+            assert_eq!(results[0].0, n1);
+            assert!((results[0].1).abs() < epsilon, "Haversine n1 sim should be 0, got {}", results[0].1);
+
+            // Second result n2
+            assert_eq!(results[1].0, n2);
+            let expected_dist = std::f32::consts::FRAC_PI_2;
+            let expected_sim = -expected_dist;
+            assert!((results[1].1 - expected_sim).abs() < epsilon,
+                    "Haversine n2 sim should be -PI/2 ({}), got {}", expected_sim, results[1].1);
+        }
+
+        // 2. Hamming (Binary vectors)
+        // Similarity = -distance (bit differences)
+        // Note: usearch performs bitwise Hamming distance on the IEEE 754 float representation.
+        {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Hamming).build()?;
+            let n1 = NodeId::new(1).unwrap();
+            let n2 = NodeId::new(2).unwrap();
+
+            // v1: 0.0 (0x00000000)
+            // v2: -0.0 (0x80000000)
+            // Difference: 1 bit (sign bit)
+            let v1 = [0.0, 0.0, 0.0, 0.0];
+            let v2 = [-0.0, 0.0, 0.0, 0.0];
+
+            index.add(n1, &v1)?;
+            index.add(n2, &v2)?;
+
+            let results = index.search(&v1, 2)?;
+
+            // n1: dist 0, sim 0
+            assert_eq!(results[0].0, n1);
+            assert!((results[0].1).abs() < epsilon, "Hamming n1 sim should be 0, got {}", results[0].1);
+
+            // n2: dist 1, sim -1
+            assert_eq!(results[1].0, n2);
+            assert!((results[1].1 - -1.0).abs() < epsilon, "Hamming n2 sim should be -1.0, got {}", results[1].1);
+        }
+
+        // 3. Tanimoto (Jaccard for binary sets)
+        // Similarity = 1.0 - distance = Tanimoto Coefficient
+        // We use single-bit float representations (-0.0) to be predictable.
+        {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Tanimoto).build()?;
+            let n1 = NodeId::new(1).unwrap();
+            let n2 = NodeId::new(2).unwrap();
+
+            // v1: -0.0 (0x80000000) -> 1 bit set (sign bit)
+            // v2: -2.0 (0xC0000000) -> 2 bits set (sign + exponent)
+            // Intersection: 0x80000000 (1 bit match)
+            // Union: 0xC0000000 (2 bits total)
+            // Jaccard = 1/2 = 0.5
+            // Note: We modify only the first float because usearch Tanimoto/Hamming
+            // with F32 might interpret 'dimensions' as bytes/words, ignoring later floats.
+            let v1 = [-0.0, 0.0, 0.0, 0.0];
+            let v2 = [-2.0, 0.0, 0.0, 0.0];
+
+            index.add(n1, &v1)?;
+            index.add(n2, &v2)?;
+
+            let results = index.search(&v1, 2)?;
+
+            // n1: Jaccard(v1, v1) = 1/1 = 1.0
+            // n2: Jaccard(v1, v2) = 1/2 = 0.5
+            // Use flexible check to debug potential ordering/value issues
+            let n1_res = results.iter().find(|(id, _)| *id == n1);
+            let n2_res = results.iter().find(|(id, _)| *id == n2);
+
+            assert!(n1_res.is_some(), "n1 missing");
+            assert!(n2_res.is_some(), "n2 missing");
+
+            let sim1 = n1_res.unwrap().1;
+            let sim2 = n2_res.unwrap().1;
+
+            assert!((sim1 - 1.0).abs() < epsilon, "Tanimoto n1 sim should be 1.0, got {}", sim1);
+            assert!((sim2 - 0.5).abs() < epsilon, "Tanimoto n2 sim should be 0.5, got {}", sim2);
+        }
+
+        Ok(())
     }
 }
