@@ -102,7 +102,43 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 // This prevents deadlocks when user filter callbacks try to modify the index.
 std::thread_local! {
-    static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REENTRANCY_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
+/// This ensures the flag is always reset, even if the callback panics.
+pub(crate) struct FilterCallbackGuard;
+
+impl FilterCallbackGuard {
+    pub(crate) fn new() -> Self {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
+        FilterCallbackGuard
+    }
+}
+
+impl Drop for FilterCallbackGuard {
+    fn drop(&mut self) {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+    }
+}
+
+/// It also handles nested usage correctly by restoring the previous state.
+struct ReentrancyGuard {
+    prev: bool,
+}
+
+impl ReentrancyGuard {
+    fn new() -> Self {
+        let prev = REENTRANCY_GUARD.with(|flag| flag.replace(true));
+        ReentrancyGuard { prev }
+    }
+}
+
+impl Drop for ReentrancyGuard {
+    fn drop(&mut self) {
+        REENTRANCY_GUARD.with(|flag| flag.set(self.prev));
+    }
 }
 
 /// Magic bytes for mapping file identification
