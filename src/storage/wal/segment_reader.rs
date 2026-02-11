@@ -1529,4 +1529,35 @@ mod tests {
         // We expect an error because the input is corrupted/incomplete
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_parse_entry_at_update_edge_truncated() {
+        // Create a buffer that is valid up to the label_id of UpdateEdge
+        let mut buffer = Vec::new();
+
+        // LSN (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+        // Timestamp (12 bytes)
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+        // Checksum (4 bytes)
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+        // OpType = 4 (UpdateEdge)
+        buffer.push(4);
+
+        // EdgeId (8 bytes)
+        buffer.extend_from_slice(&100u64.to_le_bytes());
+        // VersionId (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // Stop here! Don't add label_id.
+        // The parser should check for label_id size (4 bytes) and fail gracefully.
+
+        // Attempt parse
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Insufficient buffer size for UpdateEdge label"));
+    }
 }

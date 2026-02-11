@@ -2973,6 +2973,21 @@ mod tests {
         let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 5);
     }
+
+    #[test]
+    fn test_filter_callback_guard_drop() {
+        // Ensure flag is initially false
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+
+        {
+            let _guard = FilterCallbackGuard::new();
+            // Verify flag is true
+            assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        }
+
+        // Verify flag is reset to false after drop
+        assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
 }
 
 #[cfg(test)]
