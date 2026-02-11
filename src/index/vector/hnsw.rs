@@ -115,6 +115,15 @@ impl FilterCallbackGuard {
     pub(crate) fn new() -> Self {
         IN_FILTER_CALLBACK.with(|flag| flag.set(true));
         FilterCallbackGuard
+    }
+}
+
+impl Drop for FilterCallbackGuard {
+    fn drop(&mut self) {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+    }
+}
+
 /// It also handles nested usage correctly by restoring the previous state.
 struct ReentrancyGuard {
     prev: bool,
@@ -1521,7 +1530,9 @@ fn load_mappings_with_integrity(
     let mut max_key = 0u64;
 
     if !mappings_path.exists() {
-        return Ok((id_mapping, reverse_mapping, max_key, None));
+        return Err(Error::Vector(VectorError::IndexError(
+            "Missing mappings file. Index integrity cannot be verified.".to_string(),
+        )));
     }
 
     // Use streaming (File + BufReader) instead of reading entire file to memory (fs::read).
@@ -1785,6 +1796,18 @@ impl HnswIndex {
             multi: false,
         };
 
+        // Load mappings from companion file with integrity verification
+        // CRITICAL: We MUST do this BEFORE loading the index file.
+        // The usearch C++ library can segfault if given a corrupted or random file.
+        // By strictly enforcing that a valid, integrity-checked mappings file exists,
+        // we prevent passing garbage files to usearch.
+        let mappings_path = path.with_extension("usearch.mappings");
+        let (id_mapping, reverse_mapping, max_key, metadata) =
+            load_mappings_with_integrity(&mappings_path)?;
+
+        // Validate metadata
+        Self::validate_metadata(metadata, &config)?;
+
         let mut index = Index::new(&options).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to create index for loading: {}",
@@ -1816,14 +1839,6 @@ impl HnswIndex {
 
             index.change_metric(metric_wrapper);
         }
-
-        // Load mappings from companion file with integrity verification
-        let mappings_path = path.with_extension("usearch.mappings");
-        let (id_mapping, reverse_mapping, max_key, metadata) =
-            load_mappings_with_integrity(&mappings_path)?;
-
-        // Validate metadata
-        Self::validate_metadata(metadata, &config)?;
 
         // Verify loaded index dimensions match configuration
         // This protects against legacy indexes (no metadata) having mismatched dimensions,
