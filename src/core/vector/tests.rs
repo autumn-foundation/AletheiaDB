@@ -2847,3 +2847,15 @@ fn test_dot_product_sum_mismatch_panics() {
     let b = vec![1.0, 2.0, 3.0];
     let _ = super::simd::dot_product_sum(&a, &b);
 }
+
+#[test]
+fn test_normalize_in_place_small_magnitude() {
+    // Regression test: ensure small vectors are zeroed out
+    // consistent with normalize()
+    let small_val = 1e-8_f32; // Squared magnitude will be 3 * 1e-16 < 1e-14
+    let mut v = vec![small_val, small_val, small_val];
+
+    normalize_in_place(&mut v);
+
+    assert_eq!(v, vec![0.0, 0.0, 0.0]);
+}
