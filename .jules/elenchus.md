@@ -1,23 +1,21 @@
-# Elenchus Journal ⚔️
+# Elenchus Journal
 
-## Verdicts & Patterns
-
-This journal records the results of test quality audits.
-
-### Verdict: Weak Test Assertions in HNSW Module
-**Module:** `src/index/vector/hnsw.rs`
+**[TimeRange Validation Gap]**
+**Module:** `aletheiadb::core::temporal`
 **Severity:** 🟡 Suspect
-**Finding:** Tests in `hnsw.rs` often use weak assertions or partial checks, leaving gaps in coverage for critical logic like metric conversion and search result accuracy.
-**Evidence:**
-- `test_distance_to_similarity_conversion` only tests `DistanceMetric::Cosine`. It ignores `Euclidean`, `DotProduct`, `Haversine`, `Hamming`, and `Tanimoto`.
-- `test_hnsw_basic` asserts only the ID of the first result, ignoring the score and subsequent results.
-- `test_hnsw_search_with_filter` similarly checks only the ID.
-**Recommendation:**
-- Refactor `test_distance_to_similarity_conversion` to be a parameterized test (or iterate through all metrics) and verify exact expected scores.
-- Strengthen `test_hnsw_basic` to assert on the full result set (IDs and scores) with tolerance.
+**Finding:** `TimeRange::new` relied on `Timestamp` (HybridTimestamp) validity, but `From<i64>` allowed constructing invalid timestamps via `new_unchecked`, bypassing `MAX_VALID_TIMESTAMP` checks. This allowed creating invalid `TimeRange`s.
+**Evidence:** `tests/warden_temporal_safety.rs` demonstrated that `TimeRange::new` accepted timestamps > `MAX_VALID_TIMESTAMP`.
+**Recommendation:** Added validation to `TimeRange::new` to strictly enforce `MAX_VALID_TIMESTAMP` for both start and end times. Added `tests/warden_temporal_safety.rs` as a permanent regression test.
 
-### Verdict: Bug Found via Test Strengthening
-**Module:** `src/index/vector/hnsw.rs`
+**[PropertyMap Safety Gaps]**
+**Module:** `aletheiadb::core::property`
+**Severity:** 🟡 Suspect
+**Finding:** `PropertyMap` lacked explicit tests for capacity limits (`MAX_PROPERTY_MAP_CAPACITY`), correctness of removal operations (builder pattern), and DoS protection against pre-allocation attacks with insufficient buffer size.
+**Evidence:** Audit revealed `MAX_PROPERTY_MAP_CAPACITY` was checked in code but never exercised in tests. `PropertyMapBuilder::remove` was only tested for size consistency, not actual removal.
+**Recommendation:** Added 4 safety tests in `src/core/property.rs` (`mod sentry_tests`) covering capacity enforcement, removal correctness, trailing bytes handling, and pre-allocation DoS protection.
+
+**[HLC Causality Blind Spot]**
+**Module:** `aletheiadb::core::hlc`
 **Severity:** 🔴 Critical
 **Finding:** The property test `prop_receive_causality` provided false confidence. It generated random timestamps from a large `i64` space, making the probability of generating colliding wallclocks (where the core complexity of HLC lies) effectively zero. The logic for resolving `local.wallclock == msg.wallclock == physical` was untested by the property suite.
 **Evidence:** Mutation testing (Mutation 2: ignoring `msg.logical` in collision case) passed the original test suite but failed the new `prop_receive_causality_collision` test.

@@ -475,23 +475,11 @@ impl PropertyDelta {
 
         // Apply vector deltas (overwrites existing entries)
         for (key, vec_delta) in &self.vector_deltas {
-            match vec_delta {
-                VectorDelta::Full(new_vec) => {
-                    // Full delta contains the complete vector, so we can apply it
-                    // regardless of whether the base property exists or what type it is.
-                    // This prevents silent data loss if the base property is missing
-                    // (e.g. schema migration or initial version).
-                    result.insert(*key, PropertyValue::Vector(Arc::clone(new_vec)));
-                }
-                VectorDelta::Sparse { .. } => {
-                    // Sparse delta requires base vector to apply changes
-                    if let Some(base_value) = base.get_by_interned_key(key)
-                        && let Some(base_vec) = base_value.as_vector()
-                    {
-                        let new_vec = vec_delta.apply(base_vec);
-                        result.insert(*key, PropertyValue::vector(&new_vec));
-                    }
-                }
+            if let Some(base_value) = base.get_by_interned_key(key)
+                && let Some(base_vec) = base_value.as_vector()
+            {
+                let new_vec = vec_delta.apply(base_vec);
+                result.insert(*key, PropertyValue::vector(&new_vec));
             }
         }
 
