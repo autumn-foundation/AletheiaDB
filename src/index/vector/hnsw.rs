@@ -126,24 +126,6 @@ impl Drop for FilterCallbackGuard {
     }
 }
 
-/// It also handles nested usage correctly by restoring the previous state.
-struct ReentrancyGuard {
-    prev: bool,
-}
-
-impl ReentrancyGuard {
-    fn new() -> Self {
-        let prev = REENTRANCY_GUARD.with(|flag| flag.replace(true));
-        ReentrancyGuard { prev }
-    }
-}
-
-impl Drop for ReentrancyGuard {
-    fn drop(&mut self) {
-        REENTRANCY_GUARD.with(|flag| flag.set(self.prev));
-    }
-}
-
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
 /// Current mapping file format version
@@ -476,7 +458,7 @@ where
     Box::new(move |a: *const f32, b: *const f32| {
         // Set re-entrancy guard to prevent deadlock if custom metric calls back into index
         // This is critical because usearch holds a read lock while calling this metric.
-        let _guard = ReentrancyGuard::new();
+        let _guard = FilterCallbackGuard::new();
 
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
@@ -1125,7 +1107,7 @@ impl VectorIndex for HnswIndex {
         let filter = |key: u64| -> bool {
             if let Some(node_id_ref) = reverse_mapping.get(&key) {
                 // Set flag to prevent modifications during callback
-                let _guard = ReentrancyGuard::new();
+                let _guard = FilterCallbackGuard::new();
                 predicate(node_id_ref.value())
             } else {
                 false
