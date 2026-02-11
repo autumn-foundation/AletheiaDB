@@ -429,7 +429,8 @@ pub(crate) fn parse_entry_at(
         }
         3 => {
             // UpdateNode
-            if current_offset.checked_add(20).ok_or_else(|| {
+            // Check for node_id (8) + version_id (8) = 16 bytes
+            if current_offset.checked_add(16).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -447,6 +448,28 @@ pub(crate) fn parse_entry_at(
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
+                // Check for label_id (4 bytes)
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len() {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateNode label".to_string(),
+                    ).into());
+                }
+
+                // Check for label_id (4 bytes)
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len() {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    ).into());
+                }
+
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -502,6 +525,17 @@ pub(crate) fn parse_entry_at(
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
+                // Check for label_id (4 bytes)
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len() {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    ).into());
+                }
+
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -1486,5 +1520,70 @@ mod tests {
             }
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_parse_entry_at_update_edge_truncated_label() {
+        // Create an UpdateEdge entry, serialize it, then truncate the label
+        // This reproduces the panic found by fuzzing where version >= WAL_VERSION
+        // expects 4 bytes for label_id but buffer ends
+        let edge_id = EdgeId::new(100).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let operation = WalOperation::UpdateEdge {
+            edge_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("UPDATED_KNOWS").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(1), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Truncate the buffer to cut off the label_id (and subsequent fields)
+        // LSN(8) + Timestamp(12) + Checksum(4) + OpType(1) + EdgeId(8) + VersionId(8) = 41 bytes
+        let truncated_len = 8 + 12 + 4 + 1 + 8 + 8; // = 41 bytes
+        let truncated_buffer = &buffer[..truncated_len];
+
+        // Should return error, NOT panic
+        let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                // We expect "Insufficient buffer size" but depending on implementation details
+                // and where exactly the panic happens (before or after check),
+                // we want to ensure it fails safely.
+                // Currently it PANICS, so this assertion won't even be reached if not fixed.
+                assert!(msg.contains("Insufficient buffer size") || msg.contains("overflow"));
+            }
+            _ => panic!("Expected corrupted data error, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_update_node_truncated_label() {
+        // Similar test for UpdateNode
+        let node_id = NodeId::new(42).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let operation = WalOperation::UpdateNode {
+            node_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(1), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // LSN(8) + Timestamp(12) + Checksum(4) + OpType(1) + NodeId(8) + VersionId(8) = 41 bytes
+        let truncated_len = 8 + 12 + 4 + 1 + 8 + 8;
+        let truncated_buffer = &buffer[..truncated_len];
+
+        // Should return error, NOT panic
+        let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
     }
 }
