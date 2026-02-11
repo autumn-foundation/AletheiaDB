@@ -24,14 +24,14 @@
 //!     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
 //!     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
 //!     tx.create_edge(alice, bob, "KNOWS", properties! { "since" => 2024 })?;
-//!     Ok((alice, bob))
+//!     Ok::<(aletheiadb::core::NodeId, aletheiadb::core::NodeId), aletheiadb::Error>((alice, bob))
 //! })?;
 //!
 //! // Read-only transaction
 //! db.read(|tx| {
 //!     let alice = tx.get_node(alice_id)?;
 //!     assert_eq!(alice.get_property("name").and_then(|v| v.as_str()), Some("Alice"));
-//!     Ok(())
+//!     Ok::<(), aletheiadb::Error>(())
 //! })?;
 //! # Ok(())
 //! # }
@@ -137,7 +137,7 @@ pub trait ReadOps {
     ///         let edge = tx.get_edge(edge_id)?;
     ///         println!("-> {}", edge.target);
     ///     }
-    ///     Ok(())
+    ///     Ok::<(), aletheiadb::Error>(())
     /// })?;
     /// # Ok(())
     /// # }
@@ -329,13 +329,14 @@ pub trait WriteOps: ReadOps {
     /// # use aletheiadb::api::transaction::WriteOps;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
+    /// # let node_id = db.write(|tx| tx.create_node("Person", properties! { "name" => "Alice", "age" => 30 }))?;
     /// # let mut tx = db.write_transaction()?;
-    /// # let node_id = tx.create_node("Person", properties! { "name" => "Alice", "age" => 30 })?;
     /// // Only updates "age", preserves "name"
     /// tx.update_node(
     ///     node_id,
     ///     properties! { "age" => 31 }
     /// )?;
+    /// # tx.commit()?;
     /// # Ok(())
     /// # }
     /// ```
@@ -365,14 +366,18 @@ pub trait WriteOps: ReadOps {
     /// # use aletheiadb::api::transaction::WriteOps;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
+    /// # let (alice, bob, edge_id) = db.write(|tx| {
+    /// #     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    /// #     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    /// #     let edge = tx.create_edge(alice, bob, "KNOWS", properties! { "strength" => 0.5 })?;
+    /// #     Ok::<(aletheiadb::core::NodeId, aletheiadb::core::NodeId, aletheiadb::core::id::EdgeId), aletheiadb::Error>((alice, bob, edge))
+    /// # })?;
     /// # let mut tx = db.write_transaction()?;
-    /// # let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
-    /// # let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
-    /// # let edge_id = tx.create_edge(alice, bob, "KNOWS", properties! { "strength" => 0.5 })?;
     /// tx.update_edge(
     ///     edge_id,
     ///     properties! { "strength" => 0.95 }
     /// )?;
+    /// # tx.commit()?;
     /// # Ok(())
     /// # }
     /// ```
@@ -425,8 +430,8 @@ pub trait WriteOps: ReadOps {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
     /// # let properties = properties! { "name" => "DeleteMe" };
+    /// # let node_id = db.write(|tx| tx.create_node("Person", properties))?;
     /// let mut tx = db.write_transaction()?;
-    /// let node_id = tx.create_node("Person", properties)?;
     /// // ... create edges ...
     /// tx.delete_node_cascade(node_id)?; // Deletes node and all connected edges
     /// tx.commit()?;

@@ -109,18 +109,20 @@ std::thread_local! {
 
 /// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
 /// This ensures the flag is always reset, even if the callback panics.
-pub(crate) struct FilterCallbackGuard;
+pub(crate) struct FilterCallbackGuard {
+    previous_state: bool,
+}
 
 impl FilterCallbackGuard {
     pub(crate) fn new() -> Self {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
-        FilterCallbackGuard
+        let previous_state = IN_FILTER_CALLBACK.with(|flag| flag.replace(true));
+        FilterCallbackGuard { previous_state }
     }
 }
 
 impl Drop for FilterCallbackGuard {
     fn drop(&mut self) {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+        IN_FILTER_CALLBACK.with(|flag| flag.set(self.previous_state));
     }
 }
 
@@ -3006,5 +3008,35 @@ mod coverage_tests {
 
         // This should panic
         wrapper(unaligned_ptr, valid_ptr);
+    }
+
+    #[test]
+    fn test_filter_callback_guard_coverage() {
+        // Ensure initial state
+        super::IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+
+        {
+            let _guard = super::FilterCallbackGuard::new();
+            assert!(super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
+
+            // Nested guard
+            {
+                let _inner = super::FilterCallbackGuard::new();
+                assert!(super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
+            }
+            // Should still be true
+            assert!(super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        }
+        // Should be false
+        assert!(!super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
+
+        // Test with initial true
+        super::IN_FILTER_CALLBACK.with(|flag| flag.set(true));
+        {
+            let _guard = super::FilterCallbackGuard::new();
+            assert!(super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        }
+        // Should restore to true
+        assert!(super::IN_FILTER_CALLBACK.with(|flag| flag.get()));
     }
 }
