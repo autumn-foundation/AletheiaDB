@@ -429,7 +429,9 @@ pub(crate) fn parse_entry_at(
         }
         3 => {
             // UpdateNode
-            if current_offset.checked_add(20).ok_or_else(|| {
+            // Only require 16 bytes initially (node_id + version_id).
+            // Additional fields are conditional on version.
+            if current_offset.checked_add(16).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -447,6 +449,19 @@ pub(crate) fn parse_entry_at(
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
+                // Check buffer size for label_id (4 bytes)
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateNode label".to_string(),
+                    )
+                    .into());
+                }
+
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -502,6 +517,19 @@ pub(crate) fn parse_entry_at(
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
+                // Check buffer size for label_id (4 bytes)
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    )
+                    .into());
+                }
+
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -1486,5 +1514,77 @@ mod tests {
             }
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::temporal::time;
+    use crate::storage::wal::serialization::serialize_entry_into;
+
+    #[test]
+    fn test_parse_entry_at_update_edge_truncated_label() {
+        // Reproduces the panic where UpdateEdge buffer has edge_id + version_id but not label_id
+        // Create an UpdateEdge entry
+        let edge_id = EdgeId::new(100).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let operation = WalOperation::UpdateEdge {
+            edge_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("UPDATED_KNOWS").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(4), operation);
+
+        // Serialize it
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Truncate right before label_id (but after edge_id and version_id)
+        // Header(20) + Checksum(4) + OpType(1) + EdgeId(8) + VersionId(8) = 41 bytes
+        let truncated_len = 20 + 4 + 1 + 8 + 8;
+        let truncated_buffer = &buffer[..truncated_len];
+
+        // Should return error for insufficient buffer, NOT panic
+        let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(msg.contains("Insufficient buffer size") || msg.contains("overflow"));
+            }
+            _ => panic!("Expected CorruptedData error, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_update_node_truncated_label() {
+        // Create an UpdateNode entry
+        let node_id = NodeId::new(42).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let operation = WalOperation::UpdateNode {
+            node_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(3), operation);
+
+        // Serialize it
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Truncate right before label_id (but after node_id and version_id)
+        // Header(20) + Checksum(4) + OpType(1) + NodeId(8) + VersionId(8) = 41 bytes
+        let truncated_len = 20 + 4 + 1 + 8 + 8;
+        let truncated_buffer = &buffer[..truncated_len];
+
+        // Should return error for insufficient buffer
+        let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
     }
 }
