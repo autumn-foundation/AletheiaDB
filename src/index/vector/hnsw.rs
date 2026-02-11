@@ -115,6 +115,15 @@ impl FilterCallbackGuard {
     pub(crate) fn new() -> Self {
         IN_FILTER_CALLBACK.with(|flag| flag.set(true));
         FilterCallbackGuard
+    }
+}
+
+impl Drop for FilterCallbackGuard {
+    fn drop(&mut self) {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+    }
+}
+
 /// It also handles nested usage correctly by restoring the previous state.
 struct ReentrancyGuard {
     prev: bool,
