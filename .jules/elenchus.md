@@ -65,3 +65,10 @@
 **Finding:** The file contained a syntax error (unclosed delimiter) in `FilterCallbackGuard` implementation, preventing compilation.
 **Evidence:** `cargo test` failed with "this file contains an unclosed delimiter".
 **Resolution:** Repaired the syntax error by closing the `new` function and `impl` block, and implementing `Drop` correctly.
+
+**[Unverified Recovery Logic]**
+**Module:** `aletheiadb::core::id`
+**Severity:** 🟡 Suspect
+**Finding:** Critical recovery methods `IdGenerator::reset_to` and `ensure_at_least` were `pub(crate)` and completely untested. These are the foundation of crash recovery.
+**Evidence:** Code audit revealed these methods had no unit tests in `mod tests` or `mod proptests`.
+**Recommendation:** Added `mod sentry_tests` with concurrency tests for `ensure_at_least` and verification for `reset_to`.

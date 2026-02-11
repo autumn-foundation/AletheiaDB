@@ -427,6 +427,128 @@ impl Default for IdGenerator {
 }
 
 #[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    #[test]
+    fn test_id_generator_reset_to() {
+        let generator = IdGenerator::new();
+        // Generate a few IDs
+        assert_eq!(generator.next(), Ok(0));
+        assert_eq!(generator.next(), Ok(1));
+
+        // Reset to a higher value (simulating recovery)
+        generator.reset_to(100);
+        assert_eq!(generator.current(), 100);
+
+        // Next ID should be 100
+        assert_eq!(generator.next(), Ok(100));
+        assert_eq!(generator.next(), Ok(101));
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least() {
+        let generator = IdGenerator::with_start(50);
+
+        // Ensure at least 40 (less than current 50) - should do nothing
+        generator.ensure_at_least(40);
+        assert_eq!(generator.current(), 50);
+
+        // Ensure at least 50 (equal to current) - should do nothing
+        generator.ensure_at_least(50);
+        assert_eq!(generator.current(), 50);
+
+        // Ensure at least 60 (greater than current) - should update
+        generator.ensure_at_least(60);
+        assert_eq!(generator.current(), 60);
+        assert_eq!(generator.next(), Ok(60));
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least_concurrent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let generator = Arc::new(IdGenerator::new());
+        let num_threads = 10;
+
+        // Each thread tries to ensure at least its thread_id * 100
+        // The final value should be the maximum of all inputs
+        let handles: Vec<_> = (0..num_threads)
+            .map(|i| {
+                let generator_clone = Arc::clone(&generator);
+                thread::spawn(move || {
+                    generator_clone.ensure_at_least((i as u64) * 100);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // The max input was (9 * 100) = 900
+        // ensure_at_least(X) sets current to max(current, X).
+        // So the final value must be >= max(inputs) = 900.
+
+        assert!(generator.current() >= 900);
+
+        // It should be exactly 900 unless we called next() somewhere (we didn't).
+        assert_eq!(generator.current(), 900);
+    }
+
+    #[test]
+    fn test_tx_id_generator_basics() {
+        let tx_gen = TxIdGenerator::new();
+
+        // Initial state: starts at 1
+        // current() returns counter - 1. So initially 1 - 1 = 0.
+        // This means "last generated ID was 0" (reserved).
+        assert_eq!(tx_gen.current(), TxId(0));
+
+        // First generation
+        let id1 = tx_gen.next();
+        assert_eq!(id1, TxId(1));
+        assert_eq!(tx_gen.current(), TxId(1));
+
+        // Second generation
+        let id2 = tx_gen.next();
+        assert_eq!(id2, TxId(2));
+        assert_eq!(tx_gen.current(), TxId(2));
+
+        // Verify strict ordering
+        assert!(id2 > id1);
+    }
+
+    #[test]
+    fn test_tx_id_display() {
+        let tx_id = TxId::new(12345);
+        assert_eq!(format!("{}", tx_id), "TxId(12345)");
+    }
+
+    #[test]
+    fn test_entity_id_conversion_negative() {
+        let node_id = NodeId::new(1).unwrap();
+        let entity_node: EntityId = node_id.into();
+
+        // Should be Node, not Edge
+        assert!(entity_node.is_node());
+        assert!(!entity_node.is_edge());
+        assert_eq!(entity_node.as_node(), Some(node_id));
+        assert_eq!(entity_node.as_edge(), None);
+
+        let edge_id = EdgeId::new(2).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+
+        // Should be Edge, not Node
+        assert!(!entity_edge.is_node());
+        assert!(entity_edge.is_edge());
+        assert_eq!(entity_edge.as_node(), None);
+        assert_eq!(entity_edge.as_edge(), Some(edge_id));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
