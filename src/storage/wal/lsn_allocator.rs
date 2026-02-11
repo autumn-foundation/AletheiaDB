@@ -91,7 +91,18 @@ impl LsnAllocator {
     /// increasing value.
     #[inline]
     pub fn allocate(&self) -> LSN {
-        LSN(self.next_lsn.fetch_add(1, Ordering::Relaxed))
+        // Use fetch_update (CAS loop) to ensure we don't wrap state on overflow
+        let lsn = self
+            .next_lsn
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                if current == u64::MAX {
+                    None // Overflow
+                } else {
+                    Some(current + 1)
+                }
+            })
+            .expect("LSN Allocator Overflow");
+        LSN(lsn)
     }
 
     /// Allocate a batch of consecutive LSNs atomically.
@@ -110,10 +121,24 @@ impl LsnAllocator {
     /// # Panics
     ///
     /// Panics if `count` is 0.
+    /// Panics if the allocation would cause LSN overflow.
     #[inline]
     pub fn allocate_batch(&self, count: u64) -> (LSN, LSN) {
         assert!(count > 0, "Cannot allocate 0 LSNs");
-        let first = self.next_lsn.fetch_add(count, Ordering::Relaxed);
+
+        // Use fetch_update (CAS loop) to ensure we don't wrap state on overflow
+        let first = self
+            .next_lsn
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                // If current + count overflows u64, or reaches u64::MAX (causing next to be 0/wrapped)
+                if current > u64::MAX.saturating_sub(count) {
+                    None
+                } else {
+                    Some(current + count)
+                }
+            })
+            .expect("LSN Allocator Overflow");
+
         (LSN(first), LSN(first + count - 1))
     }
 
