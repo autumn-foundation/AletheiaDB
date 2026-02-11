@@ -1,5 +1,5 @@
 use aletheiadb::core::vector::SparseVec;
-use aletheiadb::core::vector::sparse::{sparse_dot_product, sparse_cosine_similarity};
+use aletheiadb::core::vector::sparse::{sparse_cosine_similarity, sparse_dot_product};
 use aletheiadb::utils::error::{Error, VectorError};
 
 #[test]
