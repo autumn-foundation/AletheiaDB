@@ -68,7 +68,7 @@ num_cpus = { version = "1.16", optional = true }
 redb = "3.1"
 
 # SQL parser for SQL:2011 temporal syntax support (optional)
-sqlparser = { version = "0.40", optional = true }
+sqlparser = { version = "0.61", optional = true }
 
 # Parallel iteration for sharded vector index
 rayon = "1.8"
