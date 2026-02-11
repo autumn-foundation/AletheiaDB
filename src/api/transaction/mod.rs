@@ -24,6 +24,7 @@
 //!     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
 //!     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
 //!     tx.create_edge(alice, bob, "KNOWS", properties! { "since" => 2024 })?;
+//!     // Explicit type annotation required for type inference in this example context
 //!     Ok::<(aletheiadb::core::NodeId, aletheiadb::core::NodeId), aletheiadb::Error>((alice, bob))
 //! })?;
 //!
