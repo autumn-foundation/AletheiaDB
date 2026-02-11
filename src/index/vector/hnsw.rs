@@ -92,6 +92,8 @@ use crate::utils::{Error, Result, error::VectorError};
 use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
@@ -99,37 +101,33 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
-// Thread-local flag to detect re-entrant modification attempts.
-// This prevents deadlocks when user filter callbacks or custom metrics try to modify the index
+// Thread-local set of currently locked index IDs to detect re-entrant modification attempts.
+// This prevents deadlocks when user filter callbacks or custom metrics try to modify *the same* index
 // while holding the inner lock (read).
 std::thread_local! {
-    pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static REENTRANCY_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LOCKED_INDEXES: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
 }
 
-/// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
-/// This ensures the flag is always reset, even if the callback panics.
-pub(crate) struct FilterCallbackGuard;
-
-impl FilterCallbackGuard {
-    pub(crate) fn new() -> Self {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
-        FilterCallbackGuard
-/// It also handles nested usage correctly by restoring the previous state.
+/// RAII guard that adds an index ID to LOCKED_INDEXES on creation and removes it on drop.
+/// This ensures the ID is always removed, even if the callback panics.
 struct ReentrancyGuard {
-    prev: bool,
+    index_id: u64,
 }
 
 impl ReentrancyGuard {
-    fn new() -> Self {
-        let prev = REENTRANCY_GUARD.with(|flag| flag.replace(true));
-        ReentrancyGuard { prev }
+    fn new(index_id: u64) -> Self {
+        LOCKED_INDEXES.with(|set| {
+            set.borrow_mut().insert(index_id);
+        });
+        ReentrancyGuard { index_id }
     }
 }
 
 impl Drop for ReentrancyGuard {
     fn drop(&mut self) {
-        REENTRANCY_GUARD.with(|flag| flag.set(self.prev));
+        LOCKED_INDEXES.with(|set| {
+            set.borrow_mut().remove(&self.index_id);
+        });
     }
 }
 
@@ -167,6 +165,9 @@ const MAX_K: usize = 100_000;
 /// but low enough to prevent catastrophic OOM on typical servers.
 /// 100M entries * (16 bytes data + ~32 bytes DashMap overhead) ≈ 4.8GB RAM.
 const MAX_MAPPINGS_COUNT: usize = 100_000_000;
+
+/// Global counter for unique HNSW instance IDs
+static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
@@ -458,6 +459,7 @@ fn ffi_abort(reason: &str) -> ! {
 fn create_metric_wrapper<F>(
     dims: usize,
     distance_fn: Arc<F>,
+    instance_id: u64,
 ) -> Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync>
 where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
@@ -465,7 +467,7 @@ where
     Box::new(move |a: *const f32, b: *const f32| {
         // Set re-entrancy guard to prevent deadlock if custom metric calls back into index
         // This is critical because usearch holds a read lock while calling this metric.
-        let _guard = ReentrancyGuard::new();
+        let _guard = ReentrancyGuard::new(instance_id);
 
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
@@ -489,11 +491,6 @@ where
 
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-
-        // Prevent re-entrant modifications during metric calculation (deadlock prevention)
-        // This sets the thread-local flag so that add() and other methods fail gracefully.
-        // Without this, a custom metric calling add() would deadlock on the inner RwLock.
-        let _guard = FilterCallbackGuard::new();
 
         distance_fn(slice_a, slice_b)
     })
@@ -655,6 +652,9 @@ impl HnswIndexBuilder {
             )))
         })?;
 
+        // Generate unique instance ID
+        let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+
         // Apply custom metric if configured
         if let Some(ref custom) = self.config.custom_metric {
             let dims = self.config.dimensions;
@@ -665,7 +665,7 @@ impl HnswIndexBuilder {
             // 1. Both pointers are valid and point to `dims` contiguous f32 values
             // 2. The pointers remain valid for the duration of the function call
             // 3. The data is properly aligned for f32
-            let metric_wrapper = create_metric_wrapper(dims, distance_fn);
+            let metric_wrapper = create_metric_wrapper(dims, distance_fn, instance_id);
 
             index.change_metric(metric_wrapper);
         }
@@ -709,6 +709,7 @@ impl HnswIndexBuilder {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: false,
+            instance_id,
         })
     }
 }
@@ -744,6 +745,8 @@ pub struct HnswIndex {
     max_k: usize,
     /// Whether this index is memory-mapped (read-only)
     is_mmap: bool,
+    /// Unique instance ID for re-entrancy protection
+    instance_id: u64,
 }
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -787,7 +790,7 @@ fn classify_mapping_add_outcome(existing_mapping: bool, race_detected: bool) -> 
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         // Check for re-entrant modification during callbacks (prevents deadlock)
-        if REENTRANCY_GUARD.with(|flag| flag.get()) {
+        if LOCKED_INDEXES.with(|set| set.borrow().contains(&self.instance_id)) {
             return Err(Error::Vector(VectorError::IndexError(
                 "Cannot modify index from within a callback (filter or metric). \
                  This would cause a deadlock due to lock re-entrancy. \
@@ -976,7 +979,7 @@ impl VectorIndex for HnswIndex {
 
     fn remove(&self, id: NodeId) -> Result<()> {
         // Check for re-entrant modification during callbacks (prevents deadlock)
-        if REENTRANCY_GUARD.with(|flag| flag.get()) {
+        if LOCKED_INDEXES.with(|set| set.borrow().contains(&self.instance_id)) {
             return Err(Error::Vector(VectorError::IndexError(
                 "Cannot modify index from within a callback (filter or metric). \
                  This would cause a deadlock due to lock re-entrancy. \
@@ -1111,10 +1114,11 @@ impl VectorIndex for HnswIndex {
         // We set REENTRANCY_GUARD flag when calling the user's predicate to detect
         // and prevent re-entrant modification attempts that would cause deadlock.
         let reverse_mapping = &self.reverse_mapping;
+        let instance_id = self.instance_id;
         let filter = |key: u64| -> bool {
             if let Some(node_id_ref) = reverse_mapping.get(&key) {
                 // Set flag to prevent modifications during callback
-                let _guard = ReentrancyGuard::new();
+                let _guard = ReentrancyGuard::new(instance_id);
                 predicate(node_id_ref.value())
             } else {
                 false
@@ -1208,7 +1212,7 @@ impl VectorIndex for HnswIndex {
     /// would panic), it falls back to standard synchronous execution.
     fn save(&self, path: &Path) -> Result<()> {
         // Check for re-entrant modification during callbacks (prevents deadlock)
-        if REENTRANCY_GUARD.with(|flag| flag.get()) {
+        if LOCKED_INDEXES.with(|set| set.borrow().contains(&self.instance_id)) {
             return Err(Error::Vector(VectorError::IndexError(
                 "Cannot save index from within a callback (filter or metric). \
                  This would cause a deadlock due to lock re-entrancy. \
@@ -1805,6 +1809,9 @@ impl HnswIndex {
                 )))
             })?;
 
+        // Generate unique instance ID
+        let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+
         // Apply custom metric if configured (must happen after load, before use)
         // This ensures custom metrics are preserved across save/load cycles
         if let Some(ref custom) = config.custom_metric {
@@ -1812,7 +1819,7 @@ impl HnswIndex {
             let distance_fn = Arc::clone(&custom.distance_fn);
 
             // Create a wrapper that converts usearch's raw pointer API to our safe slice API
-            let metric_wrapper = create_metric_wrapper(dims, distance_fn);
+            let metric_wrapper = create_metric_wrapper(dims, distance_fn, instance_id);
 
             index.change_metric(metric_wrapper);
         }
@@ -1845,6 +1852,7 @@ impl HnswIndex {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: false,
+            instance_id,
         })
     }
 
@@ -1893,6 +1901,9 @@ impl HnswIndex {
             (Quantization::default(), DistanceMetric::Cosine)
         };
 
+        // Generate unique instance ID
+        let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
             config: HnswConfig {
@@ -1911,6 +1922,7 @@ impl HnswIndex {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: true,
+            instance_id,
         })
     }
 }
@@ -2974,7 +2986,7 @@ mod coverage_tests {
     #[should_panic(expected = "usearch passed null pointer")]
     fn test_metric_wrapper_null_pointer() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
-        let wrapper = create_metric_wrapper(4, distance_fn);
+        let wrapper = create_metric_wrapper(4, distance_fn, 999);
 
         let null_ptr: *const f32 = std::ptr::null();
         let valid_data = [0.0f32; 4];
@@ -2988,7 +3000,7 @@ mod coverage_tests {
     #[should_panic(expected = "usearch passed unaligned pointer")]
     fn test_metric_wrapper_unaligned_pointer() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
-        let wrapper = create_metric_wrapper(4, distance_fn);
+        let wrapper = create_metric_wrapper(4, distance_fn, 999);
 
         let data = [0u8; 32];
         let unaligned_ptr = unsafe { data.as_ptr().add(1) as *const f32 };
