@@ -48,3 +48,7 @@ pub mod temporal_diff;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
+
+#[cfg(feature = "nova")]
+/// Sentinel: Semantic Firewall for validating data insertion.
+pub mod sentinel;
