@@ -1286,6 +1286,14 @@ impl TemporalIndexes {
             .sum()
     }
 
+    /// Iterate over all entity IDs currently indexed.
+    ///
+    /// This allows processing entities without collecting all IDs into memory,
+    /// avoiding O(N) memory allocation.
+    pub fn entity_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.index.iter().map(|entry| *entry.key())
+    }
+
     /// Clear all indexes.
     pub fn clear(&self) {
         self.index.clear();
@@ -3662,5 +3670,33 @@ mod tests {
             1,
             "Duplicate should be removed by insert_batch"
         );
+    }
+
+    #[test]
+    fn test_get_all_entity_ids() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(2).unwrap();
+
+        indexes
+            .insert_node_version(
+                node_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000.into()),
+            )
+            .unwrap();
+
+        indexes
+            .insert_edge_version(
+                edge_id,
+                VersionId::new(2).unwrap(),
+                BiTemporalInterval::current(1000.into()),
+            )
+            .unwrap();
+
+        let ids: Vec<_> = indexes.entity_ids().collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&EntityId::Node(node_id)));
+        assert!(ids.contains(&EntityId::Edge(edge_id)));
     }
 }

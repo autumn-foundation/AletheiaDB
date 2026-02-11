@@ -43,23 +43,6 @@ pub const DEFAULT_MAX_VECTOR_PROPERTIES: usize = 10;
 /// This storage engine maintains the current version of all nodes and edges,
 /// optimized for fast queries without temporal overhead. This is the "fast path"
 /// that should achieve <1µs single-hop traversals.
-///
-/// # Usage
-///
-/// `CurrentStorage` is an internal component typically accessed via
-/// [`crate::AletheiaDB`]. Direct usage is rarely needed for application
-/// code, but may be useful for specialized extensions or low-level tools.
-///
-/// ```rust
-/// // Access via AletheiaDB (recommended)
-/// use aletheiadb::AletheiaDB;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let db = AletheiaDB::new()?;
-/// // db.get_node() delegates to CurrentStorage::get_node()
-/// # Ok(())
-/// # }
-/// ```
 pub struct CurrentStorage {
     /// Indexes for nodes and edges
     indexes: CurrentIndexes,
@@ -2159,13 +2142,6 @@ impl CurrentStorage {
             if let Some(exclude_id) = exclude_node {
                 results.retain(|(id, _)| *id != exclude_id);
             }
-
-            // Filter out ghost nodes (nodes in vector index but not in graph)
-            // This ensures consistency even if vector index delete failed or is pending.
-            // Note: We don't do this for the filtered case above because search_with_filter
-            // already checks node existence (get_node_label returns None for missing nodes).
-            results.retain(|(id, _)| self.indexes.contains_node(*id));
-
             results
         };
 

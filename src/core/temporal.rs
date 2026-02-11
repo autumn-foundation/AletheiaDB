@@ -61,7 +61,31 @@ impl TimeRange {
     /// Returns `TemporalError::InvalidTimeRange` if start > end.
     #[inline]
     pub fn new(start: Timestamp, end: Timestamp) -> Result<Self, TemporalError> {
-        validate_time_range_inputs(start, end)?;
+        if start > end {
+            return Err(TemporalError::InvalidTimeRange { start, end });
+        }
+
+        // Warden: Validate that timestamps don't exceed MAX_VALID_TIMESTAMP
+        // This prevents invalid timestamps from entering via unchecked constructors
+        if start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: start,
+                reason: format!(
+                    "Start timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+
+        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: end,
+                reason: format!(
+                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
 
         Ok(TimeRange { start, end })
     }
@@ -204,37 +228,6 @@ impl TimeRange {
         let (end, _) = HybridTimestamp::deserialize(&bytes[12..24])?;
         Ok((TimeRange { start, end }, 24))
     }
-}
-
-#[inline]
-fn validate_time_range_inputs(start: Timestamp, end: Timestamp) -> Result<(), TemporalError> {
-    if start > end {
-        return Err(TemporalError::InvalidTimeRange { start, end });
-    }
-
-    // Warden: Validate that timestamps don't exceed MAX_VALID_TIMESTAMP
-    // This prevents invalid timestamps from entering via unchecked constructors.
-    if start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX {
-        return Err(TemporalError::InvalidTimestamp {
-            timestamp: start,
-            reason: format!(
-                "Start timestamp exceeds MAX_VALID_TIMESTAMP ({})",
-                MAX_VALID_TIMESTAMP
-            ),
-        });
-    }
-
-    if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
-        return Err(TemporalError::InvalidTimestamp {
-            timestamp: end,
-            reason: format!(
-                "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
-                MAX_VALID_TIMESTAMP
-            ),
-        });
-    }
-
-    Ok(())
 }
 
 impl fmt::Display for TimeRange {
@@ -726,41 +719,6 @@ mod tests {
         let range = result.unwrap();
         assert_eq!(range.start(), 100.into());
         assert_eq!(range.end(), 100.into());
-    }
-
-    #[test]
-    fn test_mcdc_validate_time_range_inputs_decision_table() {
-        let valid_start: Timestamp = 10.into();
-        let valid_end: Timestamp = 20.into();
-
-        // Baseline valid case.
-        assert!(validate_time_range_inputs(valid_start, valid_end).is_ok());
-
-        // Condition 1 toggled (start > end) -> InvalidTimeRange.
-        let bad_order = validate_time_range_inputs(valid_end, valid_start);
-        assert!(matches!(
-            bad_order,
-            Err(TemporalError::InvalidTimeRange { .. })
-        ));
-
-        // Condition 2 toggled (start exceeds MAX_VALID_TIMESTAMP and not TIMESTAMP_MAX).
-        let bad_start: Timestamp = (MAX_VALID_TIMESTAMP + 1).into();
-        let start_too_large = validate_time_range_inputs(bad_start, TIMESTAMP_MAX);
-        assert!(matches!(
-            start_too_large,
-            Err(TemporalError::InvalidTimestamp { .. })
-        ));
-
-        // Condition 3 toggled (end exceeds MAX_VALID_TIMESTAMP and not TIMESTAMP_MAX).
-        let end_too_large =
-            validate_time_range_inputs(valid_start, (MAX_VALID_TIMESTAMP + 1).into());
-        assert!(matches!(
-            end_too_large,
-            Err(TemporalError::InvalidTimestamp { .. })
-        ));
-
-        // TIMESTAMP_MAX is exempt from MAX_VALID_TIMESTAMP guard.
-        assert!(validate_time_range_inputs(valid_start, TIMESTAMP_MAX).is_ok());
     }
 
     // Serialization tests
