@@ -105,7 +105,9 @@ fn test_hnsw_config_v1_compatibility() {
     // dimensions (u64)
     buffer.write_all(&(128u64).to_le_bytes()).unwrap();
     // metric (u8)
-    buffer.write_all(&[DistanceMetric::Euclidean.to_u8()]).unwrap();
+    buffer
+        .write_all(&[DistanceMetric::Euclidean.to_u8()])
+        .unwrap();
     // m (u64)
     buffer.write_all(&(16u64).to_le_bytes()).unwrap();
     // ef_construction (u64)

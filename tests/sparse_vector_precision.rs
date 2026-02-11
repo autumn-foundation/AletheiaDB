@@ -1,5 +1,5 @@
-use aletheiadb::core::vector::sparse_squared_euclidean_distance;
 use aletheiadb::core::vector::SparseVec;
+use aletheiadb::core::vector::sparse_squared_euclidean_distance;
 
 #[test]
 fn test_sparse_precision_loss() {
@@ -23,6 +23,14 @@ fn test_sparse_precision_loss() {
 
     // We expect it to be close to 0.0001.
     // If it's 0.0, it failed.
-    assert!(dist_sq > 1e-5, "Distance should be non-zero (got {})", dist_sq);
-    assert!((dist_sq - 0.0001).abs() < 1e-5, "Distance should be approx 0.0001 (got {})", dist_sq);
+    assert!(
+        dist_sq > 1e-5,
+        "Distance should be non-zero (got {})",
+        dist_sq
+    );
+    assert!(
+        (dist_sq - 0.0001).abs() < 1e-5,
+        "Distance should be approx 0.0001 (got {})",
+        dist_sq
+    );
 }
