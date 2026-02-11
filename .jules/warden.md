@@ -7,3 +7,7 @@
 **2026-02-15 - FFI Unwind Safety in HNSW Metric Wrapper**
 **Threat:** The `create_metric_wrapper` function in `src/index/vector/hnsw.rs` used `panic!` when encountering null or unaligned pointers from the C++ `usearch` library. Panicking across an FFI boundary is Undefined Behavior (UB) and can lead to memory corruption or exploitable crashes.
 **Defense:** Replaced `panic!` with `std::process::abort()` and added explicit error logging. This ensures the process terminates safely and immediately if the integrity of the FFI boundary is violated, preventing UB.
+
+**2026-02-15 - SIMD FFI Buffer Over-read Protection**
+**Threat:** `simsimd_dot` and `simsimd_sqeuclidean` in `src/core/vector/simd.rs` passed slice lengths to C FFI without verifying that both input slices had equal length. This could allow a buffer over-read if called with mismatched slice lengths (reading past the end of the shorter slice).
+**Defense:** Added `assert_eq!` checks for dimension equality in both wrapper functions. Verified with unit tests.

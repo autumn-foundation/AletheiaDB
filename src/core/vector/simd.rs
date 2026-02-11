@@ -633,8 +633,17 @@ pub(crate) fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
 
 #[inline]
 fn simsimd_dot(a: &[f32], b: &[f32]) -> Option<f32> {
+    // Defense in depth: Ensure dimensions match to prevent FFI buffer over-read.
+    // Although callers should check this, we enforce it at the unsafe boundary.
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Vector dimensions must match for SIMD dot product"
+    );
+
     let mut result = 0.0f64;
-    // SAFETY: Pointers originate from valid slices with equal lengths.
+    // SAFETY: Pointers originate from valid slices.
+    // We explicitly verified a.len() == b.len() above.
     // SimSIMD writes a single distance scalar into `result`.
     unsafe {
         simsimd_dot_f32(
@@ -653,8 +662,17 @@ fn simsimd_dot(a: &[f32], b: &[f32]) -> Option<f32> {
 
 #[inline]
 fn simsimd_sqeuclidean(a: &[f32], b: &[f32]) -> Option<f32> {
+    // Defense in depth: Ensure dimensions match to prevent FFI buffer over-read.
+    // Although callers should check this, we enforce it at the unsafe boundary.
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Vector dimensions must match for SIMD squared euclidean distance"
+    );
+
     let mut result = 0.0f64;
-    // SAFETY: Pointers originate from valid slices with equal lengths.
+    // SAFETY: Pointers originate from valid slices.
+    // We explicitly verified a.len() == b.len() above.
     // SimSIMD writes a single distance scalar into `result`.
     unsafe {
         simsimd_l2sq_f32(
@@ -674,4 +692,27 @@ fn simsimd_sqeuclidean(a: &[f32], b: &[f32]) -> Option<f32> {
 unsafe extern "C" {
     fn simsimd_dot_f32(a: *const f32, b: *const f32, n: u64, d: *mut f64);
     fn simsimd_l2sq_f32(a: *const f32, b: *const f32, n: u64, d: *mut f64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "Vector dimensions must match")]
+    fn test_simsimd_dot_mismatched_dimensions() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        // This should panic due to the assertion we added
+        simsimd_dot(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector dimensions must match")]
+    fn test_simsimd_sqeuclidean_mismatched_dimensions() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        // This should panic due to the assertion we added
+        simsimd_sqeuclidean(&a, &b);
+    }
 }
