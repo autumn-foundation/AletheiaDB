@@ -91,7 +91,11 @@ impl LsnAllocator {
     /// increasing value.
     #[inline]
     pub fn allocate(&self) -> LSN {
-        LSN(self.next_lsn.fetch_add(1, Ordering::Relaxed))
+        let val = self.next_lsn.fetch_add(1, Ordering::Relaxed);
+        if val == u64::MAX {
+            panic!("LSN Allocator Overflow");
+        }
+        LSN(val)
     }
 
     /// Allocate a batch of consecutive LSNs atomically.
@@ -109,11 +113,17 @@ impl LsnAllocator {
     ///
     /// # Panics
     ///
-    /// Panics if `count` is 0.
+    /// Panics if `count` is 0 or if the allocation causes LSN overflow.
     #[inline]
     pub fn allocate_batch(&self, count: u64) -> (LSN, LSN) {
         assert!(count > 0, "Cannot allocate 0 LSNs");
         let first = self.next_lsn.fetch_add(count, Ordering::Relaxed);
+
+        // Check for overflow
+        if first.checked_add(count).is_none() {
+            panic!("LSN Allocator Overflow");
+        }
+
         (LSN(first), LSN(first + count - 1))
     }
 
@@ -318,5 +328,21 @@ mod tests {
     fn test_default_impl() {
         let alloc = LsnAllocator::default();
         assert_eq!(alloc.current(), LSN(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "LSN Allocator Overflow")]
+    fn test_allocate_overflow_panics() {
+        let alloc = LsnAllocator::new();
+        alloc.set_next(LSN(u64::MAX));
+        alloc.allocate();
+    }
+
+    #[test]
+    #[should_panic(expected = "LSN Allocator Overflow")]
+    fn test_allocate_batch_overflow_panics() {
+        let alloc = LsnAllocator::new();
+        alloc.set_next(LSN(u64::MAX - 1));
+        alloc.allocate_batch(3); // Should wrap around u64::MAX
     }
 }
