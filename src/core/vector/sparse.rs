@@ -413,6 +413,14 @@ impl SparseVec {
 /// - Space: O(1) - no allocations
 /// - Much faster than dense dot product when vectors are sparse
 pub fn sparse_dot_product(a: &SparseVec, b: &SparseVec) -> Result<f32> {
+    if a.dimension() != b.dimension() {
+        return Err(VectorError::DimensionMismatch {
+            expected: a.dimension(),
+            actual: b.dimension(),
+        }
+        .into());
+    }
+
     let mut sum = 0.0f32;
     let mut i = 0;
     let mut j = 0;
