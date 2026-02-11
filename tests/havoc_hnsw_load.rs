@@ -1,9 +1,9 @@
-use aletheiadb::index::vector::{HnswConfig, HnswIndex, DistanceMetric};
 use aletheiadb::core::property::PropertyMap;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
 use proptest::prelude::*;
-use tempfile::tempdir;
 use std::fs::File;
 use std::io::Write;
+use tempfile::tempdir;
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]

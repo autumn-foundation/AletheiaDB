@@ -1,5 +1,5 @@
-use aletheiadb::storage::wal::segment_reader::read_segment;
 use aletheiadb::storage::wal::LSN;
+use aletheiadb::storage::wal::segment_reader::read_segment;
 use std::io::Write;
 use tempfile::NamedTempFile;
 

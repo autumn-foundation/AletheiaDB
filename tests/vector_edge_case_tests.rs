@@ -302,16 +302,17 @@ fn test_load_without_mappings_file() {
     let mappings_path = dir.path().join("no_mappings.usearch.mappings");
     std::fs::remove_file(&mappings_path).unwrap();
 
-    // Load should succeed but without mappings
+    // Load should fail because mappings file is required for safety
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
-    let index = HnswIndex::load(&index_path, config).unwrap();
+    let result = HnswIndex::load(&index_path, config);
 
-    // Index has the vector but we can't map to NodeIds
-    assert_eq!(index.len(), 1);
-
-    // Search will return empty because reverse_mapping is empty
-    let results = index.search(&[1.0, 0.0, 0.0, 0.0], 10).unwrap();
-    assert!(results.is_empty()); // No mappings, so no results can be returned
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Missing mappings file"),
+        "Unexpected error: {}",
+        err_msg
+    );
 }
 
 // ============================================================================
