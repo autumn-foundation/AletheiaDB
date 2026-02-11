@@ -3008,3 +3008,33 @@ mod coverage_tests {
         wrapper(unaligned_ptr, valid_ptr);
     }
 }
+
+#[test]
+fn test_filter_callback_guard_lifecycle() {
+    // Initial state should be false
+    assert!(!IN_FILTER_CALLBACK.with(|f| f.get()));
+
+    {
+        let _guard = FilterCallbackGuard::new();
+        // Should be true inside the scope
+        assert!(IN_FILTER_CALLBACK.with(|f| f.get()));
+    }
+
+    // Should be false after drop
+    assert!(!IN_FILTER_CALLBACK.with(|f| f.get()));
+}
+
+#[test]
+fn test_filter_callback_guard_panic_safety() {
+    // Ensure panic safety (unwind) resets the flag
+    let result = std::panic::catch_unwind(|| {
+        let _guard = FilterCallbackGuard::new();
+        assert!(IN_FILTER_CALLBACK.with(|f| f.get()));
+        panic!("Simulated panic inside callback");
+    });
+
+    assert!(result.is_err());
+
+    // Should be false after unwind
+    assert!(!IN_FILTER_CALLBACK.with(|f| f.get()));
+}
