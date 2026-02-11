@@ -9,6 +9,14 @@ use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
 use crate::core::version::VersionMetadata;
 
+#[inline]
+fn matches_label(label_id: InternedString, label: &str) -> bool {
+    use crate::core::interning::GLOBAL_INTERNER;
+    GLOBAL_INTERNER
+        .resolve_with(label_id, |interned| interned == label)
+        .unwrap_or(false)
+}
+
 /// A node in the current state of the graph.
 ///
 /// This represents the current version of a node, optimized for fast access.
@@ -75,9 +83,8 @@ impl Node {
     /// Check if this node has a specific label using a string.
     ///
     /// This is a convenience method that accepts a `&str` instead of requiring
-    /// the caller to pre-intern the string. It uses `get_id()` internally,
-    /// which means it will NOT add the string to the interner if it doesn't
-    /// already exist - it will simply return `false`.
+    /// the caller to pre-intern the string. It compares against the existing
+    /// interned label and does NOT add the input string to the interner.
     ///
     /// # Performance Note
     ///
@@ -103,10 +110,7 @@ impl Node {
     /// ```
     #[inline]
     pub fn has_label_str(&self, label: &str) -> bool {
-        use crate::core::interning::GLOBAL_INTERNER;
-        GLOBAL_INTERNER
-            .get_id(label)
-            .is_some_and(|id| self.label == id)
+        matches_label(self.label, label)
     }
 }
 
@@ -204,9 +208,8 @@ impl Edge {
     /// Check if this edge has a specific label using a string.
     ///
     /// This is a convenience method that accepts a `&str` instead of requiring
-    /// the caller to pre-intern the string. It uses `get_id()` internally,
-    /// which means it will NOT add the string to the interner if it doesn't
-    /// already exist - it will simply return `false`.
+    /// the caller to pre-intern the string. It compares against the existing
+    /// interned label and does NOT add the input string to the interner.
     ///
     /// # Performance Note
     ///
@@ -232,10 +235,7 @@ impl Edge {
     /// ```
     #[inline]
     pub fn has_label_str(&self, label: &str) -> bool {
-        use crate::core::interning::GLOBAL_INTERNER;
-        GLOBAL_INTERNER
-            .get_id(label)
-            .is_some_and(|id| self.label == id)
+        matches_label(self.label, label)
     }
 
     /// Check if this edge connects the given source and target nodes.

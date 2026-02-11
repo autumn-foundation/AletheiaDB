@@ -366,6 +366,12 @@ harness = false
 path = "benches/edge_iteration.rs"
 required-features = []
 
+[[bench]]
+name = "graph_label_checks"
+harness = false
+path = "benches/graph_label_checks.rs"
+required-features = []
+
 # Experimental features
 [[example]]
 name = "story_demo"
