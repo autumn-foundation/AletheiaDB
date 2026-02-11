@@ -1529,4 +1529,48 @@ mod tests {
         let result = parse_entry_at(&data, 5, 1);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_parse_entry_at_update_node_truncated_label() {
+        // Construct an UpdateNode entry that is truncated right before the label_id
+        // Layout:
+        // - LSN (8 bytes)
+        // - Timestamp (12 bytes)
+        // - Checksum (4 bytes)
+        // - OpType (1 byte) = 3 (UpdateNode)
+        // - NodeId (8 bytes)
+        // - VersionId (8 bytes)
+        // - LabelId (4 bytes) <-- Truncate here (provide 0-3 bytes instead of 4)
+
+        let mut buffer = Vec::new();
+
+        // Header
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // LSN
+        time::now().serialize_into(&mut buffer); // Timestamp
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // Checksum (ignored here)
+
+        // Operation
+        buffer.push(3); // UpdateNode
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+        buffer.extend_from_slice(&1u64.to_le_bytes()); // VersionId
+
+        // At this point, we are at offset 24 (header) + 1 (op) + 8 (node) + 8 (ver) = 41
+        // We need 4 more bytes for label_id.
+        // Let's provide only 3 bytes to trigger the bounds check
+        buffer.push(1);
+        buffer.push(2);
+        buffer.push(3);
+
+        // Parse
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+
+        // Should be error, not panic
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(msg.contains("Insufficient buffer size") || msg.contains("overflow"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", result),
+        }
+    }
 }
