@@ -448,6 +448,17 @@ pub(crate) fn parse_entry_at(
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
                 // Read 4-byte InternedString ID
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    )
+                    .into());
+                }
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
                     buffer[current_offset + 1],
@@ -503,6 +514,17 @@ pub(crate) fn parse_entry_at(
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
                 // Read 4-byte InternedString ID
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    )
+                    .into());
+                }
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
                     buffer[current_offset + 1],
@@ -1485,6 +1507,46 @@ mod tests {
                 assert_eq!(msg, "WAL offset overflow");
             }
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_repro_fuzz_crash_update_edge_truncated() {
+        // Reproduces a crash found by fuzzing where UpdateEdge entry is truncated
+        // right after VersionId, but version >= WAL_VERSION implies LabelId follows.
+        let mut buffer = Vec::new();
+
+        // LSN (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // Timestamp (12 bytes)
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+
+        // Checksum (4 bytes) - dummy
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        // Operation type: UpdateEdge (4)
+        buffer.push(4);
+
+        // Edge ID (8 bytes)
+        buffer.extend_from_slice(&100u64.to_le_bytes());
+
+        // Version ID (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // Stop here! Don't write LabelId.
+        // Total size: 8 + 12 + 4 + 1 + 8 + 8 = 41 bytes.
+
+        // This should return an error (buffer too short), NOT panic.
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                // We expect "Insufficient buffer size" or similar
+                assert!(msg.contains("Insufficient buffer size") || msg.contains("overflow"));
+            }
+            _ => panic!("Expected Insufficient buffer size error, got: {:?}", result),
         }
     }
 }
