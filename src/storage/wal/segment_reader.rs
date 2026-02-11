@@ -503,6 +503,17 @@ pub(crate) fn parse_entry_at(
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
                 // Read 4-byte InternedString ID
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    )
+                    .into());
+                }
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
                     buffer[current_offset + 1],
@@ -1486,5 +1497,77 @@ mod tests {
             }
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_repro_panic_update_edge_truncated_label() {
+        // Reproduces index out of bounds panic in UpdateEdge when buffer ends after VersionId
+        let mut buffer = Vec::new();
+        // LSN (8)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+        // Timestamp (12)
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+        // Checksum (4) - placeholder
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+        // OpType = 4 (UpdateEdge)
+        buffer.push(4);
+
+        // EdgeID (8)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+        // VersionID (8)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // Total payload: 16 bytes. Missing LabelID (4 bytes) required for V1.
+
+        // Fix checksum
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..checksum_offset]);
+        hasher.update(&buffer[checksum_offset + 4..]);
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        // This should return Err, not panic
+        let result = parse_entry_at(&buffer, 0, 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // We expect "Insufficient buffer size"
+        assert!(format!("{}", err).contains("Insufficient buffer size"), "Got error: {}", err);
+    }
+
+    #[test]
+    fn test_parse_entry_at_update_node_truncated_label() {
+        let mut buffer = Vec::new();
+        // LSN (8)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+        // Timestamp (12)
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+        // Checksum (4) - placeholder
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+        // OpType = 3 (UpdateNode)
+        buffer.push(3);
+
+        // NodeID (8)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+        // VersionID (8)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // Total payload: 16 bytes. UpdateNode expects 20 bytes upfront.
+
+        // Fix checksum
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..checksum_offset]);
+        hasher.update(&buffer[checksum_offset + 4..]);
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        // This should return Err, not panic
+        let result = parse_entry_at(&buffer, 0, 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("Insufficient buffer size for UpdateNode"), "Got error: {}", err);
     }
 }
