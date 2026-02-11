@@ -42,7 +42,7 @@ metrics-exporter-prometheus = { version = "0.17", optional = true }
 
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
-rmcp = { version = "0.13", features = ["server", "transport-io"], optional = true }
+rmcp = { version = "0.15", features = ["server", "transport-io"], optional = true }
 base64 = { version = "0.22", optional = true }
 
 # HTTP server support (optional)
