@@ -2855,7 +2855,6 @@ fn test_dot_product_sum_mismatch_panics() {
 // ============================================================================
 
 #[test]
-#[should_panic(expected = "SIMD vector length mismatch")]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn test_unsafe_simd_dot_and_magnitudes_mismatch_panics() {
     let a = vec![1.0; 8];
@@ -2864,30 +2863,43 @@ fn test_unsafe_simd_dot_and_magnitudes_mismatch_panics() {
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
         // This is unsafe and currently causes UB (read past end of b).
         // After hardening, it should panic safely.
-        unsafe {
+        let result = std::panic::catch_unwind(|| unsafe {
             let _ = super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b);
+        });
+        assert!(result.is_err(), "Should panic on mismatch");
+        let err = result.unwrap_err();
+        if let Some(msg) = err.downcast_ref::<&str>() {
+            assert!(msg.contains("SIMD vector length mismatch"));
+        } else if let Some(msg) = err.downcast_ref::<String>() {
+            assert!(msg.contains("SIMD vector length mismatch"));
+        } else {
+            panic!("Panic occurred but message format was unexpected");
         }
     } else {
-        // Skip test if AVX2/FMA not available, but panic to match expected panic
-        // so the test doesn't fail on "did not panic" when skipping.
-        // Or better, just ignore the test result if we can't run it.
-        // But #[should_panic] requires panic.
-        panic!("SIMD vector length mismatch");
+        println!("Skipping AVX2 test: hardware not supported");
     }
 }
 
 #[test]
-#[should_panic(expected = "SIMD vector length mismatch")]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn test_unsafe_simd_squared_diff_sum_mismatch_panics() {
     let a = vec![1.0; 8];
     let b = vec![1.0; 7];
 
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        unsafe {
+        let result = std::panic::catch_unwind(|| unsafe {
             let _ = super::simd::x86_ops::squared_diff_sum_avx2(&a, &b);
+        });
+        assert!(result.is_err(), "Should panic on mismatch");
+        let err = result.unwrap_err();
+        if let Some(msg) = err.downcast_ref::<&str>() {
+            assert!(msg.contains("SIMD vector length mismatch"));
+        } else if let Some(msg) = err.downcast_ref::<String>() {
+            assert!(msg.contains("SIMD vector length mismatch"));
+        } else {
+            panic!("Panic occurred but message format was unexpected");
         }
     } else {
-        panic!("SIMD vector length mismatch");
+        println!("Skipping AVX2 test: hardware not supported");
     }
 }
