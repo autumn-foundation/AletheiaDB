@@ -12,6 +12,8 @@ on:
 
 jobs:
   claude-review:
+    # Temporarily disabled due to persistent internal SDK execution errors (Claude Code process exited with code 1)
+    if: false
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||
