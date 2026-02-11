@@ -2650,14 +2650,16 @@ fn test_sparse_dot_product_empty() {
 
 #[test]
 fn test_sparse_dot_product_different_dimensions() {
-    // Vectors with different dimensions still work for dot product
-    // Only common indices contribute
+    // Vectors with different dimensions should fail
     let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
     let b = SparseVec::new(vec![2, 4], vec![3.0, 4.0], 10).unwrap();
 
-    // Index 2 overlaps: 2.0 * 3.0 = 6.0
-    let dot = sparse_dot_product(&a, &b).unwrap();
-    assert_eq!(dot, 6.0);
+    let result = sparse_dot_product(&a, &b);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        Error::Vector(VectorError::DimensionMismatch { .. })
+    ));
 }
 
 #[test]
