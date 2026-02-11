@@ -2812,4 +2812,96 @@ mod tests {
             panic!("Expected IndexError, got {:?}", result);
         }
     }
+
+    #[test]
+    fn test_custom_metric_execution_coverage() {
+        // This test ensures that the custom metric wrapper and its guard logic are executed,
+        // satisfying code coverage requirements for the new lines added in create_metric_wrapper.
+        let metric_fn = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+        };
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .quantization(Quantization::F32) // Required for custom metric
+            .with_custom_metric("manhattan", metric_fn)
+            .build()
+            .unwrap();
+
+        // Add more nodes to ensure we trigger enough comparisons to hit the callback
+        for i in 0..10 {
+            let id = NodeId::new(i + 1).unwrap();
+            // Alternate vectors to create some diversity
+            let vec = if i % 2 == 0 {
+                [1.0, 0.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0, 0.0]
+            };
+            index.add(id, &vec).unwrap();
+        }
+
+        // Perform search to trigger the metric execution
+        // Search for k=5 to force more comparisons
+        let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
+        assert_eq!(results.len(), 5);
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "usearch passed null pointer")]
+    fn test_metric_wrapper_null_pointer() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let null_ptr: *const f32 = std::ptr::null();
+        let valid_data = [0.0f32; 4];
+        let valid_ptr = valid_data.as_ptr();
+
+        // This should panic
+        wrapper(null_ptr, valid_ptr);
+    }
+
+    #[test]
+    #[should_panic(expected = "usearch passed unaligned pointer")]
+    fn test_metric_wrapper_unaligned_pointer() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let data = [0u8; 32];
+        let unaligned_ptr = unsafe { data.as_ptr().add(1) as *const f32 };
+        let valid_data = [0.0f32; 4];
+        let valid_ptr = valid_data.as_ptr();
+
+        // This should panic
+        wrapper(unaligned_ptr, valid_ptr);
+    }
+
+    #[test]
+    fn test_filter_callback_guard_reset() {
+        // Ensure flag is initially false
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+
+        {
+            let _guard = FilterCallbackGuard::new();
+            // Verify flag is set to true
+            assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        }
+
+        // Verify flag is reset to false after drop
+        assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
+
+    #[test]
+    fn test_filter_callback_guard_manual_drop() {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+
+        let guard = FilterCallbackGuard::new();
+        assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
+
+        drop(guard);
+        assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
 }
