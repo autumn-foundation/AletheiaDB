@@ -447,9 +447,19 @@ where
             );
         }
 
+        // Verify dimensions invariant
+        // In release builds, we trust usearch (and our builder validation) to respect dims.
+        // In debug builds, we assert this invariant to catch logic bugs early.
+        debug_assert!(dims > 0, "Metric wrapper called with dimensions=0");
+
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
-
+        //
+        // We assume:
+        // 1. usearch provides buffers of at least `dims * sizeof(f32)` bytes.
+        //    (We cannot verify this from raw pointers, but we validated `dims` in HnswIndexBuilder).
+        // 2. The memory is initialized.
+        //
         // Strict alignment check to prevent UB (Sentry Directive)
         // f32 requires 4-byte alignment. accessing unaligned data via slice is UB.
         if a.align_offset(std::mem::align_of::<f32>()) != 0

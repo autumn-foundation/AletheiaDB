@@ -539,6 +539,9 @@ impl WalRingBuffer {
 
             if current_seq == expected_seq {
                 // Slot is available - try to claim it
+                // ACQREL ORDERING:
+                // - Acquire: Synchronizes with previous releases of write_pos, ensuring we see up-to-date state.
+                // - Release: Ensures that our claim is visible to other producers.
                 match self.write_pos.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
@@ -555,6 +558,10 @@ impl WalRingBuffer {
                         }
 
                         // Signal that the slot is ready for reading
+                        // RELEASE ORDERING:
+                        // Establishes a happens-before relationship with the consumer's Acquire load of sequence.
+                        // This ensures that the writes to `slot.entry` (above) are visible to the consumer
+                        // before they see the updated sequence number.
                         // Use wrapping_add to handle u64 wraparound gracefully
                         slot.sequence
                             .store(expected_seq.wrapping_add(1), Ordering::Release);
@@ -672,6 +679,10 @@ impl WalRingBuffer {
             // Expected sequence for this slot to contain data
             // Use wrapping_add to handle u64 wraparound gracefully
             let expected_seq = pos.wrapping_add(1);
+            // ACQUIRE ORDERING:
+            // Synchronizes with the producer's Release store to slot.sequence.
+            // This ensures that if we see the updated sequence number, we also see
+            // the writes to `slot.entry` that happened before it.
             let current_seq = slot.sequence.load(Ordering::Acquire);
 
             if current_seq == expected_seq {
@@ -707,6 +718,10 @@ impl WalRingBuffer {
 
                         // Mark slot as available for writing again
                         // New sequence = pos + capacity (next write cycle)
+                        // RELEASE ORDERING:
+                        // Ensures that our read of the entry happens-before the slot is marked available.
+                        // Producers attempting to claim this slot will Acquire this sequence, ensuring
+                        // they don't overwrite the entry before we are done reading it.
                         // Use wrapping_add to handle u64 wraparound gracefully
                         slot.sequence
                             .store(pos.wrapping_add(self.capacity as u64), Ordering::Release);

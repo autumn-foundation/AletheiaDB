@@ -134,9 +134,22 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     }
 
     // Memory-map the file for efficient reading without loading entire file into memory.
-    // SAFETY: We only read from the memory map, never write. The file is opened read-only.
-    // The mapping is valid for the lifetime of this function and is automatically unmapped
-    // when dropped. We have verified the file size above to prevent out-of-bounds reads.
+    // SAFETY:
+    // 1. We only read from the memory map, never write. The file is opened read-only.
+    // 2. The mapping is valid for the lifetime of this function and is automatically unmapped
+    //    when dropped.
+    // 3. We verified the file size above to prevent accidental mapping of huge files.
+    //
+    // RISK ACCEPTANCE (SIGBUS):
+    // Accessing a memory-mapped file can cause a SIGBUS signal (crash) if the underlying
+    // file is truncated by another process while mapped. Pure Rust cannot handle this safely.
+    //
+    // We accept this risk because:
+    // - WAL segments are typically immutable once rotated/archived.
+    // - This function is primarily used during recovery (single-process access).
+    // - The performance benefit of mmap for large logs (avoiding allocation/copy) is critical.
+    // - A crash during recovery due to external file corruption is an acceptable failure mode
+    //   (better than silent data corruption).
     let mmap = unsafe {
         memmap2::Mmap::map(&file).map_err(|e| {
             StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
