@@ -115,6 +115,15 @@ impl FilterCallbackGuard {
     pub(crate) fn new() -> Self {
         IN_FILTER_CALLBACK.with(|flag| flag.set(true));
         FilterCallbackGuard
+    }
+}
+
+impl Drop for FilterCallbackGuard {
+    fn drop(&mut self) {
+        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+    }
+}
+
 /// It also handles nested usage correctly by restoring the previous state.
 struct ReentrancyGuard {
     prev: bool,
@@ -602,6 +611,17 @@ impl HnswIndexBuilder {
                 reason: format!(
                     "ef_search must be in range [1, 4096], got {}",
                     self.config.ef_search
+                ),
+            }));
+        }
+
+        // Validate capacity
+        // Prevent DoS via OOM (std::bad_alloc) if capacity is excessive
+        if self.config.capacity > MAX_MAPPINGS_COUNT {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "Capacity {} exceeds maximum allowed {}",
+                    self.config.capacity, MAX_MAPPINGS_COUNT
                 ),
             }));
         }
