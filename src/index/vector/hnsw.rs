@@ -107,7 +107,7 @@ std::thread_local! {
     static REENTRANCY_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
+/// RAII guard that sets IN_FILTER_CALLBACK to true on creation and false on drop.
 /// This ensures the flag is always reset, even if the callback panics.
 pub(crate) struct FilterCallbackGuard;
 
