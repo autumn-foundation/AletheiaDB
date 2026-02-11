@@ -400,8 +400,11 @@ impl PropertyDelta {
                             // Both are vectors - use sparse delta if beneficial
                             if let Some(vec_delta) = VectorDelta::from_diff(old_vec, new_vec) {
                                 delta.vector_deltas.insert(*key, vec_delta);
+                            } else if old_vec.len() != new_vec.len() {
+                                // If dimensions differ, treat as full replacement
+                                delta.changed.insert(*key, new_value.clone());
                             }
-                            // If from_diff returns None, vectors are identical (already handled above)
+                            // Else: Dimensions match but no changes > epsilon. Treated as no change.
                         }
                         _ => {
                             // Not both vectors, or value added/type changed - store full value
@@ -472,23 +475,11 @@ impl PropertyDelta {
 
         // Apply vector deltas (overwrites existing entries)
         for (key, vec_delta) in &self.vector_deltas {
-            match vec_delta {
-                VectorDelta::Full(new_vec) => {
-                    // Full delta contains the complete vector, so we can apply it
-                    // regardless of whether the base property exists or what type it is.
-                    // This prevents silent data loss if the base property is missing
-                    // (e.g. schema migration or initial version).
-                    result.insert(*key, PropertyValue::Vector(Arc::clone(new_vec)));
-                }
-                VectorDelta::Sparse { .. } => {
-                    // Sparse delta requires base vector to apply changes
-                    if let Some(base_value) = base.get_by_interned_key(key)
-                        && let Some(base_vec) = base_value.as_vector()
-                    {
-                        let new_vec = vec_delta.apply(base_vec);
-                        result.insert(*key, PropertyValue::vector(&new_vec));
-                    }
-                }
+            if let Some(base_value) = base.get_by_interned_key(key)
+                && let Some(base_vec) = base_value.as_vector()
+            {
+                let new_vec = vec_delta.apply(base_vec);
+                result.insert(*key, PropertyValue::vector(&new_vec));
             }
         }
 
@@ -2258,5 +2249,41 @@ mod sentry_tests {
             Some(42),
             "Sparse delta should be silently ignored if base property is wrong type"
         );
+    }
+
+    #[test]
+    fn test_property_delta_silently_ignores_dimension_change() {
+        // 🧪 Strategy: Verify that dimension changes in vectors are treated as full updates
+        // even if sparse delta returns None (which it does for dimension mismatch).
+        //
+        // This was a bug found by Elenchus where dimension changes were silently ignored.
+
+        // 1. Create base with 2D vector
+        let old_vec = vec![1.0f32, 2.0];
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&old_vec))
+            .build();
+
+        // 2. Create new with 3D vector (dimension change)
+        let new_vec = vec![1.0f32, 2.0, 3.0];
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_vec))
+            .build();
+
+        // 3. Create delta
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // 4. Apply delta to old
+        let applied = delta.apply(&old_props);
+
+        // 5. Check if update was applied
+        let applied_vec = applied.get("embedding").unwrap().as_vector().unwrap();
+
+        assert_eq!(
+            applied_vec.len(),
+            3,
+            "PropertyDelta should apply full update on dimension change"
+        );
+        assert_eq!(applied_vec, &new_vec[..]);
     }
 }

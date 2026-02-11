@@ -70,11 +70,6 @@ pub const MAX_PROPERTY_MAP_CAPACITY: usize = 100_000;
 /// Set to 100 to prevent stack overflow from malicious input.
 pub const MAX_RECURSION_DEPTH: usize = 100;
 
-/// Maximum allowed total serialization size in bytes (512MB).
-/// This prevents "Billion Laughs" attacks where nested recursive structures
-/// expand exponentially, causing OOM or CPU exhaustion.
-pub const MAX_SERIALIZATION_SIZE: usize = 512 * 1024 * 1024;
-
 /// Validates that a vector dimension does not exceed the maximum allowed.
 /// Returns Ok(()) if valid, Err(VectorError::DimensionTooLarge) otherwise.
 #[inline]
@@ -86,22 +81,6 @@ fn validate_vector_dimensions(len: usize) -> Result<()> {
         }));
     }
     Ok(())
-}
-
-/// Helper to consume budget for serialization size tracking.
-/// Returns Ok(()) if budget remains, or Err if exhausted.
-#[inline]
-fn consume_budget(budget: &mut usize, amount: usize) -> Result<()> {
-    if *budget >= amount {
-        *budget -= amount;
-        Ok(())
-    } else {
-        Err(StorageError::CorruptedData(format!(
-            "Serialization size limit exceeded (max {} bytes)",
-            MAX_SERIALIZATION_SIZE
-        ))
-        .into())
-    }
 }
 
 /// Property key type.
@@ -496,7 +475,11 @@ impl PropertyValue {
     /// # Errors
     /// Returns `StorageError::CorruptedData` if recursion depth exceeds limits.
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        let mut buffer = Vec::with_capacity(self.serialized_size()?);
+        let mut buffer = Vec::with_capacity(self.serialized_size().map_err(|_| {
+            StorageError::CorruptedData(
+                "Recursion depth limit exceeded in serialized_size".to_string(),
+            )
+        })?);
         self.serialize_into(&mut buffer)?;
         Ok(buffer)
     }
@@ -509,16 +492,10 @@ impl PropertyValue {
     /// # Errors
     /// Returns `StorageError::CorruptedData` if recursion depth exceeds limits.
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<()> {
-        let mut budget = MAX_SERIALIZATION_SIZE;
-        self.serialize_recursive(buffer, 0, &mut budget)
+        self.serialize_recursive(buffer, 0)
     }
 
-    fn serialize_recursive(
-        &self,
-        buffer: &mut Vec<u8>,
-        depth: usize,
-        budget: &mut usize,
-    ) -> Result<()> {
+    fn serialize_recursive(&self, buffer: &mut Vec<u8>, depth: usize) -> Result<()> {
         if depth > MAX_RECURSION_DEPTH {
             return Err(StorageError::CorruptedData(format!(
                 "Property value recursion depth limit exceeded (max {})",
@@ -529,31 +506,25 @@ impl PropertyValue {
 
         match self {
             PropertyValue::Null => {
-                consume_budget(budget, 1)?;
                 buffer.push(TAG_NULL);
                 Ok(())
             }
             PropertyValue::Bool(b) => {
-                consume_budget(budget, 2)?;
                 buffer.push(TAG_BOOL);
                 buffer.push(if *b { 1 } else { 0 });
                 Ok(())
             }
             PropertyValue::Int(i) => {
-                consume_budget(budget, 9)?;
                 buffer.push(TAG_INT);
                 buffer.extend_from_slice(&i.to_le_bytes());
                 Ok(())
             }
             PropertyValue::Float(f) => {
-                consume_budget(budget, 9)?;
                 buffer.push(TAG_FLOAT);
                 buffer.extend_from_slice(&f.to_le_bytes());
                 Ok(())
             }
             PropertyValue::String(s) => {
-                let size = 1 + 4 + s.len();
-                consume_budget(budget, size)?;
                 buffer.push(TAG_STRING);
                 let bytes = s.as_bytes();
                 buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -561,31 +532,24 @@ impl PropertyValue {
                 Ok(())
             }
             PropertyValue::Bytes(b) => {
-                let size = 1 + 4 + b.len();
-                consume_budget(budget, size)?;
                 buffer.push(TAG_BYTES);
                 buffer.extend_from_slice(&(b.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(b);
                 Ok(())
             }
             PropertyValue::Array(arr) => {
-                consume_budget(budget, 1 + 4)?; // Tag + Count
                 buffer.push(TAG_ARRAY);
                 buffer.extend_from_slice(&(arr.len() as u32).to_le_bytes());
                 for item in arr.iter() {
-                    item.serialize_recursive(buffer, depth + 1, budget)?;
+                    item.serialize_recursive(buffer, depth + 1)?;
                 }
                 Ok(())
             }
             PropertyValue::Vector(v) => {
-                let size = 1 + 4 + (v.len() * 4);
-                consume_budget(budget, size)?;
                 try_serialize_vector_into(v, buffer)?;
                 Ok(())
             }
             PropertyValue::SparseVector(sv) => {
-                let size = 1 + 4 + 4 + (sv.nnz() * 8);
-                consume_budget(budget, size)?;
                 serialize_sparse_vector_into(sv, buffer);
                 Ok(())
             }
@@ -817,12 +781,11 @@ impl PropertyValue {
         // This ensures that malicious or excessively nested structures are
         // considered "large" by cache eviction policies, rather than "small" (0),
         // preventing them from monopolizing the cache.
-        let mut budget = MAX_SERIALIZATION_SIZE;
-        self.estimated_heap_size_recursive(0, &mut budget)
+        self.estimated_heap_size_recursive(0)
             .unwrap_or(10 * 1024 * 1024)
     }
 
-    fn estimated_heap_size_recursive(&self, depth: usize, budget: &mut usize) -> Result<usize> {
+    fn estimated_heap_size_recursive(&self, depth: usize) -> Result<usize> {
         if depth > MAX_RECURSION_DEPTH {
             return Err(StorageError::CorruptedData(format!(
                 "Property value recursion depth limit exceeded (max {})",
@@ -830,10 +793,6 @@ impl PropertyValue {
             ))
             .into());
         }
-
-        // Consume a small amount of budget per node visited to prevent infinite loops/hangs
-        // on massive DAGs even if they don't allocate much heap memory.
-        consume_budget(budget, 1)?;
 
         match self {
             PropertyValue::Null
@@ -846,7 +805,7 @@ impl PropertyValue {
                 // Vec capacity overhead + recursive element sizes
                 let mut size = arr.capacity() * std::mem::size_of::<PropertyValue>();
                 for item in arr.iter() {
-                    size += item.estimated_heap_size_recursive(depth + 1, budget)?;
+                    size += item.estimated_heap_size_recursive(depth + 1)?;
                 }
                 Ok(size)
             }
@@ -877,11 +836,10 @@ impl PropertyValue {
     /// - Vector: 1 + 4 + (dims * 4)
     /// - SparseVector: 1 + 4 + 4 + (nnz * 8)
     pub fn serialized_size(&self) -> Result<usize> {
-        let mut budget = MAX_SERIALIZATION_SIZE;
-        self.serialized_size_recursive(0, &mut budget)
+        self.serialized_size_recursive(0)
     }
 
-    fn serialized_size_recursive(&self, depth: usize, budget: &mut usize) -> Result<usize> {
+    fn serialized_size_recursive(&self, depth: usize) -> Result<usize> {
         if depth > MAX_RECURSION_DEPTH {
             return Err(StorageError::CorruptedData(format!(
                 "Property value recursion depth limit exceeded (max {})",
@@ -891,51 +849,21 @@ impl PropertyValue {
         }
 
         match self {
-            PropertyValue::Null => {
-                consume_budget(budget, 1)?;
-                Ok(1)
-            }
-            PropertyValue::Bool(_) => {
-                consume_budget(budget, 2)?;
-                Ok(2)
-            }
-            PropertyValue::Int(_) => {
-                consume_budget(budget, 9)?;
-                Ok(9)
-            }
-            PropertyValue::Float(_) => {
-                consume_budget(budget, 9)?;
-                Ok(9)
-            }
-            PropertyValue::String(s) => {
-                let size = 1 + 4 + s.len();
-                consume_budget(budget, size)?;
-                Ok(size)
-            }
-            PropertyValue::Bytes(b) => {
-                let size = 1 + 4 + b.len();
-                consume_budget(budget, size)?;
-                Ok(size)
-            }
+            PropertyValue::Null => Ok(1),
+            PropertyValue::Bool(_) => Ok(2),
+            PropertyValue::Int(_) => Ok(9),
+            PropertyValue::Float(_) => Ok(9),
+            PropertyValue::String(s) => Ok(1 + 4 + s.len()),
+            PropertyValue::Bytes(b) => Ok(1 + 4 + b.len()),
             PropertyValue::Array(arr) => {
-                consume_budget(budget, 1 + 4)?; // Tag + Count
                 let mut elements_size = 0;
                 for v in arr.iter() {
-                    let size = v.serialized_size_recursive(depth + 1, budget)?;
-                    elements_size += size;
+                    elements_size += v.serialized_size_recursive(depth + 1)?;
                 }
                 Ok(1 + 4 + elements_size)
             }
-            PropertyValue::Vector(v) => {
-                let size = 1 + 4 + (v.len() * 4);
-                consume_budget(budget, size)?;
-                Ok(size)
-            }
-            PropertyValue::SparseVector(sv) => {
-                let size = 1 + 4 + 4 + (sv.nnz() * 8);
-                consume_budget(budget, size)?;
-                Ok(size)
-            }
+            PropertyValue::Vector(v) => Ok(1 + 4 + (v.len() * 4)),
+            PropertyValue::SparseVector(sv) => Ok(1 + 4 + 4 + (sv.nnz() * 8)),
         }
     }
 }
@@ -1651,36 +1579,18 @@ impl PropertyMap {
     ///
     /// Returns `StorageError::InconsistentState` if any PropertyKey cannot be
     /// resolved from the interner, indicating data corruption.
-    ///
-    /// Returns `StorageError::CorruptedData` if serialization budget is exceeded.
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<()> {
         // Reserve space for the entire map to avoid reallocations
         buffer.reserve(self.cached_size);
 
-        // Initialize a shared budget for the entire map serialization operation.
-        // This prevents DoS attacks where a map contains many large items that individually
-        // fit within the per-item budget but collectively exceed safe limits.
-        let mut budget = MAX_SERIALIZATION_SIZE;
-
-        consume_budget(&mut budget, 4)?; // Count field
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
-
         for (key, value) in self.inner.iter() {
             // Serialize key: resolve InternedString to actual string
             // Use with_str to avoid Arc cloning overhead
-            let mut key_error = None;
             GLOBAL_INTERNER
                 .resolve_with(*key, |key_str| {
                     let key_bytes = key_str.as_bytes();
-                    let len = key_str.len();
-
-                    // Check budget BEFORE writing to buffer
-                    if let Err(e) = consume_budget(&mut budget, 4 + len) {
-                        key_error = Some(e);
-                        return;
-                    }
-
-                    buffer.extend_from_slice(&(len as u32).to_le_bytes());
+                    buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
                     buffer.extend_from_slice(key_bytes);
                 })
                 .ok_or_else(|| {
@@ -1692,13 +1602,8 @@ impl PropertyMap {
                     })
                 })?;
 
-            if let Some(e) = key_error {
-                return Err(e);
-            }
-
-            // Serialize value using the SHARED budget
-            // We call serialize_recursive directly to avoid resetting the budget
-            value.serialize_recursive(buffer, 0, &mut budget)?;
+            // Serialize value
+            value.serialize_into(buffer)?;
         }
         Ok(())
     }

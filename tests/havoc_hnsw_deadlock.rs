@@ -39,7 +39,7 @@ fn test_hnsw_reentrant_deadlock_prevented() {
             assert!(add_result.is_err(), "Expected add to fail during filter");
             let err_msg = add_result.unwrap_err().to_string();
             assert!(
-                err_msg.contains("Cannot modify index from within a callback"),
+                err_msg.contains("Cannot modify index from within a search_with_filter callback"),
                 "Expected re-entrancy error, got: {}",
                 err_msg
             );
