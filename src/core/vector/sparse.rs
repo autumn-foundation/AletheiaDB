@@ -527,8 +527,9 @@ pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 /// squared_distance = ||a - b||² = Σ(a_i - b_i)²
 /// ```
 ///
-/// For sparse vectors, we only need to compute:
-/// - ||a||² + ||b||² - 2*dot(a,b)
+/// This implementation uses a direct difference computation (merge-based) rather than the
+/// expanded form `||a||² + ||b||² - 2*dot(a,b)` to ensure numerical stability when
+/// vectors are close to each other (preventing catastrophic cancellation).
 ///
 /// # Example
 ///
@@ -557,12 +558,51 @@ pub fn sparse_squared_euclidean_distance(a: &SparseVec, b: &SparseVec) -> Result
         .into());
     }
 
-    // ||a - b||² = ||a||² + ||b||² - 2*dot(a,b)
-    let dot = sparse_dot_product(a, b)?;
-    let mag_a_sq = a.squared_magnitude();
-    let mag_b_sq = b.squared_magnitude();
+    let mut sum_sq = 0.0f32;
+    let mut i = 0;
+    let mut j = 0;
 
-    Ok(mag_a_sq + mag_b_sq - 2.0 * dot)
+    let a_indices = a.indices();
+    let a_values = a.values();
+    let b_indices = b.indices();
+    let b_values = b.values();
+
+    // Merge-like algorithm since indices are sorted
+    while i < a_indices.len() && j < b_indices.len() {
+        if a_indices[i] == b_indices[j] {
+            // Indices match - compute difference squared
+            let diff = a_values[i] - b_values[j];
+            sum_sq += diff * diff;
+            i += 1;
+            j += 1;
+        } else if a_indices[i] < b_indices[j] {
+            // a's index is smaller (implicit zero in b)
+            let val = a_values[i];
+            sum_sq += val * val;
+            i += 1;
+        } else {
+            // b's index is smaller (implicit zero in a)
+            let val = b_values[j];
+            sum_sq += val * val;
+            j += 1;
+        }
+    }
+
+    // Process remaining elements in a
+    while i < a_indices.len() {
+        let val = a_values[i];
+        sum_sq += val * val;
+        i += 1;
+    }
+
+    // Process remaining elements in b
+    while j < b_indices.len() {
+        let val = b_values[j];
+        sum_sq += val * val;
+        j += 1;
+    }
+
+    Ok(sum_sq)
 }
 
 /// Computes Euclidean distance between two sparse vectors.
