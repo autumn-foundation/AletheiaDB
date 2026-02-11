@@ -475,11 +475,20 @@ impl PropertyDelta {
 
         // Apply vector deltas (overwrites existing entries)
         for (key, vec_delta) in &self.vector_deltas {
-            if let Some(base_value) = base.get_by_interned_key(key)
-                && let Some(base_vec) = base_value.as_vector()
-            {
-                let new_vec = vec_delta.apply(base_vec);
-                result.insert(*key, PropertyValue::vector(&new_vec));
+            match vec_delta {
+                VectorDelta::Full(new_vec) => {
+                    // Full replacement: always apply, even if base is missing
+                    result.insert(*key, PropertyValue::Vector(new_vec.clone()));
+                }
+                VectorDelta::Sparse { .. } => {
+                    // Sparse update: requires valid base vector
+                    if let Some(base_value) = base.get_by_interned_key(key)
+                        && let Some(base_vec) = base_value.as_vector()
+                    {
+                        let new_vec = vec_delta.apply(base_vec);
+                        result.insert(*key, PropertyValue::vector(&new_vec));
+                    }
+                }
             }
         }
 

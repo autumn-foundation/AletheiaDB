@@ -125,24 +125,6 @@ impl Drop for FilterCallbackGuard {
     }
 }
 
-/// It also handles nested usage correctly by restoring the previous state.
-struct ReentrancyGuard {
-    prev: bool,
-}
-
-impl ReentrancyGuard {
-    fn new() -> Self {
-        let prev = REENTRANCY_GUARD.with(|flag| flag.replace(true));
-        ReentrancyGuard { prev }
-    }
-}
-
-impl Drop for ReentrancyGuard {
-    fn drop(&mut self) {
-        REENTRANCY_GUARD.with(|flag| flag.set(self.prev));
-    }
-}
-
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
 /// Current mapping file format version
@@ -1055,23 +1037,6 @@ impl VectorIndex for HnswIndex {
 
         // Use usearch's native filtered search with retry logic for thread contention
         let index = self.inner.read();
-
-        // RAII guard that sets IN_FILTER_CALLBACK to true on creation and false on drop.
-        // This ensures the flag is always reset, even if the callback panics.
-        struct FilterCallbackGuard;
-
-        impl FilterCallbackGuard {
-            fn new() -> Self {
-                IN_FILTER_CALLBACK.with(|flag| flag.set(true));
-                FilterCallbackGuard
-            }
-        }
-
-        impl Drop for FilterCallbackGuard {
-            fn drop(&mut self) {
-                IN_FILTER_CALLBACK.with(|flag| flag.set(false));
-            }
-        }
 
         // Create a filter that maps usearch keys to our predicate.
         //
