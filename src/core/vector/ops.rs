@@ -707,12 +707,20 @@ mod tests {
 
         // normalize() should return zero vector
         let normalized = normalize(&v_small);
-        assert_eq!(normalized, vec![0.0, 0.0, 0.0], "normalize should return zero vector for small magnitude");
+        assert_eq!(
+            normalized,
+            vec![0.0, 0.0, 0.0],
+            "normalize should return zero vector for small magnitude"
+        );
 
         // normalize_in_place() should also zero out the vector
         let mut v_in_place = v_small.clone();
         normalize_in_place(&mut v_in_place);
-        assert_eq!(v_in_place, vec![0.0, 0.0, 0.0], "normalize_in_place should zero out vector for small magnitude");
+        assert_eq!(
+            v_in_place,
+            vec![0.0, 0.0, 0.0],
+            "normalize_in_place should zero out vector for small magnitude"
+        );
 
         // They should match
         assert_eq!(normalized, v_in_place);
