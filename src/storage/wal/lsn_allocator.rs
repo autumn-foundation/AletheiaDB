@@ -80,11 +80,7 @@ impl LsnAllocator {
         let res = self
             .next_lsn
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| {
-                if val == u64::MAX {
-                    None
-                } else {
-                    Some(val + 1)
-                }
+                if val == u64::MAX { None } else { Some(val + 1) }
             });
 
         match res {
