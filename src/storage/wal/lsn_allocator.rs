@@ -91,7 +91,11 @@ impl LsnAllocator {
     /// increasing value.
     #[inline]
     pub fn allocate(&self) -> LSN {
-        LSN(self.next_lsn.fetch_add(1, Ordering::Relaxed))
+        let lsn = self.next_lsn.fetch_add(1, Ordering::Relaxed);
+        if lsn == u64::MAX {
+            panic!("LSN Allocator Overflow: limit reached");
+        }
+        LSN(lsn)
     }
 
     /// Allocate a batch of consecutive LSNs atomically.
@@ -114,6 +118,16 @@ impl LsnAllocator {
     pub fn allocate_batch(&self, count: u64) -> (LSN, LSN) {
         assert!(count > 0, "Cannot allocate 0 LSNs");
         let first = self.next_lsn.fetch_add(count, Ordering::Relaxed);
+
+        // Check for overflow - if first + count overflows u64, we have exceeded capacity.
+        // We panic here because LSN overflow is catastrophic and unrecoverable.
+        if first.checked_add(count).is_none() {
+            panic!(
+                "LSN Allocator Overflow: allocation of {} LSNs starting at {} would wrap u64",
+                count, first
+            );
+        }
+
         (LSN(first), LSN(first + count - 1))
     }
 
@@ -318,5 +332,15 @@ mod tests {
     fn test_default_impl() {
         let alloc = LsnAllocator::default();
         assert_eq!(alloc.current(), LSN(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "LSN Allocator Overflow")]
+    fn test_allocate_batch_overflow_panics() {
+        // Initialize near u64::MAX
+        // u64::MAX - 5 so that adding 10 wraps around
+        let alloc = LsnAllocator::starting_at(LSN(u64::MAX - 5));
+
+        let _ = alloc.allocate_batch(10);
     }
 }
