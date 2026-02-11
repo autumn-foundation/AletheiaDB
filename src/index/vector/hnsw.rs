@@ -103,7 +103,6 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 // This prevents deadlocks when user filter callbacks try to modify the index.
 std::thread_local! {
     pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static REENTRANCY_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.

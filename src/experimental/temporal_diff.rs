@@ -99,7 +99,7 @@ impl<'a> TemporalDiff<'a> {
     /// * `t1`: The first timestamp (baseline).
     /// * `t2`: The second timestamp (comparison).
     /// * `limit`: Optional maximum number of entities to process. If None, processes all entities.
-    ///            **Warning**: Without a limit, this operation is O(N) and may consume significant memory.
+    ///   **Warning**: Without a limit, this operation is O(N) and may consume significant memory.
     pub fn compute_diff(
         &self,
         t1: Timestamp,
@@ -212,10 +212,10 @@ impl<'a> TemporalDiff<'a> {
                 }
                 Some(val2) => {
                     // Simple comparison using PartialEq
-                    if val1 != val2 {
-                        if let Some(s) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string()) {
-                            changed.insert(s, (format!("{:?}", val1), format!("{:?}", val2)));
-                        }
+                    if val1 != val2
+                        && let Some(s) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string())
+                    {
+                        changed.insert(s, (format!("{:?}", val1), format!("{:?}", val2)));
                     }
                 }
             }
@@ -223,10 +223,10 @@ impl<'a> TemporalDiff<'a> {
 
         // Check for added
         for (key, _) in p2.iter() {
-            if !p1.contains_interned_key(key) {
-                if let Some(s) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string()) {
-                    added.push(s);
-                }
+            if !p1.contains_interned_key(key)
+                && let Some(s) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string())
+            {
+                added.push(s);
             }
         }
 
