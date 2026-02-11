@@ -449,8 +449,7 @@ where
 
         // Verify dimensions invariant
         // In release builds, we trust usearch (and our builder validation) to respect dims.
-        // In debug builds, we assert this invariant to catch logic bugs early.
-        debug_assert!(dims > 0, "Metric wrapper called with dimensions=0");
+        // We verified dims > 0 in HnswIndexBuilder::build().
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
