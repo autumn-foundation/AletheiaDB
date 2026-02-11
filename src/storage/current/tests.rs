@@ -1967,7 +1967,7 @@ fn test_enable_vector_index_path_traversal() {
     assert!(msg.contains("cannot contain '..'"));
 
     // Test deep traversal
-    let result = storage.enable_vector_index("../../etc/passwd", config.clone());
+    let result = storage.enable_vector_index("../../harmful_file", config.clone());
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("cannot contain '..'"));

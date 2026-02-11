@@ -109,18 +109,20 @@ std::thread_local! {
 
 /// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
 /// This ensures the flag is always reset, even if the callback panics.
-pub(crate) struct FilterCallbackGuard;
+pub(crate) struct FilterCallbackGuard {
+    prev: bool,
+}
 
 impl FilterCallbackGuard {
     pub(crate) fn new() -> Self {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
-        FilterCallbackGuard
+        let prev = IN_FILTER_CALLBACK.with(|flag| flag.replace(true));
+        FilterCallbackGuard { prev }
     }
 }
 
 impl Drop for FilterCallbackGuard {
     fn drop(&mut self) {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+        IN_FILTER_CALLBACK.with(|flag| flag.set(self.prev));
     }
 }
 
