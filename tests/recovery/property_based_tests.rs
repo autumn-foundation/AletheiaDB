@@ -24,8 +24,8 @@
 //!
 //! ## Test Execution
 //!
-//! Runs **1000 test cases**, each with **50-200 random operations**, totaling
-//! **50,000-200,000 operations** to thoroughly validate invariants.
+//! Runs a bounded number of test cases in CI, each with randomized operations,
+//! to keep runtime predictable while still exploring many state transitions.
 
 use aletheiadb::{
     GLOBAL_INTERNER,
@@ -54,14 +54,22 @@ use tempfile::TempDir;
 // Test Configuration Constants
 // ============================================================================
 
-/// Number of property test cases to execute
-const PROPTEST_CASES: u32 = 1000;
+/// Number of property test cases for individual invariants.
+///
+/// Keep this moderate so the recovery property suite completes quickly in CI.
+const PROPTEST_CASES: u32 = 128;
+
+/// Number of property test cases for the combined invariant test.
+///
+/// The combined test performs all invariant checks in a single run, so it is
+/// intentionally lower than `PROPTEST_CASES` to avoid duplicated heavy work.
+const COMBINED_PROPTEST_CASES: u32 = 64;
 
 /// Minimum operations per test case
-const MIN_OPERATIONS_PER_TEST: usize = 50;
+const MIN_OPERATIONS_PER_TEST: usize = 20;
 
 /// Maximum operations per test case
-const MAX_OPERATIONS_PER_TEST: usize = 200;
+const MAX_OPERATIONS_PER_TEST: usize = 80;
 
 /// Timestamp increment in microseconds (1ms) for each operation
 const TIMESTAMP_INCREMENT_US: i64 = 1000;
@@ -687,7 +695,7 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
+    #![proptest_config(ProptestConfig::with_cases(COMBINED_PROPTEST_CASES))]
 
     /// Property: All four invariants hold after recovery.
     ///

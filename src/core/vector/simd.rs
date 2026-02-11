@@ -640,7 +640,7 @@ fn simsimd_dot(a: &[f32], b: &[f32]) -> Option<f32> {
         simsimd_dot_f32(
             a.as_ptr(),
             b.as_ptr(),
-            a.len(),
+            a.len() as u64,
             &mut result as *mut f64,
         );
     }
@@ -660,7 +660,7 @@ fn simsimd_sqeuclidean(a: &[f32], b: &[f32]) -> Option<f32> {
         simsimd_l2sq_f32(
             a.as_ptr(),
             b.as_ptr(),
-            a.len(),
+            a.len() as u64,
             &mut result as *mut f64,
         );
     }
@@ -672,6 +672,6 @@ fn simsimd_sqeuclidean(a: &[f32], b: &[f32]) -> Option<f32> {
 }
 
 unsafe extern "C" {
-    fn simsimd_dot_f32(a: *const f32, b: *const f32, n: usize, d: *mut f64);
-    fn simsimd_l2sq_f32(a: *const f32, b: *const f32, n: usize, d: *mut f64);
+    fn simsimd_dot_f32(a: *const f32, b: *const f32, n: u64, d: *mut f64);
+    fn simsimd_l2sq_f32(a: *const f32, b: *const f32, n: u64, d: *mut f64);
 }
