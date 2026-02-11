@@ -1602,11 +1602,15 @@ mod tests {
         // But mmap'ing it usually fails with ENODEV.
         let result = read_segment(segment_path, LSN(1));
 
-        // If it fails, it should be an IoError (from mmap) or similar.
-        // It might also fail at File::open on Windows (AccessDenied).
-        // Either way, we want to ensure it handles the error gracefully.
+        // We assert that it MUST fail. If it succeeds, it means mmap worked on a directory,
+        // which is unexpected and means we aren't testing the error path.
+        //
+        // On environments where mmap on dir works (BSD?), this test might flap,
+        // but for standard Linux CI, this ensures we cover the error branch.
+        assert!(result.is_err(), "read_segment on directory should fail");
+
         if let Err(e) = result {
-            // Verify it's not a panic
+            // Verify it's not a panic and contains expected error text
             let msg = format!("{}", e);
             // We specifically want to cover the mmap error path if possible
             if msg.contains("Failed to memory-map") {
@@ -1614,13 +1618,9 @@ mod tests {
             } else if msg.contains("Access is denied") || msg.contains("Is a directory") {
                 // Also acceptable (failed at open or earlier)
             } else {
-                // Unexpected error, but still an error
-                println!("Got unexpected error: {}", msg);
+                // Unexpected error type, but at least it failed gracefully
+                println!("Got unexpected error message: {}", msg);
             }
-        } else {
-            // If it succeeds (e.g. some OS allows mmap dir?), that's unexpected but
-            // we can't force failure easily. We'll accept it.
-            // This test is best-effort for coverage.
         }
     }
 

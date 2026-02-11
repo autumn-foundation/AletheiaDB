@@ -539,9 +539,7 @@ impl WalRingBuffer {
 
             if current_seq == expected_seq {
                 // Slot is available - try to claim it
-                // ACQREL ORDERING:
-                // - Acquire: Synchronizes with previous releases of write_pos, ensuring we see up-to-date state.
-                // - Release: Ensures that our claim is visible to other producers.
+                // Use AcqRel to synchronize slot claims
                 match self.write_pos.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
@@ -557,12 +555,9 @@ impl WalRingBuffer {
                             *slot.entry.get() = Some(entry);
                         }
 
-                        // Signal that the slot is ready for reading
-                        // RELEASE ORDERING:
-                        // Establishes a happens-before relationship with the consumer's Acquire load of sequence.
-                        // This ensures that the writes to `slot.entry` (above) are visible to the consumer
-                        // before they see the updated sequence number.
-                        // Use wrapping_add to handle u64 wraparound gracefully
+                        // Signal that the slot is ready for reading.
+                        // Release ordering establishes happens-before with consumer's Acquire.
+                        // This ensures entry writes are visible before sequence update.
                         slot.sequence
                             .store(expected_seq.wrapping_add(1), Ordering::Release);
 
@@ -679,10 +674,7 @@ impl WalRingBuffer {
             // Expected sequence for this slot to contain data
             // Use wrapping_add to handle u64 wraparound gracefully
             let expected_seq = pos.wrapping_add(1);
-            // ACQUIRE ORDERING:
-            // Synchronizes with the producer's Release store to slot.sequence.
-            // This ensures that if we see the updated sequence number, we also see
-            // the writes to `slot.entry` that happened before it.
+            // Acquire ordering synchronizes with producer's Release store
             let current_seq = slot.sequence.load(Ordering::Acquire);
 
             if current_seq == expected_seq {
@@ -695,34 +687,12 @@ impl WalRingBuffer {
                 ) {
                     Ok(_) => {
                         // Successfully claimed - read the entry
-                        //
-                        // SAFETY: Memory ordering guarantees exclusive access:
-                        //
-                        // 1. The CAS uses AcqRel ordering:
-                        //    - Acquire: synchronizes with all prior Release stores,
-                        //      including the producer's sequence.store(pos+1, Release)
-                        //    - Release: prevents reordering of the entry read before CAS
-                        //
-                        // 2. The producer cannot write to this slot because:
-                        //    - Producer checks: sequence.load(Acquire) == write_pos
-                        //    - Current sequence is (pos + 1), not (pos + capacity)
-                        //    - We only set sequence to (pos + capacity) AFTER reading
-                        //
-                        // 3. No other consumer can read because:
-                        //    - This is single-consumer (flush coordinator only)
-                        //    - We own read_pos after successful CAS
-                        //
-                        // 4. The Acquire in the CAS establishes happens-before with
-                        //    the producer's Release store of the entry data.
+                        // SAFETY: Exclusive access guaranteed by sequence protocol and CAS.
                         let entry = unsafe { (*slot.entry.get()).take() };
 
                         // Mark slot as available for writing again
                         // New sequence = pos + capacity (next write cycle)
-                        // RELEASE ORDERING:
-                        // Ensures that our read of the entry happens-before the slot is marked available.
-                        // Producers attempting to claim this slot will Acquire this sequence, ensuring
-                        // they don't overwrite the entry before we are done reading it.
-                        // Use wrapping_add to handle u64 wraparound gracefully
+                        // Release ordering ensures read happens-before slot reuse
                         slot.sequence
                             .store(pos.wrapping_add(self.capacity as u64), Ordering::Release);
 
