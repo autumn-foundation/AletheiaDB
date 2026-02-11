@@ -2847,3 +2847,86 @@ fn test_dot_product_sum_mismatch_panics() {
     let b = vec![1.0, 2.0, 3.0];
     let _ = super::simd::dot_product_sum(&a, &b);
 }
+
+// ========================================================================
+// SIMD FFI Correctness Tests
+// ========================================================================
+
+#[test]
+fn test_simd_ffi_correctness() {
+    // Test vectors of various lengths to ensure FFI calls work correctly
+    // especially with the usize fix (ABI compatibility)
+    let lengths = [0, 1, 4, 7, 8, 9, 100, 1024];
+
+    for len in lengths {
+        let a: Vec<f32> = (0..len).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..len).map(|i| (len - i) as f32).collect();
+
+        // 1. Test dot_and_magnitudes
+        // This internally calls simsimd_dot (FFI)
+        let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes(&a, &b);
+
+        let expected_dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let expected_mag_a: f32 = a.iter().map(|x| x * x).sum();
+        let expected_mag_b: f32 = b.iter().map(|x| x * x).sum();
+
+        if len == 0 {
+            assert_eq!(dot, 0.0);
+            assert_eq!(mag_a, 0.0);
+            assert_eq!(mag_b, 0.0);
+        } else {
+            // Use relative tolerance for large values due to f32 precision and FMA differences
+            let rel_tol = 1e-5;
+            let dot_tol = 1e-4 + expected_dot.abs() * rel_tol;
+            let mag_a_tol = 1e-4 + expected_mag_a.abs() * rel_tol;
+            let mag_b_tol = 1e-4 + expected_mag_b.abs() * rel_tol;
+
+            assert!(
+                (dot - expected_dot).abs() < dot_tol,
+                "Dot mismatch for len {}: {} vs {} (tol {})",
+                len,
+                dot,
+                expected_dot,
+                dot_tol
+            );
+            assert!(
+                (mag_a - expected_mag_a).abs() < mag_a_tol,
+                "MagA mismatch for len {}: {} vs {}",
+                len,
+                mag_a,
+                expected_mag_a
+            );
+            assert!(
+                (mag_b - expected_mag_b).abs() < mag_b_tol,
+                "MagB mismatch for len {}: {} vs {}",
+                len,
+                mag_b,
+                expected_mag_b
+            );
+        }
+
+        // 2. Test squared_diff_sum
+        // This internally calls simsimd_l2sq (FFI)
+        let sq_diff = super::simd::squared_diff_sum(&a, &b);
+        let expected_sq_diff: f32 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).powi(2))
+            .sum();
+
+        if len == 0 {
+            assert_eq!(sq_diff, 0.0);
+        } else {
+            let rel_tol = 1e-5;
+            let sq_tol = 1e-4 + expected_sq_diff.abs() * rel_tol;
+            assert!(
+                (sq_diff - expected_sq_diff).abs() < sq_tol,
+                "SqDiff mismatch for len {}: {} vs {} (tol {})",
+                len,
+                sq_diff,
+                expected_sq_diff,
+                sq_tol
+            );
+        }
+    }
+}
