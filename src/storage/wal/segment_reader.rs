@@ -1230,6 +1230,7 @@ mod tests {
         time::now().serialize_into(&mut buffer); // Timestamp
         buffer.extend_from_slice(&0u32.to_le_bytes()); // Dummy checksum (not checked until end)
 
+        #[allow(unused_variables)]
         let _op_start = buffer.len();
         buffer.push(3); // UpdateNode op code
 

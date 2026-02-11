@@ -9,10 +9,8 @@ fn assert_approx_eq(a: f32, b: f32, context: &str) {
     if a.is_nan() && b.is_nan() {
         return;
     }
-    if a.is_infinite() && b.is_infinite() {
-        if a.is_sign_positive() == b.is_sign_positive() {
-            return;
-        }
+    if a.is_infinite() && b.is_infinite() && a.is_sign_positive() == b.is_sign_positive() {
+        return;
     }
     let diff = (a - b).abs();
     // Use a mix of absolute and relative error
