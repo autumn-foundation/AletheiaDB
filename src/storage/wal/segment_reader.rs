@@ -429,7 +429,7 @@ pub(crate) fn parse_entry_at(
         }
         3 => {
             // UpdateNode
-            if current_offset.checked_add(20).ok_or_else(|| {
+            if current_offset.checked_add(16).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -448,6 +448,17 @@ pub(crate) fn parse_entry_at(
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
                 // Read 4-byte InternedString ID
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateNode label".to_string(),
+                    )
+                    .into());
+                }
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
                     buffer[current_offset + 1],
@@ -503,6 +514,17 @@ pub(crate) fn parse_entry_at(
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
                 // Read 4-byte InternedString ID
+                if current_offset.checked_add(4).ok_or_else(|| {
+                    Error::Storage(StorageError::CorruptedData(
+                        "WAL offset overflow".to_string(),
+                    ))
+                })? > buffer.len()
+                {
+                    return Err(StorageError::CorruptedData(
+                        "Insufficient buffer size for UpdateEdge label".to_string(),
+                    )
+                    .into());
+                }
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
                     buffer[current_offset + 1],
@@ -1487,4 +1509,19 @@ mod tests {
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
     }
+}
+
+#[test]
+fn test_repro_fuzz_crash_oob_index() {
+    // Reproduction case for Fuzzer crash: index out of bounds: the len is 46 but the index is 46
+    // Input: [71, 87, 65, 76, 1, 71, 87, 0, 0, 0, 0, 87, 0, 0, 0, 65, 0, 64, 0, 10, 64, 42, 1, 0, 0, 46, 125, 0, 1, 4, 65, 0, 75, 87, 71, 0, 255, 255, 70, 87, 65, 76, 87, 75, 76, 0]
+    let crash_input: Vec<u8> = vec![
+        71, 87, 65, 76, 1, 71, 87, 0, 0, 0, 0, 87, 0, 0, 0, 65, 0, 64, 0, 10, 64, 42, 1, 0, 0, 46, 125, 0, 1, 4, 65, 0, 75, 87, 71, 0, 255, 255, 70, 87, 65, 76, 87, 75, 76, 0
+    ];
+
+    // Attempt to parse - this should return an error, not panic
+    let result = parse_entry_at(&crash_input, 5, 1);
+
+    // We expect an error, but definitely NOT a panic
+    assert!(result.is_err(), "Expected error for invalid input, got {:?}", result);
 }

@@ -103,25 +103,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 // This prevents deadlocks when user filter callbacks or custom metrics try to modify the index
 // while holding the inner lock (read).
 std::thread_local! {
-    pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REENTRANCY_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// RAII guard that sets REENTRANCY_GUARD to true on creation and false on drop.
-/// This ensures the flag is always reset, even if the callback panics.
-pub(crate) struct FilterCallbackGuard;
-
-impl FilterCallbackGuard {
-    pub(crate) fn new() -> Self {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(true));
-        FilterCallbackGuard
-    }
-}
-
-impl Drop for FilterCallbackGuard {
-    fn drop(&mut self) {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
-    }
 }
 
 /// It also handles nested usage correctly by restoring the previous state.
@@ -502,7 +484,7 @@ where
         // Prevent re-entrant modifications during metric calculation (deadlock prevention)
         // This sets the thread-local flag so that add() and other methods fail gracefully.
         // Without this, a custom metric calling add() would deadlock on the inner RwLock.
-        let _guard = FilterCallbackGuard::new();
+        let _guard = ReentrancyGuard::new();
 
         distance_fn(slice_a, slice_b)
     })
