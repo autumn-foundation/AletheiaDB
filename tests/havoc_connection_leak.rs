@@ -69,7 +69,10 @@ fn havoc_max_connections_enforcement() {
     }
 
     let stats = pool.stats();
-    assert_eq!(stats.total_connections, max_connections, "Should fill to capacity");
+    assert_eq!(
+        stats.total_connections, max_connections,
+        "Should fill to capacity"
+    );
 
     // 2. Try to add one more healthy connection
     let extra_client = Arc::new(MockShardClient::new(shard_id));
@@ -80,8 +83,7 @@ fn havoc_max_connections_enforcement() {
     // This kills the mutation where `len < max` becomes `len <= max`
     let final_stats = pool.stats();
     assert_eq!(
-        final_stats.total_connections,
-        max_connections,
+        final_stats.total_connections, max_connections,
         "Pool size should strictly adhere to max_connections (mutant check: < vs <=)"
     );
 }

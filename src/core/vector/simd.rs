@@ -33,7 +33,9 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         unsafe {
+            assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
             let len = a.len();
             let chunks = len / 8;
             let remainder = len % 8;
@@ -107,7 +109,9 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_sse2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         unsafe {
+            assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
             let len = a.len();
             let chunks = len / 4;
             let remainder = len % 4;
@@ -186,6 +190,7 @@ pub(crate) mod x86_ops {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
+            assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
             let a_chunks = a.chunks_exact(8);
             let b_chunks = b.chunks_exact(8);
             let a_rem = a_chunks.remainder();
@@ -230,6 +235,7 @@ pub(crate) mod x86_ops {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
+            assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
             let a_chunks = a.chunks_exact(4);
             let b_chunks = b.chunks_exact(4);
             let a_rem = a_chunks.remainder();
@@ -272,6 +278,7 @@ pub(crate) mod x86_ops {
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
+            assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
             let len = a.len();
             let chunks = len / 8;
             let remainder = len % 8;
@@ -322,6 +329,7 @@ pub(crate) mod x86_ops {
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
+            assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
             let len = a.len();
             let chunks = len / 4;
             let remainder = len % 4;
