@@ -91,11 +91,12 @@ proptest! {
         assert_eq!(consumed, serialized.len());
 
         // Handle NaN float comparison
-        if let PropertyValue::Float(f) = &val {
-            if f.is_nan() {
+        match &val {
+            PropertyValue::Float(f) if f.is_nan() => {
                 assert!(deserialized.as_float().unwrap().is_nan());
                 return Ok(());
             }
+            _ => {}
         }
         // Handle NaN inside vector/array?
         // For now, let's assume PartialEq handles it or we accept failure if random f32 is NaN.
@@ -132,10 +133,10 @@ fn arb_property_value() -> impl Strategy<Value = PropertyValue> {
         any::<f64>()
             .prop_filter("No NaN", |f| !f.is_nan())
             .prop_map(PropertyValue::Float),
-        ".*".prop_map(|s| PropertyValue::string(s)),
+        ".*".prop_map(PropertyValue::string),
         prop::collection::vec(any::<u8>(), 0..100).prop_map(PropertyValue::bytes),
         prop::collection::vec(any::<f32>().prop_filter("No NaN", |f| !f.is_nan()), 0..100)
-            .prop_map(|v| PropertyValue::vector(v)),
+            .prop_map(PropertyValue::vector),
     ];
 
     leaf.prop_recursive(3, 64, 5, |inner| {
