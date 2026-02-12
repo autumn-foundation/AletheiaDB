@@ -50,3 +50,38 @@ fn havoc_connection_leak_repro() {
         stats.total_connections
     );
 }
+
+#[test]
+fn havoc_max_connections_enforcement() {
+    let shard_id = ShardId::new(1).unwrap();
+    let max_connections = 5;
+    let pool_config = PoolConfig {
+        max_connections,
+        ..Default::default()
+    };
+    let pool = ConnectionPool::new(shard_id, pool_config, CircuitBreakerConfig::default());
+
+    // 1. Fill the pool to max capacity with healthy connections
+    for _ in 0..max_connections {
+        let client = Arc::new(MockShardClient::new(shard_id));
+        client.set_healthy(true);
+        pool.add(client);
+    }
+
+    let stats = pool.stats();
+    assert_eq!(stats.total_connections, max_connections, "Should fill to capacity");
+
+    // 2. Try to add one more healthy connection
+    let extra_client = Arc::new(MockShardClient::new(shard_id));
+    extra_client.set_healthy(true);
+    pool.add(extra_client);
+
+    // 3. Assert that the pool did NOT grow
+    // This kills the mutation where `len < max` becomes `len <= max`
+    let final_stats = pool.stats();
+    assert_eq!(
+        final_stats.total_connections,
+        max_connections,
+        "Pool size should strictly adhere to max_connections (mutant check: < vs <=)"
+    );
+}
