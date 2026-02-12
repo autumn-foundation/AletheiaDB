@@ -1,4 +1,15 @@
 //! HTTP request handlers.
+//!
+//! This module implements the REST API endpoints for the AletheiaDB server.
+//!
+//! # Endpoints
+//!
+//! *   `GET /status`: Health check endpoint.
+//! *   `POST /query`: General-purpose query endpoint supporting:
+//!     *   `get_node`: Retrieve a node by ID.
+//!     *   `create_node`: Create a new node.
+//!     *   `find_node`: Search for nodes by label and properties.
+//!     *   `find_neighbors`: Traverse the graph to find connected nodes.
 
 use crate::core::NodeId;
 use crate::http::converters::{interned_to_string, json_to_property_map, property_map_to_json};
@@ -13,12 +24,14 @@ use std::collections::{HashMap, HashSet};
 /// Health check response structure.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
+    /// Status message (always "healthy" if server is running).
     status: String,
 }
 
 /// Health check endpoint handler.
 ///
 /// Returns a JSON response with `{"status": "healthy"}` and HTTP 200 OK.
+/// Used by load balancers and monitoring tools to verify availability.
 pub async fn health_check() -> HttpResponse {
     let response = HealthResponse {
         status: "healthy".to_string(),
@@ -35,41 +48,99 @@ pub fn configure_health_routes(cfg: &mut web::ServiceConfig) {
 // Query Endpoint
 // ============================================================================
 
+/// Request payload for the `/query` endpoint.
+///
+/// This enum supports multiple operation types, distinguished by the `operation` field.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum QueryRequest {
+    /// Search for nodes matching criteria.
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "find_node",
+    ///   "label": "Person",
+    ///   "properties": { "name": "Alice" },
+    ///   "limit": 10
+    /// }
+    /// ```
     FindNode {
+        /// Optional label to filter by.
         label: Option<String>,
+        /// Optional property equality filters.
         properties: Option<HashMap<String, serde_json::Value>>,
+        /// Maximum number of results to return (default: 100).
         limit: Option<usize>,
+        /// Number of results to skip (default: 0).
         offset: Option<usize>,
     },
+    /// Retrieve a single node by its ID.
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "get_node",
+    ///   "node_id": 1
+    /// }
+    /// ```
     GetNode {
+        /// The unique ID of the node.
         node_id: u64,
     },
+    /// Create a new node.
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "create_node",
+    ///   "label": "Person",
+    ///   "properties": { "name": "Bob", "age": 30 }
+    /// }
+    /// ```
     CreateNode {
+        /// The label for the new node.
         label: String,
+        /// Initial properties for the node.
         properties: Option<HashMap<String, serde_json::Value>>,
     },
+    /// Find nodes connected to a source node.
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "find_neighbors",
+    ///   "node_id": 1,
+    ///   "limit": 20
+    /// }
+    /// ```
     FindNeighbors {
+        /// The source node ID.
         node_id: u64,
+        /// Maximum number of neighbors to return (default: 100, max: 1000).
         #[serde(default)]
         limit: Option<usize>,
+        /// Number of neighbors to skip (default: 0).
         #[serde(default)]
         offset: Option<usize>,
     },
 }
 
+/// Standard JSON response wrapper.
 #[derive(Debug, Serialize)]
 pub struct ApiResponse {
+    /// Whether the operation completed successfully.
     success: bool,
+    /// The result data (if success is true).
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<serde_json::Value>,
+    /// Error message (if success is false).
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
 impl ApiResponse {
+    /// Create a success response.
     fn success(data: serde_json::Value) -> Self {
         Self {
             success: true,
@@ -78,6 +149,7 @@ impl ApiResponse {
         }
     }
 
+    /// Create an error response.
     fn error(msg: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -104,7 +176,17 @@ fn json_to_predicate_value(v: &serde_json::Value) -> Option<PredicateValue> {
     }
 }
 
-/// Query endpoint handler.
+/// Handle incoming query requests.
+///
+/// Dispatches the request to the appropriate database operation based on the
+/// `operation` field in the JSON payload.
+///
+/// # Returns
+///
+/// * `200 OK` with JSON result on success.
+/// * `400 Bad Request` on validation errors or invalid input.
+/// * `404 Not Found` if a requested entity does not exist.
+/// * `500 Internal Server Error` on database failures.
 pub async fn handle_query(
     state: web::Data<AppState>,
     req: web::Json<QueryRequest>,
