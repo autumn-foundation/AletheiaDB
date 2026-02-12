@@ -13,3 +13,7 @@
 ## 2026-02-15 - Unaligned SIMD Loads
 **Learning:** Rust's `Vec<f32>` only guarantees 4-byte alignment, but AVX2 `vmovaps` requires 32-byte alignment. Using aligned load intrinsics on standard Vecs is a segfault ticking time bomb.
 **Action:** Always use `loadu` (unaligned load) intrinsics unless alignment is manually enforced and verified. Added rigorous unaligned access tests in `src/core/vector/sentry_tests.rs` to prevent regression to aligned loads.
+
+## 2026-05-21 - Multi-Index Validation Logic
+**Learning:** `SimilarToNode` operator was incorrectly validating the `property_key` against the *default* (alphabetically first) indexed property, preventing queries on other valid vector indexes.
+**Action:** When validating multi-index inputs, check if the specific property has an index (`has_vector_index`) rather than comparing against the default (`get_indexed_property_name`). Added regression test `tests/sentry_executor_tests.rs`.

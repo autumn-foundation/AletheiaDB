@@ -329,25 +329,14 @@ impl QueryExecutor {
                 k,
                 label_filter,
             } => {
-                // 1. Validate that property_key matches the indexed property
-                let indexed_property =
-                    self.current.get_indexed_property_name().ok_or_else(|| {
-                        crate::utils::error::Error::Query(
-                            crate::utils::error::QueryError::ExecutionError {
-                                message:
-                                    "No vector index is enabled. Call enable_vector_index() first."
-                                        .to_string(),
-                            },
-                        )
-                    })?;
-
-                if property_key != &indexed_property {
+                // 1. Validate that property_key has a vector index enabled
+                if !self.current.has_vector_index(property_key) {
                     return Err(crate::utils::error::Error::Query(
                         crate::utils::error::QueryError::ExecutionError {
                             message: format!(
-                                "Property key '{}' does not match indexed property '{}'. \
-                                 Vector index was built on '{}', so similar_to queries must use the same property.",
-                                property_key, indexed_property, indexed_property
+                                "No vector index enabled for property '{}'. \
+                                 Call enable_vector_index(\"{}\", config) first.",
+                                property_key, property_key
                             ),
                         },
                     ));
