@@ -8,10 +8,40 @@ use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordin
 use std::sync::Arc;
 use tempfile::tempdir;
 
+// RAII guard to reset permissions on drop
+#[cfg(unix)]
+struct PermissionsGuard<'a> {
+    path: &'a std::path::Path,
+    original_mode: u32,
+}
+
+#[cfg(unix)]
+impl<'a> Drop for PermissionsGuard<'a> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(self.path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(self.original_mode);
+            // Ignore result as we can't do much about it in drop
+            let _ = std::fs::set_permissions(self.path, perms);
+        }
+    }
+}
+
 #[test]
 #[cfg(unix)]
 fn test_havoc_flush_failure_deadlock() {
     use std::os::unix::fs::PermissionsExt;
+
+    // Skip if running as root, as root bypasses permission checks
+    // We check this by trying to create a file in a read-only directory
+    // or simply checking the UID if available. Since we don't want to add `libc`
+    // dependency just for this, we use a behavioral check.
+    // Note: behavioral check is safer than UID check anyway (e.g. capabilities).
+
+    // For now, we assume standard environment. If this fails in root CI, we can refine.
+    // Actually, let's just warn if we suspect root privileges might interfere.
+
     let dir = tempdir().unwrap();
     let wal_dir = dir.path();
 
@@ -58,9 +88,23 @@ fn test_havoc_flush_failure_deadlock() {
     println!("Flush stats: {:?}", stats);
 
     // Induce failure: Make directory read-only
-    let mut perms = std::fs::metadata(wal_dir).unwrap().permissions();
-    perms.set_mode(0o500); // Read/Execute, no Write
-    std::fs::set_permissions(wal_dir, perms).unwrap();
+    let original_mode = std::fs::metadata(wal_dir).unwrap().permissions().mode();
+    let _guard = {
+        let mut perms = std::fs::metadata(wal_dir).unwrap().permissions();
+        perms.set_mode(0o500); // Read/Execute, no Write
+        std::fs::set_permissions(wal_dir, perms).unwrap();
+        PermissionsGuard {
+            path: wal_dir,
+            original_mode,
+        }
+    };
+
+    // Verify fault injection actually works (skip test if running as root/privileged)
+    let probe_file = wal_dir.join("probe_write_permission");
+    if std::fs::File::create(&probe_file).is_ok() {
+        println!("SKIPPING: Running with privileges that bypass read-only check (e.g. root)");
+        return;
+    }
 
     // Append operation that will need to be flushed
     let (_lsn2, handle2) = wal.append_with_handle(op.clone()).unwrap();
@@ -70,20 +114,7 @@ fn test_havoc_flush_failure_deadlock() {
     assert!(!entries.is_empty());
 
     // Flush. This should try to rotate/create new segment and fail due to permissions.
-    // Note: If previous flush didn't rotate, this might succeed if it appends to open file.
-    // But we wrote >1KB, so it should have marked for rotation.
-    // The `maybe_rotate_segment` logic: if size >= limit, rotate.
-    // Rotation involves opening new file.
-    // If it rotated in previous flush, new file is open? No, rotation closes old and prepares state.
-    // `ensure_segment_open` is called at start of `flush`.
-    // It should try to open new segment.
-
     let result = coordinator.flush(entries, true);
-
-    // Reset permissions so cleanup works
-    let mut perms = std::fs::metadata(wal_dir).unwrap().permissions();
-    perms.set_mode(0o700);
-    std::fs::set_permissions(wal_dir, perms).unwrap();
 
     assert!(
         result.is_err(),
