@@ -6,9 +6,9 @@
 //!
 //! # Design
 //!
-//! - Uses `AtomicU64::fetch_add` for lock-free allocation
-//! - Single allocation is O(1) with ~10-20ns latency
-//! - Batch allocation amortizes atomic overhead for multi-operation transactions
+//! - Uses `AtomicU64::fetch_update` (CAS loop) for lock-free allocation with overflow protection.
+//! - Single allocation is O(1) with low latency.
+//! - Batch allocation amortizes atomic overhead for multi-operation transactions.
 //!
 //! # Thread Safety
 //!
@@ -17,25 +17,21 @@
 //!
 //! # LSN Overflow (Theoretical Limitation)
 //!
-//! The allocator uses a `u64` counter with `fetch_add`, which will wrap around
-//! to 0 after 2^64 allocations. This is a theoretical limitation:
+//! The allocator uses a `u64` counter. Overflow is explicitly checked and returns an error
+//! rather than wrapping around.
 //!
 //! - At 1 million LSNs/second: overflow in ~584,542 years
-//! - At 10 million LSNs/second: overflow in ~58,454 years
-//! - At 100 million LSNs/second: overflow in ~5,845 years
 //!
-//! **Consequences of overflow**: LSN wraparound would cause duplicate LSNs,
-//! breaking the uniqueness guarantee. Recovery would become ambiguous as
-//! entries with "older" LSNs might actually be newer.
+//! **Consequences of overflow**: LSN exhaustion is a terminal state. The database must be
+//! restarted with LSN reset (after full checkpoint) to continue.
 //!
-//! **Mitigation**: For systems requiring true infinite operation, a database
-//! restart with LSN reset (after full checkpoint) would be needed before
-//! overflow. Monitoring `current()` against a threshold (e.g., `u64::MAX / 2`)
+//! **Mitigation**: Monitoring `current()` against a threshold (e.g., `u64::MAX / 2`)
 //! can provide early warning.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::LSN;
+use crate::utils::error::{Error, Result, StorageError};
 
 /// Global LSN allocator using atomic operations.
 ///
@@ -66,43 +62,33 @@ impl LsnAllocator {
 
     /// Allocate the next LSN atomically.
     ///
-    /// This is a lock-free operation using `fetch_add`.
+    /// This uses `fetch_update` (CAS loop) to ensure we don't wrap on overflow.
     ///
     /// # Memory Ordering
     ///
-    /// Uses `Ordering::Relaxed` because:
-    ///
-    /// 1. **LSN uniqueness is guaranteed by the atomic counter itself**, not by
-    ///    memory visibility. Each `fetch_add` returns a unique value.
-    ///
-    /// 2. **Happens-before relationships are established elsewhere**:
-    ///    - The caller serializes data to a buffer (local operation)
-    ///    - The caller writes to the ring buffer with `Release` ordering
-    ///    - The flush coordinator reads with `Acquire` ordering
-    ///    - This Release/Acquire pair provides the necessary synchronization
-    ///
-    /// 3. **The LSN is used for ordering, not synchronization**. The sort in
-    ///    the flush coordinator uses the LSN values, which are correct
-    ///    regardless of when they become visible to other threads.
+    /// Uses `Ordering::Relaxed` because LSN uniqueness is guaranteed by the atomic
+    /// update itself. Happens-before relationships are established by the WAL write path.
     ///
     /// # Returns
     ///
     /// The allocated LSN. Each call returns a unique, monotonically
     /// increasing value.
     #[inline]
-    pub fn allocate(&self) -> LSN {
-        // Use fetch_update (CAS loop) to ensure we don't wrap state on overflow
-        let lsn = self
+    pub fn allocate(&self) -> Result<LSN> {
+        // Use fetch_update to atomically check for overflow BEFORE incrementing.
+        // This prevents the counter from ever wrapping to 0, which would be catastrophic.
+        let res = self
             .next_lsn
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                if current == u64::MAX {
-                    None // Overflow
-                } else {
-                    Some(current + 1)
-                }
-            })
-            .expect("LSN Allocator Overflow");
-        LSN(lsn)
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| {
+                if val == u64::MAX { None } else { Some(val + 1) }
+            });
+
+        match res {
+            Ok(lsn) => Ok(LSN(lsn)),
+            Err(_) => Err(Error::Storage(StorageError::WalError {
+                reason: "LSN Allocator Overflow: limit reached".to_string(),
+            })),
+        }
     }
 
     /// Allocate a batch of consecutive LSNs atomically.
@@ -123,23 +109,25 @@ impl LsnAllocator {
     /// Panics if `count` is 0.
     /// Panics if the allocation would cause LSN overflow.
     #[inline]
-    pub fn allocate_batch(&self, count: u64) -> (LSN, LSN) {
+    pub fn allocate_batch(&self, count: u64) -> Result<(LSN, LSN)> {
         assert!(count > 0, "Cannot allocate 0 LSNs");
 
-        // Use fetch_update (CAS loop) to ensure we don't wrap state on overflow
-        let first = self
+        // Use fetch_update to atomically check for overflow BEFORE adding count.
+        let res = self
             .next_lsn
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                // If current + count overflows u64, or reaches u64::MAX (causing next to be 0/wrapped)
-                if current > u64::MAX.saturating_sub(count) {
-                    None
-                } else {
-                    Some(current + count)
-                }
-            })
-            .expect("LSN Allocator Overflow");
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| {
+                val.checked_add(count)
+            });
 
-        (LSN(first), LSN(first + count - 1))
+        match res {
+            Ok(first) => Ok((LSN(first), LSN(first + count - 1))),
+            Err(current) => Err(Error::Storage(StorageError::WalError {
+                reason: format!(
+                    "LSN Allocator Overflow: allocation of {} LSNs starting at {} would wrap u64",
+                    count, current
+                ),
+            })),
+        }
     }
 
     /// Get the current (next to be allocated) LSN without allocating.
@@ -197,9 +185,9 @@ mod tests {
     fn test_single_allocation() {
         let alloc = LsnAllocator::new();
 
-        let lsn1 = alloc.allocate();
-        let lsn2 = alloc.allocate();
-        let lsn3 = alloc.allocate();
+        let lsn1 = alloc.allocate().unwrap();
+        let lsn2 = alloc.allocate().unwrap();
+        let lsn3 = alloc.allocate().unwrap();
 
         assert_eq!(lsn1, LSN(1));
         assert_eq!(lsn2, LSN(2));
@@ -211,7 +199,7 @@ mod tests {
     fn test_batch_allocation() {
         let alloc = LsnAllocator::new();
 
-        let (first, last) = alloc.allocate_batch(5);
+        let (first, last) = alloc.allocate_batch(5).unwrap();
 
         assert_eq!(first, LSN(1));
         assert_eq!(last, LSN(5));
@@ -222,7 +210,7 @@ mod tests {
     fn test_batch_allocation_single() {
         let alloc = LsnAllocator::new();
 
-        let (first, last) = alloc.allocate_batch(1);
+        let (first, last) = alloc.allocate_batch(1).unwrap();
 
         assert_eq!(first, LSN(1));
         assert_eq!(last, LSN(1));
@@ -242,8 +230,8 @@ mod tests {
         alloc.set_next(LSN(1000));
 
         assert_eq!(alloc.current(), LSN(1000));
-        assert_eq!(alloc.allocate(), LSN(1000));
-        assert_eq!(alloc.allocate(), LSN(1001));
+        assert_eq!(alloc.allocate().unwrap(), LSN(1000));
+        assert_eq!(alloc.allocate().unwrap(), LSN(1001));
     }
 
     #[test]
@@ -258,7 +246,7 @@ mod tests {
                 thread::spawn(move || {
                     let mut lsns = Vec::with_capacity(allocations_per_thread);
                     for _ in 0..allocations_per_thread {
-                        lsns.push(alloc.allocate());
+                        lsns.push(alloc.allocate().unwrap());
                     }
                     lsns
                 })
@@ -298,7 +286,7 @@ mod tests {
                 thread::spawn(move || {
                     let mut ranges = Vec::with_capacity(batches_per_thread);
                     for _ in 0..batches_per_thread {
-                        ranges.push(alloc.allocate_batch(batch_size));
+                        ranges.push(alloc.allocate_batch(batch_size).unwrap());
                     }
                     ranges
                 })
@@ -333,7 +321,7 @@ mod tests {
 
         let mut prev = LSN(0);
         for _ in 0..1000 {
-            let curr = alloc.allocate();
+            let curr = alloc.allocate().unwrap();
             assert!(curr.0 > prev.0, "LSN not monotonically increasing");
             prev = curr;
         }
@@ -343,5 +331,41 @@ mod tests {
     fn test_default_impl() {
         let alloc = LsnAllocator::default();
         assert_eq!(alloc.current(), LSN(1));
+    }
+
+    #[test]
+    fn test_allocate_batch_overflow_returns_error() {
+        // Initialize near u64::MAX
+        // u64::MAX - 5 so that adding 10 wraps around
+        let alloc = LsnAllocator::starting_at(LSN(u64::MAX - 5));
+
+        let result = alloc.allocate_batch(10);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::WalError { reason })) => {
+                assert!(reason.contains("Overflow"));
+            }
+            _ => panic!("Expected WalError::Overflow, got {:?}", result),
+        }
+
+        // Verify that the state was NOT modified
+        assert_eq!(alloc.current().0, u64::MAX - 5);
+    }
+
+    #[test]
+    fn test_allocate_overflow_returns_error() {
+        let alloc = LsnAllocator::starting_at(LSN(u64::MAX));
+
+        let result = alloc.allocate();
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::WalError { reason })) => {
+                assert!(reason.contains("Overflow"));
+            }
+            _ => panic!("Expected WalError::Overflow, got {:?}", result),
+        }
+
+        // Verify that the state was NOT modified
+        assert_eq!(alloc.current().0, u64::MAX);
     }
 }
