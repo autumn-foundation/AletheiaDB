@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
