@@ -1,6 +1,6 @@
 use aletheiadb::storage::wal::LSN;
 use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
-use std::panic;
+use std::panic::{self, AssertUnwindSafe};
 
 #[test]
 fn test_lsn_allocator_overflow_protection() {
