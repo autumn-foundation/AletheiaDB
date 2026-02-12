@@ -30,25 +30,37 @@ db.enable_vector_index("embedding", config)?;
 use aletheiadb::query::hybrid::{traverse_and_rank, find_similar_as_of};
 
 // Graph + Vector: Find neighbors ranked by similarity
+// Returns: Vec<(NodeId, f32)>
 let results = traverse_and_rank(&db, alice_id, "KNOWS", &query_embedding, 10)?;
+println!("Found {} results", results.len());
 
 // Temporal + Vector: Point-in-time semantic search
+// Returns: Vec<(NodeId, f32)>
 let results = find_similar_as_of(&db, &query_embedding, 10, timestamp)?;
 ```
 
 **2. Query Builder** (complex compositions)
 ```rust
+// Returns: QueryResults (Iterator)
 let results = db.query()
     .start(alice_id)
     .traverse("KNOWS")
     .rank_by_similarity(&bob_embedding, 10)
     .filter(Predicate::gt("score", 0.8))
     .execute(&db)?;
+
+for row in results {
+    println!("{:?}", row?);
+}
 ```
 
 **3. Database Methods** (convenience)
 ```rust
+// Returns: QueryResults (Iterator)
 let results = db.traverse_and_rank(alice_id, "KNOWS", &embedding, 10)?;
+
+// Iterate or collect
+let rows = results.collect_all()?;
 ```
 
 ## Query Builder API
