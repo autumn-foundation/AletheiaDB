@@ -769,10 +769,10 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::time;
     use crate::storage::wal::serialization::serialize_entry_into;
+    use std::io::Write;
     use tempfile::TempDir;
 
     #[test]
@@ -1875,7 +1875,6 @@ mod regression_tests {
     }
     #[test]
     fn test_read_segment_empty_file_returns_ok() {
-
         let dir = TempDir::new().unwrap();
         let segment_path = dir.path().join("empty_valid.log");
 
