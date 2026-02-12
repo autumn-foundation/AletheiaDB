@@ -450,14 +450,6 @@ where
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
 
-        // Strict alignment check to prevent UB (Sentry Directive)
-        // f32 requires 4-byte alignment. accessing unaligned data via slice is UB.
-        if a.align_offset(std::mem::align_of::<f32>()) != 0
-            || b.align_offset(std::mem::align_of::<f32>()) != 0
-        {
-            panic!("usearch passed unaligned pointer to metric function");
-        }
-
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
         distance_fn(slice_a, slice_b)
@@ -2593,6 +2585,53 @@ mod tests {
             Ok(_) => panic!("Expected IndexError with overflow/limit message, got: Ok(_)"),
             Err(e) => panic!(
                 "Expected IndexError with overflow message, got: Err({:?})",
+                e
+            ),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_mappings_count_limit() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Modify count to be MAX_MAPPINGS_COUNT + 1
+        let mut data = std::fs::read(&mappings_path).unwrap();
+        let count_offset = 15; // V2 offset
+        let huge_count = (super::MAX_MAPPINGS_COUNT + 1) as u64;
+
+        // Write huge count
+        let count_bytes = huge_count.to_le_bytes();
+        data[count_offset..count_offset + 8].copy_from_slice(&count_bytes);
+
+        // Update CRC
+        let crc_offset = data.len() - 4;
+        let mut hasher = Hasher::new();
+        hasher.update(&data[..crc_offset]);
+        let new_crc = hasher.finalize();
+        data[crc_offset..].copy_from_slice(&new_crc.to_le_bytes());
+
+        std::fs::write(&mappings_path, &data).unwrap();
+
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(
+                    msg.contains("exceeds maximum allowed"),
+                    "Expected max limit error, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("Expected IndexError with limit message, got: Ok(_)"),
+            Err(e) => panic!(
+                "Expected IndexError with limit message, got: Err({:?})",
                 e
             ),
         }
