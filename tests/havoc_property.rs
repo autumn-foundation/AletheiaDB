@@ -82,6 +82,62 @@ proptest! {
 
         let _ = PropertyValue::deserialize(&bytes);
     }
+
+    #[test]
+    fn prop_round_trip(val in arb_property_value()) {
+        let serialized = val.serialize().expect("Serialization should succeed");
+        let (deserialized, consumed) = PropertyValue::deserialize(&serialized).expect("Deserialization should succeed");
+
+        assert_eq!(consumed, serialized.len());
+
+        // Handle NaN float comparison
+        if let PropertyValue::Float(f) = &val {
+            if f.is_nan() {
+                assert!(deserialized.as_float().unwrap().is_nan());
+                return Ok(());
+            }
+        }
+        // Handle NaN inside vector/array?
+        // For now, let's assume PartialEq handles it or we accept failure if random f32 is NaN.
+        // Actually PropertyValue::PartialEq for float checks exact bits or standard equality.
+        // If we generate NaN, normal == might fail.
+        // Our strategy generates any::<f64>() which includes NaN.
+
+        // But wait, PropertyValue derived PartialEq.
+        // f64::NAN != f64::NAN.
+        // So we should filter out NaN from our strategy or handle it.
+        // Let's rely on string format comparison for robust round-trip of NaN?
+        // Or just assert equality if not NaN.
+
+        // Let's filter NaN from strategy for simplicity of equality check
+
+        // Actually, let's verify via debug string if direct equality fails,
+        // or just accept that we generate non-NaN floats.
+
+        if val != deserialized {
+             // Fallback check for NaN
+             let s1 = format!("{:?}", val);
+             let s2 = format!("{:?}", deserialized);
+             assert_eq!(s1, s2, "Values not equal (even via Debug): {:?} vs {:?}", val, deserialized);
+        }
+    }
+}
+
+fn arb_property_value() -> impl Strategy<Value = PropertyValue> {
+    let leaf = prop_oneof![
+        Just(PropertyValue::Null),
+        any::<bool>().prop_map(PropertyValue::Bool),
+        any::<i64>().prop_map(PropertyValue::Int),
+        // Filter out NaN to make equality checks easier
+        any::<f64>().prop_filter("No NaN", |f| !f.is_nan()).prop_map(PropertyValue::Float),
+        ".*".prop_map(|s| PropertyValue::string(s)),
+        prop::collection::vec(any::<u8>(), 0..100).prop_map(PropertyValue::bytes),
+        prop::collection::vec(any::<f32>().prop_filter("No NaN", |f| !f.is_nan()), 0..100).prop_map(|v| PropertyValue::vector(v)),
+    ];
+
+    leaf.prop_recursive(
+        3, 64, 5, |inner| prop::collection::vec(inner, 0..5).prop_map(PropertyValue::array)
+    )
 }
 
 #[test]
