@@ -97,7 +97,12 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
+
+/// Timeout for acquiring the index lock.
+/// This prevents deadlocks (e.g., recursive locking across threads) from hanging the system indefinitely.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 // This prevents deadlocks when user filter callbacks try to modify the index.
@@ -774,7 +779,11 @@ impl VectorIndex for HnswIndex {
                 // where multiple threads try to update the same node concurrently (PR #575).
                 // Without this, thread A could remove, thread B could remove (fail), then both try to add,
                 // causing "Duplicate keys not allowed" error.
-                let index = self.inner.write();
+                let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Index lock acquisition timed out in add(occupied) (potential deadlock detected)".to_string(),
+                    ))
+                })?;
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
@@ -845,7 +854,11 @@ impl VectorIndex for HnswIndex {
 
                 // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
-                let index = self.inner.write();
+                let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Index lock acquisition timed out in add(vacant) (potential deadlock detected)".to_string(),
+                    ))
+                })?;
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
@@ -890,7 +903,11 @@ impl VectorIndex for HnswIndex {
 
                     // Acquire inner lock again to remove our key.
                     // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let index = self.inner.write();
+                    let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+                        Error::Vector(VectorError::IndexError(
+                            "Index lock acquisition timed out in rollback (potential deadlock detected)".to_string(),
+                        ))
+                    })?;
                     index.remove(key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
                             "Failed to rollback vector after concurrent add: {}",
@@ -938,7 +955,11 @@ impl VectorIndex for HnswIndex {
             self.reverse_mapping.remove(&key);
 
             // Native delete in usearch
-            let index = self.inner.write();
+            let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Index lock acquisition timed out in remove (potential deadlock detected)".to_string(),
+                ))
+            })?;
             index.remove(key).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to remove vector: {}",
