@@ -23,9 +23,9 @@ fn test_lsn_allocator_overflow_protection() {
     // The next allocate() call will fetch_add(1), returning u64::MAX and setting state to 0 (wrap).
     // The allocator should detect this and panic.
 
-    let result = panic::catch_unwind(move || {
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
         alloc.allocate();
-    });
+    }));
 
     assert!(result.is_err(), "LsnAllocator should panic on LSN overflow");
 
