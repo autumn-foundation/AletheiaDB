@@ -464,10 +464,7 @@ where
             distance_fn(slice_a, slice_b)
         }));
 
-        match result {
-            Ok(val) => val,
-            Err(_) => f32::MAX, // Panic caught, return max distance
-        }
+        result.unwrap_or(f32::MAX)
     })
 }
 
