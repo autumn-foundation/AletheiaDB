@@ -562,7 +562,15 @@ impl<C: ShardClient> ConnectionPool<C> {
     /// Add a connection to the pool.
     pub fn add(&self, conn: Arc<C>) {
         if let Ok(mut connections) = self.connections.write() {
-            connections.push(conn);
+            // Opportunistic cleanup: remove unhealthy connections to make space
+            connections.retain(|c| c.is_healthy());
+
+            // Only add if we haven't exceeded the limit.
+            // This prevents unbounded memory growth if the network is flaky.
+            // We use max_connections as a hard limit for the idle pool here.
+            if connections.len() < self.config.max_connections {
+                connections.push(conn);
+            }
         }
     }
 
