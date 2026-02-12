@@ -62,5 +62,8 @@ fn test_flush_deadlock_on_io_error() {
     // Verify the result from wait()
     let wait_result = join_result.unwrap();
     // It should be an error because flush failed
-    assert!(wait_result.is_err(), "Waiter should receive error notification");
+    assert!(
+        wait_result.is_err(),
+        "Waiter should receive error notification"
+    );
 }
