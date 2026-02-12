@@ -129,15 +129,18 @@ fn arb_property_value() -> impl Strategy<Value = PropertyValue> {
         any::<bool>().prop_map(PropertyValue::Bool),
         any::<i64>().prop_map(PropertyValue::Int),
         // Filter out NaN to make equality checks easier
-        any::<f64>().prop_filter("No NaN", |f| !f.is_nan()).prop_map(PropertyValue::Float),
+        any::<f64>()
+            .prop_filter("No NaN", |f| !f.is_nan())
+            .prop_map(PropertyValue::Float),
         ".*".prop_map(|s| PropertyValue::string(s)),
         prop::collection::vec(any::<u8>(), 0..100).prop_map(PropertyValue::bytes),
-        prop::collection::vec(any::<f32>().prop_filter("No NaN", |f| !f.is_nan()), 0..100).prop_map(|v| PropertyValue::vector(v)),
+        prop::collection::vec(any::<f32>().prop_filter("No NaN", |f| !f.is_nan()), 0..100)
+            .prop_map(|v| PropertyValue::vector(v)),
     ];
 
-    leaf.prop_recursive(
-        3, 64, 5, |inner| prop::collection::vec(inner, 0..5).prop_map(PropertyValue::array)
-    )
+    leaf.prop_recursive(3, 64, 5, |inner| {
+        prop::collection::vec(inner, 0..5).prop_map(PropertyValue::array)
+    })
 }
 
 #[test]

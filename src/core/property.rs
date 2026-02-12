@@ -4500,10 +4500,12 @@ mod sentry_tests {
         // Check boundary exact hit (should fail on buffer size, not capacity limit)
         let result = PropertyMap::deserialize(&bytes);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Insufficient buffer size"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Insufficient buffer size")
+        );
 
         // Check boundary violation (MAX + 1)
         let mut bytes_overflow = Vec::new();
@@ -4512,10 +4514,12 @@ mod sentry_tests {
 
         let result_overflow = PropertyMap::deserialize(&bytes_overflow);
         assert!(result_overflow.is_err());
-        assert!(result_overflow
-            .unwrap_err()
-            .to_string()
-            .contains("exceeds maximum allowed"));
+        assert!(
+            result_overflow
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds maximum allowed")
+        );
     }
 
     #[test]
