@@ -323,7 +323,11 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         // The error comes from zstd::decode_all wrapped in StorageError::io_error
-        assert!(err_msg.contains("I/O error") || err_msg.contains("zstd") || err_msg.contains("Decompression failed"));
+        assert!(
+            err_msg.contains("I/O error")
+                || err_msg.contains("zstd")
+                || err_msg.contains("Decompression failed")
+        );
     }
 
     #[test]
