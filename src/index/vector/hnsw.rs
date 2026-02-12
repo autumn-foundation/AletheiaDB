@@ -2630,10 +2630,7 @@ mod tests {
                 );
             }
             Ok(_) => panic!("Expected IndexError with limit message, got: Ok(_)"),
-            Err(e) => panic!(
-                "Expected IndexError with limit message, got: Err({:?})",
-                e
-            ),
+            Err(e) => panic!("Expected IndexError with limit message, got: Err({:?})", e),
         }
         Ok(())
     }
