@@ -199,7 +199,9 @@ mod tests {
         // 2. Update to "Shipped" (after 10ms)
         std::thread::sleep(std::time::Duration::from_millis(10));
         db.write(|tx| {
-            let p = PropertyMapBuilder::new().insert("status", "Shipped").build();
+            let p = PropertyMapBuilder::new()
+                .insert("status", "Shipped")
+                .build();
             tx.update_node(node_id, p)
         })
         .unwrap();
@@ -207,7 +209,9 @@ mod tests {
         // 3. Update to "Delivered" (after 10ms)
         std::thread::sleep(std::time::Duration::from_millis(10));
         db.write(|tx| {
-            let p = PropertyMapBuilder::new().insert("status", "Delivered").build();
+            let p = PropertyMapBuilder::new()
+                .insert("status", "Delivered")
+                .build();
             tx.update_node(node_id, p)
         })
         .unwrap();
@@ -268,7 +272,10 @@ mod tests {
             });
 
         let results = sherlock.investigate(node_id, &impossible_mystery).unwrap();
-        assert!(results.is_empty(), "Should not match due to time constraint");
+        assert!(
+            results.is_empty(),
+            "Should not match due to time constraint"
+        );
 
         // Mystery: A -> B within 500ms (Should Pass)
         let possible_mystery = Mystery::new(Duration::from_millis(500))
