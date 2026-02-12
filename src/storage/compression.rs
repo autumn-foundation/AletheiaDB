@@ -281,7 +281,7 @@ mod tests {
         assert!(compressed.len() < 1000);
 
         // 3. Configure a small limit (e.g., 1MB)
-        let limit = 1 * 1024 * 1024; // 1MB
+        let limit = 1024 * 1024; // 1MB
         let config = ColdStorageConfig {
             compression: CompressionAlgorithm::Zstd,
             enable_checksums: false, // Simplify test (skip checksum wrapping)
