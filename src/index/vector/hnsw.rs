@@ -2868,6 +2868,5 @@ mod coverage_tests {
 
         drop(guard);
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
-
     }
-    }
+}

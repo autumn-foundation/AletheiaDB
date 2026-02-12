@@ -763,11 +763,11 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::time;
     use crate::storage::wal::serialization::serialize_entry_into;
+    use std::io::Write;
     use tempfile::TempDir;
 
     #[test]
@@ -1324,7 +1324,6 @@ mod tests {
     /// and verifies that all entries can be read correctly.
     #[test]
     fn test_read_large_segment_memory_efficient() {
-
         let dir = TempDir::new().unwrap();
         let segment_path = dir.path().join("large_segment.log");
 
@@ -1376,7 +1375,6 @@ mod tests {
     /// them sequentially without holding all segment buffers in memory simultaneously.
     #[test]
     fn test_read_multiple_segments_sequentially() {
-
         let dir = TempDir::new().unwrap();
 
         // Create 5 segment files
@@ -1431,7 +1429,6 @@ mod tests {
     /// without processing them.
     #[test]
     fn test_read_segment_with_start_lsn_filter() {
-
         let dir = TempDir::new().unwrap();
         let segment_path = dir.path().join("filtered_segment.log");
 
@@ -1472,7 +1469,6 @@ mod tests {
     /// Test that empty segments are handled efficiently.
     #[test]
     fn test_read_empty_segment_efficient() {
-
         let dir = TempDir::new().unwrap();
         let segment_path = dir.path().join("empty_segment.log");
 
@@ -1497,7 +1493,6 @@ mod tests {
     /// This can happen if a write was interrupted mid-entry.
     #[test]
     fn test_read_segment_with_truncated_entry() {
-
         let dir = TempDir::new().unwrap();
         let segment_path = dir.path().join("truncated_segment.log");
 
@@ -1555,7 +1550,6 @@ mod tests {
     /// in the WAL directory.
     #[test]
     fn test_read_segment_rejects_oversized_file() {
-
         let dir = TempDir::new().unwrap();
         let segment_path = dir.path().join("oversized_segment.log");
 
@@ -1801,11 +1795,11 @@ mod tests {
 
 #[cfg(test)]
 mod regression_tests {
-    use tempfile::TempDir;
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::time;
     use crate::storage::wal::serialization::serialize_entry_into;
+    use tempfile::TempDir;
 
     #[test]
     fn test_repro_fuzz_update_edge_panic() {
