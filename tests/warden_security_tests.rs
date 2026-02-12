@@ -1,6 +1,6 @@
 use aletheiadb::storage::wal::LSN;
 use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
-use std::panic::{self, AssertUnwindSafe};
+use std::panic;
 
 #[test]
 fn test_lsn_allocator_overflow_protection() {
@@ -23,9 +23,9 @@ fn test_lsn_allocator_overflow_protection() {
     // The next allocate() call will fetch_add(1), returning u64::MAX and setting state to 0 (wrap).
     // The allocator should detect this and panic.
 
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+    let result = panic::catch_unwind(move || {
         alloc.allocate();
-    }));
+    });
 
     assert!(result.is_err(), "LsnAllocator should panic on LSN overflow");
 
@@ -69,14 +69,40 @@ fn test_lsn_allocator_batch_overflow_protection() {
     // Let's try allocating 20 items.
     // Range end: MAX-10 + 20 - 1 = MAX + 9 (overflows u64).
 
-    let result = panic::catch_unwind(move || {
+    // Use AssertUnwindSafe to allow sharing alloc across the unwind boundary
+    // so we can verify its state wasn't corrupted.
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         alloc.allocate_batch(20);
-    });
+    }));
 
     assert!(
         result.is_err(),
         "LsnAllocator batch should panic on LSN overflow"
     );
+
+    // Verify state is unchanged (critical guarantee of fetch_update vs fetch_add)
+    assert_eq!(
+        alloc.current(),
+        LSN(u64::MAX - 10),
+        "Allocator state should not change on batch overflow"
+    );
+
+    // Verify panic message
+    if let Err(e) = result {
+        if let Some(msg) = e.downcast_ref::<&str>() {
+            assert!(
+                msg.contains("LSN Allocator Overflow"),
+                "Unexpected panic message: {}",
+                msg
+            );
+        } else if let Some(msg) = e.downcast_ref::<String>() {
+            assert!(
+                msg.contains("LSN Allocator Overflow"),
+                "Unexpected panic message: {}",
+                msg
+            );
+        }
+    }
 }
 
 #[test]
