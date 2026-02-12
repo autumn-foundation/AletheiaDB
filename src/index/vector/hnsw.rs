@@ -447,17 +447,9 @@ where
             );
         }
 
-        // Verify dimensions invariant
-        // We trust usearch (and our builder validation) to respect dims.
-        // We verified dims > 0 in HnswIndexBuilder::build().
-
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
-        //
-        // We assume:
-        // 1. usearch provides buffers of at least `dims * sizeof(f32)` bytes.
-        //    (We cannot verify this from raw pointers, but we validated `dims` in HnswIndexBuilder).
-        // 2. The memory is initialized.
+        // We trusted dims > 0 from HnswIndexBuilder validation.
         //
         // Strict alignment check to prevent UB (Sentry Directive)
         // f32 requires 4-byte alignment. accessing unaligned data via slice is UB.

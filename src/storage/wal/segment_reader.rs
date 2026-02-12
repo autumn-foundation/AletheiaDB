@@ -1586,44 +1586,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_segment_mmap_failure_empty_file() {
-
-        let dir = TempDir::new().unwrap();
-        let segment_path = dir.path().join("empty_failure.log");
-
-        // Create an empty file
-        {
-            let _file = File::create(&segment_path).unwrap();
-        }
-
-        // Attempt to read it.
-        // File::open succeeds.
-        // metadata.len() is 0.
-        // Mmap::map usually fails on empty files with EINVAL.
-        let result = read_segment(&segment_path, LSN(1));
-
-        // Note: If read_segment returns Ok(empty) for empty files by logic,
-        // then this test doesn't trigger the mmap error.
-        // However, read_segment doesn't check for empty file before mmap.
-        // It checks metadata.len() > MAX_SEGMENT_SIZE.
-        //
-        // If mmap succeeds on empty file (returning empty slice), then the error path is not taken.
-        // `memmap2` documentation says: "mapping an empty file ... will result in an error".
-        // So we expect an error.
-
-        if result.is_ok() {
-            // If it succeeded, check if it returned empty vec (which is also safe behavior)
-            // But this means we missed the error path coverage.
-            // For now, let's print a warning if this happens, but the goal is to hit the Err path.
-            println!("Warning: Mmap on empty file succeeded, coverage of error path missed.");
-        } else {
-            let e = result.unwrap_err();
-            let msg = format!("{}", e);
-            assert!(msg.contains("Failed to memory-map"), "Expected mmap error, got: {}", msg);
-        }
-    }
-
-    #[test]
     fn test_wal_offset_overflow_protection() {
         // Create a small dummy buffer
         let buffer = [0u8; 100];
@@ -1839,6 +1801,7 @@ mod tests {
 
 #[cfg(test)]
 mod regression_tests {
+    use tempfile::TempDir;
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::time;
@@ -1909,6 +1872,37 @@ mod regression_tests {
             );
         } else {
             panic!("Expected CorruptedData error, got: {:?}", result);
+        }
+    }
+    #[test]
+    fn test_read_segment_mmap_failure_on_directory() {
+        let dir = TempDir::new().unwrap();
+        // Use the directory path itself as the "segment"
+        let segment_path = dir.path();
+
+        // Note: read_segment uses File::open. On Linux, opening a directory with O_RDONLY succeeds.
+        // But mmap_ing it usually fails with ENODEV.
+        let result = read_segment(segment_path, LSN(1));
+
+        // We assert that it MUST fail. If it succeeds, it means mmap worked on a directory,
+        // which is unexpected and means we are not testing the error path.
+        //
+        // On environments where mmap on dir works (BSD?), this test might flap,
+        // but for standard Linux CI, this ensures we cover the error branch.
+        assert!(result.is_err(), "read_segment on directory should fail");
+
+        if let Err(e) = result {
+            // Verify it is not a panic and contains expected error text
+            let msg = format!("{}", e);
+            // We specifically want to cover the mmap error path if possible
+            if msg.contains("Failed to memory-map") {
+                // Success: we hit the target lines
+            } else if msg.contains("Access is denied") || msg.contains("Is a directory") {
+                // Also acceptable (failed at open or earlier)
+            } else {
+                // Unexpected error type, but at least it failed gracefully
+                println!("Got unexpected error message: {}", msg);
+            }
         }
     }
 }
