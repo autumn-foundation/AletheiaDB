@@ -777,7 +777,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::thread;
-    use std::time::Duration;
 
     #[test]
     fn test_completion_notifier_success() {
@@ -1362,7 +1361,7 @@ mod tests {
 
     #[test]
     fn test_ring_buffer_drop_deadlock_prevention() {
-        use std::sync::{Arc, Barrier};
+        use std::sync::mpsc;
 
         // This test verifies that dropping a WalRingBuffer with pending sync entries
         // properly notifies waiters instead of causing a deadlock.
@@ -1375,22 +1374,21 @@ mod tests {
         // Append it
         buf.try_append(entry).expect("Failed to append");
 
-        // Barrier to synchronize start of waiting
-        let barrier = Arc::new(Barrier::new(2));
-        let barrier_clone = barrier.clone();
+        // Channel to synchronize start of waiting
+        let (tx, rx) = mpsc::channel();
 
         // Spawn a thread that waits for completion
         let waiter = thread::spawn(move || {
-            barrier_clone.wait();
+            // Signal main thread that we are about to wait
+            tx.send(()).unwrap();
             // This wait should unblock with an error when buf is dropped
             // If the fix is missing, this will hang forever
             handle.wait()
         });
 
         // Ensure waiter is running and about to wait
-        barrier.wait();
-        // Give the waiter thread a moment to actually enter wait()
-        thread::sleep(Duration::from_millis(50));
+        // The receive blocks until the waiter thread sends the signal
+        rx.recv().unwrap();
 
         // Drop the buffer (main thread owns it)
         drop(buf);
