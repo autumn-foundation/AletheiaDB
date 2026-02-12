@@ -94,6 +94,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -460,7 +461,26 @@ where
 
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-        distance_fn(slice_a, slice_b)
+
+        // Wrap execution in catch_unwind to prevent FFI aborts.
+        // If the user-provided callback panics, unwinding across the FFI boundary
+        // into C++ (usearch) is Undefined Behavior and will likely abort the process.
+        // We catch the panic here and return a fallback value.
+        //
+        // Note: distance_fn is Arc<F> where F: Send + Sync. Arc is not UnwindSafe by default,
+        // but since we only read from it, it's safe to assert unwind safety here.
+        let result = catch_unwind(AssertUnwindSafe(|| distance_fn(slice_a, slice_b)));
+
+        match result {
+            Ok(distance) => distance,
+            Err(_) => {
+                // Log error to stderr (since we can't return Result across FFI)
+                // We use eprintln! because we can't assume a logger is initialized.
+                eprintln!("CRITICAL: Panic in custom metric callback (caught at FFI boundary)");
+                // Return max distance to make this candidate effectively unreachable
+                f32::MAX
+            }
+        }
     })
 }
 
