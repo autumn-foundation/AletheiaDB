@@ -3923,7 +3923,7 @@ mod tests {
         // Size should be exactly:
         // 10 * (Vec capacity overhead + sizeof(PropertyValue)) + string length
         // Vec capacity is exactly 1 because we used vec![value]
-        let vec_overhead = 1 * std::mem::size_of::<PropertyValue>();
+        let vec_overhead = std::mem::size_of::<PropertyValue>();
         let expected_size = 10 * vec_overhead + 4; // "data".len() = 4
 
         assert_eq!(
