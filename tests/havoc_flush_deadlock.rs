@@ -1,10 +1,10 @@
 use aletheiadb::core::id::NodeId;
+use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::property::PropertyMap;
 use aletheiadb::core::temporal::time;
-use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::storage::wal::WalOperation;
 use aletheiadb::storage::wal::concurrent::{ConcurrentWal, ConcurrentWalConfig};
 use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
-use aletheiadb::storage::wal::WalOperation;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -85,7 +85,10 @@ fn test_havoc_flush_failure_deadlock() {
     perms.set_mode(0o700);
     std::fs::set_permissions(wal_dir, perms).unwrap();
 
-    assert!(result.is_err(), "Flush should fail due to read-only directory");
+    assert!(
+        result.is_err(),
+        "Flush should fail due to read-only directory"
+    );
 
     // DEADLOCK CHECK:
     // If the bug exists, handle2 is NOT complete, and wait() would block forever.
@@ -95,5 +98,8 @@ fn test_havoc_flush_failure_deadlock() {
         panic!("DEADLOCK DETECTED: Flush failed but waiting threads were not notified!");
     }
 
-    assert!(handle2.wait().is_err(), "Wait should return the flush error");
+    assert!(
+        handle2.wait().is_err(),
+        "Wait should return the flush error"
+    );
 }
