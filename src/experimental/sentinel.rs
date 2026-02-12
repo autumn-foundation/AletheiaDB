@@ -300,9 +300,7 @@ mod tests {
     #[test]
     fn test_numeric_range_nan_handling() {
         let rule = NumericRangeRule::new("age").min(18.0);
-        let props = PropertyMapBuilder::new()
-            .insert("age", f64::NAN)
-            .build();
+        let props = PropertyMapBuilder::new().insert("age", f64::NAN).build();
 
         let result = rule.validate(&props);
         assert!(result.is_err());
@@ -312,15 +310,16 @@ mod tests {
     #[test]
     fn test_numeric_range_error_privacy() {
         let rule = NumericRangeRule::new("salary").max(50000.0);
-        let props = PropertyMapBuilder::new()
-            .insert("salary", 100000.0)
-            .build();
+        let props = PropertyMapBuilder::new().insert("salary", 100000.0).build();
 
         let result = rule.validate(&props);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("greater than maximum 50000"));
-        assert!(!msg.contains("100000"), "Sensitive value leaked in error message");
+        assert!(
+            !msg.contains("100000"),
+            "Sensitive value leaked in error message"
+        );
     }
 
     #[test]
