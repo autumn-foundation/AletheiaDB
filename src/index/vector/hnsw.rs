@@ -1074,10 +1074,18 @@ impl VectorIndex for HnswIndex {
         // and prevent re-entrant modification attempts that would cause deadlock.
         let reverse_mapping = &self.reverse_mapping;
         let filter = |key: u64| -> bool {
-            if let Some(node_id_ref) = reverse_mapping.get(&key) {
+            // Get NodeId and drop the DashMap guard immediately to avoid holding locks during callback
+            // (Issue found by Havoc testing: holding DashMap lock blocks remove() operations)
+            let node_id = if let Some(node_id_ref) = reverse_mapping.get(&key) {
+                Some(*node_id_ref.value())
+            } else {
+                None
+            };
+
+            if let Some(node_id) = node_id {
                 // Set flag to prevent modifications during callback
                 let _guard = FilterCallbackGuard::new();
-                predicate(node_id_ref.value())
+                predicate(&node_id)
             } else {
                 false
             }

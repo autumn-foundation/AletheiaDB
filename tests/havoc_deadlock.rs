@@ -65,3 +65,52 @@ fn test_deadlock_spawn_in_filter() {
         panic!("DEADLOCK DETECTED! The system hung while trying to acquire locks recursively across threads.");
     }
 }
+
+#[test]
+fn test_remove_lock_timeout() {
+    // This test ensures that index.remove() correctly times out if the lock is held.
+    // This covers the error handling path in remove().
+
+    let index = Arc::new(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap()
+    );
+
+    let node_id = NodeId::new(1).unwrap();
+    index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+    let index_clone = index.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // Spawn a thread to hold the read lock for longer than the timeout (10s)
+    thread::spawn(move || {
+        // search_with_filter acquires a read lock
+        let _ = index_clone.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, |_| {
+            tx.send(()).unwrap(); // Signal that we have the lock
+            thread::sleep(Duration::from_secs(20)); // Hold it for 20s > 10s timeout
+            true
+        });
+    });
+
+    // Wait for thread to acquire lock
+    rx.recv().unwrap();
+
+    // Try to remove - this requires a write lock
+    // Should block for 10s then fail with timeout error
+    let start = std::time::Instant::now();
+    let result = index.remove(node_id);
+    let duration = start.elapsed();
+
+    assert!(result.is_err(), "remove() should have failed due to timeout");
+
+    // Verify it took at least 10s (approximate check)
+    assert!(duration.as_secs() >= 9, "remove() returned too quickly ({}s), didn't wait for timeout", duration.as_secs());
+
+    match result {
+        Err(aletheiadb::utils::Error::Vector(aletheiadb::utils::error::VectorError::IndexError(msg))) => {
+            assert!(msg.contains("timed out"), "Error message should mention timeout");
+        },
+        _ => panic!("Expected IndexError with timeout message, got {:?}", result),
+    }
+}
