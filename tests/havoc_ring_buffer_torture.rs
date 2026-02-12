@@ -1,5 +1,5 @@
-use aletheiadb::storage::wal::ring_buffer::{BackpressureConfig, PendingEntry, WalRingBuffer};
 use aletheiadb::storage::wal::LSN;
+use aletheiadb::storage::wal::ring_buffer::{BackpressureConfig, PendingEntry, WalRingBuffer};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -93,9 +93,12 @@ fn test_ring_buffer_torture() {
                 // Verify ordering per producer
                 if received_counts[p_id] > 0 {
                     assert_eq!(
-                        seq, last_seq[p_id] + 1,
+                        seq,
+                        last_seq[p_id] + 1,
                         "Out of order for producer {}: got {}, expected {}",
-                        p_id, seq, last_seq[p_id] + 1
+                        p_id,
+                        seq,
+                        last_seq[p_id] + 1
                     );
                 } else {
                     assert_eq!(seq, 0, "First entry for producer {} was not 0", p_id);
@@ -120,6 +123,10 @@ fn test_ring_buffer_torture() {
 
     // Verification
     for (p_id, count) in counts.iter().enumerate() {
-        assert_eq!(*count, ENTRIES_PER_PRODUCER, "Producer {} count mismatch", p_id);
+        assert_eq!(
+            *count, ENTRIES_PER_PRODUCER,
+            "Producer {} count mismatch",
+            p_id
+        );
     }
 }
