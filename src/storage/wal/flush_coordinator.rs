@@ -599,91 +599,110 @@ impl FlushCoordinator {
 
         let start = Instant::now();
 
-        // Ensure segment is open
-        self.ensure_segment_open()?;
+        // Inner function to perform I/O operations.
+        // This allows us to catch errors and notify pending entries before returning.
+        let do_flush = || -> Result<FlushStats> {
+            // Ensure segment is open
+            self.ensure_segment_open()?;
 
-        let mut bytes_written = 0usize;
+            let mut bytes_written = 0usize;
 
-        // Track LSN range for this batch (ADR-0025)
-        let mut batch_min_lsn = u64::MAX;
-        let mut batch_max_lsn = 0u64;
+            // Track LSN range for this batch (ADR-0025)
+            let mut batch_min_lsn = u64::MAX;
+            let mut batch_max_lsn = 0u64;
 
-        // Write all entries
-        {
-            let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-            let writer = writer_guard.as_mut().ok_or_else(|| {
-                Error::Storage(StorageError::WalError {
-                    reason: "WAL writer not initialized".to_string(),
-                })
-            })?;
+            // Write all entries
+            {
+                let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+                let writer = writer_guard.as_mut().ok_or_else(|| {
+                    Error::Storage(StorageError::WalError {
+                        reason: "WAL writer not initialized".to_string(),
+                    })
+                })?;
 
-            for entry in &entries {
-                // Track LSN range
-                batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
-                batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
+                for entry in &entries {
+                    // Track LSN range
+                    batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
+                    batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
 
-                writer.write_all(&entry.data).map_err(|e| {
+                    writer.write_all(&entry.data).map_err(|e| {
+                        Error::Storage(StorageError::IoError(format!(
+                            "Failed to write WAL entry: {}",
+                            e
+                        )))
+                    })?;
+                    bytes_written += entry.data.len();
+                }
+
+                // Flush buffer to OS
+                writer.flush().map_err(|e| {
                     Error::Storage(StorageError::IoError(format!(
-                        "Failed to write WAL entry: {}",
+                        "Failed to flush WAL buffer: {}",
                         e
                     )))
                 })?;
-                bytes_written += entry.data.len();
             }
 
-            // Flush buffer to OS
-            writer.flush().map_err(|e| {
-                Error::Storage(StorageError::IoError(format!(
-                    "Failed to flush WAL buffer: {}",
-                    e
-                )))
-            })?;
-        }
+            // Update segment LSN tracking (ADR-0025)
+            // Use fetch_min/fetch_max for atomic updates
+            self.current_segment_min_lsn
+                .fetch_min(batch_min_lsn, Ordering::Relaxed);
+            self.current_segment_max_lsn
+                .fetch_max(batch_max_lsn, Ordering::Relaxed);
+            self.current_segment_entry_count
+                .fetch_add(entries.len() as u64, Ordering::Relaxed);
 
-        // Update segment LSN tracking (ADR-0025)
-        // Use fetch_min/fetch_max for atomic updates
-        self.current_segment_min_lsn
-            .fetch_min(batch_min_lsn, Ordering::Relaxed);
-        self.current_segment_max_lsn
-            .fetch_max(batch_max_lsn, Ordering::Relaxed);
-        self.current_segment_entry_count
-            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+            // Sync to disk if requested
+            if sync && self.config.sync_on_flush {
+                let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(ref sync_file) = *sync_guard {
+                    sync_file.sync_data().map_err(|e| {
+                        Error::Storage(StorageError::IoError(format!("Failed to sync WAL: {}", e)))
+                    })?;
+                }
+            }
 
-        // Sync to disk if requested
-        if sync && self.config.sync_on_flush {
-            let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(ref sync_file) = *sync_guard {
-                sync_file.sync_data().map_err(|e| {
-                    Error::Storage(StorageError::IoError(format!("Failed to sync WAL: {}", e)))
-                })?;
+            // Update size
+            self.current_segment_size
+                .fetch_add(bytes_written as u64, Ordering::Relaxed);
+
+            // Check for rotation
+            let segment_rotated = self.maybe_rotate_segment()?;
+
+            // Update metrics
+            self.total_entries_flushed
+                .fetch_add(entries.len() as u64, Ordering::Relaxed);
+            self.total_bytes_written
+                .fetch_add(bytes_written as u64, Ordering::Relaxed);
+            self.total_flushes.fetch_add(1, Ordering::Relaxed);
+
+            Ok(FlushStats {
+                entries_flushed: entries.len(),
+                bytes_written,
+                flush_duration: start.elapsed(),
+                segment_rotated,
+            })
+        };
+
+        // Execute flush logic
+        match do_flush() {
+            Ok(stats) => {
+                // Notify success
+                for entry in entries {
+                    entry.notify_completion();
+                }
+                Ok(stats)
+            }
+            Err(e) => {
+                // Notify error to prevent deadlocks (Sentry 🛡️)
+                // If we don't notify, threads waiting on these entries will hang forever.
+                let error_msg = e.to_string();
+                for entry in entries {
+                    entry.notify_error(&error_msg);
+                }
+                Err(e)
             }
         }
-
-        // Update size
-        self.current_segment_size
-            .fetch_add(bytes_written as u64, Ordering::Relaxed);
-
-        // Check for rotation
-        let segment_rotated = self.maybe_rotate_segment()?;
-
-        // Notify all completion handles
-        for entry in &entries {
-            entry.notify_completion();
-        }
-
-        // Update metrics
-        self.total_entries_flushed
-            .fetch_add(entries.len() as u64, Ordering::Relaxed);
-        self.total_bytes_written
-            .fetch_add(bytes_written as u64, Ordering::Relaxed);
-        self.total_flushes.fetch_add(1, Ordering::Relaxed);
-
-        Ok(FlushStats {
-            entries_flushed: entries.len(),
-            bytes_written,
-            flush_duration: start.elapsed(),
-            segment_rotated,
-        })
     }
 
     /// Get total entries flushed.
