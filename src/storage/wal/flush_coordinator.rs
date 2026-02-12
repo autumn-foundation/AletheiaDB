@@ -597,6 +597,30 @@ impl FlushCoordinator {
             return Ok(FlushStats::default());
         }
 
+        let result = self.flush_internal(&entries, sync);
+
+        match result {
+            Ok(stats) => {
+                // Notify all completion handles on success
+                for entry in &entries {
+                    entry.notify_completion();
+                }
+                Ok(stats)
+            }
+            Err(e) => {
+                // Notify all completion handles with error on failure
+                // This prevents deadlock in synchronous appends when flush fails
+                let error_msg = e.to_string();
+                for entry in &entries {
+                    entry.notify_error(&error_msg);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Internal flush implementation that handles writing but not notification.
+    fn flush_internal(&self, entries: &[PendingEntry], sync: bool) -> Result<FlushStats> {
         let start = Instant::now();
 
         // Ensure segment is open
@@ -617,7 +641,7 @@ impl FlushCoordinator {
                 })
             })?;
 
-            for entry in &entries {
+            for entry in entries {
                 // Track LSN range
                 batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
                 batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
@@ -665,11 +689,6 @@ impl FlushCoordinator {
 
         // Check for rotation
         let segment_rotated = self.maybe_rotate_segment()?;
-
-        // Notify all completion handles
-        for entry in &entries {
-            entry.notify_completion();
-        }
 
         // Update metrics
         self.total_entries_flushed
