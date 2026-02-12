@@ -17,7 +17,7 @@
 //!
 //! // Rule: Ban anything semantically similar to "Hate Speech" (vector: [1.0, 0.0])
 //! let mut ban_rule = VectorBanRule::new("embedding", 0.9);
-//! ban_rule.add_banned_vector(vec![1.0, 0.0]);
+//! ban_rule.add_banned_vector(vec![1.0, 0.0]).unwrap();
 //! sentinel.add_rule(Box::new(ban_rule));
 //!
 //! // This should fail validation
@@ -29,7 +29,8 @@
 //! ```
 
 use crate::core::property::PropertyMap;
-use crate::utils::error::{Error, Result};
+use crate::core::vector::cosine_similarity;
+use crate::utils::error::{Error, Result, StorageError};
 
 /// A rule that validates a PropertyMap.
 pub trait SemanticRule {
@@ -91,25 +92,17 @@ impl VectorBanRule {
     }
 
     /// Add a banned vector to the rule.
-    pub fn add_banned_vector(&mut self, vector: Vec<f32>) {
+    pub fn add_banned_vector(&mut self, vector: Vec<f32>) -> Result<()> {
+        const MAX_BANNED_VECTORS_PER_RULE: usize = 1_000;
+        if self.banned_vectors.len() >= MAX_BANNED_VECTORS_PER_RULE {
+            return Err(Error::Storage(StorageError::CapacityExceeded {
+                resource: "VectorBanRule.banned_vectors".to_string(),
+                current: self.banned_vectors.len(),
+                limit: MAX_BANNED_VECTORS_PER_RULE,
+            }));
+        }
         self.banned_vectors.push(vector);
-    }
-
-    /// Calculate cosine similarity between two vectors.
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-        if a.len() != b.len() {
-            return 0.0;
-        }
-
-        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-        if mag_a == 0.0 || mag_b == 0.0 {
-            0.0
-        } else {
-            dot / (mag_a * mag_b)
-        }
+        Ok(())
     }
 }
 
@@ -129,18 +122,31 @@ impl SemanticRule for VectorBanRule {
         };
 
         for banned in &self.banned_vectors {
-            if vec.len() != banned.len() {
-                // Dimension mismatch - ignore or error?
-                // Let's ignore for now, assuming different spaces.
-                continue;
-            }
+            // Note: cosine_similarity handles dimension mismatch by returning Error
+            match cosine_similarity(vec, banned) {
+                Ok(similarity) => {
+                    if !similarity.is_finite() {
+                        // Reject non-finite similarity as a potential bypass attempt
+                        return Err(Error::other(format!(
+                            "Vector property '{}' similarity check resulted in non-finite value (NaN/Inf)",
+                            self.property_name
+                        )));
+                    }
 
-            let similarity = Self::cosine_similarity(vec, banned);
-            if similarity > self.threshold {
-                return Err(Error::other(format!(
-                    "Vector property '{}' is too similar to a banned vector (similarity: {:.4} > {:.4})",
-                    self.property_name, similarity, self.threshold
-                )));
+                    if similarity > self.threshold {
+                        return Err(Error::other(format!(
+                            "Vector property '{}' is too similar to a banned vector (similarity: {:.4} > {:.4})",
+                            self.property_name, similarity, self.threshold
+                        )));
+                    }
+                }
+                Err(_) => {
+                    // Dimension mismatch or other error in calculation.
+                    // For now, we ignore this mismatch and continue checking others,
+                    // assuming the banned vector might be from a different space.
+                    // Ideally, we might want to enforce dimension matching if configured.
+                    continue;
+                }
             }
         }
 
@@ -198,11 +204,18 @@ impl SemanticRule for NumericRangeRule {
             return Ok(()); // Not a number
         };
 
+        if !num.is_finite() {
+            return Err(Error::other(format!(
+                "Property '{}' value is not finite (NaN or Inf)",
+                self.property_name
+            )));
+        }
+
         if let Some(min) = self.min {
             if num < min {
                 return Err(Error::other(format!(
-                    "Property '{}' value {} is less than minimum {}",
-                    self.property_name, num, min
+                    "Property '{}' value is less than minimum {}",
+                    self.property_name, min
                 )));
             }
         }
@@ -210,8 +223,8 @@ impl SemanticRule for NumericRangeRule {
         if let Some(max) = self.max {
             if num > max {
                 return Err(Error::other(format!(
-                    "Property '{}' value {} is greater than maximum {}",
-                    self.property_name, num, max
+                    "Property '{}' value is greater than maximum {}",
+                    self.property_name, max
                 )));
             }
         }
@@ -229,7 +242,7 @@ mod tests {
     fn test_vector_ban_rule() {
         let mut rule = VectorBanRule::new("embedding", 0.9);
         // Banned: [1.0, 0.0]
-        rule.add_banned_vector(vec![1.0, 0.0]);
+        rule.add_banned_vector(vec![1.0, 0.0]).unwrap();
 
         // Case 1: Identical vector (Should Fail)
         let props1 = PropertyMapBuilder::new()
@@ -253,12 +266,70 @@ mod tests {
     }
 
     #[test]
+    fn test_vector_ban_rule_capacity_limit() {
+        let mut rule = VectorBanRule::new("embedding", 0.9);
+        for _ in 0..1000 {
+            rule.add_banned_vector(vec![1.0, 0.0]).unwrap();
+        }
+        // Next one should fail
+        let result = rule.add_banned_vector(vec![1.0, 0.0]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::Storage(StorageError::CapacityExceeded { limit, .. }) => {
+                assert_eq!(limit, 1000);
+            }
+            _ => panic!("Expected CapacityExceeded error"),
+        }
+    }
+
+    #[test]
+    fn test_vector_ban_rule_nan_handling() {
+        let mut rule = VectorBanRule::new("embedding", 0.9);
+        rule.add_banned_vector(vec![1.0, 0.0]).unwrap();
+
+        // Vector with NaN
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[f32::NAN, 0.0])
+            .build();
+
+        let result = rule.validate(&props);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("non-finite"));
+    }
+
+    #[test]
+    fn test_numeric_range_nan_handling() {
+        let rule = NumericRangeRule::new("age").min(18.0);
+        let props = PropertyMapBuilder::new()
+            .insert("age", f64::NAN)
+            .build();
+
+        let result = rule.validate(&props);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("not finite"));
+    }
+
+    #[test]
+    fn test_numeric_range_error_privacy() {
+        let rule = NumericRangeRule::new("salary").max(50000.0);
+        let props = PropertyMapBuilder::new()
+            .insert("salary", 100000.0)
+            .build();
+
+        let result = rule.validate(&props);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("greater than maximum 50000"));
+        assert!(!msg.contains("100000"), "Sensitive value leaked in error message");
+    }
+
+    #[test]
     fn test_sentinel_integration() {
         let mut sentinel = Sentinel::new();
 
         // Rule 1: Ban toxic vectors
         let mut ban_rule = VectorBanRule::new("embedding", 0.8);
-        ban_rule.add_banned_vector(vec![1.0, 0.0]);
+        ban_rule.add_banned_vector(vec![1.0, 0.0]).unwrap();
         sentinel.add_rule(Box::new(ban_rule));
 
         // Rule 2: Age must be >= 18
