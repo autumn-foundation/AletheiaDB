@@ -105,6 +105,9 @@ pub struct ColdStorageConfig {
 
     /// Enable CRC32 checksums for data integrity verification.
     pub enable_checksums: bool,
+
+    /// Maximum allowed size for decompressed data (DoS protection).
+    pub max_decompressed_size: usize,
 }
 
 impl Default for ColdStorageConfig {
@@ -114,6 +117,7 @@ impl Default for ColdStorageConfig {
             sync_writes: false,
             batch_size: 1000,
             enable_checksums: true,
+            max_decompressed_size: 64 * 1024 * 1024, // 64 MB default limit
         }
     }
 }
@@ -262,6 +266,9 @@ pub struct RedbConfig {
 
     /// Cache size in bytes for Redb (0 = use default).
     pub cache_size_bytes: usize,
+
+    /// Maximum allowed size for decompressed data (DoS protection).
+    pub max_decompressed_size: usize,
 }
 
 impl Default for RedbConfig {
@@ -270,6 +277,7 @@ impl Default for RedbConfig {
             compression: CompressionAlgorithm::Zstd,
             enable_checksums: true,
             cache_size_bytes: 0,
+            max_decompressed_size: 64 * 1024 * 1024, // 64 MB default limit
         }
     }
 }
@@ -298,6 +306,12 @@ impl RedbConfig {
         self
     }
 
+    /// Set the maximum allowed size for decompressed data.
+    pub fn max_decompressed_size(mut self, size: usize) -> Self {
+        self.max_decompressed_size = size;
+        self
+    }
+
     /// Convert to ColdStorageConfig for compression/checksum handling.
     pub fn to_cold_storage_config(&self) -> ColdStorageConfig {
         ColdStorageConfig {
@@ -305,6 +319,7 @@ impl RedbConfig {
             enable_checksums: self.enable_checksums,
             sync_writes: true, // Redb handles durability
             batch_size: 1000,
+            max_decompressed_size: self.max_decompressed_size,
         }
     }
 }

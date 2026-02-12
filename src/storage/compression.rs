@@ -80,9 +80,8 @@ pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
     // Decompress based on algorithm
     match config.compression.zstd_level() {
         Some(_) => {
-            zstd::decode_all(data_to_decompress).map_err(|e| -> crate::utils::error::Error {
-                StorageError::io_error(e.to_string()).into()
-            })
+            // Use decompress_with_limit to prevent Zip Bomb attacks
+            decompress_with_limit(data_to_decompress, config.max_decompressed_size)
         }
         None => Ok(data_to_decompress.to_vec()),
     }
@@ -130,17 +129,18 @@ pub fn decompress_with_limit(data: &[u8], limit: usize) -> Result<Vec<u8>> {
             break;
         }
 
-        buffer.extend_from_slice(&chunk[..bytes_read]);
-
-        if buffer.len() > limit {
+        // Check limit BEFORE extending the buffer to prevent memory spike
+        if buffer.len().saturating_add(bytes_read) > limit {
             return Err(crate::utils::error::Error::Storage(
                 StorageError::CapacityExceeded {
                     resource: "decompressed_size".to_string(),
-                    current: buffer.len(),
+                    current: buffer.len() + bytes_read,
                     limit,
                 },
             ));
         }
+
+        buffer.extend_from_slice(&chunk[..bytes_read]);
     }
 
     Ok(buffer)
@@ -266,5 +266,45 @@ mod tests {
             result.unwrap_err(),
             crate::utils::error::Error::Storage(StorageError::CapacityExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn test_decompress_zip_bomb_via_config() {
+        // 1. Create a "bomb": 10MB of zeros
+        // We use a smaller size than 100MB to avoid slowing down tests too much,
+        // but large enough to trigger a small limit.
+        let uncompressed_size = 10 * 1024 * 1024; // 10MB
+        let bomb_data = vec![0u8; uncompressed_size];
+
+        // 2. Compress it (should be very small, ~100-500 bytes)
+        let compressed = zstd::encode_all(&bomb_data[..], 1).unwrap();
+        assert!(compressed.len() < 1000);
+
+        // 3. Configure a small limit (e.g., 1MB)
+        let limit = 1 * 1024 * 1024; // 1MB
+        let config = ColdStorageConfig {
+            compression: CompressionAlgorithm::Zstd,
+            enable_checksums: false, // Simplify test (skip checksum wrapping)
+            max_decompressed_size: limit,
+            ..Default::default()
+        };
+
+        // 4. Attempt decompression
+        let result = decompress(&compressed, &config);
+
+        // 5. Verify it fails with CapacityExceeded
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+                limit: l,
+                current: c,
+                ..
+            }) => {
+                assert_eq!(l, limit);
+                // current should be > limit
+                assert!(c > limit);
+            }
+            e => panic!("Expected CapacityExceeded error, got: {:?}", e),
+        }
     }
 }
