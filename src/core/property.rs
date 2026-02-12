@@ -3920,13 +3920,16 @@ mod tests {
 
         let size = value.estimated_heap_size();
 
-        // Size should be:
+        // Size should be exactly:
         // 10 * (Vec capacity overhead + sizeof(PropertyValue)) + string length
-        // Vec capacity is at least 1.
-        let min_vec_size = std::mem::size_of::<PropertyValue>();
-        let expected_min = 10 * min_vec_size + 4; // "data".len() = 4
+        // Vec capacity is exactly 1 because we used vec![value]
+        let vec_overhead = std::mem::size_of::<PropertyValue>();
+        let expected_size = 10 * vec_overhead + 4; // "data".len() = 4
 
-        assert!(size >= expected_min);
+        assert_eq!(
+            size, expected_size,
+            "Heap size estimate should be exact for deterministic structure"
+        );
     }
 
     #[test]

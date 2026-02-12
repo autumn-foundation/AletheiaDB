@@ -1879,37 +1879,33 @@ fn test_simd_explicit_coverage() {
 fn test_simd_mismatched_lengths_safety() {
     // 🛡️ Warden Verification: This test ensures that calling internal unsafe SIMD functions
     // with mismatched lengths does NOT cause Undefined Behavior (e.g. buffer over-read/segfault).
-    // They should simply process the common prefix or truncate safely.
+    // The implementation now enforces strict equality checks and panics on mismatch.
 
     let short = vec![1.0f32; 10];
     let long = vec![2.0f32; 100]; // Much longer to ensure OOB if it were reading blindly
 
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        unsafe {
-            // Should verify only first 10 elements: 1.0 * 2.0 * 10 = 20.0
-            let (dot, _, _) = super::simd::x86_ops::dot_and_magnitudes_avx2(&short, &long);
-            assert!(
-                (dot - 20.0).abs() < 1e-5,
-                "AVX2 should safely process common prefix"
-            );
+        let result = std::panic::catch_unwind(|| unsafe {
+            let _ = super::simd::x86_ops::dot_and_magnitudes_avx2(&short, &long);
+        });
+        assert!(result.is_err(), "AVX2 should panic on mismatch");
 
-            // Reverse args: should still process only 10 elements
-            let (dot, _, _) = super::simd::x86_ops::dot_and_magnitudes_avx2(&long, &short);
-            assert!((dot - 20.0).abs() < 1e-5, "AVX2 reversed should match");
-        }
+        let result = std::panic::catch_unwind(|| unsafe {
+            let _ = super::simd::x86_ops::dot_and_magnitudes_avx2(&long, &short);
+        });
+        assert!(result.is_err(), "AVX2 reversed should panic on mismatch");
     }
 
     if is_x86_feature_detected!("sse2") {
-        unsafe {
-            let (dot, _, _) = super::simd::x86_ops::dot_and_magnitudes_sse2(&short, &long);
-            assert!(
-                (dot - 20.0).abs() < 1e-5,
-                "SSE2 should safely process common prefix"
-            );
+        let result = std::panic::catch_unwind(|| unsafe {
+            let _ = super::simd::x86_ops::dot_and_magnitudes_sse2(&short, &long);
+        });
+        assert!(result.is_err(), "SSE2 should panic on mismatch");
 
-            let (dot, _, _) = super::simd::x86_ops::dot_and_magnitudes_sse2(&long, &short);
-            assert!((dot - 20.0).abs() < 1e-5, "SSE2 reversed should match");
-        }
+        let result = std::panic::catch_unwind(|| unsafe {
+            let _ = super::simd::x86_ops::dot_and_magnitudes_sse2(&long, &short);
+        });
+        assert!(result.is_err(), "SSE2 reversed should panic on mismatch");
     }
 }
 
