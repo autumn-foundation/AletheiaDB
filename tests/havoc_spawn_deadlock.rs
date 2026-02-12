@@ -6,8 +6,15 @@ use std::time::Duration;
 
 #[test]
 fn test_spawned_thread_deadlock() {
+    // Set short timeout to make test faster
+    aletheiadb::index::vector::hnsw::set_lock_timeout_internal(Duration::from_millis(100));
+
     // Setup index
-    let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+    let index = Arc::new(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap(),
+    );
     let id1 = NodeId::new(1).unwrap();
     index.add(id1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 

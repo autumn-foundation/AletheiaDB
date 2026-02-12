@@ -165,7 +165,18 @@ const MAX_MAPPINGS_COUNT: usize = 100_000_000;
 /// attempts to modify the index (requiring a write lock).
 ///
 /// See: tests/havoc_spawn_deadlock.rs
-const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+static LOCK_TIMEOUT_MS: AtomicU64 = AtomicU64::new(10_000); // 10s default
+
+/// Helper to set the lock timeout for testing purposes.
+/// This is hidden from the public API but accessible for integration tests.
+#[doc(hidden)]
+pub fn set_lock_timeout_internal(timeout: Duration) {
+    LOCK_TIMEOUT_MS.store(timeout.as_millis() as u64, Ordering::SeqCst);
+}
+
+fn get_lock_timeout() -> Duration {
+    Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed))
+}
 
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
@@ -782,11 +793,14 @@ impl VectorIndex for HnswIndex {
                 // where multiple threads try to update the same node concurrently (PR #575).
                 // Without this, thread A could remove, thread B could remove (fail), then both try to add,
                 // causing "Duplicate keys not allowed" error.
-                let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
-                    Error::Vector(VectorError::IndexError(
-                        "Failed to acquire index write lock (timeout)".to_string(),
-                    ))
-                })?;
+                let index = self
+                    .inner
+                    .try_write_for(get_lock_timeout())
+                    .ok_or_else(|| {
+                        Error::Vector(VectorError::IndexError(
+                            "Failed to acquire index write lock (timeout)".to_string(),
+                        ))
+                    })?;
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
@@ -857,11 +871,14 @@ impl VectorIndex for HnswIndex {
 
                 // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
-                let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
-                    Error::Vector(VectorError::IndexError(
-                        "Failed to acquire index write lock (timeout)".to_string(),
-                    ))
-                })?;
+                let index = self
+                    .inner
+                    .try_write_for(get_lock_timeout())
+                    .ok_or_else(|| {
+                        Error::Vector(VectorError::IndexError(
+                            "Failed to acquire index write lock (timeout)".to_string(),
+                        ))
+                    })?;
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
@@ -906,11 +923,15 @@ impl VectorIndex for HnswIndex {
 
                     // Acquire inner lock again to remove our key.
                     // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
-                        Error::Vector(VectorError::IndexError(
-                            "Failed to acquire index write lock for rollback (timeout)".to_string(),
-                        ))
-                    })?;
+                    let index = self
+                        .inner
+                        .try_write_for(get_lock_timeout())
+                        .ok_or_else(|| {
+                            Error::Vector(VectorError::IndexError(
+                                "Failed to acquire index write lock for rollback (timeout)"
+                                    .to_string(),
+                            ))
+                        })?;
                     index.remove(key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
                             "Failed to rollback vector after concurrent add: {}",
@@ -958,11 +979,14 @@ impl VectorIndex for HnswIndex {
             self.reverse_mapping.remove(&key);
 
             // Native delete in usearch
-            let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
-                Error::Vector(VectorError::IndexError(
-                    "Failed to acquire index write lock for remove (timeout)".to_string(),
-                ))
-            })?;
+            let index = self
+                .inner
+                .try_write_for(get_lock_timeout())
+                .ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Failed to acquire index write lock for remove (timeout)".to_string(),
+                    ))
+                })?;
             index.remove(key).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to remove vector: {}",
