@@ -2023,13 +2023,13 @@ mod sentry_tests {
         // This unit test replicates the logic of `tests/havoc_coverage.rs` but runs within the unit test suite.
         // This ensures code coverage for the rollback timeout path even when integration tests are not run with `test-utils`.
 
-        use std::time::Duration;
         use std::thread;
+        use std::time::Duration;
 
         let index = Arc::new(
             HnswIndexBuilder::new(4, DistanceMetric::Cosine)
                 .build()
-                .unwrap()
+                .unwrap(),
         );
 
         // Reduce lock timeout to 100ms
@@ -2045,6 +2045,7 @@ mod sentry_tests {
         TEST_ADD_DELAY_MS.store(500, Ordering::Relaxed);
 
         // Set rollback delay for later
+        // Make this long enough to ensure T3 has time to start and acquire lock
         TEST_ROLLBACK_DELAY_MS.store(2000, Ordering::Relaxed);
 
         // Spawn T1
@@ -2062,19 +2063,18 @@ mod sentry_tests {
 
         // Wait for T1 to wake up from ADD hook, do the work, and hit ROLLBACK hook.
         // T1 sleeps for 500ms total. We are at ~100ms.
+        // We wait enough to ensure T1 has definitely finished its first sleep and work
         thread::sleep(Duration::from_millis(600));
         // Now T1 should be in rollback sleep (which lasts 2000ms).
 
         // Step 3: T3 acquires READ lock to block T1's rollback
         let (tx, rx) = std::sync::mpsc::channel();
         let _t3 = thread::spawn(move || {
-            // Hold lock for 3s (blocks T1's rollback write lock)
+            // Hold lock long enough to force T1 timeout (100ms)
             // Filter callback holds READ lock (via search_with_filter's read lock on inner)
-            // Wait: search_with_filter holds inner.read().
-            // T1 needs inner.write() for rollback (remove(key)).
             let _ = index_t3.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, |_| {
                 tx.send(()).unwrap();
-                thread::sleep(Duration::from_secs(3));
+                thread::sleep(Duration::from_secs(4));
                 true
             });
         });
@@ -2090,13 +2090,23 @@ mod sentry_tests {
         TEST_ROLLBACK_DELAY_MS.store(0, Ordering::Relaxed);
         LOCK_TIMEOUT_MS.store(old_timeout, Ordering::Relaxed);
 
-        assert!(result.is_err(), "T1 should have failed due to rollback timeout");
+        assert!(
+            result.is_err(),
+            "T1 should have failed due to rollback timeout"
+        );
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
                 // Verify it was the rollback timeout
-                assert!(msg.contains("during rollback"), "Expected rollback timeout error, got: {}", msg);
-            },
-            _ => panic!("Expected IndexError with rollback timeout message, got {:?}", result),
+                assert!(
+                    msg.contains("during rollback"),
+                    "Expected rollback timeout error, got: {}",
+                    msg
+                );
+            }
+            _ => panic!(
+                "Expected IndexError with rollback timeout message, got {:?}",
+                result
+            ),
         }
     }
 }
