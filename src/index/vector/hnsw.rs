@@ -447,12 +447,6 @@ where
             );
         }
 
-        // SAFETY: usearch guarantees pointers are valid for `dims` elements.
-        // We verified they are not null above.
-        // We trusted dims > 0 from HnswIndexBuilder validation.
-        //
-        // Strict alignment check to prevent UB (Sentry Directive)
-        // f32 requires 4-byte alignment. accessing unaligned data via slice is UB.
         if a.align_offset(std::mem::align_of::<f32>()) != 0
             || b.align_offset(std::mem::align_of::<f32>()) != 0
         {

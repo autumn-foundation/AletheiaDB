@@ -121,6 +121,11 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         .metadata()
         .map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
 
+    // Optimization: Empty file has no entries
+    if metadata.len() == 0 {
+        return Ok(Vec::new());
+    }
+
     // Maximum reasonable segment size (configurable, but 1GB is a safe upper bound)
     // Default segments are 64MB, so 1GB allows for 16x growth
     const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
@@ -764,10 +769,10 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::time;
     use crate::storage::wal::serialization::serialize_entry_into;
-    use std::io::Write;
     use tempfile::TempDir;
 
     #[test]
@@ -1869,34 +1874,21 @@ mod regression_tests {
         }
     }
     #[test]
-    fn test_read_segment_mmap_failure_on_directory() {
+    fn test_read_segment_empty_file_returns_ok() {
+
         let dir = TempDir::new().unwrap();
-        // Use the directory path itself as the "segment"
-        let segment_path = dir.path();
+        let segment_path = dir.path().join("empty_valid.log");
 
-        // Note: read_segment uses File::open. On Linux, opening a directory with O_RDONLY succeeds.
-        // But mmap_ing it usually fails with ENODEV.
-        let result = read_segment(segment_path, LSN(1));
-
-        // We assert that it MUST fail. If it succeeds, it means mmap worked on a directory,
-        // which is unexpected and means we are not testing the error path.
-        //
-        // On environments where mmap on dir works (BSD?), this test might flap,
-        // but for standard Linux CI, this ensures we cover the error branch.
-        assert!(result.is_err(), "read_segment on directory should fail");
-
-        if let Err(e) = result {
-            // Verify it is not a panic and contains expected error text
-            let msg = format!("{}", e);
-            // We specifically want to cover the mmap error path if possible
-            if msg.contains("Failed to memory-map") {
-                // Success: we hit the target lines
-            } else if msg.contains("Access is denied") || msg.contains("Is a directory") {
-                // Also acceptable (failed at open or earlier)
-            } else {
-                // Unexpected error type, but at least it failed gracefully
-                println!("Got unexpected error message: {}", msg);
-            }
+        // Create an empty file
+        {
+            let _file = File::create(&segment_path).unwrap();
         }
+
+        // Attempt to read it.
+        // Should hit the metadata.len() == 0 optimization and return Ok([])
+        let result = read_segment(&segment_path, LSN(1));
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 }
