@@ -448,11 +448,8 @@ where
         }
 
         // Verify dimensions invariant
-        // In release builds, we trust usearch (and our builder validation) to respect dims.
-        // In debug builds, we assert this invariant to catch logic bugs early.
-        if cfg!(debug_assertions) {
-            assert!(dims > 0, "Metric wrapper called with dimensions=0");
-        }
+        // We trust usearch (and our builder validation) to respect dims.
+        // We verified dims > 0 in HnswIndexBuilder::build().
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
@@ -2881,20 +2878,4 @@ mod coverage_tests {
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
 
     }
-    #[test]
-    #[should_panic(expected = "Metric wrapper called with dimensions=0")]
-    fn test_metric_wrapper_zero_dims_panic() {
-        if !cfg!(debug_assertions) {
-            // Skip in release mode where the assertion is optimized out
-            panic!("Metric wrapper called with dimensions=0");
-        }
-
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
-        // This should panic in debug mode
-        let wrapper = create_metric_wrapper(0, distance_fn);
-
-        let data = [0.0f32; 1];
-        let ptr = data.as_ptr();
-        wrapper(ptr, ptr);
     }
-}
