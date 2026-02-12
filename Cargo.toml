@@ -150,6 +150,9 @@ honeycomb-client = ["dep:serde"]
 # Honeycomb client with HTTP transmission support
 honeycomb = ["honeycomb-client", "dep:reqwest"]
 
+# Expose internal test utilities for integration tests
+test-utils = []
+
 [profile.dev]
 # Fast compilation for development
 opt-level = 0

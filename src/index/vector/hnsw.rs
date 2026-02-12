@@ -100,9 +100,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
-/// Timeout for acquiring the index lock.
+/// Timeout for acquiring the index lock (milliseconds).
 /// This prevents deadlocks (e.g., recursive locking across threads) from hanging the system indefinitely.
-const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Configurable for testing purposes.
+pub static LOCK_TIMEOUT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(10_000);
+
+// Exposed for integration tests
+#[cfg(any(test, feature = "test-utils"))]
+pub static TEST_ADD_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 // This prevents deadlocks when user filter callbacks try to modify the index.
@@ -779,7 +784,8 @@ impl VectorIndex for HnswIndex {
                 // where multiple threads try to update the same node concurrently (PR #575).
                 // Without this, thread A could remove, thread B could remove (fail), then both try to add,
                 // causing "Duplicate keys not allowed" error.
-                let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+                let timeout = Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
+                let index = self.inner.try_write_for(timeout).ok_or_else(|| {
                     Error::Vector(VectorError::IndexError(
                         "Index lock acquisition timed out in add(occupied) (potential deadlock detected)".to_string(),
                     ))
@@ -854,7 +860,8 @@ impl VectorIndex for HnswIndex {
 
                 // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
-                let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+                let timeout = Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
+                let index = self.inner.try_write_for(timeout).ok_or_else(|| {
                     Error::Vector(VectorError::IndexError(
                         "Index lock acquisition timed out in add(vacant) (potential deadlock detected)".to_string(),
                     ))
@@ -883,6 +890,14 @@ impl VectorIndex for HnswIndex {
                 // Release inner lock before accessing DashMap
                 drop(index);
 
+                #[cfg(any(test, feature = "test-utils"))]
+                {
+                    let delay = TEST_ADD_DELAY_MS.load(Ordering::Relaxed);
+                    if delay > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                    }
+                }
+
                 // Step 4: Insert to mappings (dashmap) AFTER inner is updated
                 // Handle race: another thread may have added this NodeId while we held inner lock
                 // Use entry API to safely check for existence without overwriting (which causes Zombie Vectors)
@@ -903,7 +918,8 @@ impl VectorIndex for HnswIndex {
 
                     // Acquire inner lock again to remove our key.
                     // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+                    let timeout = Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
+                    let index = self.inner.try_write_for(timeout).ok_or_else(|| {
                         Error::Vector(VectorError::IndexError(
                             "Index lock acquisition timed out in rollback (potential deadlock detected)".to_string(),
                         ))
@@ -955,7 +971,8 @@ impl VectorIndex for HnswIndex {
             self.reverse_mapping.remove(&key);
 
             // Native delete in usearch
-            let index = self.inner.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+            let timeout = Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
+            let index = self.inner.try_write_for(timeout).ok_or_else(|| {
                 Error::Vector(VectorError::IndexError(
                     "Index lock acquisition timed out in remove (potential deadlock detected)".to_string(),
                 ))
