@@ -1888,7 +1888,10 @@ fn test_simd_mismatched_lengths_safety() {
         unsafe {
             // Should verify only first 10 elements: 1.0 * 2.0 * 10 = 20.0
             let (dot, _, _) = super::simd::x86_ops::dot_and_magnitudes_avx2(&short, &long);
-            assert!((dot - 20.0).abs() < 1e-5, "AVX2 should safely process common prefix");
+            assert!(
+                (dot - 20.0).abs() < 1e-5,
+                "AVX2 should safely process common prefix"
+            );
 
             // Reverse args: should still process only 10 elements
             let (dot, _, _) = super::simd::x86_ops::dot_and_magnitudes_avx2(&long, &short);
@@ -1899,7 +1902,10 @@ fn test_simd_mismatched_lengths_safety() {
     if is_x86_feature_detected!("sse2") {
         unsafe {
             let (dot, _, _) = super::simd::x86_ops::dot_and_magnitudes_sse2(&short, &long);
-            assert!((dot - 20.0).abs() < 1e-5, "SSE2 should safely process common prefix");
+            assert!(
+                (dot - 20.0).abs() < 1e-5,
+                "SSE2 should safely process common prefix"
+            );
 
             let (dot, _, _) = super::simd::x86_ops::dot_and_magnitudes_sse2(&long, &short);
             assert!((dot - 20.0).abs() < 1e-5, "SSE2 reversed should match");
