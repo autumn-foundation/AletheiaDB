@@ -6,12 +6,10 @@ use std::time::Duration;
 
 #[test]
 fn test_spawned_thread_deadlock() {
-    // Set short timeout to make test faster
-    aletheiadb::index::vector::hnsw::set_lock_timeout_internal(Duration::from_millis(100));
-
     // Setup index
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .with_lock_timeout(Duration::from_millis(100))
             .build()
             .unwrap(),
     );
@@ -23,7 +21,7 @@ fn test_spawned_thread_deadlock() {
 
     // Spawn a thread to run the search
     thread::spawn(move || {
-        let result = index_clone.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, |id| {
+        let result = index_clone.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, |_id| {
             let (inner_tx, inner_rx) = mpsc::channel();
             let index_inner = index_clone.clone();
 

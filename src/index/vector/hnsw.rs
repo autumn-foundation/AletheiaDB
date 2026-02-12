@@ -160,23 +160,8 @@ const MAX_K: usize = 100_000;
 /// 100M entries * (16 bytes data + ~32 bytes DashMap overhead) ≈ 4.8GB RAM.
 const MAX_MAPPINGS_COUNT: usize = 100_000_000;
 
-/// Timeout for acquiring index locks (write operations).
-/// This prevents deadlocks when a thread spawned from a search filter (holding a read lock)
-/// attempts to modify the index (requiring a write lock).
-///
-/// See: tests/havoc_spawn_deadlock.rs
-static LOCK_TIMEOUT_MS: AtomicU64 = AtomicU64::new(10_000); // 10s default
-
-/// Helper to set the lock timeout for testing purposes.
-/// This is hidden from the public API but accessible for integration tests.
-#[doc(hidden)]
-pub fn set_lock_timeout_internal(timeout: Duration) {
-    LOCK_TIMEOUT_MS.store(timeout.as_millis() as u64, Ordering::SeqCst);
-}
-
-fn get_lock_timeout() -> Duration {
-    Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed))
-}
+/// Default timeout for acquiring index locks (write operations).
+const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
@@ -486,6 +471,7 @@ where
 /// Builder for configuring and creating an `HnswIndex`.
 pub struct HnswIndexBuilder {
     config: HnswConfig,
+    lock_timeout: Duration,
 }
 
 impl HnswIndexBuilder {
@@ -497,6 +483,7 @@ impl HnswIndexBuilder {
                 metric,
                 ..Default::default()
             },
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
         }
     }
 
@@ -504,7 +491,14 @@ impl HnswIndexBuilder {
     pub fn from_config(config: &HnswConfig) -> Self {
         HnswIndexBuilder {
             config: config.clone(),
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
         }
+    }
+
+    /// Sets the timeout for acquiring write locks.
+    pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 
     /// Sets the M parameter (connections per node).
@@ -693,6 +687,7 @@ impl HnswIndexBuilder {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: false,
+            lock_timeout: self.lock_timeout,
         })
     }
 }
@@ -728,6 +723,8 @@ pub struct HnswIndex {
     max_k: usize,
     /// Whether this index is memory-mapped (read-only)
     is_mmap: bool,
+    /// Timeout for acquiring write locks
+    lock_timeout: Duration,
 }
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -746,6 +743,7 @@ impl std::fmt::Debug for HnswIndex {
             .field("config", &self.config)
             .field("is_mmap", &self.is_mmap)
             .field("stats", &self.stats)
+            .field("lock_timeout", &self.lock_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -793,14 +791,11 @@ impl VectorIndex for HnswIndex {
                 // where multiple threads try to update the same node concurrently (PR #575).
                 // Without this, thread A could remove, thread B could remove (fail), then both try to add,
                 // causing "Duplicate keys not allowed" error.
-                let index = self
-                    .inner
-                    .try_write_for(get_lock_timeout())
-                    .ok_or_else(|| {
-                        Error::Vector(VectorError::IndexError(
-                            "Failed to acquire index write lock (timeout)".to_string(),
-                        ))
-                    })?;
+                let index = self.inner.try_write_for(self.lock_timeout).ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Failed to acquire index write lock (timeout)".to_string(),
+                    ))
+                })?;
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
@@ -871,14 +866,11 @@ impl VectorIndex for HnswIndex {
 
                 // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
-                let index = self
-                    .inner
-                    .try_write_for(get_lock_timeout())
-                    .ok_or_else(|| {
-                        Error::Vector(VectorError::IndexError(
-                            "Failed to acquire index write lock (timeout)".to_string(),
-                        ))
-                    })?;
+                let index = self.inner.try_write_for(self.lock_timeout).ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Failed to acquire index write lock (timeout)".to_string(),
+                    ))
+                })?;
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
@@ -923,15 +915,11 @@ impl VectorIndex for HnswIndex {
 
                     // Acquire inner lock again to remove our key.
                     // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let index = self
-                        .inner
-                        .try_write_for(get_lock_timeout())
-                        .ok_or_else(|| {
-                            Error::Vector(VectorError::IndexError(
-                                "Failed to acquire index write lock for rollback (timeout)"
-                                    .to_string(),
-                            ))
-                        })?;
+                    let index = self.inner.try_write_for(self.lock_timeout).ok_or_else(|| {
+                        Error::Vector(VectorError::IndexError(
+                            "Failed to acquire index write lock for rollback (timeout)".to_string(),
+                        ))
+                    })?;
                     index.remove(key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
                             "Failed to rollback vector after concurrent add: {}",
@@ -979,14 +967,11 @@ impl VectorIndex for HnswIndex {
             self.reverse_mapping.remove(&key);
 
             // Native delete in usearch
-            let index = self
-                .inner
-                .try_write_for(get_lock_timeout())
-                .ok_or_else(|| {
-                    Error::Vector(VectorError::IndexError(
-                        "Failed to acquire index write lock for remove (timeout)".to_string(),
-                    ))
-                })?;
+            let index = self.inner.try_write_for(self.lock_timeout).ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Failed to acquire index write lock for remove (timeout)".to_string(),
+                ))
+            })?;
             index.remove(key).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to remove vector: {}",
@@ -1101,13 +1086,17 @@ impl VectorIndex for HnswIndex {
         // and prevent re-entrant modification attempts that would cause deadlock.
         let reverse_mapping = &self.reverse_mapping;
         let filter = |key: u64| -> bool {
-            if let Some(node_id_ref) = reverse_mapping.get(&key) {
-                // Set flag to prevent modifications during callback
-                let _guard = FilterCallbackGuard::new();
-                predicate(node_id_ref.value())
+            // Optimization: Copy NodeId and drop the DashMap lock immediately
+            // to avoid blocking concurrent writes (like remove) during long predicates.
+            let node_id = if let Some(node_id_ref) = reverse_mapping.get(&key) {
+                *node_id_ref.value()
             } else {
-                false
-            }
+                return false;
+            };
+
+            // Set flag to prevent modifications during callback
+            let _guard = FilterCallbackGuard::new();
+            predicate(&node_id)
         };
 
         // Retry with exponential backoff to handle thread pool exhaustion
@@ -1821,6 +1810,7 @@ impl HnswIndex {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: false,
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
         })
     }
 
@@ -1887,6 +1877,7 @@ impl HnswIndex {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: true,
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
         })
     }
 }

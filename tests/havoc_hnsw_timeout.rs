@@ -6,11 +6,9 @@ use std::time::Duration;
 
 #[test]
 fn test_remove_timeout_during_search() {
-    // Set short timeout for testing
-    aletheiadb::index::vector::hnsw::set_lock_timeout_internal(Duration::from_millis(100));
-
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .with_lock_timeout(Duration::from_millis(100))
             .build()
             .unwrap(),
     );
@@ -28,7 +26,7 @@ fn test_remove_timeout_during_search() {
         // We block inside the callback.
         let _ = index_clone.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, |_| {
             barrier_clone.wait(); // Signal main thread we are holding lock
-            thread::sleep(Duration::from_millis(500)); // Hold lock longer than 100ms timeout
+            thread::sleep(Duration::from_millis(2000)); // Hold lock longer than 100ms timeout
             true
         });
     });
@@ -49,11 +47,9 @@ fn test_remove_timeout_during_search() {
 
 #[test]
 fn test_add_timeout_during_search() {
-    // Set short timeout for testing
-    aletheiadb::index::vector::hnsw::set_lock_timeout_internal(Duration::from_millis(100));
-
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .with_lock_timeout(Duration::from_millis(100))
             .build()
             .unwrap(),
     );
@@ -67,7 +63,7 @@ fn test_add_timeout_during_search() {
         // Search holds Read lock
         let _ = index_clone.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, |_| {
             barrier_clone.wait();
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(2000));
             true
         });
     });
