@@ -97,17 +97,28 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
-/// Timeout for acquiring the index lock (milliseconds).
-/// This prevents deadlocks (e.g., recursive locking across threads) from hanging the system indefinitely.
-/// Configurable for testing purposes.
-pub static LOCK_TIMEOUT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(10_000);
-
-// Exposed for integration tests
+// Default timeout for index locks (5 seconds)
+// This prevents indefinite deadlocks by failing the operation if the lock cannot be acquired.
 #[cfg(any(test, feature = "test-utils"))]
-pub static TEST_ADD_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Timeout for acquiring index locks (in milliseconds).
+/// Exposed for testing to allow simulating timeouts without waiting 5 seconds.
+pub static LOCK_TIMEOUT_MS: AtomicU64 = AtomicU64::new(5000);
+
+#[cfg(not(any(test, feature = "test-utils")))]
+const LOCK_TIMEOUT_MS: u64 = 5000;
+
+// Hook for testing race conditions
+#[cfg(any(test, feature = "test-utils"))]
+/// Delay injected before acquiring the inner write lock during `add()` (vacant path).
+/// Used to widen the race window for concurrency tests.
+pub static TEST_ADD_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(any(test, feature = "test-utils"))]
+/// Delay injected before acquiring the inner write lock during rollback operations.
+/// Used to simulate race conditions where rollback is blocked by another thread.
+pub static TEST_ROLLBACK_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 // This prevents deadlocks when user filter callbacks try to modify the index.
@@ -784,12 +795,9 @@ impl VectorIndex for HnswIndex {
                 // where multiple threads try to update the same node concurrently (PR #575).
                 // Without this, thread A could remove, thread B could remove (fail), then both try to add,
                 // causing "Duplicate keys not allowed" error.
-                let timeout = Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
-                let index = self.inner.try_write_for(timeout).ok_or_else(|| {
-                    Error::Vector(VectorError::IndexError(
-                        "Index lock acquisition timed out in add(occupied) (potential deadlock detected)".to_string(),
-                    ))
-                })?;
+
+                // DEADLOCK PREVENTION: Use try_write_for instead of blocking write
+                let index = self.write_with_timeout()?;
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
@@ -858,14 +866,19 @@ impl VectorIndex for HnswIndex {
                     }
                 };
 
+                // TESTING HOOK: Inject delay to widen race window for concurrency tests
+                #[cfg(any(test, feature = "test-utils"))]
+                {
+                    let delay = TEST_ADD_DELAY_MS.load(Ordering::Relaxed);
+                    if delay > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                    }
+                }
+
                 // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
-                let timeout = Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
-                let index = self.inner.try_write_for(timeout).ok_or_else(|| {
-                    Error::Vector(VectorError::IndexError(
-                        "Index lock acquisition timed out in add(vacant) (potential deadlock detected)".to_string(),
-                    ))
-                })?;
+                // DEADLOCK PREVENTION: Use try_write_for instead of blocking write
+                let index = self.write_with_timeout()?;
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
@@ -890,14 +903,6 @@ impl VectorIndex for HnswIndex {
                 // Release inner lock before accessing DashMap
                 drop(index);
 
-                #[cfg(any(test, feature = "test-utils"))]
-                {
-                    let delay = TEST_ADD_DELAY_MS.load(Ordering::Relaxed);
-                    if delay > 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(delay));
-                    }
-                }
-
                 // Step 4: Insert to mappings (dashmap) AFTER inner is updated
                 // Handle race: another thread may have added this NodeId while we held inner lock
                 // Use entry API to safely check for existence without overwriting (which causes Zombie Vectors)
@@ -918,12 +923,29 @@ impl VectorIndex for HnswIndex {
 
                     // Acquire inner lock again to remove our key.
                     // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let timeout = Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
-                    let index = self.inner.try_write_for(timeout).ok_or_else(|| {
-                        Error::Vector(VectorError::IndexError(
-                            "Index lock acquisition timed out in rollback (potential deadlock detected)".to_string(),
-                        ))
+
+                    // TESTING HOOK: Inject delay to facilitate rollback timeout testing
+                    #[cfg(any(test, feature = "test-utils"))]
+                    {
+                        let delay = TEST_ROLLBACK_DELAY_MS.load(Ordering::Relaxed);
+                        if delay > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(delay));
+                        }
+                    }
+
+                    // DEADLOCK PREVENTION: Use try_write_for instead of blocking write
+                    // Note: We use the standard timeout helper, but wrap the error to be more specific context
+                    let index = self.write_with_timeout().map_err(|e| {
+                        if let Error::Vector(VectorError::IndexError(msg)) = e {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "{} during rollback",
+                                msg
+                            )))
+                        } else {
+                            e
+                        }
                     })?;
+
                     index.remove(key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
                             "Failed to rollback vector after concurrent add: {}",
@@ -971,12 +993,9 @@ impl VectorIndex for HnswIndex {
             self.reverse_mapping.remove(&key);
 
             // Native delete in usearch
-            let timeout = Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
-            let index = self.inner.try_write_for(timeout).ok_or_else(|| {
-                Error::Vector(VectorError::IndexError(
-                    "Index lock acquisition timed out in remove (potential deadlock detected)".to_string(),
-                ))
-            })?;
+            // DEADLOCK PREVENTION: Use try_write_for instead of blocking write
+            let index = self.write_with_timeout()?;
+
             index.remove(key).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to remove vector: {}",
@@ -1091,18 +1110,10 @@ impl VectorIndex for HnswIndex {
         // and prevent re-entrant modification attempts that would cause deadlock.
         let reverse_mapping = &self.reverse_mapping;
         let filter = |key: u64| -> bool {
-            // Get NodeId and drop the DashMap guard immediately to avoid holding locks during callback
-            // (Issue found by Havoc testing: holding DashMap lock blocks remove() operations)
-            let node_id = if let Some(node_id_ref) = reverse_mapping.get(&key) {
-                Some(*node_id_ref.value())
-            } else {
-                None
-            };
-
-            if let Some(node_id) = node_id {
+            if let Some(node_id_ref) = reverse_mapping.get(&key) {
                 // Set flag to prevent modifications during callback
                 let _guard = FilterCallbackGuard::new();
-                predicate(&node_id)
+                predicate(node_id_ref.value())
             } else {
                 false
             }
@@ -1418,6 +1429,22 @@ impl HnswIndex {
             }
         }
         Ok(())
+    }
+
+    /// Helper method to acquire write lock with timeout.
+    ///
+    /// This centralizes the timeout logic and error handling to prevent deadlocks.
+    fn write_with_timeout(&self) -> Result<parking_lot::RwLockWriteGuard<'_, Index>> {
+        #[cfg(any(test, feature = "test-utils"))]
+        let timeout = std::time::Duration::from_millis(LOCK_TIMEOUT_MS.load(Ordering::Relaxed));
+        #[cfg(not(any(test, feature = "test-utils")))]
+        let timeout = std::time::Duration::from_millis(LOCK_TIMEOUT_MS);
+
+        self.inner.try_write_for(timeout).ok_or_else(|| {
+            Error::Vector(VectorError::IndexError(
+                "Timed out waiting for index write lock (potential deadlock detected)".to_string(),
+            ))
+        })
     }
 
     /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.

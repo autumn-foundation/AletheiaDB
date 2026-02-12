@@ -1,4 +1,4 @@
-use aletheiadb::core::PropertyValue;
+use aletheiadb::PropertyValue;
 use aletheiadb::core::property::MAX_VECTOR_DIMENSIONS;
 use proptest::prelude::*;
 
