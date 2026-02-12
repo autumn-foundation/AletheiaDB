@@ -44,18 +44,12 @@ fn test_ring_buffer_torture() {
                 }
 
                 // Retry until success (simulating aggressive writer)
-                loop {
-                    match buffer.try_append(entry) {
-                        Ok(_) => break,
-                        Err(returned_entry) => {
-                            // Manual backoff instead of blocking, to stress try_append
-                            thread::yield_now();
-                            // Use blocking append to finish if try_append keeps failing
-                            // This exercises both code paths
-                            buffer.append_blocking(returned_entry).unwrap();
-                            break;
-                        }
-                    }
+                if let Err(returned_entry) = buffer.try_append(entry) {
+                    // Manual backoff instead of blocking, to stress try_append
+                    thread::yield_now();
+                    // Use blocking append to finish if try_append keeps failing
+                    // This exercises both code paths
+                    buffer.append_blocking(returned_entry).unwrap();
                 }
             }
         }));
@@ -67,9 +61,9 @@ fn test_ring_buffer_torture() {
     let producers_done_clone = Arc::clone(&producers_done);
 
     let consumer_handle = thread::spawn(move || {
-        let mut received_counts = vec![0usize; NUM_PRODUCERS];
+        let mut received_counts = [0usize; NUM_PRODUCERS];
         let mut total_received = 0;
-        let mut last_seq = vec![0u64; NUM_PRODUCERS]; // To check per-producer ordering
+        let mut last_seq = [0u64; NUM_PRODUCERS]; // To check per-producer ordering
 
         barrier_clone.wait();
 
@@ -77,7 +71,13 @@ fn test_ring_buffer_torture() {
             let entries = buffer_clone.drain();
 
             if entries.is_empty() {
-                if producers_done_clone.load(Ordering::Acquire) && total_received == TOTAL_ENTRIES {
+                if producers_done_clone.load(Ordering::Acquire) {
+                    if total_received < TOTAL_ENTRIES {
+                        panic!(
+                            "Producers finished but only received {}/{} entries. Ring buffer dropped data?",
+                            total_received, TOTAL_ENTRIES
+                        );
+                    }
                     break;
                 }
                 thread::yield_now();
