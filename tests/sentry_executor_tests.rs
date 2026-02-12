@@ -1,13 +1,13 @@
 use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::version::AnchorConfig;
+use aletheiadb::index::vector::DistanceMetric;
+use aletheiadb::index::vector::hnsw::HnswConfig;
 use aletheiadb::query::executor::QueryExecutor;
 use aletheiadb::query::planner::physical::{PhysicalOp, PhysicalPlan};
 use aletheiadb::storage::current::CurrentStorage;
 use aletheiadb::storage::historical::HistoricalStorage;
-use aletheiadb::index::vector::hnsw::HnswConfig;
-use aletheiadb::index::vector::DistanceMetric;
-use aletheiadb::core::version::AnchorConfig;
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::sync::Arc;
 
 #[test]
 fn test_similar_to_node_multi_index_bug() {
