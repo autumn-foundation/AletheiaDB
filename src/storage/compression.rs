@@ -267,4 +267,105 @@ mod tests {
             crate::utils::error::Error::Storage(StorageError::CapacityExceeded { .. })
         ));
     }
+
+    #[test]
+    fn test_config_mismatch_checksum() {
+        // 💣 Risk: Disabling checksums when reading data written with checksums
+        // causes silent corruption if compression is None.
+        let write_config = ColdStorageConfig {
+            compression: CompressionAlgorithm::None,
+            enable_checksums: true,
+            ..Default::default()
+        };
+
+        let read_config = ColdStorageConfig {
+            compression: CompressionAlgorithm::None,
+            enable_checksums: false, // Mismatch!
+            ..Default::default()
+        };
+
+        let data = b"Important Data";
+        let compressed = compress(data, &write_config).unwrap();
+
+        // Reading with checksums disabled...
+        let result = decompress(&compressed, &read_config).unwrap();
+
+        // 💣 ...returns the data PLUS the checksum bytes prepended!
+        // This confirms the silent corruption behavior.
+        assert_ne!(result, data);
+        assert_eq!(result.len(), data.len() + 4);
+        assert_eq!(&result[4..], data);
+    }
+
+    #[test]
+    fn test_config_mismatch_checksum_zstd() {
+        // 💣 Risk: Disabling checksums when reading data written with checksums
+        // causes obscure Zstd errors if compression is Zstd.
+        let write_config = ColdStorageConfig {
+            compression: CompressionAlgorithm::Zstd,
+            enable_checksums: true,
+            ..Default::default()
+        };
+
+        let read_config = ColdStorageConfig {
+            compression: CompressionAlgorithm::Zstd,
+            enable_checksums: false, // Mismatch!
+            ..Default::default()
+        };
+
+        let data = b"Important Data";
+        let compressed = compress(data, &write_config).unwrap();
+
+        // Reading with checksums disabled...
+        let result = decompress(&compressed, &read_config);
+
+        // 💣 ...fails because Zstd decoder sees the CRC bytes as garbage header.
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        // The error comes from zstd::decode_all wrapped in StorageError::io_error
+        assert!(err_msg.contains("I/O error") || err_msg.contains("zstd") || err_msg.contains("Decompression failed"));
+    }
+
+    #[test]
+    fn test_decompress_with_limit_empty() {
+        // 💣 Risk: Empty input handling.
+        // 🧪 Strategy: Pass empty slice to decompress_with_limit.
+        let result = decompress_with_limit(&[], 100);
+
+        // zstd decoder on empty input might error (invalid frame) or return empty.
+        // Let's see what happens.
+        // If it errors, that's safe. If it returns empty, that's also safe (empty -> empty).
+        match result {
+            Ok(v) => assert!(v.is_empty(), "Empty input should yield empty output"),
+            Err(_) => {
+                // Also acceptable if it considers empty input invalid zstd stream
+            }
+        }
+    }
+
+    #[test]
+    fn test_decompress_empty() {
+        // 💣 Risk: Empty input handling for standard decompress.
+        let config = ColdStorageConfig {
+            compression: CompressionAlgorithm::None,
+            enable_checksums: false,
+            ..Default::default()
+        };
+
+        let result = decompress(&[], &config);
+        // Should return empty vec
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+
+        let config_checksum = ColdStorageConfig {
+            compression: CompressionAlgorithm::None,
+            enable_checksums: true,
+            ..Default::default()
+        };
+
+        let result = decompress(&[], &config_checksum);
+        // Should error because len < 4 (no checksum)
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too short"));
+    }
 }
