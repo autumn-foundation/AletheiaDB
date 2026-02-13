@@ -7,8 +7,10 @@
 //! We explicitly test with random lengths to exercise both the SIMD vector loop
 //! and the scalar tail processing loop.
 
+use aletheiadb::core::vector::{
+    cosine_similarity, dot_product, euclidean_distance, normalize, squared_euclidean_distance,
+};
 use proptest::prelude::*;
-use aletheiadb::core::vector::{cosine_similarity, dot_product, squared_euclidean_distance, euclidean_distance, normalize};
 
 proptest! {
     #[test]

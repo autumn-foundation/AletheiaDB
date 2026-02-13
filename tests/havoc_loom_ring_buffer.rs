@@ -10,9 +10,9 @@
 //! Ideally, the production code would use a trait or macro to support both `std` and `loom`,
 //! but for now this "Model Test" ensures the algorithm itself is correct.
 
-use loom::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use loom::sync::Arc;
 use loom::cell::UnsafeCell;
+use loom::sync::Arc;
+use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use loom::thread;
 
 // Simplified PendingEntry - just holds some data
@@ -84,7 +84,8 @@ impl WalRingBuffer {
         // Loom loop limit to prevent infinite loops in model checking
         // In real code this is `loop`, but for loom we need to break if stuck
         // or just let loom handle context switches.
-        for _ in 0..3 { // Reduced for performance
+        for _ in 0..3 {
+            // Reduced for performance
             let pos = self.write_pos.load(Ordering::Relaxed);
             let idx = (pos as usize) & self.mask;
             let slot = &self.slots[idx];
@@ -134,7 +135,8 @@ impl WalRingBuffer {
     fn drain(&self) -> Vec<PendingEntry> {
         let mut entries = Vec::new();
         // Limit drain loop for loom too
-        for _ in 0..3 { // Reduced for performance
+        for _ in 0..3 {
+            // Reduced for performance
             let pos = self.read_pos.load(Ordering::Relaxed);
             let idx = (pos as usize) & self.mask;
             let slot = &self.slots[idx];
@@ -189,17 +191,20 @@ fn test_ring_buffer_concurrency() {
             let b = buffer.clone();
             producers.push(thread::spawn(move || {
                 for i in 0..items_per_producer {
-                    let entry = PendingEntry { producer_id: p, seq: i };
+                    let entry = PendingEntry {
+                        producer_id: p,
+                        seq: i,
+                    };
                     // Retry loop
                     let mut current_entry = entry;
                     loop {
-                         match b.try_append(current_entry) {
-                             Ok(_) => break,
-                             Err(e) => {
-                                 current_entry = e;
-                                 thread::yield_now();
-                             }
-                         }
+                        match b.try_append(current_entry) {
+                            Ok(_) => break,
+                            Err(e) => {
+                                current_entry = e;
+                                thread::yield_now();
+                            }
+                        }
                     }
                 }
             }));
@@ -207,16 +212,18 @@ fn test_ring_buffer_concurrency() {
 
         let b = buffer.clone();
         let consumer = thread::spawn(move || {
-             let mut received = Vec::new();
-             let total_items = num_producers * items_per_producer;
-             // Limit iterations to avoid infinite loop in loom
-             for _ in 0..10 {
-                 if received.len() >= total_items { break; }
-                 let batch = b.drain();
-                 received.extend(batch);
-                 thread::yield_now();
-             }
-             received
+            let mut received = Vec::new();
+            let total_items = num_producers * items_per_producer;
+            // Limit iterations to avoid infinite loop in loom
+            for _ in 0..10 {
+                if received.len() >= total_items {
+                    break;
+                }
+                let batch = b.drain();
+                received.extend(batch);
+                thread::yield_now();
+            }
+            received
         });
 
         for p in producers {
@@ -228,7 +235,8 @@ fn test_ring_buffer_concurrency() {
         // Verify consistency
         // Each producer's items should be in order
         for p in 0..num_producers {
-            let p_items: Vec<_> = received.iter()
+            let p_items: Vec<_> = received
+                .iter()
                 .filter(|e| e.producer_id == p)
                 .map(|e| e.seq)
                 .collect();

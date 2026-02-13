@@ -8,8 +8,8 @@
 //! in parsing logic, `proptest` provides a good baseline for CI without requiring
 //! nightly Rust or special fuzzing infrastructure.
 
+use aletheiadb::core::property::{PropertyMap, PropertyValue, deserialize_vector};
 use proptest::prelude::*;
-use aletheiadb::core::property::{PropertyValue, PropertyMap, deserialize_vector};
 
 proptest! {
     // Fuzz PropertyValue::deserialize with random bytes
