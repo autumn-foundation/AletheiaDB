@@ -526,7 +526,7 @@ mod prop_tests {
     fn arb_property_map() -> impl Strategy<Value = PropertyMap> {
         prop::collection::vec(
             (
-                "[a-z]{1,10}",       // Key
+                "[a-z]{1,10}",        // Key
                 arb_property_value(), // Value
             ),
             0..10, // Size
