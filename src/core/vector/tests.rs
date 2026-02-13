@@ -2861,17 +2861,22 @@ fn test_simd_mismatched_lengths_safety() {
         let result = std::panic::catch_unwind(|| unsafe {
             super::simd::x86_ops::dot_and_magnitudes_sse2(&a, &b)
         });
-        assert!(result.is_err(), "SSE2 dot_and_magnitudes should panic on mismatch");
+        assert!(
+            result.is_err(),
+            "SSE2 dot_and_magnitudes should panic on mismatch"
+        );
 
-        let result = std::panic::catch_unwind(|| unsafe {
-            super::simd::x86_ops::dot_product_sse2(&a, &b)
-        });
+        let result =
+            std::panic::catch_unwind(|| unsafe { super::simd::x86_ops::dot_product_sse2(&a, &b) });
         assert!(result.is_err(), "SSE2 dot_product should panic on mismatch");
 
         let result = std::panic::catch_unwind(|| unsafe {
             super::simd::x86_ops::squared_diff_sum_sse2(&a, &b)
         });
-        assert!(result.is_err(), "SSE2 squared_diff_sum should panic on mismatch");
+        assert!(
+            result.is_err(),
+            "SSE2 squared_diff_sum should panic on mismatch"
+        );
     }
 
     // Test AVX2 if available
@@ -2879,16 +2884,21 @@ fn test_simd_mismatched_lengths_safety() {
         let result = std::panic::catch_unwind(|| unsafe {
             super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b)
         });
-        assert!(result.is_err(), "AVX2 dot_and_magnitudes should panic on mismatch");
+        assert!(
+            result.is_err(),
+            "AVX2 dot_and_magnitudes should panic on mismatch"
+        );
 
-        let result = std::panic::catch_unwind(|| unsafe {
-            super::simd::x86_ops::dot_product_avx2(&a, &b)
-        });
+        let result =
+            std::panic::catch_unwind(|| unsafe { super::simd::x86_ops::dot_product_avx2(&a, &b) });
         assert!(result.is_err(), "AVX2 dot_product should panic on mismatch");
 
         let result = std::panic::catch_unwind(|| unsafe {
             super::simd::x86_ops::squared_diff_sum_avx2(&a, &b)
         });
-        assert!(result.is_err(), "AVX2 squared_diff_sum should panic on mismatch");
+        assert!(
+            result.is_err(),
+            "AVX2 squared_diff_sum should panic on mismatch"
+        );
     }
 }
