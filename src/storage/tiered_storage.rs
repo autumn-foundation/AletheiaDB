@@ -1080,4 +1080,82 @@ mod tests {
         let result = tiered.store_node_versions_batch(&[version]);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_prefetch_latency_metric_behavior() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let config = TieredStorageConfig {
+            warm_cache_size: 100,
+            enable_prefetch: true,
+            prefetch_depth: 3,
+        };
+        let tiered = TieredStorage::new(config, Arc::new(cold));
+
+        // Create a chain of versions: v4 -> v3 -> v2 -> v1
+        let mut versions = Vec::new();
+        let v1 = create_test_node_version(1);
+        versions.push(v1);
+
+        for i in 2..=4 {
+            let v = NodeVersion::new_delta(
+                VersionId::new(i).unwrap(),
+                NodeId::new(100).unwrap(),
+                BiTemporalInterval::current(((1000 + i * 100) as i64).into()),
+                GLOBAL_INTERNER.intern("Test").unwrap(),
+                &PropertyMapBuilder::new().build(),
+                &PropertyMapBuilder::new().build(),
+                VersionId::new(i - 1).unwrap(),
+            );
+            versions.push(v);
+        }
+
+        // Store all in cold storage
+        for v in &versions {
+            tiered.store_node_version(v).unwrap();
+        }
+
+        // Access the head version (v4)
+        // This should trigger:
+        // 1. Fetch v4 (cold miss) -> records latency
+        // 2. Prefetch v3 (cold) -> DOES NOT record latency in cold_latency metric
+        // 3. Prefetch v2 (cold) -> DOES NOT record latency
+        // 4. Prefetch v1 (cold) -> DOES NOT record latency
+        let _ = tiered
+            .get_node_version_cold(VersionId::new(4).unwrap())
+            .unwrap();
+
+        let metrics = tiered.metrics();
+
+        // Verify we only have 1 latency sample despite doing 4 disk reads
+        assert_eq!(
+            metrics.cold_latency.sample_count, 1,
+            "Should record latency only for the requested item, not prefetches"
+        );
+
+        // Verify we did prefetch
+        assert_eq!(metrics.prefetches, 3, "Should have prefetched 3 items");
+
+        // Verify cache state: all 4 should be in warm cache
+        for i in 1..=4 {
+            // Since we just accessed them (or prefetched them), they should be in warm cache
+            // Note: get_node_version_cold increments warm_hits if found
+            // We expect returns Ok(Some(_))
+            assert!(
+                tiered
+                    .get_node_version_cold(VersionId::new(i).unwrap())
+                    .unwrap()
+                    .is_some()
+            );
+        }
+
+        let final_metrics = tiered.metrics();
+        // Initial cold hit (v4) + 4 warm hits (checking v1..v4)
+        // Total cold hits: 1 (v4 initial)
+        // Total warm hits: 4 (subsequent checks)
+        assert_eq!(final_metrics.cold_hits, 1);
+        assert_eq!(final_metrics.warm_hits, 4);
+    }
 }
