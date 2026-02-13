@@ -35,17 +35,20 @@
 //!
 //! Or embedded within a larger application:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use std::sync::Arc;
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::mcp::AletheiaMcpServer;
+//! // Requires 'rmcp' dependency
+//! use rmcp::{ServiceExt, transport::stdio};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = Arc::new(AletheiaDB::new()?);
 //! let server = AletheiaMcpServer::new(db);
 //!
 //! // Run the server over stdio (blocks until stdin closes)
-//! server.serve_stdio().await?;
+//! let service = server.serve(stdio()).await?;
+//! service.waiting().await?;
 //! # Ok(())
 //! # }
 //! ```
