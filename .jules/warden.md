@@ -14,3 +14,7 @@
 **2026-02-15 - LSN Allocator Overflow**
 **Threat:** The atomic LSN allocator used `fetch_add` without overflow checking. While requiring ~5000 years at 100M/sec to overflow `u64`, a large batch allocation (e.g. `u64::MAX`) or eventual wraparound would cause duplicate LSNs, breaking WAL ordering and data consistency.
 **Defense:** Replaced `fetch_add` with `fetch_update` (CAS loop) in `src/storage/wal/lsn_allocator.rs` to atomically check for overflow *before* modifying the state. Added `tests/warden_security_tests.rs` to verify panic behavior on overflow attempts.
+
+**2026-02-15 - FFI Panic Abort Prevention**
+**Threat:** User-provided custom distance metrics can panic. Since these are called via FFI from C++ (usearch), unwinding across the FFI boundary causes a hard process abort (SIGABRT), acting as a DoS vector.
+**Defense:** Wrapped the metric callback in `std::panic::catch_unwind`. If a panic occurs, it is caught, logged to stderr, and `f32::MAX` is returned to signal infinite distance, preventing the crash.

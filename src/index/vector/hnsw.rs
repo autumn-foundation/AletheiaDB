@@ -449,10 +449,24 @@ where
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
+        //
+        // We wrap the user callback in catch_unwind to prevent panics from unwinding
+        // across the FFI boundary into C++, which is Undefined Behavior and causes aborts.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+            let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+            distance_fn(slice_a, slice_b)
+        }));
 
-        let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
-        let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-        distance_fn(slice_a, slice_b)
+        match result {
+            Ok(distance) => distance,
+            Err(_) => {
+                // Log the error to stderr since we can't propagate it through FFI.
+                // We return f32::MAX to indicate "infinite distance" (no match).
+                eprintln!("CRITICAL: Panic in custom metric function caught by HNSW wrapper. Returning f32::MAX to prevent UB.");
+                f32::MAX
+            }
+        }
     })
 }
 
@@ -1914,6 +1928,21 @@ mod sentry_tests {
             "Error: No available threads to lock for search"
         ));
         assert!(!is_retryable_usearch_error("Other error"));
+    }
+
+    #[test]
+    fn test_metric_wrapper_panic_handling() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            panic!("Test panic in metric");
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let v1 = [1.0f32, 0.0, 0.0, 0.0];
+        let v2 = [0.0f32, 1.0, 0.0, 0.0];
+
+        // Should return f32::MAX instead of unwinding
+        let result = wrapper(v1.as_ptr(), v2.as_ptr());
+        assert_eq!(result, f32::MAX);
     }
 }
 
