@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization};
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization};
 use std::sync::Arc;
 
 #[test]
@@ -16,7 +16,9 @@ fn test_ffi_panic_in_custom_metric() {
         .expect("Failed to build index");
 
     let node1 = NodeId::new(1).unwrap();
-    index.add(node1, &[1.0, 0.0, 0.0, 0.0]).expect("Failed to add vector");
+    index
+        .add(node1, &[1.0, 0.0, 0.0, 0.0])
+        .expect("Failed to add vector");
 
     // This search should trigger the panic inside the metric
     let _ = index.search(&[1.0, 0.0, 0.0, 0.0], 1);

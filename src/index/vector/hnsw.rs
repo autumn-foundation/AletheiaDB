@@ -463,7 +463,9 @@ where
             Err(_) => {
                 // Log the error to stderr since we can't propagate it through FFI.
                 // We return f32::MAX to indicate "infinite distance" (no match).
-                eprintln!("CRITICAL: Panic in custom metric function caught by HNSW wrapper. Returning f32::MAX to prevent UB.");
+                eprintln!(
+                    "CRITICAL: Panic in custom metric function caught by HNSW wrapper. Returning f32::MAX to prevent UB."
+                );
                 f32::MAX
             }
         }
