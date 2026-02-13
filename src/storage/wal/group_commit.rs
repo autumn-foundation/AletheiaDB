@@ -265,7 +265,7 @@ impl GroupCommitCoordinator {
         // epoch 1 < 2, but it shouldn't fail unless 1 < oldest_error_epoch.
 
         if epoch < state.oldest_error_epoch {
-             return Err(Error::Storage(StorageError::WalError {
+            return Err(Error::Storage(StorageError::WalError {
                 reason: format!(
                     "Group commit status unknown: epoch {} evicted from error history (history starts at {})",
                     epoch, state.oldest_error_epoch
@@ -715,10 +715,12 @@ mod tests {
         // Check Epoch 1 - Should be unknown/evicted
         let result1 = coord.wait_for_flush(epoch1);
         assert!(result1.is_err());
-        assert!(result1
-            .unwrap_err()
-            .to_string()
-            .contains("evicted from error history"));
+        assert!(
+            result1
+                .unwrap_err()
+                .to_string()
+                .contains("evicted from error history")
+        );
 
         // Check Epoch 2 - Should be known error
         let result2 = coord.wait_for_flush(epoch2);
