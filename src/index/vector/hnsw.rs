@@ -1919,6 +1919,25 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_metric_wrapper_panic_handling() {
+        // This test ensures that panics in the metric function are caught and handled safely
+        // by returning f32::MAX, preventing FFI aborts.
+        // It covers the catch_unwind logic in create_metric_wrapper.
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            panic!("Intentional panic for coverage");
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let vec = [0.0f32; 4];
+        let ptr = vec.as_ptr();
+
+        // This should not panic, but return f32::MAX and print an error to stderr
+        let result = wrapper(ptr, ptr);
+
+        assert_eq!(result, f32::MAX);
+    }
+
+    #[test]
     fn test_is_retryable_error_matching() {
         assert!(is_retryable_usearch_error(
             "Error: No available threads to lock for search"

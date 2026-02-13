@@ -63,108 +63,12 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::IndexPersistenceManager;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 
-use super::formats::{
-    GraphIndexManifestEntry, IndexManifest, PersistencePolicies, StringInternerManifestEntry,
-    TemporalAdjacencyIndexManifestEntry,
-};
+use super::formats::PersistencePolicies;
 use super::operations::{
     persist_all_indexes, persist_graph_index, persist_string_interner, persist_temporal_index,
     persist_vector_indexes,
 };
 use super::tracker::PersistenceTracker;
-
-/// Update the manifest file to reflect persisted index state.
-///
-/// **CRITICAL**: This function must be called after any index persistence operation
-/// during background persistence. Without this, the manifest becomes stale/missing,
-/// causing recovery failures after crashes (e.g., string interner ID mismatches).
-///
-/// # Parameters
-///
-/// * `snapshot_lsn` - The LSN captured BEFORE persistence started. This is critical
-///   for crash recovery: the manifest must record a conservative LSN that is guaranteed
-///   to be consistent with the persisted data. If we used the current LSN (after
-///   persistence), concurrent writes could cause the manifest to reference a state
-///   ahead of what's on disk, leading to data loss during WAL replay.
-///
-/// * `node_count`, `edge_count` - The exact counts of nodes/edges that were persisted.
-///   These should be captured at the same time as the snapshot LSN to ensure consistency.
-///
-/// # Background
-///
-/// Issue #1011: Before this fix, the manifest was ONLY saved during clean shutdown
-/// via `persist_all_indexes`. This caused a critical bug:
-/// 1. Background worker saves indexes (graph.idx, temporal.idx, interner.idx)
-/// 2. Manifest is NOT updated (remains stale or doesn't exist)
-/// 3. Process crashes or is killed via Ctrl+C
-/// 4. On restart: indexes exist but manifest is missing
-/// 5. Recovery loads interner but temporal data references missing string IDs
-///
-/// This function ensures the manifest stays in sync with persisted index files,
-/// enabling successful recovery even without clean shutdown.
-///
-/// # Error Handling
-///
-/// Errors are logged but swallowed to prevent killing the background persistence thread.
-/// Manifest save failures are non-fatal since:
-/// - Index files are still valid (can be loaded with best-effort recovery)
-/// - Next persistence cycle will retry manifest save
-/// - WAL provides durability for data
-fn update_manifest(
-    manager: &Arc<IndexPersistenceManager>,
-    historical: &Arc<RwLock<HistoricalStorage>>,
-    snapshot_lsn: u64,
-    node_count: u64,
-    edge_count: u64,
-    string_count: u64,
-) {
-    let mut manifest = IndexManifest::new(snapshot_lsn);
-
-    // Add string interner entry (always present if any data exists)
-    if string_count > 0 {
-        manifest.string_interner = Some(StringInternerManifestEntry {
-            interner_file: "strings/interner.idx".to_string(),
-            string_count,
-        });
-    }
-
-    // Add graph index entry if we have nodes/edges
-    if node_count > 0 || edge_count > 0 {
-        manifest.graph_index = Some(GraphIndexManifestEntry {
-            adjacency_file: "graph/adjacency.idx".to_string(),
-            node_count,
-            edge_count,
-        });
-    }
-
-    // Add temporal adjacency index entry if configured
-    let hist_read = historical.read();
-    if let Some(adj_index) = hist_read.get_temporal_adjacency_index() {
-        let total_entries: usize = adj_index
-            .outgoing
-            .iter()
-            .map(|entry| entry.value().len())
-            .sum();
-        let node_count = adj_index.outgoing.len();
-
-        if total_entries > 0 {
-            manifest.temporal_adjacency_index = Some(TemporalAdjacencyIndexManifestEntry {
-                adjacency_file: "temporal_adjacency/adjacency.idx".to_string(),
-                entry_count: total_entries as u64,
-                node_count: node_count as u64,
-            });
-        }
-    }
-    drop(hist_read);
-
-    // Save manifest (swallow errors to avoid killing background thread)
-    // Note: Using eprintln! for consistency with other error handling in this module.
-    // The `tracing` crate is optional and behind feature flags, while this module
-    // consistently uses eprintln! for direct stderr logging.
-    if let Err(e) = manager.save_manifest(&manifest) {
-        eprintln!("Background persistence: Failed to save manifest: {}", e);
-    }
-}
 
 /// Spawn a background thread for automatic index persistence.
 ///
@@ -206,104 +110,56 @@ pub(crate) fn spawn_background_persistence_thread(
                     break;
                 }
 
-                // Track if any index was persisted this cycle
-                let mut any_index_persisted = false;
-
-                // CRITICAL: Capture snapshot state BEFORE persistence operations start
-                // This ensures the manifest records a conservative LSN/counts that are
-                // guaranteed to be consistent with what gets written to disk, preventing
-                // data loss during recovery if concurrent writes happen during persistence.
-                let snapshot_lsn = wal.current_lsn().0;
-                let node_count = current.node_count() as u64;
-                let edge_count = current.edge_count() as u64;
-                let string_count = crate::core::GLOBAL_INTERNER.len() as u64;
-
                 // Check vector index policy
                 let vector_mutations = tracker.get_vector_mutations();
                 let vector_seconds = tracker.seconds_since_vector_persist();
-                if vector_mutations >= policies.vector.mutation_threshold as u64
-                    || vector_seconds >= policies.vector.time_interval_secs as u64
+                if (vector_mutations >= policies.vector.mutation_threshold as u64
+                    || vector_seconds >= policies.vector.time_interval_secs as u64)
+                    && let Err(e) = persist_vector_indexes(&current, &manager, Some(&tracker))
                 {
-                    match persist_vector_indexes(&current, &manager, Some(&tracker)) {
-                        Ok(()) => any_index_persisted = true,
-                        Err(e) => {
-                            eprintln!(
-                                "Background persistence: Failed to persist vector indexes: {}",
-                                e
-                            );
-                        }
-                    }
+                    eprintln!(
+                        "Background persistence: Failed to persist vector indexes: {}",
+                        e
+                    );
                 }
 
                 // Check graph index policy
                 let graph_mutations = tracker.get_graph_mutations();
                 let graph_seconds = tracker.seconds_since_graph_persist();
-                if graph_mutations >= policies.graph.mutation_threshold as u64
-                    || graph_seconds >= policies.graph.time_interval_secs as u64
+                if (graph_mutations >= policies.graph.mutation_threshold as u64
+                    || graph_seconds >= policies.graph.time_interval_secs as u64)
+                    && let Err(e) = persist_graph_index(&current, &manager, Some(&tracker))
                 {
-                    match persist_graph_index(&current, &manager, Some(&tracker)) {
-                        Ok(()) => any_index_persisted = true,
-                        Err(e) => {
-                            eprintln!(
-                                "Background persistence: Failed to persist graph index: {}",
-                                e
-                            );
-                        }
-                    }
+                    eprintln!(
+                        "Background persistence: Failed to persist graph index: {}",
+                        e
+                    );
                 }
 
                 // Check temporal index policy
                 let temporal_mutations = tracker.get_temporal_mutations();
                 let temporal_seconds = tracker.seconds_since_temporal_persist();
-                if temporal_mutations >= policies.temporal.version_threshold as u64
-                    || temporal_seconds >= policies.temporal.time_interval_secs as u64
+                if (temporal_mutations >= policies.temporal.version_threshold as u64
+                    || temporal_seconds >= policies.temporal.time_interval_secs as u64)
+                    && let Err(e) =
+                        persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker)
                 {
-                    match persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker)
-                    {
-                        Ok(()) => any_index_persisted = true,
-                        Err(e) => {
-                            eprintln!(
-                                "Background persistence: Failed to persist temporal index: {}",
-                                e
-                            );
-                        }
-                    }
+                    eprintln!(
+                        "Background persistence: Failed to persist temporal index: {}",
+                        e
+                    );
                 }
 
                 // Check string interner policy
                 let string_mutations = tracker.get_string_mutations();
                 let string_seconds = tracker.seconds_since_string_persist();
-                if string_mutations >= policies.strings.new_strings_threshold as u64
-                    || string_seconds >= policies.strings.time_interval_secs as u64
+                if (string_mutations >= policies.strings.new_strings_threshold as u64
+                    || string_seconds >= policies.strings.time_interval_secs as u64)
+                    && let Err(e) = persist_string_interner(&manager, &tracker)
                 {
-                    match persist_string_interner(&manager, &tracker) {
-                        Ok(()) => any_index_persisted = true,
-                        Err(e) => {
-                            eprintln!(
-                                "Background persistence: Failed to persist string interner: {}",
-                                e
-                            );
-                        }
-                    }
-                }
-
-                // CRITICAL FIX (Issue #1011): Update manifest after any index persistence
-                // This ensures manifest stays in sync with index files on disk, preventing
-                // recovery failures after crashes (e.g., string ID mismatches in temporal data).
-                // Without this, manifest is only saved on clean shutdown, which never happens
-                // when the process is killed via Ctrl+C or crashes.
-                //
-                // We use the snapshot state captured BEFORE persistence to ensure the manifest
-                // LSN/counts are conservative and consistent with the persisted data, preventing
-                // WAL replay from skipping operations if concurrent writes happened during persistence.
-                if any_index_persisted {
-                    update_manifest(
-                        &manager,
-                        &historical,
-                        snapshot_lsn,
-                        node_count,
-                        edge_count,
-                        string_count,
+                    eprintln!(
+                        "Background persistence: Failed to persist string interner: {}",
+                        e
                     );
                 }
             }
