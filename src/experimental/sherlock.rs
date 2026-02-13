@@ -118,11 +118,11 @@ impl<'a> Sherlock<'a> {
                     let mut found_next = false;
                     let prev_event_time = *current_sequence.last().unwrap();
 
-                    // Search forward from current_version_idx + 1
+                    // Search forward from the next index (saturating to avoid overflow edge cases).
                     for (j, candidate) in versions
                         .iter()
                         .enumerate()
-                        .skip(current_version_idx + 1)
+                        .skip(current_version_idx.saturating_add(1))
                     {
                         let candidate_time = candidate.temporal.valid_time().start();
 
@@ -198,31 +198,33 @@ mod tests {
     #[test]
     fn test_sherlock_detects_sequence() {
         let db = AletheiaDB::new().unwrap();
-        let _start_time = time::now();
+        let t0 = time::from_millis(1_000);
+        let t1 = time::from_millis(1_050);
+        let t2 = time::from_millis(1_100);
 
         // 1. Create Node (Status: Pending)
         let props = PropertyMapBuilder::new()
             .insert("status", "Pending")
             .build();
-        let node_id = db.create_node("Order", props).unwrap();
+        let node_id = db
+            .write(|tx| tx.create_node_with_valid_time("Order", props, Some(t0)))
+            .unwrap();
 
-        // 2. Update to "Shipped" (after 10ms)
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // 2. Update to "Shipped" at explicit valid time.
         db.write(|tx| {
             let p = PropertyMapBuilder::new()
                 .insert("status", "Shipped")
                 .build();
-            tx.update_node(node_id, p)
+            tx.update_node_with_valid_time(node_id, p, Some(t1))
         })
         .unwrap();
 
-        // 3. Update to "Delivered" (after 10ms)
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // 3. Update to "Delivered" at explicit valid time.
         db.write(|tx| {
             let p = PropertyMapBuilder::new()
                 .insert("status", "Delivered")
                 .build();
-            tx.update_node(node_id, p)
+            tx.update_node_with_valid_time(node_id, p, Some(t2))
         })
         .unwrap();
 
@@ -247,24 +249,26 @@ mod tests {
         let results = sherlock.investigate(node_id, &mystery).unwrap();
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].event_times.len(), 3);
+        assert_eq!(results[0].node_id, node_id);
+        assert_eq!(results[0].event_times, vec![t0, t1, t2]);
     }
 
     #[test]
     fn test_sherlock_time_window_constraint() {
         let db = AletheiaDB::new().unwrap();
+        let t0 = time::from_millis(10_000);
+        let t1 = time::from_millis(10_100); // 100ms after t0
 
         // 1. Create Node (State A)
         let props = PropertyMapBuilder::new().insert("state", "A").build();
-        let node_id = db.create_node("Machine", props).unwrap();
-
-        // 2. Wait 100ms
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let node_id = db
+            .write(|tx| tx.create_node_with_valid_time("Machine", props, Some(t0)))
+            .unwrap();
 
         // 3. Update to State B
         db.write(|tx| {
             let p = PropertyMapBuilder::new().insert("state", "B").build();
-            tx.update_node(node_id, p)
+            tx.update_node_with_valid_time(node_id, p, Some(t1))
         })
         .unwrap();
 
@@ -300,5 +304,7 @@ mod tests {
 
         let results_pass = sherlock.investigate(node_id, &possible_mystery).unwrap();
         assert_eq!(results_pass.len(), 1, "Should match within 500ms");
+        assert_eq!(results_pass[0].node_id, node_id);
+        assert_eq!(results_pass[0].event_times, vec![t0, t1]);
     }
 }
