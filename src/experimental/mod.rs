@@ -28,6 +28,9 @@ pub mod graph_context;
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
 #[cfg(feature = "nova")]
+/// Prism: Semantic Spectroscopy for Vectors.
+pub mod prism;
+#[cfg(feature = "nova")]
 /// Prophet Link Prediction Engine.
 pub mod prophet;
 #[cfg(feature = "nova")]
