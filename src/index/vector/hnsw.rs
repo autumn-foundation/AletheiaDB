@@ -97,7 +97,15 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
+
+// Test hook to inject delay for race condition testing
+#[cfg(test)]
+pub(crate) static TEST_RACE_HOOK: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static TEST_RACE_WAITING: AtomicBool = AtomicBool::new(false);
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 // This prevents deadlocks when user filter callbacks try to modify the index.
@@ -774,6 +782,17 @@ impl VectorIndex for HnswIndex {
                 // Lock Ordering Invariant: inner (RwLock) -> id_mapping (DashMap).
                 // Previous implementation held DashMap -> inner, causing deadlock with search/save/vacant-add.
                 drop(entry);
+
+                #[cfg(test)]
+                {
+                    if TEST_RACE_HOOK.load(Ordering::SeqCst) {
+                        TEST_RACE_WAITING.store(true, Ordering::SeqCst);
+                        // Sleep to allow the test controller to modify the map.
+                        // The test controller waits for TEST_RACE_WAITING=true before proceeding.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        TEST_RACE_WAITING.store(false, Ordering::SeqCst);
+                    }
+                }
 
                 // Acquire inner write lock (follows invariant: Inner first)
                 let index = self.inner.write();
@@ -2827,6 +2846,84 @@ mod tests {
         // Search for k=5 to force more comparisons
         let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn test_add_race_retry_coverage() -> Result<()> {
+        // This test deterministically triggers the retry logic in add()
+        // when the mapping changes or is removed between dropping entry lock
+        // and acquiring inner lock.
+
+        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?);
+        let id = NodeId::new(1).unwrap();
+
+        // Initial add
+        index.add(id, &[1.0, 0.0, 0.0, 0.0])?;
+
+        // Enable hook to pause thread in the critical gap
+        TEST_RACE_HOOK.store(true, Ordering::SeqCst);
+        // Ensure waiting flag is clear
+        TEST_RACE_WAITING.store(false, Ordering::SeqCst);
+
+        // Scenario 1: Mapping removed while waiting
+        let index_clone = index.clone();
+        let handle = std::thread::spawn(move || {
+            // This will pause after dropping entry lock
+            index_clone.add(id, &[0.0, 1.0, 0.0, 0.0])
+        });
+
+        // Wait for helper thread to enter the critical section
+        while !TEST_RACE_WAITING.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // Remove the mapping (concurrent modification) while helper is waiting
+        index.remove(id)?;
+
+        // Wait for thread to finish (should retry and succeed)
+        handle.join().unwrap()?;
+
+        // Verify vector was added (re-added after removal)
+        let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, id);
+        assert!(results[0].1 > 0.99);
+
+        // Scenario 2: Mapping changed (updated) while waiting
+        // Reset state
+        TEST_RACE_HOOK.store(true, Ordering::SeqCst);
+        TEST_RACE_WAITING.store(false, Ordering::SeqCst);
+
+        let index_clone = index.clone();
+        let handle = std::thread::spawn(move || {
+            // This will pause after dropping entry lock
+            // Trying to set to [0.0, 0.0, 1.0, 0.0]
+            index_clone.add(id, &[0.0, 0.0, 1.0, 0.0])
+        });
+
+        // Wait for helper thread to enter the critical section
+        while !TEST_RACE_WAITING.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // Update the mapping directly (simulate another thread changing the key)
+        // We can't easily change the key without add/remove, so let's remove and add back
+        // which allocates a NEW key.
+        index.remove(id)?;
+        index.add(id, &[1.0, 1.0, 1.0, 1.0])?; // New key
+
+        // Wait for thread to finish (should detect key mismatch and retry)
+        handle.join().unwrap()?;
+
+        // Verify the final state matches the thread's update
+        let results = index.search(&[0.0, 0.0, 1.0, 0.0], 1)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, id);
+        assert!(results[0].1 > 0.99);
+
+        // Cleanup
+        TEST_RACE_HOOK.store(false, Ordering::SeqCst);
+        Ok(())
     }
 }
 
