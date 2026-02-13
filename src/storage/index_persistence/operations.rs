@@ -310,6 +310,14 @@ pub(crate) fn persist_graph_index(
     graph_data.incoming_offsets = incoming_offsets;
     graph_data.incoming_neighbors = incoming_neighbors;
 
+    // Persist string interner AFTER graph conversion.
+    // Property serialization can intern previously unseen string values, so
+    // the interner snapshot must be updated before writing graph data that
+    // references those IDs.
+    manager.save_string_interner().map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
+
     // Save to disk
     let graph_path = manager.graph_path().join("adjacency.idx");
 
@@ -337,11 +345,6 @@ pub(crate) fn persist_temporal_index(
     use crate::storage::index_persistence::temporal::{
         convert_edge_version, convert_node_version, new_temporal_index_data, save_temporal_index,
     };
-
-    // First save string interner (versions depend on interned strings)
-    manager.save_string_interner().map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
-    })?;
 
     // Get read lock on historical storage
     let historical_guard = historical.read();
@@ -381,6 +384,14 @@ pub(crate) fn persist_temporal_index(
 
     // Drop the lock before disk I/O
     drop(historical_guard);
+
+    // Persist string interner AFTER converting temporal data.
+    // Conversion can intern previously unseen string values from version payloads.
+    // Saving the interner before conversion can leave temporal entries pointing to
+    // IDs that are missing from the persisted interner snapshot.
+    manager.save_string_interner().map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
 
     // Save to disk
     let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
