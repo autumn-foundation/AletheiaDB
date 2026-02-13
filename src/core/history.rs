@@ -100,7 +100,7 @@ impl VersionDiff {
                     // Property was added
                     added_builder = added_builder.insert_by_key(*key, to_value.clone());
                 }
-                Some(from_value) if from_value != to_value => {
+                Some(from_value) if !property_values_semantically_equal(from_value, to_value) => {
                     // Property was modified
                     modified.push((*key, from_value.clone(), to_value.clone()));
                 }
@@ -136,6 +136,57 @@ impl VersionDiff {
     #[must_use]
     pub fn change_count(&self) -> usize {
         self.added.len() + self.removed.len() + self.modified.len()
+    }
+}
+
+/// Helper to check if two property values are semantically equal.
+///
+/// This handles NaN equality for floating point types (Float, Vector, SparseVector),
+/// treating NaN as equal to NaN. This is important for history tracking to avoid
+/// detecting changes when values are effectively the same (undefined).
+fn property_values_semantically_equal(a: &PropertyValue, b: &PropertyValue) -> bool {
+    use crate::core::property::PropertyValue::*;
+
+    match (a, b) {
+        (Float(a_val), Float(b_val)) => {
+            if a_val.is_nan() && b_val.is_nan() {
+                true
+            } else {
+                a_val == b_val
+            }
+        }
+        (Vector(a_vec), Vector(b_vec)) => {
+            if a_vec.len() != b_vec.len() {
+                return false;
+            }
+            a_vec.iter().zip(b_vec.iter()).all(|(x, y)| {
+                if x.is_nan() && y.is_nan() {
+                    true
+                } else {
+                    x == y
+                }
+            })
+        }
+        (SparseVector(a_sv), SparseVector(b_sv)) => {
+            if a_sv.dimension() != b_sv.dimension() || a_sv.indices() != b_sv.indices() {
+                return false;
+            }
+            // Compare values with NaN handling
+            let a_vals = a_sv.values();
+            let b_vals = b_sv.values();
+            if a_vals.len() != b_vals.len() {
+                return false;
+            }
+            a_vals.iter().zip(b_vals.iter()).all(|(x, y)| {
+                if x.is_nan() && y.is_nan() {
+                    true
+                } else {
+                    x == y
+                }
+            })
+        }
+        // All other types use standard equality
+        _ => a == b,
     }
 }
 
@@ -445,5 +496,54 @@ mod tests {
                 .build(),
             label: "Test".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod semantic_equality_tests {
+    use super::*;
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
+    use crate::core::id::VersionId;
+
+    #[test]
+    fn test_version_diff_nan_behavior() {
+        let from_props = PropertyMapBuilder::new()
+            .insert("score", f64::NAN)
+            .build();
+
+        let to_props = PropertyMapBuilder::new()
+            .insert("score", f64::NAN)
+            .build();
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+
+        // Currently this fails (returns true) because NaN != NaN
+        assert!(!diff.has_changes(), "NaN -> NaN should NOT be treated as a change");
+    }
+
+    #[test]
+    fn test_version_diff_vector_nan_behavior() {
+        let vec_nan = vec![1.0, f32::NAN, 2.0];
+        let from_props = PropertyMapBuilder::new()
+            .insert_vector("emb", &vec_nan)
+            .build();
+
+        let to_props = PropertyMapBuilder::new()
+            .insert_vector("emb", &vec_nan)
+            .build();
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+
+        assert!(!diff.has_changes(), "Vector with NaN -> Same Vector should NOT be treated as a change");
     }
 }
