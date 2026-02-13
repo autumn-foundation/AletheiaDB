@@ -360,7 +360,7 @@ println!("Created Alice: {:?}", alice);
 ### Time-Travel Queries
 
 ```rust
-use aletheiadb::core::temporal::{Timestamp, time};
+use aletheiadb::core::temporal::time;
 
 // Get current time
 let now = time::now();
@@ -408,7 +408,6 @@ let similar = db.find_similar(doc_id, 10)?;
 ### Hybrid Queries (Graph + Vector + Temporal)
 
 ```rust
-use aletheiadb::query::QueryBuilder;
 use aletheiadb::query::ir::Predicate;
 
 // Setup query parameters

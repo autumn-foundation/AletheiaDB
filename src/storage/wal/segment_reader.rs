@@ -495,7 +495,10 @@ pub(crate) fn parse_entry_at(
         }
         4 => {
             // UpdateEdge
-            if current_offset.checked_add(16).ok_or_else(|| {
+            // V0: 16 bytes (EdgeId + VersionId)
+            // V1+: 20 bytes (EdgeId + VersionId + LabelId)
+            let required = if version >= WAL_VERSION { 20 } else { 16 };
+            if current_offset.checked_add(required).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -1650,17 +1653,17 @@ mod tests {
         let mut full_buffer = Vec::new();
         serialize_entry_into(&entry, &mut full_buffer).unwrap();
 
-        // Calculate expected cut point
-        // Header (24) + Op (1) + EdgeID (8) + VersionID (8) = 41 bytes
-        // We want to pass the first check (41 bytes) but fail the next (Label ID, +4 bytes)
-        // So we truncate to EXACTLY 41 bytes.
+        // Calculate expected cut point.
+        // UpdateEdge now validates all V1 fixed fields in one check:
+        // Header (24) + Op (1) + EdgeID (8) + VersionID (8) + LabelID (4) = 45 bytes.
+        // Truncating to 41 bytes should fail the fixed-fields boundary check.
         let truncated_buffer = &full_buffer[0..41];
 
-        // This should trigger "Insufficient buffer size for UpdateEdge label"
+        // This should trigger the generic UpdateEdge insufficient buffer error.
         let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
         assert!(result.is_err());
         if let Err(Error::Storage(StorageError::CorruptedData(msg))) = result {
-            assert_eq!(msg, "Insufficient buffer size for UpdateEdge label");
+            assert_eq!(msg, "Insufficient buffer size for UpdateEdge");
         } else {
             panic!("Expected specific CorruptedData error, got: {:?}", result);
         }
@@ -1863,6 +1866,25 @@ mod regression_tests {
             );
         } else {
             panic!("Expected CorruptedData error, got: {:?}", result);
+        }
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        // Fuzz parse_entry_at with arbitrary bytes
+        #[test]
+        fn fuzz_parse_entry_at(
+            bytes in prop::collection::vec(any::<u8>(), 0..2048),
+            offset in 0..100usize,
+            version in 0..2u8
+        ) {
+            // Should not panic
+            let _ = parse_entry_at(&bytes, offset, version);
         }
     }
 }
