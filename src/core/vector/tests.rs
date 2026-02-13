@@ -2849,3 +2849,56 @@ fn test_dot_product_sum_mismatch_panics() {
     let b = vec![1.0, 2.0, 3.0];
     let _ = super::simd::dot_product_sum(&a, &b);
 }
+
+#[test]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn test_simd_mismatched_lengths_safety() {
+    let a = vec![1.0; 8];
+    let b = vec![1.0; 9];
+
+    // Test SSE2 if available (baseline for x86_64)
+    if is_x86_feature_detected!("sse2") {
+        let result = std::panic::catch_unwind(|| unsafe {
+            super::simd::x86_ops::dot_and_magnitudes_sse2(&a, &b)
+        });
+        assert!(
+            result.is_err(),
+            "SSE2 dot_and_magnitudes should panic on mismatch"
+        );
+
+        let result =
+            std::panic::catch_unwind(|| unsafe { super::simd::x86_ops::dot_product_sse2(&a, &b) });
+        assert!(result.is_err(), "SSE2 dot_product should panic on mismatch");
+
+        let result = std::panic::catch_unwind(|| unsafe {
+            super::simd::x86_ops::squared_diff_sum_sse2(&a, &b)
+        });
+        assert!(
+            result.is_err(),
+            "SSE2 squared_diff_sum should panic on mismatch"
+        );
+    }
+
+    // Test AVX2 if available
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        let result = std::panic::catch_unwind(|| unsafe {
+            super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b)
+        });
+        assert!(
+            result.is_err(),
+            "AVX2 dot_and_magnitudes should panic on mismatch"
+        );
+
+        let result =
+            std::panic::catch_unwind(|| unsafe { super::simd::x86_ops::dot_product_avx2(&a, &b) });
+        assert!(result.is_err(), "AVX2 dot_product should panic on mismatch");
+
+        let result = std::panic::catch_unwind(|| unsafe {
+            super::simd::x86_ops::squared_diff_sum_avx2(&a, &b)
+        });
+        assert!(
+            result.is_err(),
+            "AVX2 squared_diff_sum should panic on mismatch"
+        );
+    }
+}

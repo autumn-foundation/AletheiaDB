@@ -33,6 +33,8 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         unsafe {
             let len = a.len();
             let chunks = len / 8;
@@ -107,6 +109,8 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_sse2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         unsafe {
             let len = a.len();
             let chunks = len / 4;
@@ -183,6 +187,8 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
@@ -227,6 +233,8 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32]) -> f32 {
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
@@ -268,6 +276,8 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn squared_diff_sum_avx2(a: &[f32], b: &[f32]) -> f32 {
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
@@ -318,6 +328,8 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn squared_diff_sum_sse2(a: &[f32], b: &[f32]) -> f32 {
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees SSE2 is available via runtime feature detection.

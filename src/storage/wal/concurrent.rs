@@ -252,7 +252,7 @@ impl ConcurrentWal {
     ///
     /// The allocated LSN for this entry.
     pub fn append_async(&self, operation: WalOperation) -> Result<LSN> {
-        let lsn = self.lsn_allocator.allocate()?;
+        let lsn = self.lsn_allocator.allocate();
         let data = self.serialize_entry(lsn, &operation)?;
         let stripe = self.get_stripe();
 
@@ -277,7 +277,7 @@ impl ConcurrentWal {
     /// - `Ok(lsn)` - The entry is now durable
     /// - `Err(...)` - Flush failed
     pub fn append_sync(&self, operation: WalOperation) -> Result<LSN> {
-        let lsn = self.lsn_allocator.allocate()?;
+        let lsn = self.lsn_allocator.allocate();
         let data = self.serialize_entry(lsn, &operation)?;
         let stripe = self.get_stripe();
 
@@ -304,7 +304,7 @@ impl ConcurrentWal {
     /// This method will block if the buffer is full until space becomes
     /// available (backpressure).
     pub fn append_with_handle(&self, operation: WalOperation) -> Result<(LSN, CompletionHandle)> {
-        let lsn = self.lsn_allocator.allocate()?;
+        let lsn = self.lsn_allocator.allocate();
         let data = self.serialize_entry(lsn, &operation)?;
         let stripe = self.get_stripe();
 
@@ -366,7 +366,7 @@ impl ConcurrentWal {
         debug_assert!(count > 0, "count should be > 0 after empty check");
 
         // Allocate all LSNs in a single atomic operation
-        let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count)?;
+        let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
 
         // Pre-allocate result vector
         let mut lsns = Vec::with_capacity(operations.len());
