@@ -351,18 +351,47 @@ impl StringInterner {
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
     pub fn get_all_strings(&self) -> Vec<String> {
-        let count = self.len();
-        let mut strings = vec![String::new(); count];
+        // Retry loop to ensure snapshot consistency under concurrent modifications.
+        // DashMap iterators are not guaranteed to be consistent snapshots, so we
+        // might miss items that were inserted during iteration or just before.
+        let mut attempts = 0;
+        loop {
+            // Get expected count from string_to_id (which is populated LAST during intern)
+            let count = self.len();
+            let mut strings = vec![String::new(); count];
+            let mut found_count = 0;
 
-        // Collect all (id, string) pairs
-        for entry in self.id_to_string.iter() {
-            let id = entry.key().as_u32() as usize;
-            if id < count {
-                strings[id] = entry.value().to_string();
+            // Iterate id_to_string directly to fill the vector.
+            // This avoids allocating intermediate tuples.
+            for entry in self.id_to_string.iter() {
+                let id = entry.key().as_u32() as usize;
+                if id < count {
+                    strings[id] = entry.value().to_string();
+                    found_count += 1;
+                }
             }
-        }
 
-        strings
+            // Consistency Check:
+            // We must find exactly `count` items. If we find fewer, it means our iteration
+            // missed some concurrent inserts (holes). Since id_to_string is populated
+            // strictly before string_to_id (which drives `count`), any item counted in
+            // `len()` MUST exist in `id_to_string`. Missing it means we need to retry.
+            if found_count == count {
+                return strings;
+            }
+
+            // Liveness safety: prevent infinite loop if interner state is inconsistent
+            // (e.g. if len() > id_to_string.len() permanently due to a bug).
+            attempts += 1;
+            if attempts > 1000 {
+                // Return best effort (may contain holes/empty strings)
+                // This is better than hanging indefinitely.
+                return strings;
+            }
+
+            // Backoff slightly to let concurrent operations settle
+            std::thread::yield_now();
+        }
     }
 
     /// Pre-intern common strings at startup to avoid initial allocation overhead.
@@ -1234,5 +1263,65 @@ mod mutant_kill_tests {
         }
 
         writer.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sentry_consistency_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn test_get_all_strings_consistency_under_load() {
+        let interner = Arc::new(StringInterner::new());
+        let barrier = Arc::new(Barrier::new(11)); // 10 writers + 1 reader
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        // Spawn 10 writers
+        let mut handles = vec![];
+        for i in 0..10 {
+            let interner = Arc::clone(&interner);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for j in 0..1000 {
+                    interner.intern(format!("w{}_s{}", i, j)).unwrap();
+                }
+            }));
+        }
+
+        // Reader thread
+        let reader_handle = {
+            let interner = Arc::clone(&interner);
+            let barrier = Arc::clone(&barrier);
+            let running = Arc::clone(&running);
+            thread::spawn(move || {
+                barrier.wait();
+                while running.load(std::sync::atomic::Ordering::Relaxed) {
+                    let all_strings = interner.get_all_strings();
+                    for (id, s) in all_strings.iter().enumerate() {
+                        assert!(
+                            !s.is_empty(),
+                            "Found empty string (hole) at ID {}! len={}",
+                            id,
+                            all_strings.len()
+                        );
+                    }
+                    // Yield to let writers proceed
+                    thread::yield_now();
+                }
+            })
+        };
+
+        // Wait for writers
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Stop reader
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        reader_handle.join().unwrap();
     }
 }
