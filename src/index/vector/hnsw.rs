@@ -770,11 +770,31 @@ impl VectorIndex for HnswIndex {
                 // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
 
-                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
-                // where multiple threads try to update the same node concurrently (PR #575).
-                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
-                // causing "Duplicate keys not allowed" error.
+                // DEADLOCK FIX: Drop DashMap shard lock BEFORE acquiring inner lock.
+                // Lock Ordering Invariant: inner (RwLock) -> id_mapping (DashMap).
+                // Previous implementation held DashMap -> inner, causing deadlock with search/save/vacant-add.
+                drop(entry);
+
+                // Acquire inner write lock (follows invariant: Inner first)
                 let index = self.inner.write();
+
+                // Re-verify mapping under Inner lock.
+                // We must ensure the mapping hasn't changed or been removed while we switched locks.
+                // This is safe because acquiring id_mapping (read) while holding inner (write)
+                // respects the Inner -> DashMap order.
+                if let Some(current_key) = self.id_mapping.get(&id) {
+                    if *current_key != existing_key {
+                        // Mapping changed by another thread (update/remove).
+                        // Release lock and retry the operation from scratch.
+                        drop(index);
+                        return self.add(id, vector);
+                    }
+                } else {
+                    // Mapping removed by another thread.
+                    // Release lock and retry (will likely take Vacant path).
+                    drop(index);
+                    return self.add(id, vector);
+                }
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {

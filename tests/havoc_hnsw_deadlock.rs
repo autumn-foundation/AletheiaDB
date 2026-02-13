@@ -1,5 +1,6 @@
 use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -58,5 +59,72 @@ fn test_hnsw_reentrant_deadlock_prevented() {
     // Wait for 2 seconds. The operation should complete quickly now.
     if rx.recv_timeout(Duration::from_secs(2)).is_err() {
         panic!("Test timed out! The re-entrancy prevention may not be working correctly.");
+    }
+}
+
+#[test]
+fn havoc_hnsw_deadlock_repro() {
+    // Chaos Test: Concurrent Add (Occupied) vs Add (Vacant) Deadlock
+    // Ideally this runs with many iterations to catch the race.
+
+    // Reduce iterations for CI to avoid timeout flakes, but enough to trigger race locally
+    let _iterations = 1000;
+    let num_threads = 16;
+
+    let index = Arc::new(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap(),
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut handles = vec![];
+
+    // Thread Group A: Repeatedly update the SAME ID (Occupied path)
+    // This holds the shard lock for ID 1 continuously.
+    for i in 0..num_threads {
+        let index = index.clone();
+        let stop = stop.clone();
+        handles.push(thread::spawn(move || {
+            let id = NodeId::new(1).unwrap();
+            let mut vec = vec![1.0, 0.0, 0.0, 0.0];
+            while !stop.load(Ordering::Relaxed) {
+                // Mutate vector slightly to force updates
+                vec[0] = (i as f32) * 0.1;
+                if let Err(e) = index.add(id, &vec) {
+                    eprintln!("Update failed: {}", e);
+                }
+                // Yield to increase contention
+                thread::yield_now();
+            }
+        }));
+    }
+
+    // Thread Group B: Add NEW IDs (Vacant path)
+    // This holds the INNER lock, then tries to acquire shard lock.
+    for i in 0..num_threads {
+        let index = index.clone();
+        let stop = stop.clone();
+        handles.push(thread::spawn(move || {
+            let mut id_val = 1000 * (i as u64) + 2;
+            let vec = vec![0.0, 1.0, 0.0, 0.0];
+            while !stop.load(Ordering::Relaxed) {
+                let id = NodeId::new(id_val).unwrap();
+                if let Err(e) = index.add(id, &vec) {
+                    eprintln!("Add failed: {}", e);
+                }
+                id_val += 1;
+                // Yield to increase contention
+                thread::yield_now();
+            }
+        }));
+    }
+
+    // Run for a bit
+    thread::sleep(Duration::from_secs(5));
+    stop.store(true, Ordering::Relaxed);
+
+    for handle in handles {
+        handle.join().unwrap();
     }
 }
