@@ -24,10 +24,12 @@ use std::time::Duration;
 /// A Clue represents a specific event or state change to look for.
 #[derive(Debug, Clone)]
 pub enum Clue {
-    /// A property changed to a specific value.
-    /// If value is None, matches any change to that key.
-    PropertyChange {
+    /// A property has a specific value at this version.
+    /// If value is None, matches any existing value for that key.
+    PropertyState {
+        /// The property key to check.
         key: String,
+        /// The expected value (None for existence check).
         value: Option<PropertyValue>,
     },
     // Future: Edge addition/removal, etc.
@@ -90,11 +92,13 @@ impl<'a> Sherlock<'a> {
 
         // We need to find a sequence of versions that match the clues.
         // This is a simplified backtracking or iterative search.
-        // Since history is linear time-wise, we can iterate.
+        // Since history is linear time-wise (transaction time), but we care about valid time
+        // for temporal pattern matching, we MUST sort by valid time.
+        // Otherwise, backdated updates could break detection.
 
-        // Candidate matches for the FIRST clue.
-        // A "match" is a version index.
-        let versions = &history.versions;
+        // Clone and sort versions by valid_time start
+        let mut versions = history.versions.clone();
+        versions.sort_by_key(|v| v.temporal.valid_time().start());
 
         // Strategy: Find all occurrences of Clue 0.
         // For each, look ahead for Clue 1, then Clue 2...
@@ -112,16 +116,28 @@ impl<'a> Sherlock<'a> {
 
                 for next_clue_idx in 1..mystery.clues.len() {
                     let mut found_next = false;
+                    let prev_event_time = *current_sequence.last().unwrap();
 
                     // Search forward from current_version_idx + 1
                     for j in (current_version_idx + 1)..versions.len() {
                         let candidate = &versions[j];
                         let candidate_time = candidate.temporal.valid_time().start();
 
+                        // Enforce strictly increasing time (if required) or just monotonic?
+                        // "Sequence of events" usually implies strict ordering if distinct events.
+                        // But let's assume valid time is monotonic since we sorted.
+                        // We still check strictly greater to avoid matching the same instant if multiple versions exist?
+                        // Or if we want strict temporal progression.
+                        if candidate_time <= prev_event_time {
+                            continue;
+                        }
+
                         // Check time window constraint relative to START
                         let elapsed_micros = candidate_time.wallclock() - start_time.wallclock();
-                        if Duration::from_micros(elapsed_micros as u64) > mystery.time_window {
-                            // Exceeded window, stop searching for this sequence
+                        if elapsed_micros > mystery.time_window.as_micros() as i64 {
+                            // Exceeded window. Since versions are sorted by valid time,
+                            // all subsequent versions will also exceed the window.
+                            // So we can safely break this inner loop.
                             break;
                         }
 
@@ -152,18 +168,9 @@ impl<'a> Sherlock<'a> {
     }
 
     // Helper: Does a version match a clue?
-    // Note: This checks if the version *contains* the property state.
-    // Strictly speaking, "PropertyChange" implies it *changed* to this value in this version.
-    // But `VersionInfo` represents the state *at* that time.
-    // If we want "Change", we should check diff with previous version?
-    // For MVP, let's assume "State at version matches".
-    // Wait, if I have versions V1(status=OK), V2(status=OK), V3(status=Error).
-    // If clue is "status=OK", V1 and V2 match.
-    // If sequence is "OK -> Error", then V1->V3 matches, V2->V3 matches.
-    // This is acceptable for "Pattern Matching".
     fn matches_clue(&self, version: &crate::core::history::VersionInfo, clue: &Clue) -> bool {
         match clue {
-            Clue::PropertyChange { key, value } => {
+            Clue::PropertyState { key, value } => {
                 if let Some(prop_val) = version.properties.get(key) {
                     if let Some(target_val) = value {
                         prop_val == target_val
@@ -182,6 +189,7 @@ impl<'a> Sherlock<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
+    use crate::core::hlc::HybridTimestamp;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
 
@@ -221,15 +229,15 @@ mod tests {
         // Mystery: Pending -> Delivered (skipping Shipped is allowed if order preserved? No, we just look for A then B)
         // Let's look for Pending -> Shipped -> Delivered
         let mystery = Mystery::new(Duration::from_secs(1))
-            .add_clue(Clue::PropertyChange {
+            .add_clue(Clue::PropertyState {
                 key: "status".to_string(),
                 value: Some(PropertyValue::from("Pending")),
             })
-            .add_clue(Clue::PropertyChange {
+            .add_clue(Clue::PropertyState {
                 key: "status".to_string(),
                 value: Some(PropertyValue::from("Shipped")),
             })
-            .add_clue(Clue::PropertyChange {
+            .add_clue(Clue::PropertyState {
                 key: "status".to_string(),
                 value: Some(PropertyValue::from("Delivered")),
             });
@@ -262,11 +270,11 @@ mod tests {
 
         // Mystery: A -> B within 10ms (Should Fail)
         let impossible_mystery = Mystery::new(Duration::from_millis(10))
-            .add_clue(Clue::PropertyChange {
+            .add_clue(Clue::PropertyState {
                 key: "state".to_string(),
                 value: Some(PropertyValue::from("A")),
             })
-            .add_clue(Clue::PropertyChange {
+            .add_clue(Clue::PropertyState {
                 key: "state".to_string(),
                 value: Some(PropertyValue::from("B")),
             });
@@ -279,11 +287,11 @@ mod tests {
 
         // Mystery: A -> B within 500ms (Should Pass)
         let possible_mystery = Mystery::new(Duration::from_millis(500))
-            .add_clue(Clue::PropertyChange {
+            .add_clue(Clue::PropertyState {
                 key: "state".to_string(),
                 value: Some(PropertyValue::from("A")),
             })
-            .add_clue(Clue::PropertyChange {
+            .add_clue(Clue::PropertyState {
                 key: "state".to_string(),
                 value: Some(PropertyValue::from("B")),
             });
