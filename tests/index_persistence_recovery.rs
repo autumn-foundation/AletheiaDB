@@ -29,6 +29,12 @@ fn test_interner_loaded_without_manifest() {
     assert!(manager.interner_path().exists());
     assert!(!manager.manifest_path().exists());
 
+    // Simulate a process restart by clearing the in-memory interner.
+    // This ensures we are testing the loading logic from a clean state,
+    // which is critical for verifying recovery.
+    GLOBAL_INTERNER.clear();
+    GLOBAL_INTERNER.warm_common_strings();
+
     // Try to load - should succeed with best-effort recovery
     let result = manager.load_manifest_and_strings();
 

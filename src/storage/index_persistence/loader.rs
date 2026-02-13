@@ -96,17 +96,19 @@ impl IndexPersistenceManager {
         // This must happen before manifest check to enable recovery when manifest is missing
         // but other index files exist (partial save failure scenario)
         let interner_path = self.interner_path();
-        if interner_path.exists() {
+        let interner_was_loaded = if interner_path.exists() {
             let interner_data = load_string_interner(&interner_path)?;
             restore_string_interner(&interner_data)?;
-        }
+            true
+        } else {
+            false
+        };
 
         // 2. Check if manifest exists
         let manifest_path = self.manifest_path();
         if !manifest_path.exists() {
-            // Manifest is missing - check if we have any other index files
-            // If we loaded the interner above, we can still proceed with graph restoration
-            if interner_path.exists() {
+            // Manifest is missing. If we loaded the interner, we can attempt recovery.
+            if interner_was_loaded {
                 // Return a default manifest - best-effort recovery mode
                 // The caller (load_indexes_startup) will attempt to load individual index files
                 eprintln!(
