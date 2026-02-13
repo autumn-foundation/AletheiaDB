@@ -1367,4 +1367,36 @@ mod tests {
         assert_eq!(final_drained.len(), 1);
         assert_eq!(final_drained[0].data, vec![100]);
     }
+
+    #[test]
+    #[should_panic(expected = "Ring buffer capacity must be > 0")]
+    fn test_ring_buffer_zero_capacity() {
+        let _ = WalRingBuffer::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid BackpressureConfig: \"max_spins must be >= initial_spins\"")]
+    fn test_backpressure_invalid_config() {
+        let config = BackpressureConfig {
+            initial_spins: 100,
+            max_spins: 10, // Invalid: max < initial
+            base_sleep_us: 1,
+            max_sleep_us: 10,
+        };
+        let _ = WalRingBuffer::with_config(1024, config);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Invalid BackpressureConfig: \"initial_spins must be > 0 to prevent infinite spin loops\""
+    )]
+    fn test_backpressure_zero_initial_spins() {
+        let config = BackpressureConfig {
+            initial_spins: 0, // Invalid
+            max_spins: 10,
+            base_sleep_us: 1,
+            max_sleep_us: 10,
+        };
+        let _ = WalRingBuffer::with_config(1024, config);
+    }
 }
