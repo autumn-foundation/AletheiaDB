@@ -74,32 +74,51 @@ impl IndexPersistenceManager {
     /// Load all indexes from disk.
     ///
     /// Load order:
-    /// 1. Check manifest exists (early return if no persisted indexes)
-    /// 2. String interner (others depend on it)
-    /// 3. Manifest
-    /// 4. Other indexes can be loaded in parallel after this
+    /// 1. String interner first (if exists) - required for all other indexes
+    /// 2. Manifest (if exists)
+    /// 3. Other indexes can be loaded in parallel after this
+    ///
+    /// # Resilient Recovery
+    ///
+    /// This function is designed for best-effort recovery from partial save failures.
+    /// If the manifest is missing but the string interner exists, we still load the
+    /// interner so that graph/temporal restoration can proceed. This handles the case
+    /// where a crash occurred after saving indexes but before saving the manifest.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The manifest file is missing
+    /// - The manifest file is missing AND no other index files exist
     /// - Failed to load or restore string interner
-    /// - Failed to load manifest
+    /// - Failed to load manifest (if it exists)
     pub fn load_manifest_and_strings(&self) -> Result<IndexManifest> {
-        // 1. Check if manifest exists before attempting to load interner
-        // This avoids wasting time loading interner if there are no persisted indexes
-        let manifest_path = self.manifest_path();
-        if !manifest_path.exists() {
-            return Err(super::error::IndexPersistenceError::MissingIndex {
-                name: "manifest.idx".to_string(),
-            });
-        }
-
-        // 2. Load and restore string interner first (required for manifest and other indexes)
+        // 1. Load and restore string interner FIRST (if it exists)
+        // This must happen before manifest check to enable recovery when manifest is missing
+        // but other index files exist (partial save failure scenario)
         let interner_path = self.interner_path();
         if interner_path.exists() {
             let interner_data = load_string_interner(&interner_path)?;
             restore_string_interner(&interner_data)?;
+        }
+
+        // 2. Check if manifest exists
+        let manifest_path = self.manifest_path();
+        if !manifest_path.exists() {
+            // Manifest is missing - check if we have any other index files
+            // If we loaded the interner above, we can still proceed with graph restoration
+            if interner_path.exists() {
+                // Return a default manifest - best-effort recovery mode
+                // The caller (load_indexes_startup) will attempt to load individual index files
+                eprintln!(
+                    "Warning: Manifest missing but string interner exists - attempting best-effort recovery"
+                );
+                return Ok(super::formats::IndexManifest::new(0));
+            }
+
+            // No index files exist at all - this is expected on first run
+            return Err(super::error::IndexPersistenceError::MissingIndex {
+                name: "manifest.idx".to_string(),
+            });
         }
 
         // 3. Load manifest
