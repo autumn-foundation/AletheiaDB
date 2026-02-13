@@ -105,6 +105,10 @@ std::thread_local! {
     pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+pub static TEST_RACE_HOOK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
 /// This ensures the flag is always reset, even if the callback panics.
 pub(crate) struct FilterCallbackGuard {
@@ -774,6 +778,14 @@ impl VectorIndex for HnswIndex {
                 // Previous implementation held Shard lock then acquired Inner lock, violating
                 // the lock ordering invariant (Inner -> Shard) used by Vacant path and Search.
                 drop(entry);
+
+                #[cfg(test)]
+                {
+                    // Hook for testing race conditions
+                    if TEST_RACE_HOOK.load(Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
 
                 // Acquire inner lock (follows invariant: Inner first)
                 let index = self.inner.write();
@@ -2886,5 +2898,54 @@ mod coverage_tests {
 
         drop(guard);
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
+
+    #[test]
+    fn test_add_race_retry_coverage() {
+        // This test forces the "Occupied" path race condition where the node is removed/changed
+        // while the lock is dropped. This covers lines 773-774, 794, 796-797.
+
+        use std::sync::Arc;
+        use std::thread;
+
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
+
+        // Pre-populate node 1
+        let id = NodeId::new(1).unwrap();
+        index.add(id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Enable race hook
+        TEST_RACE_HOOK.store(true, Ordering::SeqCst);
+
+        let index_clone = index.clone();
+        let handle = thread::spawn(move || {
+            // This add will hit "Occupied", drop lock, sleep 100ms (hook), then acquire inner.
+            // By the time it wakes, main thread will have removed node 1.
+            // It should retry and succeed (adding as new).
+            index_clone.add(id, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        });
+
+        // Sleep 10ms to ensure thread enters "add" and hits the hook sleep
+        thread::sleep(std::time::Duration::from_millis(10));
+
+        // Remove node 1 while thread is sleeping in the hook
+        // This acquires inner lock (which thread is waiting for or will wait for)
+        index.remove(id).unwrap();
+
+        // Join thread
+        handle.join().unwrap();
+
+        // Disable hook
+        TEST_RACE_HOOK.store(false, Ordering::SeqCst);
+
+        // Verify node 1 exists (re-added) and has new vector
+        let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, id);
+        assert!(results[0].1 > 0.99);
     }
 }
