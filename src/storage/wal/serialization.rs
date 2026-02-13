@@ -500,13 +500,13 @@ mod tests {
 #[cfg(test)]
 mod prop_tests {
     use super::*;
-    use proptest::prelude::*;
     use crate::core::id::{EdgeId, NodeId, VersionId};
     use crate::core::interning::{GLOBAL_INTERNER, InternedString};
     use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
     use crate::core::temporal::MAX_VALID_TIMESTAMP;
     use crate::core::vector::SparseVec;
     use crate::storage::wal::entry::{LSN, WalEntry, WalOperation};
+    use proptest::prelude::*;
     use std::sync::Arc;
 
     // Strategy for LSN
@@ -540,18 +540,21 @@ mod prop_tests {
             any::<bool>().prop_map(PropertyValue::Bool),
             any::<i64>().prop_map(PropertyValue::Int),
             // Filter NaNs for strict equality checks
-            any::<f64>().prop_filter("No NaN", |f| !f.is_nan()).prop_map(PropertyValue::Float),
+            any::<f64>()
+                .prop_filter("No NaN", |f| !f.is_nan())
+                .prop_map(PropertyValue::Float),
             "[a-z0-9_]{0,32}".prop_map(|s| PropertyValue::String(Arc::from(s))),
-            prop::collection::vec(any::<u8>(), 0..32).prop_map(|v| PropertyValue::Bytes(Arc::from(v.as_slice()))),
+            prop::collection::vec(any::<u8>(), 0..32)
+                .prop_map(|v| PropertyValue::Bytes(Arc::from(v.as_slice()))),
             // Small vectors for testing
             prop::collection::vec(any::<f32>().prop_filter("No NaN", |f| !f.is_nan()), 0..16)
                 .prop_map(|v| PropertyValue::Vector(Arc::from(v.as_slice()))),
         ];
 
         leaf.prop_recursive(
-            depth,      // levels deep
-            64,         // max size of collection
-            4,          // items per collection
+            depth, // levels deep
+            64,    // max size of collection
+            4,     // items per collection
             move |inner| {
                 prop_oneof![
                     // Array
@@ -560,19 +563,32 @@ mod prop_tests {
                     // SparseVector (can't be nested, but included here for completeness)
                     // We generate valid SparseVecs
                     (
-                        prop::collection::vec((any::<u32>(), any::<f32>().prop_filter("No NaN", |f| !f.is_nan())), 0..10),
+                        prop::collection::vec(
+                            (
+                                any::<u32>(),
+                                any::<f32>().prop_filter("No NaN", |f| !f.is_nan())
+                            ),
+                            0..10
+                        ),
                         1..100u32 // dimension
-                    ).prop_filter_map("Invalid SparseVec", |(pairs, dim)| {
-                        let mut pairs = pairs;
-                        // Filter indices >= dimension
-                        pairs.retain(|(idx, val)| *idx < dim && *val != 0.0);
-                        // Sort by index and deduplicate
-                        pairs.sort_by_key(|(idx, _)| *idx);
-                        pairs.dedup_by_key(|(idx, _)| *idx);
+                    )
+                        .prop_filter_map(
+                            "Invalid SparseVec",
+                            |(pairs, dim)| {
+                                let mut pairs = pairs;
+                                // Filter indices >= dimension
+                                pairs.retain(|(idx, val)| *idx < dim && *val != 0.0);
+                                // Sort by index and deduplicate
+                                pairs.sort_by_key(|(idx, _)| *idx);
+                                pairs.dedup_by_key(|(idx, _)| *idx);
 
-                        let (indices, values): (Vec<u32>, Vec<f32>) = pairs.into_iter().unzip();
-                        SparseVec::new(indices, values, dim).ok().map(PropertyValue::sparse_vector)
-                    })
+                                let (indices, values): (Vec<u32>, Vec<f32>) =
+                                    pairs.into_iter().unzip();
+                                SparseVec::new(indices, values, dim)
+                                    .ok()
+                                    .map(PropertyValue::sparse_vector)
+                            }
+                        )
                 ]
             },
         )
@@ -583,8 +599,9 @@ mod prop_tests {
         prop::collection::hash_map(
             arb_interned_string(),
             arb_property_value(2), // Limit recursion depth
-            0..5
-        ).prop_map(|map| {
+            0..5,
+        )
+        .prop_map(|map| {
             let mut builder = PropertyMapBuilder::new();
             for (k, v) in map {
                 builder = builder.insert_by_key(k, v);
@@ -601,40 +618,92 @@ mod prop_tests {
 
         prop_oneof![
             // CreateNode
-            (arb_node_id.clone(), arb_interned_string(), arb_property_map(), arb_timestamp())
-                .prop_map(|(node_id, label, properties, valid_from)| WalOperation::CreateNode {
-                    node_id, label, properties, valid_from
+            (
+                arb_node_id.clone(),
+                arb_interned_string(),
+                arb_property_map(),
+                arb_timestamp()
+            )
+                .prop_map(|(node_id, label, properties, valid_from)| {
+                    WalOperation::CreateNode {
+                        node_id,
+                        label,
+                        properties,
+                        valid_from,
+                    }
                 }),
             // CreateEdge
-            (arb_edge_id.clone(), arb_node_id.clone(), arb_node_id.clone(), arb_interned_string(), arb_property_map(), arb_timestamp())
-                .prop_map(|(edge_id, source, target, label, properties, valid_from)| WalOperation::CreateEdge {
-                    edge_id, source, target, label, properties, valid_from
-                }),
+            (
+                arb_edge_id.clone(),
+                arb_node_id.clone(),
+                arb_node_id.clone(),
+                arb_interned_string(),
+                arb_property_map(),
+                arb_timestamp()
+            )
+                .prop_map(
+                    |(edge_id, source, target, label, properties, valid_from)| {
+                        WalOperation::CreateEdge {
+                            edge_id,
+                            source,
+                            target,
+                            label,
+                            properties,
+                            valid_from,
+                        }
+                    }
+                ),
             // UpdateNode
-            (arb_node_id.clone(), arb_version_id.clone(), arb_interned_string(), arb_property_map(), arb_timestamp())
-                .prop_map(|(node_id, version_id, label, properties, valid_from)| WalOperation::UpdateNode {
-                    node_id, version_id, label, properties, valid_from
+            (
+                arb_node_id.clone(),
+                arb_version_id.clone(),
+                arb_interned_string(),
+                arb_property_map(),
+                arb_timestamp()
+            )
+                .prop_map(|(node_id, version_id, label, properties, valid_from)| {
+                    WalOperation::UpdateNode {
+                        node_id,
+                        version_id,
+                        label,
+                        properties,
+                        valid_from,
+                    }
                 }),
             // UpdateEdge
-            (arb_edge_id.clone(), arb_version_id.clone(), arb_interned_string(), arb_property_map(), arb_timestamp())
-                .prop_map(|(edge_id, version_id, label, properties, valid_from)| WalOperation::UpdateEdge {
-                    edge_id, version_id, label, properties, valid_from
+            (
+                arb_edge_id.clone(),
+                arb_version_id.clone(),
+                arb_interned_string(),
+                arb_property_map(),
+                arb_timestamp()
+            )
+                .prop_map(|(edge_id, version_id, label, properties, valid_from)| {
+                    WalOperation::UpdateEdge {
+                        edge_id,
+                        version_id,
+                        label,
+                        properties,
+                        valid_from,
+                    }
                 }),
             // DeleteNode
-            (arb_node_id.clone(), arb_timestamp())
-                .prop_map(|(node_id, valid_from)| WalOperation::DeleteNode {
-                    node_id, valid_from
-                }),
+            (arb_node_id.clone(), arb_timestamp()).prop_map(|(node_id, valid_from)| {
+                WalOperation::DeleteNode {
+                    node_id,
+                    valid_from,
+                }
+            }),
             // DeleteEdge
-            (arb_edge_id.clone(), arb_timestamp())
-                .prop_map(|(edge_id, valid_from)| WalOperation::DeleteEdge {
-                    edge_id, valid_from
-                }),
+            (arb_edge_id.clone(), arb_timestamp()).prop_map(|(edge_id, valid_from)| {
+                WalOperation::DeleteEdge {
+                    edge_id,
+                    valid_from,
+                }
+            }),
             // Checkpoint
             (arb_lsn(), arb_timestamp())
-                .prop_map(|(lsn, timestamp)| WalOperation::Checkpoint {
-                    lsn, timestamp
-                }),
+                .prop_map(|(lsn, timestamp)| WalOperation::Checkpoint { lsn, timestamp }),
         ]
     }
 
