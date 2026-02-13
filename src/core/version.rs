@@ -448,6 +448,17 @@ impl PropertyDelta {
     /// - Clone the Arc (cheap)
     /// - Try to unwrap it (fails due to refcount > 1)
     /// - Fall back to cloning the entire HashMap structure
+    ///
+    /// # Failure Modes (Fail-Open)
+    ///
+    /// When applying a sparse vector delta (`VectorDelta::Sparse`):
+    /// - If the base property exists and is a vector of matching dimension, the delta is applied.
+    /// - If the base property is **missing** or has the **wrong type**, the sparse delta is **silently ignored**.
+    ///
+    /// This "fail-open" behavior is intentional for query/view construction to provide
+    /// best-effort results even if the base state is inconsistent (e.g., during development
+    /// or partial data recovery). It prevents the entire view from failing due to a single
+    /// corrupted property history.
     pub fn apply(&self, base: &PropertyMap) -> PropertyMap {
         // Calculate capacity for the new map to avoid reallocation
         // Properties from base (minus removed) plus potentially new properties from changes
@@ -515,6 +526,13 @@ impl PropertyDelta {
     ///
     /// Returns `Ok(())` if all sparse deltas were successfully materialized.
     /// Returns `Err` if any sparse delta cannot be materialized (e.g., base property missing).
+    ///
+    /// # Failure Modes (Fail-Closed)
+    ///
+    /// Unlike [`apply`](Self::apply), this method is **fail-closed**. If a base property
+    /// is missing or invalid for a sparse delta, it returns an error. This strictness
+    /// is required for persistence to ensure data integrity - we cannot persist a
+    /// sparse delta that cannot be fully resolved, as this would lead to permanent data loss.
     ///
     /// # Side Effects
     ///

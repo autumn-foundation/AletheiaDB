@@ -37,6 +37,9 @@ pub mod prophet;
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
 #[cfg(feature = "nova")]
+/// Sherlock: Temporal Pattern Matching Engine.
+pub mod sherlock;
+#[cfg(feature = "nova")]
 /// Temporal Diff Engine for computing snapshot differences.
 pub mod temporal_diff;
 #[cfg(feature = "nova")]
