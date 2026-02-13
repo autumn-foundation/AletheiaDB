@@ -18,7 +18,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
-//! let mut prism = Prism::new(&db);
+//! let mut prism = Prism::new(&db).with_vector_property("embedding");
 //!
 //! // Define the "lens"
 //! prism.add_axis_from_node("Tech", tech_node_id)?;
@@ -50,6 +50,7 @@ struct Axis {
 pub struct Prism<'a> {
     db: &'a AletheiaDB,
     axes: Vec<Axis>,
+    vector_property: Option<String>,
 }
 
 impl<'a> Prism<'a> {
@@ -58,6 +59,73 @@ impl<'a> Prism<'a> {
         Self {
             db,
             axes: Vec::new(),
+            vector_property: None,
+        }
+    }
+
+    /// Configure the vector property Prism should use for node-based analysis.
+    ///
+    /// When set, `add_axis_from_node` and `analyze_node` always read this property.
+    /// This avoids nondeterministic behavior on nodes with multiple vector properties.
+    pub fn with_vector_property(mut self, property: &str) -> Self {
+        self.vector_property = Some(property.to_string());
+        self
+    }
+
+    fn resolve_node_vector<'n>(
+        &self,
+        node_id: NodeId,
+        properties: &'n crate::core::property::PropertyMap,
+        explicit_property: Option<&str>,
+        context: &str,
+    ) -> Result<&'n [f32]> {
+        let selected_property = explicit_property.or(self.vector_property.as_deref());
+        if let Some(property) = selected_property {
+            let value = properties.get(property).ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Node {} is missing vector property '{}'",
+                    node_id, property
+                )))
+            })?;
+
+            return value.as_vector().ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Node {} property '{}' is not a dense vector",
+                    node_id, property
+                )))
+            });
+        }
+
+        let mut first_vector: Option<&[f32]> = None;
+        let mut vector_keys = Vec::new();
+
+        for (key, value) in properties.iter() {
+            if let Some(vector) = value.as_vector() {
+                if first_vector.is_none() {
+                    first_vector = Some(vector);
+                }
+                vector_keys.push(key.to_string());
+            }
+        }
+
+        match vector_keys.len() {
+            0 => Err(Error::Vector(VectorError::IndexError(format!(
+                "Node {} has no vector properties to {}",
+                node_id, context
+            )))),
+            1 => match first_vector {
+                Some(vector) => Ok(vector),
+                None => unreachable!("vector_keys length and first_vector state diverged"),
+            },
+            _ => {
+                vector_keys.sort();
+                Err(Error::Vector(VectorError::IndexError(format!(
+                    "Node {} has multiple vector properties [{}]. Configure Prism with \
+                     with_vector_property(...) or use *_with_property APIs for deterministic selection.",
+                    node_id,
+                    vector_keys.join(", ")
+                ))))
+            }
         }
     }
 
@@ -73,22 +141,29 @@ impl<'a> Prism<'a> {
     }
 
     /// Add an axis defined by a node's vector.
-    /// Uses the first available vector property of the node.
+    ///
+    /// Selection rules:
+    /// - Uses the configured property from `with_vector_property`, if set.
+    /// - Otherwise requires exactly one dense vector property on the node.
+    /// - Returns an error if the node has multiple vector properties.
     pub fn add_axis_from_node(&mut self, name: &str, node_id: NodeId) -> Result<()> {
         let node = self.db.get_node(node_id)?;
+        let vector = self.resolve_node_vector(node_id, &node.properties, None, "use as an axis")?;
 
-        // Find first vector property
-        let vector = node
-            .properties
-            .iter()
-            .find_map(|(_, val)| val.as_vector())
-            .ok_or_else(|| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Node {} has no vector properties to use as an axis",
-                    node_id
-                )))
-            })?;
+        self.add_axis(name, vector.to_vec());
+        Ok(())
+    }
 
+    /// Add an axis defined by a specific vector property on a node.
+    pub fn add_axis_from_node_with_property(
+        &mut self,
+        name: &str,
+        node_id: NodeId,
+        property: &str,
+    ) -> Result<()> {
+        let node = self.db.get_node(node_id)?;
+        let vector =
+            self.resolve_node_vector(node_id, &node.properties, Some(property), "use as an axis")?;
         self.add_axis(name, vector.to_vec());
         Ok(())
     }
@@ -165,22 +240,23 @@ impl<'a> Prism<'a> {
     }
 
     /// Analyze a node's vector.
-    /// Uses the first available vector property.
+    ///
+    /// Selection rules mirror `add_axis_from_node`.
     pub fn analyze_node(&self, node_id: NodeId) -> Result<HashMap<String, f32>> {
         let node = self.db.get_node(node_id)?;
+        let vector = self.resolve_node_vector(node_id, &node.properties, None, "analyze")?;
+        self.analyze(vector)
+    }
 
-        // Find first vector property
-        let vector = node
-            .properties
-            .iter()
-            .find_map(|(_, val)| val.as_vector())
-            .ok_or_else(|| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Node {} has no vector properties to analyze",
-                    node_id
-                )))
-            })?;
-
+    /// Analyze a node using a specific vector property.
+    pub fn analyze_node_with_property(
+        &self,
+        node_id: NodeId,
+        property: &str,
+    ) -> Result<HashMap<String, f32>> {
+        let node = self.db.get_node(node_id)?;
+        let vector =
+            self.resolve_node_vector(node_id, &node.properties, Some(property), "analyze")?;
         self.analyze(vector)
     }
 
@@ -306,5 +382,53 @@ mod tests {
 
         let spectrum = prism.analyze(&[1.0, 0.0]).unwrap();
         assert!((spectrum.get("BasisNode").unwrap() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_prism_rejects_ambiguous_vector_selection() {
+        let db = AletheiaDB::new().unwrap();
+        let props = PropertyMapBuilder::new()
+            .insert_vector("text_vec", &[1.0, 0.0])
+            .insert_vector("image_vec", &[0.0, 1.0])
+            .build();
+        let node = db.create_node("Doc", props).unwrap();
+
+        let mut prism = Prism::new(&db);
+        let err = prism.add_axis_from_node("DocAxis", node).unwrap_err();
+        let err_msg = format!("{err}");
+        assert!(err_msg.contains("multiple vector properties"));
+        assert!(err_msg.contains("image_vec"));
+        assert!(err_msg.contains("text_vec"));
+    }
+
+    #[test]
+    fn test_prism_explicit_property_selection_is_deterministic() {
+        let db = AletheiaDB::new().unwrap();
+        let axis_props = PropertyMapBuilder::new()
+            .insert_vector("text_vec", &[1.0, 0.0])
+            .insert_vector("image_vec", &[0.0, 1.0])
+            .build();
+        let axis_node = db.create_node("Axis", axis_props).unwrap();
+
+        let target_props = PropertyMapBuilder::new()
+            .insert_vector("text_vec", &[1.0, 0.0])
+            .insert_vector("image_vec", &[0.0, 1.0])
+            .build();
+        let target_node = db.create_node("Target", target_props).unwrap();
+
+        let mut prism = Prism::new(&db).with_vector_property("text_vec");
+        prism.add_axis_from_node("TextAxis", axis_node).unwrap();
+
+        let spectrum = prism.analyze_node(target_node).unwrap();
+        assert!((spectrum.get("TextAxis").unwrap() - 1.0).abs() < 1e-5);
+
+        let mut by_property = Prism::new(&db);
+        by_property
+            .add_axis_from_node_with_property("ImageAxis", axis_node, "image_vec")
+            .unwrap();
+        let image_spectrum = by_property
+            .analyze_node_with_property(target_node, "image_vec")
+            .unwrap();
+        assert!((image_spectrum.get("ImageAxis").unwrap() - 1.0).abs() < 1e-5);
     }
 }
