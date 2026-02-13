@@ -120,7 +120,7 @@ impl<'a> Sherlock<'a> {
 
                         // Check time window constraint relative to START
                         let elapsed_micros = candidate_time.wallclock() - start_time.wallclock();
-                        if elapsed_micros > mystery.time_window.as_micros() as i64 {
+                        if Duration::from_micros(elapsed_micros as u64) > mystery.time_window {
                             // Exceeded window, stop searching for this sequence
                             break;
                         }
