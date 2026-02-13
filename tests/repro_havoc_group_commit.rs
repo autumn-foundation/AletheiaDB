@@ -9,7 +9,6 @@ use std::thread;
 // A failing test proves I have found a weakness.
 
 #[test]
-#[ignore = "Reproduces known 'False Success' data loss bug in GroupCommitCoordinator"]
 fn havoc_repro_group_commit_false_success() {
     // SCENARIO: Data Loss
     // A transaction thinks it's durable, but it failed.
@@ -69,7 +68,6 @@ fn havoc_repro_group_commit_false_success() {
 }
 
 #[test]
-#[ignore = "Reproduces known 'False Failure' ghost error bug in GroupCommitCoordinator"]
 fn havoc_repro_group_commit_false_failure() {
     // SCENARIO: Ghost Error
     // A successful transaction reports failure because a LATER transaction failed.

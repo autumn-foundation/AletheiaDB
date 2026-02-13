@@ -27,6 +27,7 @@
 //! The flush thread uses `.expect()` to panic on lock poisoning because silent
 //! degradation is worse than fail-fast behavior for background infrastructure.
 
+use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -104,8 +105,9 @@ struct GroupCommitState {
     batch_count: usize,
     /// Epoch that has been durably flushed
     flushed_epoch: u64,
-    /// Error from last flush (for propagation to waiters)
-    last_flush_error: Option<String>,
+    /// Recent flush errors, stored as (epoch, error_message).
+    /// Used to verify that a specific epoch was successfully flushed.
+    recent_errors: VecDeque<(u64, String)>,
 }
 
 impl GroupCommitCoordinator {
@@ -125,7 +127,7 @@ impl GroupCommitCoordinator {
                 current_epoch: 1, // Start at 1 so flushed_epoch=0 means "nothing flushed yet"
                 batch_count: 0,
                 flushed_epoch: 0,
-                last_flush_error: None,
+                recent_errors: VecDeque::new(),
             }),
             flush_complete: Condvar::new(),
             config,
@@ -236,11 +238,13 @@ impl GroupCommitCoordinator {
             }
         }
 
-        // Check for flush errors
-        if let Some(ref error_msg) = state.last_flush_error {
-            return Err(Error::Storage(StorageError::WalError {
-                reason: format!("Group commit flush failed: {}", error_msg),
-            }));
+        // Check for flush errors specifically for this epoch
+        for (failed_epoch, error_msg) in &state.recent_errors {
+            if *failed_epoch == epoch {
+                return Err(Error::Storage(StorageError::WalError {
+                    reason: format!("Group commit flush failed: {}", error_msg),
+                }));
+            }
         }
 
         Ok(())
@@ -269,8 +273,15 @@ impl GroupCommitCoordinator {
             })
         })?;
 
-        // Store any error for propagation
-        state.last_flush_error = result.err().map(|e| e.to_string());
+        // Store error if any
+        if let Err(e) = result {
+            let epoch = state.current_epoch;
+            state.recent_errors.push_back((epoch, e.to_string()));
+            // Keep history limited
+            if state.recent_errors.len() > 1024 {
+                state.recent_errors.pop_front();
+            }
+        }
 
         // NOTE: Observability metrics removed to prevent log spam in CI.
         // See GitHub issue #274 for tracking proper observability implementation
@@ -457,15 +468,30 @@ mod tests {
 
     #[test]
     fn test_wait_for_flush_timeout() {
-        let coord = GroupCommitCoordinator::new(10, 100); // 10ms max delay
+        // Use a config with very short timeout for testing
+        let config = GroupCommitConfig {
+            max_delay_ms: 10,
+            max_batch_size: 100,
+            timeout_multiplier: 2, // 10 * 2 = 20ms
+            timeout_base_ms: 10,   // + 10 = 30ms
+            timeout_min_ms: 20,    // clamp min
+            timeout_max_ms: 100,   // clamp max
+        };
+        let coord = GroupCommitCoordinator::with_config(config);
 
         let (epoch, _) = coord.register_transaction().unwrap();
 
-        // Wait without anyone calling mark_flushed - should timeout
+        // Wait without anyone calling mark_flushed - should timeout quickly
+        let start = std::time::Instant::now();
         let result = coord.wait_for_flush(epoch);
+        let elapsed = start.elapsed();
+
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("timeout"));
+
+        // Verify it didn't take 10 seconds (default timeout)
+        assert!(elapsed < Duration::from_millis(500));
     }
 
     #[test]
