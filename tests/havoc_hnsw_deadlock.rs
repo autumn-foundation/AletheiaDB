@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
@@ -58,5 +58,89 @@ fn test_hnsw_reentrant_deadlock_prevented() {
     // Wait for 2 seconds. The operation should complete quickly now.
     if rx.recv_timeout(Duration::from_secs(2)).is_err() {
         panic!("Test timed out! The re-entrancy prevention may not be working correctly.");
+    }
+}
+
+// Increase thread count to force contention
+const NUM_UPDATERS: usize = 32;
+const NUM_INSERTERS: usize = 32;
+const DURATION_SECS: u64 = 10;
+
+// We use a small number of keys to maximize collision probability if DashMap
+// uses a small number of shards (default is often 64 or related to core count).
+const NUM_INITIAL_NODES: u64 = 100;
+
+#[test]
+fn havoc_deadlock_repro() {
+    // 1. Setup Index
+    let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine)
+        .m(16)
+        .ef_construction(100)
+        .build()
+        .expect("Failed to build index");
+    let index = Arc::new(index);
+
+    // 2. Pre-populate
+    for i in 0..NUM_INITIAL_NODES {
+        let id = NodeId::new(i + 1).unwrap();
+        let vec = vec![0.1f32; 384];
+        index.add(id, &vec).unwrap();
+    }
+
+    // 3. Spawn Threads
+    let barrier = Arc::new(Barrier::new(NUM_UPDATERS + NUM_INSERTERS));
+    let mut handles = vec![];
+
+    // Updaters (Occupied path)
+    // They lock Shard(existing) -> Inner
+    for t in 0..NUM_UPDATERS {
+        let index = index.clone();
+        let barrier = barrier.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            let start = std::time::Instant::now();
+            let mut i = 0;
+            while start.elapsed().as_secs() < DURATION_SECS {
+                let id_val = (t as u64 * 10 + i) % NUM_INITIAL_NODES + 1;
+                let id = NodeId::new(id_val).unwrap();
+                let vec = vec![0.2f32; 384];
+                // This hits the Occupied path because the node exists
+                index.add(id, &vec).unwrap();
+                i += 1;
+                if i % 100 == 0 {
+                    thread::yield_now();
+                }
+            }
+        }));
+    }
+
+    // Inserters (Vacant path)
+    // They lock Inner -> Shard(new)
+    for t in 0..NUM_INSERTERS {
+        let index = index.clone();
+        let barrier = barrier.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            let start = std::time::Instant::now();
+            let mut i = 0;
+            while start.elapsed().as_secs() < DURATION_SECS {
+                // Use IDs outside the initial range to ensure Vacant path
+                let id_val = NUM_INITIAL_NODES + 1000 + (t as u64 * 100000) + i;
+                let id = NodeId::new(id_val).unwrap();
+                let vec = vec![0.3f32; 384];
+
+                // Add (Vacant path)
+                index.add(id, &vec).unwrap();
+                i += 1;
+                if i % 100 == 0 {
+                    thread::yield_now();
+                }
+            }
+        }));
+    }
+
+    // 4. Wait for threads
+    for handle in handles {
+        handle.join().unwrap();
     }
 }

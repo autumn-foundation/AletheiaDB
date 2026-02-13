@@ -770,11 +770,30 @@ impl VectorIndex for HnswIndex {
                 // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
 
-                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
-                // where multiple threads try to update the same node concurrently (PR #575).
-                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
-                // causing "Duplicate keys not allowed" error.
+                // CRITICAL DEADLOCK FIX (Havoc): Drop the entry lock BEFORE acquiring inner lock.
+                // Previous implementation held Shard lock then acquired Inner lock, violating
+                // the lock ordering invariant (Inner -> Shard) used by Vacant path and Search.
+                drop(entry);
+
+                // Acquire inner lock (follows invariant: Inner first)
                 let index = self.inner.write();
+
+                // Re-verify that the ID still maps to the same key.
+                // Since we dropped the lock, another thread might have removed/changed the mapping.
+                // We acquire Shard lock here (Inner -> Shard is SAFE).
+                if let Some(current_entry) = self.id_mapping.get(&id) {
+                    if *current_entry.value() != existing_key {
+                        // Race detected: Mapping changed while we released lock.
+                        // Recursively retry to handle the new state.
+                        drop(index);
+                        return self.add(id, vector);
+                    }
+                } else {
+                    // Race detected: Node removed while we released lock.
+                    // Recursively retry (will likely hit Vacant path).
+                    drop(index);
+                    return self.add(id, vector);
+                }
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
