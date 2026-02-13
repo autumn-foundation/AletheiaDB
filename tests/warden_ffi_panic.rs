@@ -1,7 +1,6 @@
 use aletheiadb::core::id::NodeId;
 use aletheiadb::index::VectorIndex;
 use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization};
-use std::sync::Arc;
 
 #[test]
 fn test_ffi_panic_in_custom_metric() {

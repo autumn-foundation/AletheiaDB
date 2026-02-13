@@ -452,13 +452,13 @@ where
         //
         // We wrap the user callback in catch_unwind to prevent panics from unwinding
         // across the FFI boundary into C++, which is Undefined Behavior and causes aborts.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let safe_closure = std::panic::AssertUnwindSafe(|| {
             let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
             let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
             distance_fn(slice_a, slice_b)
-        }));
+        });
 
-        match result {
+        match std::panic::catch_unwind(safe_closure) {
             Ok(distance) => distance,
             Err(_) => {
                 // Log the error to stderr since we can't propagate it through FFI.
@@ -2026,6 +2026,40 @@ mod tests {
     }
 
     #[test]
+    fn test_metric_wrapper_panic_handling() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            panic!("Test panic in metric");
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let v1 = [1.0f32, 0.0, 0.0, 0.0];
+        let v2 = [0.0f32, 1.0, 0.0, 0.0];
+
+        // Should return f32::MAX instead of unwinding
+        let result = wrapper(v1.as_ptr(), v2.as_ptr());
+        assert_eq!(result, f32::MAX);
+    }
+
+    #[test]
+    fn test_metric_wrapper_success() {
+        // Simple Euclidean distance
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let v1 = [1.0f32, 2.0, 3.0, 4.0];
+        let v2 = [1.0f32, 2.0, 3.0, 4.0]; // Identical, dist should be 0.0
+
+        let result = wrapper(v1.as_ptr(), v2.as_ptr());
+        assert_eq!(result, 0.0);
+
+        let v3 = [2.0f32, 2.0, 3.0, 4.0]; // diff is 1.0 in first dim, squared is 1.0
+        let result = wrapper(v1.as_ptr(), v3.as_ptr());
+        assert_eq!(result, 1.0);
+    }
+
+    #[test]
     fn test_hnsw_config_new_fields() {
         let config = HnswConfig::new(384, DistanceMetric::Cosine)
             .with_quantization(Quantization::F16)
@@ -2937,39 +2971,5 @@ mod coverage_tests {
 
         drop(guard);
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
-    }
-
-    #[test]
-    fn test_metric_wrapper_panic_handling() {
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
-            panic!("Test panic in metric");
-        });
-        let wrapper = create_metric_wrapper(4, distance_fn);
-
-        let v1 = [1.0f32, 0.0, 0.0, 0.0];
-        let v2 = [0.0f32, 1.0, 0.0, 0.0];
-
-        // Should return f32::MAX instead of unwinding
-        let result = wrapper(v1.as_ptr(), v2.as_ptr());
-        assert_eq!(result, f32::MAX);
-    }
-
-    #[test]
-    fn test_metric_wrapper_success() {
-        // Simple Euclidean distance
-        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
-            a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
-        });
-        let wrapper = create_metric_wrapper(4, distance_fn);
-
-        let v1 = [1.0f32, 2.0, 3.0, 4.0];
-        let v2 = [1.0f32, 2.0, 3.0, 4.0]; // Identical, dist should be 0.0
-
-        let result = wrapper(v1.as_ptr(), v2.as_ptr());
-        assert_eq!(result, 0.0);
-
-        let v3 = [2.0f32, 2.0, 3.0, 4.0]; // diff is 1.0 in first dim, squared is 1.0
-        let result = wrapper(v1.as_ptr(), v3.as_ptr());
-        assert_eq!(result, 1.0);
     }
 }
