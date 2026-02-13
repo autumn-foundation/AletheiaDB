@@ -1929,6 +1929,38 @@ mod sentry_tests {
         ));
         assert!(!is_retryable_usearch_error("Other error"));
     }
+
+    #[test]
+    fn test_metric_wrapper_panic_handling() {
+        // This test ensures that the catch_unwind logic in create_metric_wrapper works correctly.
+        // It should catch the panic and return f32::MAX.
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            panic!("Simulated metric panic");
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let vec_a = [0.0f32; 4];
+        let vec_b = [0.0f32; 4];
+
+        // This call should NOT panic, but return f32::MAX
+        let result = wrapper(vec_a.as_ptr(), vec_b.as_ptr());
+        assert_eq!(result, f32::MAX);
+    }
+
+    #[test]
+    fn test_metric_wrapper_success() {
+        // Verify happy path works as expected
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            42.0
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let vec_a = [0.0f32; 4];
+        let vec_b = [0.0f32; 4];
+
+        let result = wrapper(vec_a.as_ptr(), vec_b.as_ptr());
+        assert_eq!(result, 42.0);
+    }
 }
 
 #[cfg(test)]
