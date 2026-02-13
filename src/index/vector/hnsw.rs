@@ -96,9 +96,9 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 // Test hook to inject delay for race condition testing
@@ -785,12 +785,18 @@ impl VectorIndex for HnswIndex {
 
                 #[cfg(test)]
                 {
-                    if TEST_RACE_HOOK.load(Ordering::SeqCst) {
+                    // Use swap to ensure we only trigger once, preventing deadlock during recursion
+                    if TEST_RACE_HOOK.swap(false, Ordering::SeqCst) {
                         TEST_RACE_WAITING.store(true, Ordering::SeqCst);
-                        // Sleep to allow the test controller to modify the map.
-                        // The test controller waits for TEST_RACE_WAITING=true before proceeding.
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        TEST_RACE_WAITING.store(false, Ordering::SeqCst);
+                        // Wait for test controller to perform modification and clear the flag.
+                        // This ensures deterministic ordering: helper pauses -> controller modifies -> helper retries.
+                        let start = std::time::Instant::now();
+                        while TEST_RACE_WAITING.load(Ordering::SeqCst) {
+                            if start.elapsed() > std::time::Duration::from_secs(10) {
+                                panic!("Test helper timed out waiting for controller to release lock");
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
                     }
                 }
 
@@ -2873,12 +2879,20 @@ mod tests {
         });
 
         // Wait for helper thread to enter the critical section
+        let start = std::time::Instant::now();
         while !TEST_RACE_WAITING.load(Ordering::SeqCst) {
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                // Prevent hanging CI if hook is somehow missed
+                panic!("Timeout waiting for helper thread to enter critical section");
+            }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
         // Remove the mapping (concurrent modification) while helper is waiting
         index.remove(id)?;
+
+        // Release the helper thread to proceed and retry
+        TEST_RACE_WAITING.store(false, Ordering::SeqCst);
 
         // Wait for thread to finish (should retry and succeed)
         handle.join().unwrap()?;
@@ -2902,7 +2916,11 @@ mod tests {
         });
 
         // Wait for helper thread to enter the critical section
+        let start = std::time::Instant::now();
         while !TEST_RACE_WAITING.load(Ordering::SeqCst) {
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                panic!("Timeout waiting for helper thread to enter critical section");
+            }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
@@ -2911,6 +2929,9 @@ mod tests {
         // which allocates a NEW key.
         index.remove(id)?;
         index.add(id, &[1.0, 1.0, 1.0, 1.0])?; // New key
+
+        // Release the helper thread
+        TEST_RACE_WAITING.store(false, Ordering::SeqCst);
 
         // Wait for thread to finish (should detect key mismatch and retry)
         handle.join().unwrap()?;
