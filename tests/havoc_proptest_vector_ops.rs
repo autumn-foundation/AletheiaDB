@@ -34,8 +34,8 @@ proptest! {
     fn fuzz_euclidean_distance(vec1 in proptest::collection::vec(any::<f32>(), 0..1024),
                                vec2 in proptest::collection::vec(any::<f32>(), 0..1024)) {
         if vec1.len() == vec2.len() {
-             let _ = euclidean_distance(&vec1, &vec2);
-             let _ = squared_euclidean_distance(&vec1, &vec2);
+             let _ = euclidean_distance(&vec1, &vec2).unwrap();
+             let _ = squared_euclidean_distance(&vec1, &vec2).unwrap();
         }
     }
 
