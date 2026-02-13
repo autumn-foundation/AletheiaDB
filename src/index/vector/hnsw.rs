@@ -793,7 +793,9 @@ impl VectorIndex for HnswIndex {
                         let start = std::time::Instant::now();
                         while TEST_RACE_WAITING.load(Ordering::SeqCst) {
                             if start.elapsed() > std::time::Duration::from_secs(10) {
-                                panic!("Test helper timed out waiting for controller to release lock");
+                                panic!(
+                                    "Test helper timed out waiting for controller to release lock"
+                                );
                             }
                             std::thread::sleep(std::time::Duration::from_millis(1));
                         }
@@ -2927,8 +2929,11 @@ mod tests {
         // Update the mapping directly (simulate another thread changing the key)
         // We can't easily change the key without add/remove, so let's remove and add back
         // which allocates a NEW key.
+        let old_key = index.id_mapping.get(&id).map(|k| *k);
         index.remove(id)?;
         index.add(id, &[1.0, 1.0, 1.0, 1.0])?; // New key
+        let new_key = index.id_mapping.get(&id).map(|k| *k);
+        assert_ne!(old_key, new_key, "Setup failed: Key should have changed");
 
         // Release the helper thread
         TEST_RACE_WAITING.store(false, Ordering::SeqCst);
@@ -2940,7 +2945,11 @@ mod tests {
         let results = index.search(&[0.0, 0.0, 1.0, 0.0], 1)?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, id);
-        assert!(results[0].1 > 0.99);
+        assert!(
+            results[0].1 > 0.99,
+            "Expected similarity > 0.99, got {}. Vector probably not updated by retry logic.",
+            results[0].1
+        );
 
         // Cleanup
         TEST_RACE_HOOK.store(false, Ordering::SeqCst);
