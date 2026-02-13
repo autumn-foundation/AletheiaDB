@@ -106,6 +106,10 @@ std::thread_local! {
 }
 
 #[cfg(test)]
+/// Hook for testing race conditions in the `Occupied` match arm of `HnswIndex::add`.
+///
+/// If true, the thread will sleep after dropping the `id_mapping` lock and before acquiring the
+/// `inner` write lock, simulating a race condition where another thread might modify the index.
 pub static TEST_RACE_HOOK: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
