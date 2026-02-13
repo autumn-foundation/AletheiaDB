@@ -1342,4 +1342,58 @@ mod tests {
         // Should have at most segments_to_retain + 1 meta files
         assert!(meta_count <= 3);
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_sync_logic_correctness() {
+        use tempfile::tempdir;
+
+        // 1. Setup coordinator with sync_on_flush = true
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.sync_on_flush = true;
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 2. Open segment to get sync handle
+        coordinator.ensure_segment_open().unwrap();
+
+        // 3. Replace sync_handle with a File opening /dev/null
+        // fsync on /dev/null returns EINVAL on Linux, which causes sync_data to fail.
+        // This avoids unsafe libc::close and double-close issues.
+        {
+            let dev_null = File::open("/dev/null").expect("Failed to open /dev/null");
+            let mut guard = coordinator.sync_handle.lock().unwrap();
+            *guard = Some(dev_null);
+        }
+
+        // 4. Create dummy entry
+        let entry = create_test_entry(1, &[1, 2, 3]);
+
+        // 5. Test Case 1: sync=false.
+        // Correct Logic: sync (false) && sync_on_flush (true) -> false. No sync -> Success.
+        // Mutant Logic (||): sync (false) || sync_on_flush (true) -> true. Sync -> Fail (EINVAL).
+        // This assertion KILLS the mutant.
+        let result = coordinator.flush(vec![entry], false);
+        assert!(
+            result.is_ok(),
+            "flush(false) should NOT sync, so it should succeed even if sync handle is broken"
+        );
+
+        // 6. Test Case 2: sync=true.
+        // Correct Logic: sync (true) && sync_on_flush (true) -> true. Sync -> Fail.
+        // This confirms our test setup works (broken sync handle actually causes failure).
+        let entry2 = create_test_entry(2, &[4, 5, 6]);
+        let result = coordinator.flush(vec![entry2], true);
+        assert!(
+            result.is_err(),
+            "flush(true) SHOULD sync, so it should fail due to broken sync handle"
+        );
+
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Failed to sync WAL"),
+            "Error should be about syncing, got: {}",
+            err_msg
+        );
+    }
 }
