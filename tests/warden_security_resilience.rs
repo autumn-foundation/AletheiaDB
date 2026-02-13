@@ -1,6 +1,6 @@
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization};
-use aletheiadb::index::VectorIndex;
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization};
 
 #[test]
 fn test_metric_panic_resilience() {
@@ -30,8 +30,16 @@ fn test_metric_panic_resilience() {
     // We expect add() to succeed (or at least not crash), even if the metric panics.
     // Useach might return an error if distance calculation fails?
     // No, we return f32::MAX, so usearch sees a valid (large) distance.
-    assert!(res1.is_ok(), "add() failed during panic scenario: {:?}", res1.err());
-    assert!(res2.is_ok(), "add() failed during panic scenario: {:?}", res2.err());
+    assert!(
+        res1.is_ok(),
+        "add() failed during panic scenario: {:?}",
+        res1.err()
+    );
+    assert!(
+        res2.is_ok(),
+        "add() failed during panic scenario: {:?}",
+        res2.err()
+    );
 
     // Trigger search which calls the metric
     println!("Starting search with panicking metric...");
@@ -43,11 +51,17 @@ fn test_metric_panic_resilience() {
             // We expect results, but with very low similarity (due to f32::MAX distance)
             // Cosine similarity = 1.0 - distance = 1.0 - f32::MAX = -inf
             if !search_res.is_empty() {
-                assert!(search_res[0].1 < -1.0e30, "Expected extremely low similarity due to panic fallback");
+                assert!(
+                    search_res[0].1 < -1.0e30,
+                    "Expected extremely low similarity due to panic fallback"
+                );
             }
         }
         Err(e) => {
-            panic!("Search returned error instead of handling panic gracefully: {}", e);
+            panic!(
+                "Search returned error instead of handling panic gracefully: {}",
+                e
+            );
         }
     }
 }

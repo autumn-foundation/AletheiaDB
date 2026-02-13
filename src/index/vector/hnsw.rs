@@ -463,7 +463,9 @@ where
             Err(_) => {
                 // Log error to stderr (cannot panic here as that would be UB)
                 // We return f32::MAX to indicate maximum dissimilarity
-                eprintln!("CRITICAL: Panic in custom metric function caught at FFI boundary. Returning f32::MAX.");
+                eprintln!(
+                    "CRITICAL: Panic in custom metric function caught at FFI boundary. Returning f32::MAX."
+                );
                 f32::MAX
             }
         }
@@ -1950,9 +1952,7 @@ mod sentry_tests {
     #[test]
     fn test_metric_wrapper_success() {
         // Verify happy path works as expected
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
-            42.0
-        });
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 { 42.0 });
         let wrapper = create_metric_wrapper(4, distance_fn);
 
         let vec_a = [0.0f32; 4];
