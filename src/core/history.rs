@@ -432,6 +432,98 @@ mod tests {
         assert_eq!(summary.change_count(), 6); // 2 + 1 + 3
     }
 
+    #[test]
+    fn test_version_diff_has_changes_added_only() {
+        let from_props = PropertyMapBuilder::new().build();
+        let to_props = PropertyMapBuilder::new().insert("name", "Alice").build();
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            test_version_id(10),
+            test_version_id(11),
+        );
+
+        assert_eq!(diff.added.len(), 1);
+        assert!(diff.removed.is_empty());
+        assert!(diff.modified.is_empty());
+        assert!(diff.has_changes());
+    }
+
+    #[test]
+    fn test_version_diff_has_changes_removed_only() {
+        let from_props = PropertyMapBuilder::new().insert("status", "active").build();
+        let to_props = PropertyMapBuilder::new().build();
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            test_version_id(12),
+            test_version_id(13),
+        );
+
+        assert!(diff.added.is_empty());
+        assert_eq!(diff.removed.len(), 1);
+        assert!(diff.modified.is_empty());
+        assert!(diff.has_changes());
+    }
+
+    #[test]
+    fn test_version_diff_change_count_sums_all_categories() {
+        let from_props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("status", "active")
+            .build();
+        let to_props = PropertyMapBuilder::new()
+            .insert("name", "Bob")
+            .insert("city", "NYC")
+            .build();
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            test_version_id(14),
+            test_version_id(15),
+        );
+
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.removed.len(), 2);
+        assert_eq!(diff.modified.len(), 1);
+        assert_eq!(diff.change_count(), 4);
+    }
+
+    #[test]
+    fn test_version_summary_has_changes_removed_only() {
+        let summary = VersionSummary {
+            version_id: test_version_id(3),
+            version_number: 3,
+            valid_from: test_timestamp(3000),
+            transaction_time: test_timestamp(4000),
+            properties_added: 0,
+            properties_removed: 1,
+            properties_modified: 0,
+        };
+
+        assert!(summary.has_changes());
+        assert_eq!(summary.change_count(), 1);
+    }
+
+    #[test]
+    fn test_version_summary_has_changes_modified_only() {
+        let summary = VersionSummary {
+            version_id: test_version_id(4),
+            version_number: 4,
+            valid_from: test_timestamp(4000),
+            transaction_time: test_timestamp(5000),
+            properties_added: 0,
+            properties_removed: 0,
+            properties_modified: 1,
+        };
+
+        assert!(summary.has_changes());
+        assert_eq!(summary.change_count(), 1);
+    }
     // ==================== Helper Functions ====================
 
     fn create_test_version_info(version_num: u64, wallclock: i64) -> VersionInfo {
