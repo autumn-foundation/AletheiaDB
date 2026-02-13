@@ -87,8 +87,10 @@ fn havoc_repro_group_commit_false_failure() {
     // EXPECTED: T1 should receive Ok.
     // ACTUAL (BUG): T1 receives Err.
 
-    let mut config = GroupCommitConfig::default();
-    config.recent_errors_capacity = 100;
+    let config = GroupCommitConfig {
+        recent_errors_capacity: 100,
+        ..GroupCommitConfig::default()
+    };
     // We need to use with_config to set the capacity properly if we want to rely on history
     let coord = Arc::new(GroupCommitCoordinator::with_config(config));
 
