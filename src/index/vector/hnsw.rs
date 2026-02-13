@@ -771,84 +771,89 @@ impl VectorIndex for HnswIndex {
 
         // Get or create key for this NodeId
         // Use entry API for atomic check-and-update to prevent race conditions
-        match self.id_mapping.entry(id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => {
-                // Re-adding existing node: remove old vector from usearch if it exists
-                // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
-                // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
-                let existing_key = *entry.get();
+        loop {
+            match self.id_mapping.entry(id) {
+                dashmap::mapref::entry::Entry::Occupied(entry) => {
+                    // Re-adding existing node: remove old vector from usearch if it exists
+                    // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
+                    // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
+                    let existing_key = *entry.get();
 
-                // CRITICAL DEADLOCK FIX (Havoc): Drop the entry lock BEFORE acquiring inner lock.
-                // Previous implementation held Shard lock then acquired Inner lock, violating
-                // the lock ordering invariant (Inner -> Shard) used by Vacant path and Search.
-                drop(entry);
+                    // CRITICAL DEADLOCK FIX (Havoc): Drop the entry lock BEFORE acquiring inner lock.
+                    // Previous implementation held Shard lock then acquired Inner lock, violating
+                    // the lock ordering invariant (Inner -> Shard) used by Vacant path and Search.
+                    drop(entry);
 
-                #[cfg(test)]
-                {
-                    // Hook for testing race conditions
-                    if TEST_RACE_HOOK.load(Ordering::Relaxed) {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    #[cfg(test)]
+                    {
+                        // Hook for testing race conditions
+                        if TEST_RACE_HOOK.load(Ordering::Relaxed) {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
                     }
-                }
 
-                // Acquire inner lock (follows invariant: Inner first)
-                let index = self.inner.write();
+                    // Acquire inner lock (follows invariant: Inner first)
+                    let index = self.inner.write();
 
-                // Re-verify that the ID still maps to the same key.
-                // Since we dropped the lock, another thread might have removed/changed the mapping.
-                // We acquire Shard lock here (Inner -> Shard is SAFE).
-                if let Some(current_entry) = self.id_mapping.get(&id) {
-                    if *current_entry.value() != existing_key {
-                        // Race detected: Mapping changed while we released lock.
-                        // Recursively retry to handle the new state.
+                    // Re-verify that the ID still maps to the same key.
+                    // Since we dropped the lock, another thread might have removed/changed the mapping.
+                    // We acquire Shard lock here (Inner -> Shard is SAFE).
+                    //
+                    // CRITICAL: We must drop the read guard (`current_entry`) BEFORE continuing the loop
+                    // to assume the 'Vacant' path, which requires a write lock on the same shard.
+                    // Failing to do so causes a self-deadlock (Read -> Write upgrade attempt).
+                    let race_retry = if let Some(current_entry) = self.id_mapping.get(&id) {
+                        *current_entry.value() != existing_key
+                    } else {
+                        // Node removed
+                        true
+                    };
+
+                    if race_retry {
+                        // Race detected: Mapping changed or removed while we released lock.
+                        // Retry loop to handle the new state.
                         drop(index);
-                        return self.add(id, vector);
+                        continue;
                     }
-                } else {
-                    // Race detected: Node removed while we released lock.
-                    // Recursively retry (will likely hit Vacant path).
-                    drop(index);
-                    return self.add(id, vector);
-                }
 
-                // Check if key exists before removing to avoid wasteful FFI call
-                if index.contains(existing_key) {
-                    // Key exists in usearch - remove it before re-adding
-                    // (usearch requires explicit remove before add with same key)
-                    index.remove(existing_key).map_err(|e| {
+                    // Check if key exists before removing to avoid wasteful FFI call
+                    if index.contains(existing_key) {
+                        // Key exists in usearch - remove it before re-adding
+                        // (usearch requires explicit remove before add with same key)
+                        index.remove(existing_key).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to remove existing vector: {}",
+                                e
+                            )))
+                        })?;
+                    }
+                    // Note: If key doesn't exist, we skip remove() and proceed directly to add()
+                    // This is safe because add() with a non-existent key will succeed
+
+                    // Keep lock held - check if we need to expand capacity
+                    if index.size() >= index.capacity() {
+                        // Double capacity, minimum 1024
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        index.reserve(new_capacity).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to expand capacity: {}",
+                                e
+                            )))
+                        })?;
+                    }
+
+                    // Add the new vector while still holding the lock
+                    index.add(existing_key, vector).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
-                            "Failed to remove existing vector: {}",
+                            "Failed to add vector: {}",
                             e
                         )))
                     })?;
+
+                    self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
                 }
-                // Note: If key doesn't exist, we skip remove() and proceed directly to add()
-                // This is safe because add() with a non-existent key will succeed
-
-                // Keep lock held - check if we need to expand capacity
-                if index.size() >= index.capacity() {
-                    // Double capacity, minimum 1024
-                    let new_capacity = (index.capacity() * 2).max(1024);
-                    index.reserve(new_capacity).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to expand capacity: {}",
-                            e
-                        )))
-                    })?;
-                }
-
-                // Add the new vector while still holding the lock
-                index.add(existing_key, vector).map_err(|e| {
-                    Error::Vector(VectorError::IndexError(format!(
-                        "Failed to add vector: {}",
-                        e
-                    )))
-                })?;
-
-                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
                 // New node: allocate key with overflow protection
                 // Check BEFORE incrementing to avoid leaving next_key in invalid state
                 const MAX_VALID_KEY: u64 = u64::MAX - 1000;
@@ -940,12 +945,13 @@ impl VectorIndex for HnswIndex {
                     )));
                 }
 
-                // If no race, we successfully inserted into id_mapping.
-                // Now insert reverse mapping.
-                // Note: We do this outside the id_mapping lock to reduce contention.
-                self.reverse_mapping.insert(key, id);
-                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+                    // If no race, we successfully inserted into id_mapping.
+                    // Now insert reverse mapping.
+                    // Note: We do this outside the id_mapping lock to reduce contention.
+                    self.reverse_mapping.insert(key, id);
+                    self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
             }
         }
     }

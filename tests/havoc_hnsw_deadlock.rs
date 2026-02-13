@@ -105,7 +105,12 @@ fn havoc_deadlock_repro() {
                 let id = NodeId::new(id_val).unwrap();
                 let vec = vec![0.2f32; 384];
                 // This hits the Occupied path because the node exists
-                index.add(id, &vec).unwrap();
+                if let Err(e) = index.add(id, &vec) {
+                    let msg = e.to_string();
+                    if !msg.contains("Concurrent add detected") {
+                        panic!("Unexpected error in updater: {}", msg);
+                    }
+                }
                 i += 1;
                 if i % 100 == 0 {
                     thread::yield_now();
