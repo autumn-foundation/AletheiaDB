@@ -73,11 +73,22 @@ use super::operations::{
 };
 use super::tracker::PersistenceTracker;
 
-/// Update the manifest file to reflect current index state.
+/// Update the manifest file to reflect persisted index state.
 ///
 /// **CRITICAL**: This function must be called after any index persistence operation
 /// during background persistence. Without this, the manifest becomes stale/missing,
 /// causing recovery failures after crashes (e.g., string interner ID mismatches).
+///
+/// # Parameters
+///
+/// * `snapshot_lsn` - The LSN captured BEFORE persistence started. This is critical
+///   for crash recovery: the manifest must record a conservative LSN that is guaranteed
+///   to be consistent with the persisted data. If we used the current LSN (after
+///   persistence), concurrent writes could cause the manifest to reference a state
+///   ahead of what's on disk, leading to data loss during WAL replay.
+///
+/// * `node_count`, `edge_count` - The exact counts of nodes/edges that were persisted.
+///   These should be captured at the same time as the snapshot LSN to ensure consistency.
 ///
 /// # Background
 ///
@@ -101,16 +112,15 @@ use super::tracker::PersistenceTracker;
 /// - WAL provides durability for data
 fn update_manifest(
     manager: &Arc<IndexPersistenceManager>,
-    current: &Arc<CurrentStorage>,
     historical: &Arc<RwLock<HistoricalStorage>>,
-    wal: &Arc<ConcurrentWalSystem>,
+    snapshot_lsn: u64,
+    node_count: u64,
+    edge_count: u64,
+    string_count: u64,
 ) {
-    // Get current LSN for manifest
-    let current_lsn = wal.current_lsn().0;
-    let mut manifest = IndexManifest::new(current_lsn);
+    let mut manifest = IndexManifest::new(snapshot_lsn);
 
     // Add string interner entry (always present if any data exists)
-    let string_count = crate::core::GLOBAL_INTERNER.len() as u64;
     if string_count > 0 {
         manifest.string_interner = Some(StringInternerManifestEntry {
             interner_file: "strings/interner.idx".to_string(),
@@ -119,8 +129,6 @@ fn update_manifest(
     }
 
     // Add graph index entry if we have nodes/edges
-    let node_count = current.all_nodes().count() as u64;
-    let edge_count = current.all_edges().count() as u64;
     if node_count > 0 || edge_count > 0 {
         manifest.graph_index = Some(GraphIndexManifestEntry {
             adjacency_file: "graph/adjacency.idx".to_string(),
@@ -150,6 +158,9 @@ fn update_manifest(
     drop(hist_read);
 
     // Save manifest (swallow errors to avoid killing background thread)
+    // Note: Using eprintln! for consistency with other error handling in this module.
+    // The `tracing` crate is optional and behind feature flags, while this module
+    // consistently uses eprintln! for direct stderr logging.
     if let Err(e) = manager.save_manifest(&manifest) {
         eprintln!("Background persistence: Failed to save manifest: {}", e);
     }
@@ -197,6 +208,15 @@ pub(crate) fn spawn_background_persistence_thread(
 
                 // Track if any index was persisted this cycle
                 let mut any_index_persisted = false;
+
+                // CRITICAL: Capture snapshot state BEFORE persistence operations start
+                // This ensures the manifest records a conservative LSN/counts that are
+                // guaranteed to be consistent with what gets written to disk, preventing
+                // data loss during recovery if concurrent writes happen during persistence.
+                let snapshot_lsn = wal.current_lsn().0;
+                let node_count = current.node_count() as u64;
+                let edge_count = current.edge_count() as u64;
+                let string_count = crate::core::GLOBAL_INTERNER.len() as u64;
 
                 // Check vector index policy
                 let vector_mutations = tracker.get_vector_mutations();
@@ -272,8 +292,19 @@ pub(crate) fn spawn_background_persistence_thread(
                 // recovery failures after crashes (e.g., string ID mismatches in temporal data).
                 // Without this, manifest is only saved on clean shutdown, which never happens
                 // when the process is killed via Ctrl+C or crashes.
+                //
+                // We use the snapshot state captured BEFORE persistence to ensure the manifest
+                // LSN/counts are conservative and consistent with the persisted data, preventing
+                // WAL replay from skipping operations if concurrent writes happened during persistence.
                 if any_index_persisted {
-                    update_manifest(&manager, &current, &historical, &wal);
+                    update_manifest(
+                        &manager,
+                        &historical,
+                        snapshot_lsn,
+                        node_count,
+                        edge_count,
+                        string_count,
+                    );
                 }
             }
 
