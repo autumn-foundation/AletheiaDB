@@ -3696,8 +3696,22 @@ mod tests {
             .build();
 
         let size = map.estimated_heap_size();
-        // Should include at least the string length plus HashMap overhead
-        assert!(size >= 5, "Map with string should include string heap size");
+
+        // Calculation:
+        // Capacity >= 3 (likely 4 or more)
+        // Per entry overhead: sizeof(PropertyKey) + sizeof(PropertyValue) + 8
+        // Value heap size: "Alice".len() = 5
+
+        let min_overhead_per_entry =
+            std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8;
+        let expected_min_overhead = 3 * min_overhead_per_entry + 5;
+
+        assert!(
+            size >= expected_min_overhead,
+            "Map heap size {} too small (expected at least {})",
+            size,
+            expected_min_overhead
+        );
     }
 
     #[test]
@@ -3708,10 +3722,19 @@ mod tests {
             .build();
 
         let size = map.estimated_heap_size();
-        // Should include vector heap size: 384 * 4 = 1536 bytes
+
+        let vector_data_size = 384 * std::mem::size_of::<f32>(); // 1536
+        let min_overhead_per_entry =
+            std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8;
+
+        // Map has 1 entry
+        let expected_min = vector_data_size + min_overhead_per_entry;
+
         assert!(
-            size >= 384 * std::mem::size_of::<f32>(),
-            "Map with vector should include vector heap size"
+            size >= expected_min,
+            "Map heap size {} too small (expected at least {})",
+            size,
+            expected_min
         );
     }
 
@@ -4425,5 +4448,94 @@ mod sentry_tests {
             }
             _ => panic!("Expected CorruptedData error"),
         }
+    }
+
+    #[test]
+    fn test_array_max_elements_boundary() {
+        // Construct a buffer with exactly MAX_ARRAY_ELEMENTS
+        let mut bytes = Vec::new();
+        bytes.push(TAG_ARRAY);
+        let count = MAX_ARRAY_ELEMENTS as u32;
+        bytes.extend_from_slice(&count.to_le_bytes());
+
+        // We can't actually allocate MAX_ARRAY_ELEMENTS (10M) * 1 byte in a test without it being slow/heavy.
+        // However, we can check that it passes the initial count check and fails on buffer size check
+        // (which is O(1)) OR if we provide enough data, it starts deserializing.
+        //
+        // So if we provide count = MAX, it should NOT return "exceeds maximum allowed".
+        // It might return "Insufficient buffer size" if we don't provide data, which confirms the count passed.
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Insufficient buffer size"),
+            "Should pass max check and fail on buffer size: {}",
+            err
+        );
+
+        // If we provide count = MAX + 1, it MUST return "exceeds maximum allowed"
+        let mut bytes_overflow = Vec::new();
+        bytes_overflow.push(TAG_ARRAY);
+        let count_overflow = (MAX_ARRAY_ELEMENTS + 1) as u32;
+        bytes_overflow.extend_from_slice(&count_overflow.to_le_bytes());
+
+        let result_overflow = PropertyValue::deserialize(&bytes_overflow);
+        assert!(result_overflow.is_err());
+        let err_overflow = result_overflow.unwrap_err();
+        assert!(
+            err_overflow.to_string().contains("exceeds maximum allowed"),
+            "Should fail max check: {}",
+            err_overflow
+        );
+    }
+
+    #[test]
+    fn test_property_map_capacity_boundary() {
+        // Similar strategy for PropertyMap
+        let mut bytes = Vec::new();
+        let count = MAX_PROPERTY_MAP_CAPACITY as u32;
+        bytes.extend_from_slice(&count.to_le_bytes());
+
+        // Check boundary exact hit (should fail on buffer size, not capacity limit)
+        let result = PropertyMap::deserialize(&bytes);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Insufficient buffer size")
+        );
+
+        // Check boundary violation (MAX + 1)
+        let mut bytes_overflow = Vec::new();
+        let count_overflow = (MAX_PROPERTY_MAP_CAPACITY + 1) as u32;
+        bytes_overflow.extend_from_slice(&count_overflow.to_le_bytes());
+
+        let result_overflow = PropertyMap::deserialize(&bytes_overflow);
+        assert!(result_overflow.is_err());
+        assert!(
+            result_overflow
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds maximum allowed")
+        );
+    }
+
+    #[test]
+    fn test_contains_vector_nested() {
+        // Document that contains_vector does NOT check nested arrays
+        let embedding = vec![0.1f32; 4];
+        let vec_val = PropertyValue::vector(&embedding);
+        let array_val = PropertyValue::array(vec![vec_val]);
+
+        let map = PropertyMapBuilder::new()
+            .insert("nested_vector", array_val)
+            .build();
+
+        assert!(
+            !map.contains_vector(),
+            "contains_vector should ignore nested vectors (current limitation)"
+        );
     }
 }
