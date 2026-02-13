@@ -25,11 +25,14 @@ pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 /// Configuration for query execution.
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
-    /// Maximum number of results to buffer
+    /// Maximum number of results to buffer before backpressure is applied.
+    /// Default is 10,000.
     pub max_buffer_size: usize,
-    /// Enable parallel execution
+    /// Enable parallel execution of query operators (where applicable).
+    /// Default is false.
     pub parallel: bool,
-    /// Timeout in milliseconds (0 = no timeout)
+    /// Execution timeout in milliseconds.
+    /// 0 means no timeout. Default is 0.
     pub timeout_ms: u64,
 }
 
@@ -44,6 +47,52 @@ impl Default for ExecutionConfig {
 }
 
 /// Query executor that runs physical plans against storage.
+///
+/// The executor converts a `PhysicalPlan` into a pipeline of iterators (`ResultIterator`).
+/// It manages access to both `CurrentStorage` (for recent data) and `HistoricalStorage`
+/// (for temporal data).
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::sync::Arc;
+/// use parking_lot::RwLock;
+/// use aletheiadb::storage::current::CurrentStorage;
+/// use aletheiadb::storage::historical::HistoricalStorage;
+/// use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+/// use aletheiadb::query::planner::PhysicalOp;
+///
+/// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Setup storage
+/// let current = Arc::new(CurrentStorage::new());
+/// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+///
+/// // 2. Create executor
+/// let executor = QueryExecutor::new(current, historical);
+///
+/// // 3. Define a plan (e.g., scan all Person nodes)
+/// let plan = PhysicalPlan {
+///     root: PhysicalOp::NodeScan {
+///         label: Some("Person".to_string()),
+///         estimated_rows: 100,
+///     },
+///     estimated_cost: Default::default(),
+///     temporal_context: None,
+///     parallel: false,
+///     include_provenance: true,
+/// };
+///
+/// // 4. Execute
+/// let results = executor.execute(plan)?;
+///
+/// // 5. Iterate results
+/// for row in results {
+///     let row = row?;
+///     println!("Found entity: {:?}", row.entity);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct QueryExecutor {
     /// Reference to current storage
     current: Arc<CurrentStorage>,
@@ -76,7 +125,19 @@ impl QueryExecutor {
         }
     }
 
-    /// Execute a physical plan and return results
+    /// Execute a physical plan and return results.
+    ///
+    /// This method recursively transforms the operator tree starting at `plan.root`
+    /// into a chain of iterators. The execution is lazy: no data is fetched until
+    /// the returned `QueryResults` iterator is consumed.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The physical query plan to execute.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `QueryResults` iterator that produces `Result<QueryRow>`.
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;
         // Wrap with provenance filter to conditionally strip metadata
