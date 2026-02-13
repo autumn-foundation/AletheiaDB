@@ -1929,21 +1929,6 @@ mod sentry_tests {
         ));
         assert!(!is_retryable_usearch_error("Other error"));
     }
-
-    #[test]
-    fn test_metric_wrapper_panic_handling() {
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
-            panic!("Test panic in metric");
-        });
-        let wrapper = create_metric_wrapper(4, distance_fn);
-
-        let v1 = [1.0f32, 0.0, 0.0, 0.0];
-        let v2 = [0.0f32, 1.0, 0.0, 0.0];
-
-        // Should return f32::MAX instead of unwinding
-        let result = wrapper(v1.as_ptr(), v2.as_ptr());
-        assert_eq!(result, f32::MAX);
-    }
 }
 
 #[cfg(test)]
@@ -2950,5 +2935,39 @@ mod coverage_tests {
 
         drop(guard);
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
+
+    #[test]
+    fn test_metric_wrapper_panic_handling() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            panic!("Test panic in metric");
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let v1 = [1.0f32, 0.0, 0.0, 0.0];
+        let v2 = [0.0f32, 1.0, 0.0, 0.0];
+
+        // Should return f32::MAX instead of unwinding
+        let result = wrapper(v1.as_ptr(), v2.as_ptr());
+        assert_eq!(result, f32::MAX);
+    }
+
+    #[test]
+    fn test_metric_wrapper_success() {
+        // Simple Euclidean distance
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let v1 = [1.0f32, 2.0, 3.0, 4.0];
+        let v2 = [1.0f32, 2.0, 3.0, 4.0]; // Identical, dist should be 0.0
+
+        let result = wrapper(v1.as_ptr(), v2.as_ptr());
+        assert_eq!(result, 0.0);
+
+        let v3 = [2.0f32, 2.0, 3.0, 4.0]; // diff is 1.0 in first dim, squared is 1.0
+        let result = wrapper(v1.as_ptr(), v3.as_ptr());
+        assert_eq!(result, 1.0);
     }
 }
