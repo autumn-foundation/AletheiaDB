@@ -119,8 +119,11 @@ impl<'a> Sherlock<'a> {
                     let prev_event_time = *current_sequence.last().unwrap();
 
                     // Search forward from current_version_idx + 1
-                    for j in (current_version_idx + 1)..versions.len() {
-                        let candidate = &versions[j];
+                    for (j, candidate) in versions
+                        .iter()
+                        .enumerate()
+                        .skip(current_version_idx + 1)
+                    {
                         let candidate_time = candidate.temporal.valid_time().start();
 
                         // Enforce strictly increasing time (if required) or just monotonic?
@@ -189,7 +192,6 @@ impl<'a> Sherlock<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
-    use crate::core::hlc::HybridTimestamp;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
 
