@@ -1919,6 +1919,25 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_metric_wrapper_success() {
+        // This test covers the "happy path" of the metric wrapper where no panic occurs.
+        // It ensures that the Ok branch of the catch_unwind match is covered.
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+            // Simple Euclidean distance for testing
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let vec1 = [1.0f32, 0.0, 0.0, 0.0];
+        let vec2 = [0.0f32, 0.0, 0.0, 0.0];
+
+        let result = wrapper(vec1.as_ptr(), vec2.as_ptr());
+
+        // Distance should be 1.0^2 = 1.0
+        assert!((result - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_metric_wrapper_panic_handling() {
         // This test ensures that panics in the metric function are caught and handled safely
         // by returning f32::MAX, preventing FFI aborts.
