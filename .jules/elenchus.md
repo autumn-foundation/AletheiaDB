@@ -60,7 +60,8 @@
 
 **Recommendations:**
 1.  None. This module is well-tested for its complexity level.
-# Elenchus Journal
+
+# Elenchus Journal - Recent Audits
 
 **[TimeRange Validation Gap]**
 **Module:** `aletheiadb::core::temporal`
@@ -118,7 +119,7 @@
 **Module:** `src/core/version.rs`
 **Severity:** 🔴 Critical
 **Finding:** `PropertyDelta::from_diff` silently ignored vector updates if `VectorDelta::from_diff` returned `None` (e.g., due to dimension mismatch). This resulted in data loss where the new vector value was discarded and the old value preserved.
-**Evidence:** Created reproduction test `test_property_delta_silently_ignores_dimension_change` which confirmed that changing a vector's dimension resulted in no change being recorded in the delta.
+**Evidence:** Created reproduction test `test_property_delta_silently_ignores_dimension_change` which confirmed that changing a vector's dimension resulted in no change and no error.
 **Resolution:** Modified `PropertyDelta::from_diff` to strictly fall back to a full value replacement in `delta.changed` when `VectorDelta` cannot be computed (e.g. dimension mismatch), while still respecting epsilon-equality for identical vectors. Added regression test to `sentry_tests`.
 
 **[HNSW Compilation Repair]**
@@ -134,3 +135,17 @@
 **Finding:** Critical recovery methods `IdGenerator::reset_to` and `ensure_at_least` were `pub(crate)` and completely untested. These are the foundation of crash recovery.
 **Evidence:** Code audit revealed these methods had no unit tests in `mod tests` or `mod proptests`.
 **Recommendation:** Added `mod sentry_tests` with concurrency tests for `ensure_at_least` and verification for `reset_to`.
+
+**[Ring Buffer Wraparound Fear]**
+**Module:** `src/storage/wal/ring_buffer.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** The documentation warned of a "Theoretical limitation" where `u64` overflow would break the buffer after ~1.2 million years. Audit revealed the code correctly uses `wrapping_sub` for modular arithmetic, handling overflow safely. The warning was false.
+**Evidence:** `test_wraparound_logic` verifies correct behavior across `u64` boundaries.
+**Resolution:** Updated documentation to reflect reality and removed the false warning.
+
+**[Ring Buffer Config Panic Gaps]**
+**Module:** `src/storage/wal/ring_buffer.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `WalRingBuffer::with_config` and `new` panicked on invalid input (capacity 0, spins 0) but these panics were not covered by tests, leaving the API contract unverified against regression.
+**Evidence:** Added 3 `#[should_panic]` tests (`test_new_zero_capacity_panics`, `test_config_initial_spins_zero_panics`, `test_config_max_less_than_initial_panics`).
+**Resolution:** Tests now enforce the panic contract.

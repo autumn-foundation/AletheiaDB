@@ -37,20 +37,22 @@
 //! wrap around after 2^64 operations using `wrapping_add`. At 500K operations
 //! per second, overflow would occur after approximately 1.2 million years.
 //!
-//! **Theoretical limitation**: The sequence-based slot availability logic uses
-//! direct integer comparison (`==`, `<`, `>`). After position counter wraparound,
-//! these comparisons would produce incorrect results, causing the buffer to
-//! become unusable. This is a documented theoretical limitation rather than a
-//! practical concern.
+//! The implementation uses modular arithmetic (`wrapping_sub`) for sequence comparisons,
+//! ensuring correctness even after `u64` overflow, provided the buffer capacity is
+//! significantly smaller than `u64::MAX`.
 //!
 //! **Sequence number lifecycle**:
 //! 1. Initially: `sequence[i] = i` for each slot
 //! 2. After write: `sequence = pos + 1` (signals data ready)
 //! 3. After read: `sequence = pos + capacity` (signals slot available)
 //!
-//! The comparison `current_seq < expected_seq` at line 526 assumes monotonic
-//! growth, which breaks after u64 wraparound. For systems requiring true
-//! infinite operation, a restart-based reset mechanism would be needed.
+//! # Panic Safety
+//!
+//! **This data structure is not panic-safe.** If a writer thread panics while holding
+//! a slot claim (after incrementing `write_pos` but before updating the slot's sequence),
+//! the buffer will permanently stall. The consumer will wait indefinitely for the
+//! sequence to be updated. It is the caller's responsibility to ensure that `try_append`
+//! does not panic or that the process aborts on panic.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1366,5 +1368,32 @@ mod tests {
         let final_drained = buf.drain();
         assert_eq!(final_drained.len(), 1);
         assert_eq!(final_drained[0].data, vec![100]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Ring buffer capacity must be > 0")]
+    fn test_new_zero_capacity_panics() {
+        WalRingBuffer::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "initial_spins must be > 0")]
+    fn test_config_initial_spins_zero_panics() {
+        let config = BackpressureConfig {
+            initial_spins: 0,
+            ..BackpressureConfig::default()
+        };
+        WalRingBuffer::with_config(1024, config);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_spins must be >= initial_spins")]
+    fn test_config_max_less_than_initial_panics() {
+        let config = BackpressureConfig {
+            initial_spins: 100,
+            max_spins: 10,
+            ..BackpressureConfig::default()
+        };
+        WalRingBuffer::with_config(1024, config);
     }
 }
