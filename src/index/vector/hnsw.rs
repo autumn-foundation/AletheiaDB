@@ -944,6 +944,15 @@ impl VectorIndex for HnswIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
+        // Check for re-entrant access during filtered search (prevents deadlock)
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot perform search from within a search_with_filter callback. \
+                 This prevents deadlocks when concurrent writers are pending."
+                    .to_string(),
+            )));
+        }
+
         // Validate query vector
         validate_vector(query)?;
 
@@ -1014,6 +1023,15 @@ impl VectorIndex for HnswIndex {
     where
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
+        // Check for re-entrant access during filtered search (prevents deadlock)
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot perform search_with_filter from within a search_with_filter callback. \
+                 This prevents deadlocks when concurrent writers are pending."
+                    .to_string(),
+            )));
+        }
+
         // Validate query vector
         validate_vector(query)?;
 

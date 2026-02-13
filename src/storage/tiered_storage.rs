@@ -876,4 +876,208 @@ mod tests {
         assert_eq!(metrics.cold_hits, 10);
         assert!(metrics.cold_latency.sample_count > 0);
     }
+
+    #[test]
+    fn test_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        // Wrap TieredStorage in Arc for thread safety
+        let tiered = Arc::new(TieredStorage::with_default_config(Arc::new(cold)));
+
+        // Store a version first so threads have something to read
+        let version = create_test_node_version(1);
+        tiered.store_node_version(&version).unwrap();
+
+        let mut handles = vec![];
+
+        for _ in 0..10 {
+            let tiered_clone = Arc::clone(&tiered);
+            let handle = thread::spawn(move || {
+                for _ in 0..100 {
+                    // All threads hammer the same version
+                    let _ = tiered_clone
+                        .get_node_version_cold(VersionId::new(1).unwrap())
+                        .unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let metrics = tiered.metrics();
+        // Total operations = 10 threads * 100 loops = 1000
+        // One cold hit (first access), rest warm hits
+        // Note: Due to race conditions on initial cache population, multiple threads might
+        // miss the cache and hit cold storage simultaneously.
+        assert_eq!(metrics.cold_hits + metrics.warm_hits, 1000);
+        assert!(metrics.cold_hits >= 1);
+
+        // Verify latency tracker recorded samples safely
+        assert!(metrics.cold_latency.sample_count > 0);
+    }
+
+    #[test]
+    fn test_prefetch_limits() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Chain of 10 versions
+        let mut versions = Vec::new();
+        let v1 = {
+            let props = PropertyMapBuilder::new().insert("step", 1i64).build();
+            NodeVersion::new_anchor(
+                VersionId::new(1).unwrap(),
+                NodeId::new(100).unwrap(),
+                BiTemporalInterval::current(1000.into()),
+                GLOBAL_INTERNER.intern("Test").unwrap(),
+                props,
+            )
+        };
+        versions.push(v1);
+
+        for i in 2..=10 {
+            let old_props = PropertyMapBuilder::new()
+                .insert("step", (i - 1) as i64)
+                .build();
+            let new_props = PropertyMapBuilder::new().insert("step", i as i64).build();
+            let v = NodeVersion::new_delta(
+                VersionId::new(i).unwrap(),
+                NodeId::new(100).unwrap(),
+                BiTemporalInterval::current(((1000 + i * 100) as i64).into()),
+                GLOBAL_INTERNER.intern("Test").unwrap(),
+                &old_props,
+                &new_props,
+                VersionId::new(i - 1).unwrap(),
+            );
+            versions.push(v);
+        }
+
+        let config = TieredStorageConfig {
+            warm_cache_size: 100,
+            enable_prefetch: true,
+            prefetch_depth: 3,
+        };
+        let tiered = TieredStorage::new(config, Arc::new(cold));
+
+        for v in &versions {
+            tiered.store_node_version(v).unwrap();
+        }
+
+        // Fetch head (v10)
+        let _ = tiered
+            .get_node_version_cold(VersionId::new(10).unwrap())
+            .unwrap();
+
+        let metrics = tiered.metrics();
+        // Prefetches should be exactly 3: v9, v8, v7
+        assert_eq!(metrics.prefetches, 3);
+
+        // Verify what is in cache implicitly by checking hit counts
+
+        // Fetch v9 -> warm hit (was prefetched)
+        let _ = tiered
+            .get_node_version_cold(VersionId::new(9).unwrap())
+            .unwrap();
+        assert_eq!(tiered.metrics().warm_hits, 1);
+
+        // Fetch v7 -> warm hit (was prefetched)
+        let _ = tiered
+            .get_node_version_cold(VersionId::new(7).unwrap())
+            .unwrap();
+        assert_eq!(tiered.metrics().warm_hits, 2);
+
+        // Fetch v6 -> cold hit (was NOT prefetched because depth=3 from v10 covers v9, v8, v7)
+        let _ = tiered
+            .get_node_version_cold(VersionId::new(6).unwrap())
+            .unwrap();
+
+        let final_metrics = tiered.metrics();
+        assert_eq!(final_metrics.warm_hits, 2); // Unchanged
+        // Initial v10 + v6 = 2 cold hits
+        assert_eq!(final_metrics.cold_hits, 2);
+    }
+
+    #[test]
+    fn test_cache_eviction() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Use a small cache
+        let config = TieredStorageConfig {
+            warm_cache_size: 5,
+            enable_prefetch: false,
+            prefetch_depth: 0,
+        };
+        let tiered = TieredStorage::new(config, Arc::new(cold));
+
+        // Store 10 versions
+        for i in 1..=10 {
+            let version = create_test_node_version(i);
+            tiered.store_node_version(&version).unwrap();
+        }
+
+        // Access all 10 versions to populate cache
+        // This will cause 10 cold hits.
+        for i in 1..=10 {
+            tiered
+                .get_node_version_cold(VersionId::new(i).unwrap())
+                .unwrap();
+        }
+
+        // Now access them again. Since cache size is 5, we expect at most 5 warm hits
+        // (the recently accessed ones), and at least 5 cold hits (the evicted ones).
+        let metrics_before = tiered.metrics();
+
+        for i in 1..=10 {
+            tiered
+                .get_node_version_cold(VersionId::new(i).unwrap())
+                .unwrap();
+        }
+
+        let metrics_after = tiered.metrics();
+        let warm_hits = metrics_after.warm_hits - metrics_before.warm_hits;
+        let cold_hits = metrics_after.cold_hits - metrics_before.cold_hits;
+
+        assert!(
+            warm_hits <= 5,
+            "Expected at most 5 warm hits, got {}",
+            warm_hits
+        );
+        assert!(
+            cold_hits >= 5,
+            "Expected at least 5 cold hits, got {}",
+            cold_hits
+        );
+    }
+
+    #[test]
+    fn test_error_propagation_writes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
+
+        // Enable write failure injection
+        tiered.cold_storage().set_fail_writes(true);
+
+        let version = create_test_node_version(1);
+        let result = tiered.store_node_version(&version);
+
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("Simulated write failure"));
+
+        // Also test batch store
+        let result = tiered.store_node_versions_batch(&[version]);
+        assert!(result.is_err());
+    }
 }

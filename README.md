@@ -360,7 +360,7 @@ println!("Created Alice: {:?}", alice);
 ### Time-Travel Queries
 
 ```rust
-use aletheiadb::core::temporal::{Timestamp, time};
+use aletheiadb::core::temporal::time;
 
 // Get current time
 let now = time::now();
@@ -408,7 +408,6 @@ let similar = db.find_similar(doc_id, 10)?;
 ### Hybrid Queries (Graph + Vector + Temporal)
 
 ```rust
-use aletheiadb::query::QueryBuilder;
 use aletheiadb::query::ir::Predicate;
 
 // Setup query parameters
@@ -418,9 +417,6 @@ let tx_time = aletheiadb::core::temporal::time::now();
 
 // Simple: Graph + Vector hybrid
 let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
-for row in results {
-    println!("Found: {:?}", row?.entity);
-}
 
 // Complex: Full hybrid with builder
 let results = db.query()
@@ -431,11 +427,6 @@ let results = db.query()
     .filter(Predicate::gt("score", 0.8)) // Filter: high similarity only
     .with_provenance()                 // Include metadata
     .execute(&db)?;
-
-for row in results {
-    let row = row?;
-    println!("Score: {:?}, Path: {:?}", row.score, row.path);
-}
 
 // Property-specific vector queries
 let results = db.query()

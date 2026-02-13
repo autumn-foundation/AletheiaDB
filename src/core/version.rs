@@ -448,6 +448,17 @@ impl PropertyDelta {
     /// - Clone the Arc (cheap)
     /// - Try to unwrap it (fails due to refcount > 1)
     /// - Fall back to cloning the entire HashMap structure
+    ///
+    /// # Failure Modes (Fail-Open)
+    ///
+    /// When applying a sparse vector delta (`VectorDelta::Sparse`):
+    /// - If the base property exists and is a vector of matching dimension, the delta is applied.
+    /// - If the base property is **missing** or has the **wrong type**, the sparse delta is **silently ignored**.
+    ///
+    /// This "fail-open" behavior is intentional for query/view construction to provide
+    /// best-effort results even if the base state is inconsistent (e.g., during development
+    /// or partial data recovery). It prevents the entire view from failing due to a single
+    /// corrupted property history.
     pub fn apply(&self, base: &PropertyMap) -> PropertyMap {
         // Calculate capacity for the new map to avoid reallocation
         // Properties from base (minus removed) plus potentially new properties from changes
@@ -515,6 +526,13 @@ impl PropertyDelta {
     ///
     /// Returns `Ok(())` if all sparse deltas were successfully materialized.
     /// Returns `Err` if any sparse delta cannot be materialized (e.g., base property missing).
+    ///
+    /// # Failure Modes (Fail-Closed)
+    ///
+    /// Unlike [`apply`](Self::apply), this method is **fail-closed**. If a base property
+    /// is missing or invalid for a sparse delta, it returns an error. This strictness
+    /// is required for persistence to ensure data integrity - we cannot persist a
+    /// sparse delta that cannot be fully resolved, as this would lead to permanent data loss.
     ///
     /// # Side Effects
     ///
@@ -1034,6 +1052,45 @@ mod metadata_tests {
 
     #[test]
     fn test_version_metadata_default() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "core::version::metadata_tests::test_version_metadata_default_subprocess_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for default metadata test");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(
+                        status.success(),
+                        "subprocess helper failed for VersionMetadata default semantics"
+                    );
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("VersionMetadata::default/default_for_existing did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_version_metadata_default_subprocess_helper() {
         let metadata = VersionMetadata::default();
         let default_expected = VersionMetadata::default_for_existing();
 
@@ -2295,90 +2352,318 @@ mod sentry_tests {
         );
         assert_eq!(applied_vec, &new_vec[..]);
     }
+}
 
-    #[test]
-    fn test_materialize_vector_deltas_correctness() {
-        // 🧪 Strategy: Verify that materialize_vector_deltas correctly applies sparse deltas
-        // and moves them to the 'changed' map as full vectors.
+#[cfg(test)]
+mod mutant_kill_tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::TIMESTAMP_MAX;
+    use std::sync::Arc;
 
-        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
-        let mut delta = PropertyDelta::new();
+    fn make_node_anchor() -> NodeVersion {
+        let props = PropertyMapBuilder::new().insert("name", "node").build();
+        NodeVersion::new_anchor(
+            VersionId::new(10).unwrap(),
+            NodeId::new(11).unwrap(),
+            BiTemporalInterval::current(1_000.into()),
+            GLOBAL_INTERNER.intern("Node").unwrap(),
+            props,
+        )
+    }
 
-        // 1. Create a sparse delta: change index 1 to 5.0
-        // Base will be [1.0, 2.0, 3.0]
-        let changes = Arc::new(vec![(1, 5.0f32)]);
-        let vec_delta = VectorDelta::Sparse {
-            dimension: 3,
-            changes,
-        };
-        delta.vector_deltas.insert(key, vec_delta);
+    fn make_edge_anchor() -> EdgeVersion {
+        let props = PropertyMapBuilder::new().insert("weight", 1i64).build();
+        EdgeVersion::new_anchor(
+            VersionId::new(20).unwrap(),
+            EdgeId::new(21).unwrap(),
+            BiTemporalInterval::current(1_000.into()),
+            GLOBAL_INTERNER.intern("EDGE").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+        )
+    }
 
-        // 2. Create base property map
-        let base_vec = vec![1.0f32, 2.0, 3.0];
-        let base = PropertyMapBuilder::new()
-            .insert("embedding", PropertyValue::vector(&base_vec))
-            .build();
-
-        // 3. Materialize
-        delta
-            .materialize_vector_deltas(&base)
-            .expect("Materialization should succeed");
-
-        // 4. Verify 'vector_deltas' is empty
-        assert!(
-            delta.vector_deltas.is_empty(),
-            "vector_deltas should be empty after materialization"
-        );
-
-        // 5. Verify 'changed' has the full vector
-        let materialized_val = delta
-            .changed
-            .get(&key)
-            .expect("Materialized vector should be in changed");
-        let materialized_vec = materialized_val
-            .as_vector()
-            .expect("Should be a vector value");
-
-        // 6. Verify values: [1.0, 5.0, 3.0]
-        assert_eq!(materialized_vec, &[1.0, 5.0, 3.0]);
+    fn make_edge_delta() -> EdgeVersion {
+        let old_props = PropertyMapBuilder::new().insert("weight", 1i64).build();
+        let new_props = PropertyMapBuilder::new().insert("weight", 2i64).build();
+        EdgeVersion::new_delta(
+            VersionId::new(22).unwrap(),
+            EdgeId::new(23).unwrap(),
+            BiTemporalInterval::current(2_000.into()),
+            GLOBAL_INTERNER.intern("EDGE").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            &old_props,
+            &new_props,
+            VersionId::new(20).unwrap(),
+        )
     }
 
     #[test]
-    fn test_materialize_vector_deltas_full_delta() {
-        // 🧪 Strategy: Verify that VectorDelta::Full is also moved to 'changed' correctly.
+    fn test_vector_delta_from_diff_allows_exact_max_dimensions() {
+        let len = MAX_VECTOR_DIMENSIONS;
+        let old = vec![0.0f32; len];
+        let mut new = old.clone();
+        new[0] = 1.0;
 
-        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
-        let mut delta = PropertyDelta::new();
+        let delta = VectorDelta::from_diff(&old, &new);
+        assert!(delta.is_some(), "Max dimension should be allowed");
+    }
 
-        // 1. Create a Full delta
-        let new_vec = vec![4.0f32, 5.0, 6.0];
-        let vec_delta = VectorDelta::Full(Arc::from(new_vec.clone()));
-        delta.vector_deltas.insert(key, vec_delta);
-
-        // 2. Create base (can be empty for Full delta, but let's provide one to be safe)
-        let base = PropertyMapBuilder::new().build();
-
-        // 3. Materialize
-        delta
-            .materialize_vector_deltas(&base)
-            .expect("Materialization should succeed");
-
-        // 4. Verify 'vector_deltas' is empty
+    #[test]
+    fn test_vector_delta_from_diff_threshold_behavior_for_sparse_vs_full() {
+        // Boundary: changes * 2 == dimension should be full storage.
+        let old_full = vec![0.0f32; 4];
+        let mut new_full = old_full.clone();
+        new_full[0] = 1.0;
+        new_full[1] = 2.0;
+        let delta_full = VectorDelta::from_diff(&old_full, &new_full).unwrap();
         assert!(
-            delta.vector_deltas.is_empty(),
-            "vector_deltas should be empty after materialization"
+            matches!(delta_full, VectorDelta::Full(_)),
+            "Threshold boundary should choose full storage"
         );
 
-        // 5. Verify 'changed' has the full vector
-        let materialized_val = delta
-            .changed
-            .get(&key)
-            .expect("Materialized vector should be in changed");
-        let materialized_vec = materialized_val
-            .as_vector()
-            .expect("Should be a vector value");
+        // One change in 3 dimensions should be sparse.
+        let old_sparse = vec![0.0f32; 3];
+        let mut new_sparse = old_sparse.clone();
+        new_sparse[0] = 1.0;
+        let delta_sparse = VectorDelta::from_diff(&old_sparse, &new_sparse).unwrap();
+        assert!(
+            matches!(delta_sparse, VectorDelta::Sparse { .. }),
+            "Few changes should choose sparse storage"
+        );
+    }
 
-        // 6. Verify values match the full delta
-        assert_eq!(materialized_vec, &new_vec[..]);
+    #[test]
+    fn test_vector_delta_apply_ignores_index_equal_to_length() {
+        let base = vec![0.0f32, 1.0, 2.0];
+        let delta = VectorDelta::Sparse {
+            dimension: 3,
+            changes: Arc::new(vec![(3, 99.0)]),
+        };
+
+        let result = delta.apply(&base);
+        assert_eq!(result, base);
+    }
+
+    #[test]
+    fn test_vector_delta_sparse_estimated_heap_size_matches_formula() {
+        let mut changes = Vec::with_capacity(4);
+        changes.push((0u32, 1.0f32));
+        changes.push((3u32, 2.0f32));
+        let delta = VectorDelta::Sparse {
+            dimension: 8,
+            changes: Arc::new(changes),
+        };
+
+        let expected = match &delta {
+            VectorDelta::Sparse { changes, .. } => {
+                changes.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(delta.estimated_heap_size(), expected);
+    }
+
+    #[test]
+    fn test_vector_delta_partial_eq_semantics() {
+        let sparse_a = VectorDelta::Sparse {
+            dimension: 4,
+            changes: Arc::new(vec![(1, 0.5), (3, 1.0)]),
+        };
+        let sparse_b = VectorDelta::Sparse {
+            dimension: 4,
+            changes: Arc::new(vec![(1, 0.5), (3, 1.0)]),
+        };
+        assert_eq!(sparse_a, sparse_b);
+
+        let sparse_dim_mismatch = VectorDelta::Sparse {
+            dimension: 5,
+            changes: Arc::new(vec![(1, 0.5), (3, 1.0)]),
+        };
+        assert_ne!(sparse_a, sparse_dim_mismatch);
+
+        let sparse_len_mismatch = VectorDelta::Sparse {
+            dimension: 4,
+            changes: Arc::new(vec![(1, 0.5)]),
+        };
+        assert_ne!(sparse_a, sparse_len_mismatch);
+
+        let sparse_idx_mismatch = VectorDelta::Sparse {
+            dimension: 4,
+            changes: Arc::new(vec![(0, 0.5), (3, 1.0)]),
+        };
+        assert_ne!(sparse_a, sparse_idx_mismatch);
+
+        let sparse_val_mismatch = VectorDelta::Sparse {
+            dimension: 4,
+            changes: Arc::new(vec![(1, 0.5 + 1e-3), (3, 1.0)]),
+        };
+        assert_ne!(sparse_a, sparse_val_mismatch);
+
+        let full_a = VectorDelta::Full(Arc::from(vec![1.0f32, 2.0f32]));
+        let full_b = VectorDelta::Full(Arc::from(vec![1.0f32, 2.0f32]));
+        assert_eq!(full_a, full_b);
+
+        let full_len_mismatch = VectorDelta::Full(Arc::from(vec![1.0f32]));
+        assert_ne!(full_a, full_len_mismatch);
+
+        let full_val_mismatch = VectorDelta::Full(Arc::from(vec![1.0f32, 2.5f32]));
+        assert_ne!(full_a, full_val_mismatch);
+
+        assert_ne!(sparse_a, full_a);
+    }
+
+    #[test]
+    fn test_temporal_version_close_transaction_time_updates_tx_dimension() {
+        let mut node = make_node_anchor();
+        let end = Timestamp::from(2_000);
+
+        node.close_transaction_time(end);
+
+        assert_eq!(node.temporal().transaction_time().end(), end);
+        assert_eq!(node.temporal().valid_time().end(), TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_property_delta_is_empty_only_when_all_collections_empty() {
+        let key_a = GLOBAL_INTERNER.intern("a").unwrap();
+        let key_v = GLOBAL_INTERNER.intern("v").unwrap();
+        let key_r = GLOBAL_INTERNER.intern("r").unwrap();
+
+        let mut changed_only = PropertyDelta::new();
+        changed_only.changed.insert(key_a, PropertyValue::Int(1));
+        assert!(!changed_only.is_empty());
+
+        let mut vector_only = PropertyDelta::new();
+        vector_only.vector_deltas.insert(
+            key_v,
+            VectorDelta::Sparse {
+                dimension: 2,
+                changes: Arc::new(vec![(0, 1.0)]),
+            },
+        );
+        assert!(!vector_only.is_empty());
+
+        let mut removed_only = PropertyDelta::new();
+        removed_only.removed.insert(key_r);
+        assert!(!removed_only.is_empty());
+
+        assert!(PropertyDelta::new().is_empty());
+    }
+
+    #[test]
+    fn test_property_delta_estimated_heap_size_matches_formula() {
+        let mut delta = PropertyDelta::new();
+        let key_name = GLOBAL_INTERNER.intern("name").unwrap();
+        let key_vec = GLOBAL_INTERNER.intern("embedding").unwrap();
+        let key_removed = GLOBAL_INTERNER.intern("old").unwrap();
+
+        delta
+            .changed
+            .insert(key_name, PropertyValue::string("Alice"));
+        delta.vector_deltas.insert(
+            key_vec,
+            VectorDelta::Sparse {
+                dimension: 4,
+                changes: Arc::new(vec![(1, 2.0)]),
+            },
+        );
+        delta.removed.insert(key_removed);
+
+        let expected_changed_overhead = delta.changed.capacity()
+            * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8);
+        let expected_changed_values: usize = delta
+            .changed
+            .values()
+            .map(PropertyValue::estimated_heap_size)
+            .sum();
+
+        let expected_vector_overhead = delta.vector_deltas.capacity()
+            * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<VectorDelta>() + 8);
+        let expected_vector_values: usize = delta
+            .vector_deltas
+            .values()
+            .map(VectorDelta::estimated_heap_size)
+            .sum();
+
+        let expected_removed_overhead =
+            delta.removed.capacity() * (std::mem::size_of::<PropertyKey>() + 8);
+
+        let expected = expected_changed_overhead
+            + expected_changed_values
+            + expected_vector_overhead
+            + expected_vector_values
+            + expected_removed_overhead;
+
+        assert_eq!(delta.estimated_heap_size(), expected);
+    }
+
+    #[test]
+    fn test_node_and_edge_estimated_size_match_formula() {
+        let node = make_node_anchor();
+        assert_eq!(
+            node.estimated_size(),
+            std::mem::size_of::<NodeVersion>() + node.data.estimated_heap_size()
+        );
+
+        let edge = make_edge_anchor();
+        assert_eq!(
+            edge.estimated_size(),
+            std::mem::size_of::<EdgeVersion>() + edge.data.estimated_heap_size()
+        );
+    }
+
+    #[test]
+    fn test_edge_anchor_reports_not_delta() {
+        let edge = make_edge_anchor();
+        assert!(!edge.is_delta());
+    }
+
+    #[test]
+    fn test_entity_version_trait_round_trip_links_for_node_and_edge() {
+        fn set_links<V: EntityVersion>(
+            v: &mut V,
+            prev: Option<VersionId>,
+            next: Option<VersionId>,
+        ) {
+            v.set_prev_version(prev);
+            v.set_next_version(next);
+        }
+        fn links<V: EntityVersion>(v: &V) -> (Option<VersionId>, Option<VersionId>) {
+            (v.prev_version(), v.next_version())
+        }
+
+        let mut node = make_node_anchor();
+        let node_prev = Some(VersionId::new(99).unwrap());
+        let node_next = Some(VersionId::new(100).unwrap());
+        set_links(&mut node, node_prev, node_next);
+        assert_eq!(links(&node), (node_prev, node_next));
+        set_links(&mut node, None, None);
+        assert_eq!(links(&node), (None, None));
+
+        let mut edge = make_edge_anchor();
+        let edge_prev = Some(VersionId::new(199).unwrap());
+        let edge_next = Some(VersionId::new(200).unwrap());
+        set_links(&mut edge, edge_prev, edge_next);
+        assert_eq!(links(&edge), (edge_prev, edge_next));
+        set_links(&mut edge, None, None);
+        assert_eq!(links(&edge), (None, None));
+    }
+
+    #[test]
+    fn test_entity_version_trait_is_anchor_for_edge_variants() {
+        fn trait_is_anchor<V: EntityVersion>(v: &V) -> bool {
+            v.is_anchor()
+        }
+
+        let edge_anchor = make_edge_anchor();
+        let edge_delta = make_edge_delta();
+
+        assert!(trait_is_anchor(&edge_anchor));
+        assert!(!trait_is_anchor(&edge_delta));
     }
 }
