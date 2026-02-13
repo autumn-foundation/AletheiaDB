@@ -450,9 +450,23 @@ where
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
 
-        let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
-        let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-        distance_fn(slice_a, slice_b)
+        // Wrap user code in catch_unwind to prevent UB from unwinding into C++
+        // Use AssertUnwindSafe because raw pointers are not UnwindSafe, but they are Copy/trivially safe here.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+            let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+            distance_fn(slice_a, slice_b)
+        }));
+
+        match result {
+            Ok(dist) => dist,
+            Err(_) => {
+                // Log error to stderr (cannot panic here as that would be UB)
+                // We return f32::MAX to indicate maximum dissimilarity
+                eprintln!("CRITICAL: Panic in custom metric function caught at FFI boundary. Returning f32::MAX.");
+                f32::MAX
+            }
+        }
     })
 }
 
