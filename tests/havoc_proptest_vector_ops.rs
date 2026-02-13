@@ -26,7 +26,7 @@ proptest! {
     fn fuzz_dot_product(vec1 in proptest::collection::vec(any::<f32>(), 0..1024),
                         vec2 in proptest::collection::vec(any::<f32>(), 0..1024)) {
         if vec1.len() == vec2.len() {
-             let _ = dot_product(&vec1, &vec2);
+             let _ = dot_product(&vec1, &vec2).unwrap();
         }
     }
 
