@@ -495,7 +495,10 @@ pub(crate) fn parse_entry_at(
         }
         4 => {
             // UpdateEdge
-            if current_offset.checked_add(16).ok_or_else(|| {
+            // V0: 16 bytes (EdgeId + VersionId)
+            // V1+: 20 bytes (EdgeId + VersionId + LabelId)
+            let required = if version >= WAL_VERSION { 20 } else { 16 };
+            if current_offset.checked_add(required).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
