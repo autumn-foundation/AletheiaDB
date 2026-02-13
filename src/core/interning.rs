@@ -1271,7 +1271,6 @@ mod sentry_consistency_tests {
     use super::*;
     use std::sync::{Arc, Barrier};
     use std::thread;
-    use std::time::Duration;
 
     #[test]
     fn test_get_all_strings_consistency_under_load() {
