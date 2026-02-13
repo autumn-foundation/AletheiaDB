@@ -272,8 +272,8 @@ impl EntityTimeline {
     ///
     /// # Deduplication Policy
     ///
-    /// After merging and sorting by `start` time, consecutive entries with duplicate
-    /// `metadata_idx` are handled according to the provided `policy`.
+    /// After merging and sorting by `start` time, entries with duplicate `metadata_idx`
+    /// are deduplicated globally according to the provided `policy`.
     ///
     /// | Policy | Behavior | Use Case |
     /// |--------|----------|----------|
@@ -332,15 +332,25 @@ impl EntityTimeline {
 
         match policy {
             DeduplicationPolicy::FirstOccurrence => {
-                // Deduplicate by metadata_idx to prevent memory leaks during recovery or bulk updates.
-                // Keeps the first occurrence when duplicates exist.
-                self.versions.dedup_by_key(|e| e.metadata_idx);
+                // Keep the earliest occurrence for each metadata_idx.
+                // Uses global deduplication (not just consecutive runs) to preserve idempotence
+                // even when duplicates are separated by other entries after sorting.
+                let mut seen = std::collections::HashSet::with_capacity(self.versions.len());
+                self.versions
+                    .retain(|entry| seen.insert(entry.metadata_idx));
             }
             DeduplicationPolicy::LastOccurrence => {
-                // Reverse, dedup, reverse back to keep the last occurrence (latest start time)
-                self.versions.reverse();
-                self.versions.dedup_by_key(|e| e.metadata_idx);
-                self.versions.reverse();
+                // Keep the latest occurrence for each metadata_idx by scanning in reverse.
+                // Reverse scan avoids O(n^2) lookups and preserves sorted order after reverse().
+                let mut seen = std::collections::HashSet::with_capacity(self.versions.len());
+                let mut deduped = Vec::with_capacity(self.versions.len());
+                for entry in self.versions.iter().rev() {
+                    if seen.insert(entry.metadata_idx) {
+                        deduped.push(*entry);
+                    }
+                }
+                deduped.reverse();
+                self.versions = deduped;
             }
             DeduplicationPolicy::Reject => {
                 // Already checked above, no further deduplication needed.
@@ -1801,6 +1811,135 @@ mod tests {
             1000.into(),
             "Should keep first occurrence (end=1000)"
         );
+    }
+
+    #[test]
+    fn test_batch_insert_deduplication_non_consecutive_first_occurrence() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(200).unwrap();
+        let v2 = VersionId::new(201).unwrap();
+
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), 1000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let mut timelines = indexes.index.get_mut(&EntityId::Node(node_id)).unwrap();
+        let v3 = VersionId::new(202).unwrap();
+        let new_metadata_idx = timelines
+            .add_version_metadata(VersionMetadata::new(v3))
+            .unwrap();
+
+        timelines
+            .valid
+            .insert_batch(
+                vec![
+                    TimelineEntry {
+                        // Duplicate of metadata_idx=0 but with later start, so duplicate entries
+                        // are non-consecutive after sorting by start.
+                        start: 1500.into(),
+                        end: 2500.into(),
+                        metadata_idx: 0,
+                    },
+                    TimelineEntry {
+                        start: 2000.into(),
+                        end: 3000.into(),
+                        metadata_idx: new_metadata_idx,
+                    },
+                ],
+                DeduplicationPolicy::FirstOccurrence,
+            )
+            .unwrap();
+
+        assert_eq!(
+            timelines.valid.versions.len(),
+            3,
+            "FirstOccurrence must deduplicate non-consecutive duplicate metadata indices"
+        );
+        let idx0_entries: Vec<_> = timelines
+            .valid
+            .versions
+            .iter()
+            .filter(|e| e.metadata_idx == 0)
+            .collect();
+        assert_eq!(idx0_entries.len(), 1);
+        assert_eq!(idx0_entries[0].start, 0.into());
+        assert_eq!(idx0_entries[0].end, 1000.into());
+    }
+
+    #[test]
+    fn test_batch_insert_deduplication_non_consecutive_last_occurrence() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(2).unwrap();
+        let v1 = VersionId::new(300).unwrap();
+        let v2 = VersionId::new(301).unwrap();
+
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), 1000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let mut timelines = indexes.index.get_mut(&EntityId::Node(node_id)).unwrap();
+        timelines
+            .valid
+            .insert_batch(
+                vec![TimelineEntry {
+                    // Duplicate of metadata_idx=0 appears after metadata_idx=1 in sorted order.
+                    start: 1500.into(),
+                    end: 2500.into(),
+                    metadata_idx: 0,
+                }],
+                DeduplicationPolicy::LastOccurrence,
+            )
+            .unwrap();
+
+        assert_eq!(
+            timelines.valid.versions.len(),
+            2,
+            "LastOccurrence must deduplicate non-consecutive duplicate metadata indices"
+        );
+        let idx0_entries: Vec<_> = timelines
+            .valid
+            .versions
+            .iter()
+            .filter(|e| e.metadata_idx == 0)
+            .collect();
+        assert_eq!(idx0_entries.len(), 1);
+        assert_eq!(idx0_entries[0].start, 1500.into());
+        assert_eq!(idx0_entries[0].end, 2500.into());
     }
 
     #[test]
