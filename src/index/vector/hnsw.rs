@@ -2998,6 +2998,9 @@ mod coverage_tests {
         // The value in id_mapping is the usearch key (u64).
         // Let's insert a fake key.
         index.id_mapping.insert(id, 9999);
+        // Fix: Also update reverse mapping so that subsequent searches can resolve the new key (9999) back to the NodeId.
+        // Without this, search results return the key 9999, but convert_and_sort_matches drops it because 9999 isn't in reverse_mapping.
+        index.reverse_mapping.insert(9999, id);
 
         // Join thread
         handle.join().unwrap();
