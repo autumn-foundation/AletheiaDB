@@ -420,6 +420,58 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
     error_msg.contains("No available threads to lock")
 }
 
+// Helper logic to execute the metric function safely.
+// Extracted to a helper function to improve test coverage attribution and reduce code bloat.
+fn execute_metric_safe<F>(
+    a: *const f32,
+    b: *const f32,
+    dims: usize,
+    distance_fn: &F,
+) -> f32
+where
+    F: Fn(&[f32], &[f32]) -> f32 + ?Sized,
+{
+    // Check for null pointers to prevent UB
+    if a.is_null() || b.is_null() {
+        // This should never happen with a correct usearch implementation.
+        // If it does, we panic to prevent UB from dereferencing null.
+        panic!("usearch passed null pointer to metric function");
+    }
+
+    // Check for alignment to prevent UB
+    // Use bitwise check for power-of-2 alignment (f32 align is 4)
+    let align_mask = std::mem::align_of::<f32>() - 1;
+    if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
+        panic!(
+            "usearch passed unaligned pointer to metric function (expected alignment {})",
+            std::mem::align_of::<f32>()
+        );
+    }
+
+    // SAFETY: usearch guarantees pointers are valid for `dims` elements.
+    // We verified they are not null above.
+    //
+    // We wrap the user callback in catch_unwind to prevent panics from unwinding
+    // across the FFI boundary into C++, which is Undefined Behavior and causes aborts.
+    let safe_closure = std::panic::AssertUnwindSafe(|| {
+        let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+        let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+        distance_fn(slice_a, slice_b)
+    });
+
+    match std::panic::catch_unwind(safe_closure) {
+        Ok(distance) => distance,
+        Err(_) => {
+            // Log the error to stderr since we can't propagate it through FFI.
+            // We return f32::MAX to indicate "infinite distance" (no match).
+            eprintln!(
+                "CRITICAL: Panic in custom metric function caught by HNSW wrapper. Returning f32::MAX to prevent UB."
+            );
+            f32::MAX
+        }
+    }
+}
+
 // Helper to create the metric wrapper - extracted for testing
 fn create_metric_wrapper<F>(
     dims: usize,
@@ -429,46 +481,7 @@ where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
 {
     Box::new(move |a: *const f32, b: *const f32| {
-        // Check for null pointers to prevent UB
-        if a.is_null() || b.is_null() {
-            // This should never happen with a correct usearch implementation.
-            // If it does, we panic to prevent UB from dereferencing null.
-            // We cannot return an error here because the signature is fixed by usearch trait.
-            panic!("usearch passed null pointer to metric function");
-        }
-
-        // Check for alignment to prevent UB
-        // Use bitwise check for power-of-2 alignment (f32 align is 4)
-        let align_mask = std::mem::align_of::<f32>() - 1;
-        if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
-            panic!(
-                "usearch passed unaligned pointer to metric function (expected alignment {})",
-                std::mem::align_of::<f32>()
-            );
-        }
-
-        // SAFETY: usearch guarantees pointers are valid for `dims` elements.
-        // We verified they are not null above.
-        //
-        // We wrap the user callback in catch_unwind to prevent panics from unwinding
-        // across the FFI boundary into C++, which is Undefined Behavior and causes aborts.
-        let safe_closure = std::panic::AssertUnwindSafe(|| {
-            let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
-            let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-            distance_fn(slice_a, slice_b)
-        });
-
-        match std::panic::catch_unwind(safe_closure) {
-            Ok(distance) => distance,
-            Err(_) => {
-                // Log the error to stderr since we can't propagate it through FFI.
-                // We return f32::MAX to indicate "infinite distance" (no match).
-                eprintln!(
-                    "CRITICAL: Panic in custom metric function caught by HNSW wrapper. Returning f32::MAX to prevent UB."
-                );
-                f32::MAX
-            }
-        }
+        execute_metric_safe(a, b, dims, &*distance_fn)
     })
 }
 
@@ -2027,9 +2040,11 @@ mod tests {
 
     #[test]
     fn test_metric_wrapper_panic_handling() {
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
-            panic!("Test panic in metric");
-        });
+        // Use unsized trait object to match production usage and ensure correct coverage attribution
+        let distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync> =
+            Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+                panic!("Test panic in metric");
+            });
         let wrapper = create_metric_wrapper(4, distance_fn);
 
         let v1 = [1.0f32, 0.0, 0.0, 0.0];
@@ -2043,9 +2058,11 @@ mod tests {
     #[test]
     fn test_metric_wrapper_success() {
         // Simple Euclidean distance
-        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
-            a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
-        });
+        // Use unsized trait object to match production usage and ensure correct coverage attribution
+        let distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync> =
+            Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+                a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+            });
         let wrapper = create_metric_wrapper(4, distance_fn);
 
         let v1 = [1.0f32, 2.0, 3.0, 4.0];
