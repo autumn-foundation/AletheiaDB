@@ -183,7 +183,7 @@ struct EntityTimeline {
 }
 
 impl EntityTimeline {
-    /// Insert a new version into the timeline, maintaining sorted order by start time.
+    /// Insert a new version into the timeline, maintaining sorted order.
     ///
     /// # Arguments
     ///
@@ -197,15 +197,23 @@ impl EntityTimeline {
             metadata_idx,
         };
 
-        // Optimization: if this version starts after the last one (common case), just push it.
-        if self.versions.last().is_none_or(|last| last.start <= start) {
+        // Optimization: if this version belongs at the end (common case), just push it.
+        // We sort by (start, metadata_idx) to make ordering deterministic for equal starts.
+        let new_key = (start, metadata_idx);
+        if self
+            .versions
+            .last()
+            .is_none_or(|last| (last.start, last.metadata_idx) <= new_key)
+        {
             let position = self.versions.len();
             self.versions.push(entry);
             self.metadata_to_position.insert(metadata_idx, position);
             return;
         }
 
-        let idx = self.versions.partition_point(|e| e.start < start);
+        let idx = self
+            .versions
+            .partition_point(|e| (e.start, e.metadata_idx) < new_key);
         self.versions.insert(idx, entry);
 
         // Rebuild position map after insertion (positions shifted)
@@ -318,8 +326,9 @@ impl EntityTimeline {
         // Critical for bulk recovery/migration (10K+ versions per entity).
         self.versions.reserve(entries.len());
         self.versions.append(&mut entries);
-        // Sort by start time. Timsort exploits existing order in the timeline.
-        self.versions.sort_by_key(|e| e.start);
+        // Sort by start time with metadata_idx tie-breaker for deterministic ordering.
+        // Timsort exploits existing order in the timeline.
+        self.versions.sort_by_key(|e| (e.start, e.metadata_idx));
 
         match policy {
             DeduplicationPolicy::FirstOccurrence => {
@@ -2042,6 +2051,77 @@ mod tests {
         // Both should have start time 1000
         assert_eq!(timelines.valid.versions[0].start, 1000.into());
         assert_eq!(timelines.valid.versions[1].start, 1000.into());
+    }
+
+    #[test]
+    fn test_batch_insert_equivalence_with_same_start_retroactive_pattern() {
+        let node_id = NodeId::new(1).unwrap();
+        let versions = vec![
+            (
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new(10.into(), 15.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
+            ),
+            (
+                VersionId::new(2).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new(20.into(), 25.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
+            ),
+            (
+                VersionId::new(3).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new(10.into(), 12.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
+            ),
+        ];
+
+        let indexes_individual = TemporalIndexes::new();
+        for (version_id, temporal) in &versions {
+            indexes_individual
+                .insert_node_version(node_id, *version_id, *temporal)
+                .unwrap();
+        }
+
+        let indexes_batch = TemporalIndexes::new();
+        indexes_batch
+            .insert_node_versions_batch(node_id, versions)
+            .unwrap();
+
+        let entity_id = EntityId::Node(node_id);
+        let timelines_individual = indexes_individual.index.get(&entity_id).unwrap();
+        let timelines_batch = indexes_batch.index.get(&entity_id).unwrap();
+
+        let individual_entries: Vec<_> = timelines_individual
+            .valid
+            .versions
+            .iter()
+            .map(|entry| {
+                (
+                    entry.start,
+                    entry.end,
+                    timelines_individual.resolve_version_id(entry.metadata_idx),
+                )
+            })
+            .collect();
+        let batch_entries: Vec<_> = timelines_batch
+            .valid
+            .versions
+            .iter()
+            .map(|entry| {
+                (
+                    entry.start,
+                    entry.end,
+                    timelines_batch.resolve_version_id(entry.metadata_idx),
+                )
+            })
+            .collect();
+
+        assert_eq!(individual_entries, batch_entries);
     }
 
     #[test]
