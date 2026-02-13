@@ -30,9 +30,13 @@
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
 use crate::db::AletheiaDB;
-use crate::utils::Result;
+use crate::utils::{error::VectorError, Error, Result};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
+
+/// Maximum allowed value for k (results count) to prevent DoS attacks via memory exhaustion.
+/// This matches the limit in the HNSW index implementation.
+const MAX_HYBRID_K: usize = 100_000;
 
 /// A candidate node with its similarity score, ordered by similarity (min-heap).
 ///
@@ -119,6 +123,14 @@ pub fn traverse_and_rank(
     target_embedding: &[f32],
     k: usize,
 ) -> Result<Vec<(NodeId, f32)>> {
+    // Validate k to prevent DoS
+    if k > MAX_HYBRID_K {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Requested k={} exceeds maximum allowed {}",
+            k, MAX_HYBRID_K
+        ))));
+    }
+
     // Validate target embedding
     validate_vector(target_embedding)?;
 
@@ -162,6 +174,17 @@ pub fn traverse_and_rank(
         // Compute cosine similarity
         match cosine_similarity(target_embedding, embedding) {
             Ok(similarity) => {
+                // SENTRY: Filter out NaN results to prevent undefined sorting/heap behavior.
+                // NaNs can occur if the stored vector is invalid (e.g. legacy data or corruption)
+                if similarity.is_nan() {
+                    #[cfg(feature = "observability")]
+                    tracing::warn!(
+                        target_id = %target_id,
+                        "Skipping node in traverse_and_rank due to NaN similarity result"
+                    );
+                    continue;
+                }
+
                 let candidate = ScoredCandidate::new(target_id, similarity);
 
                 if top_k_heap.len() < k {
@@ -954,6 +977,72 @@ mod tests {
             results.len(),
             0,
             "Should return empty results for empty database"
+        );
+    }
+
+    #[test]
+    fn test_traverse_and_rank_with_nan_in_db() {
+        use crate::core::property::PropertyValue;
+        use std::sync::Arc;
+
+        // Use a DB without vector index to simulate stored NaN data (bypassing index validation)
+        let db = AletheiaDB::new().unwrap();
+
+        // Create start node
+        let start = db
+            .create_node(
+                "Start",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0, 0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Create neighbor with NaN embedding
+        let nan_vec = vec![f32::NAN, 0.0, 0.0, 0.0];
+        let nan_node = db
+            .create_node(
+                "NaN",
+                PropertyMapBuilder::new()
+                    .insert("embedding", PropertyValue::Vector(Arc::from(nan_vec.into_boxed_slice())))
+                    .build(),
+            )
+            .unwrap();
+
+        // Create edge
+        db.create_edge(start, nan_node, "LINK", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Query
+        let target = [1.0, 0.0, 0.0, 0.0];
+        let results = traverse_and_rank(&db, start, "LINK", &target, 10).unwrap();
+
+        // SENTRY VERIFICATION:
+        // NaNs should be filtered out by traverse_and_rank.
+        // So the results should NOT contain the nan_node.
+        for (id, _) in results {
+            if id == nan_node {
+                panic!("Should not return node with NaN similarity");
+            }
+        }
+    }
+
+    #[test]
+    fn test_traverse_and_rank_huge_k() {
+        let db = create_test_db();
+        let start = db
+            .create_node("Start", PropertyMapBuilder::new().build())
+            .unwrap();
+        let target = [1.0, 0.0, 0.0, 0.0];
+
+        // Huge k should be rejected gracefully
+        let result = traverse_and_rank(&db, start, "LINK", &target, usize::MAX);
+
+        assert!(result.is_err(), "Should return error for huge k");
+        let err = result.unwrap_err();
+        assert!(
+            format!("{}", err).contains("exceeds maximum allowed"),
+            "Error message should mention limit"
         );
     }
 }

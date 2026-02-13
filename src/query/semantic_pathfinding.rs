@@ -252,7 +252,13 @@ impl<'a> SemanticPathfinder<'a> {
                             .and_then(|v| v.as_vector());
 
                         let semantic_cost = if let Some(emb) = target_embedding {
-                            1.0 - cosine_similarity(emb, query_embedding)?
+                            let sim = cosine_similarity(emb, query_embedding)?;
+                            // SENTRY: Handle NaN similarity by assigning high cost
+                            if sim.is_nan() {
+                                1.0
+                            } else {
+                                1.0 - sim
+                            }
                         } else {
                             1.0 // High cost if no embedding
                         };
@@ -285,6 +291,14 @@ impl<'a> SemanticPathfinder<'a> {
         if let Some(prop) = node.properties.get(&self.vector_property) {
             if let Some(vec) = prop.as_vector() {
                 let sim = cosine_similarity(vec, query)?;
+
+                // SENTRY: Handle NaN similarity by returning max cost (1.0)
+                // This ensures the pathfinder doesn't get stuck or propagate NaNs
+                // which would break the priority queue ordering.
+                if sim.is_nan() {
+                    return Ok(1.0);
+                }
+
                 // Clamp to [0, 2] (cosine sim is [-1, 1])
                 // We want high similarity -> low cost
                 // 1.0 - 1.0 = 0.0 (perfect match)
@@ -516,5 +530,63 @@ mod tests {
         );
         // Verify it's the original middle node, not new_middle
         assert_eq!(path_t0_check.as_ref().unwrap()[1], middle);
+    }
+
+    #[test]
+    fn test_semantic_pathfinding_with_nan() {
+        use crate::core::property::PropertyValue;
+        use std::sync::Arc;
+
+        // Use a fresh DB without vector index to simulate stored NaN data (bypassing validation)
+        let db = AletheiaDB::new().unwrap();
+
+        let start = db
+            .create_node(
+                "Start",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let end = db
+            .create_node(
+                "End",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Intermediate node with NaN embedding
+        // 3 dimensions to match create_test_db config
+        let nan_vec = vec![f32::NAN, 0.0, 0.0];
+        let nan_node = db
+            .create_node(
+                "NaN",
+                PropertyMapBuilder::new()
+                    .insert("embedding", PropertyValue::Vector(Arc::from(nan_vec.into_boxed_slice())))
+                    .build(),
+            )
+            .unwrap();
+
+        // Path: Start -> NaN -> End
+        db.create_edge(start, nan_node, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(nan_node, end, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let pathfinder = SemanticPathfinder::new(&db, "embedding");
+        let query = [1.0, 0.0, 0.0];
+
+        // Should find path even with NaN, but treat NaN node as high cost.
+        let path = pathfinder
+            .find_path(start, end, &query, 10, false)
+            .unwrap();
+
+        assert!(path.is_some(), "Should find path");
+        let p = path.unwrap();
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[1], nan_node);
     }
 }
