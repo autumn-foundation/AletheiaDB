@@ -983,15 +983,21 @@ mod tests {
         // Verify what is in cache implicitly by checking hit counts
 
         // Fetch v9 -> warm hit (was prefetched)
-        let _ = tiered.get_node_version_cold(VersionId::new(9).unwrap()).unwrap();
+        let _ = tiered
+            .get_node_version_cold(VersionId::new(9).unwrap())
+            .unwrap();
         assert_eq!(tiered.metrics().warm_hits, 1);
 
         // Fetch v7 -> warm hit (was prefetched)
-        let _ = tiered.get_node_version_cold(VersionId::new(7).unwrap()).unwrap();
+        let _ = tiered
+            .get_node_version_cold(VersionId::new(7).unwrap())
+            .unwrap();
         assert_eq!(tiered.metrics().warm_hits, 2);
 
         // Fetch v6 -> cold hit (was NOT prefetched because depth=3 from v10 covers v9, v8, v7)
-        let _ = tiered.get_node_version_cold(VersionId::new(6).unwrap()).unwrap();
+        let _ = tiered
+            .get_node_version_cold(VersionId::new(6).unwrap())
+            .unwrap();
 
         let final_metrics = tiered.metrics();
         assert_eq!(final_metrics.warm_hits, 2); // Unchanged
@@ -1022,7 +1028,9 @@ mod tests {
         // Access all 10 versions to populate cache
         // This will cause 10 cold hits.
         for i in 1..=10 {
-            tiered.get_node_version_cold(VersionId::new(i).unwrap()).unwrap();
+            tiered
+                .get_node_version_cold(VersionId::new(i).unwrap())
+                .unwrap();
         }
 
         // Now access them again. Since cache size is 5, we expect at most 5 warm hits
@@ -1030,15 +1038,25 @@ mod tests {
         let metrics_before = tiered.metrics();
 
         for i in 1..=10 {
-            tiered.get_node_version_cold(VersionId::new(i).unwrap()).unwrap();
+            tiered
+                .get_node_version_cold(VersionId::new(i).unwrap())
+                .unwrap();
         }
 
         let metrics_after = tiered.metrics();
         let warm_hits = metrics_after.warm_hits - metrics_before.warm_hits;
         let cold_hits = metrics_after.cold_hits - metrics_before.cold_hits;
 
-        assert!(warm_hits <= 5, "Expected at most 5 warm hits, got {}", warm_hits);
-        assert!(cold_hits >= 5, "Expected at least 5 cold hits, got {}", cold_hits);
+        assert!(
+            warm_hits <= 5,
+            "Expected at most 5 warm hits, got {}",
+            warm_hits
+        );
+        assert!(
+            cold_hits >= 5,
+            "Expected at least 5 cold hits, got {}",
+            cold_hits
+        );
     }
 
     #[test]
