@@ -854,96 +854,96 @@ impl VectorIndex for HnswIndex {
                     return Ok(());
                 }
                 dashmap::mapref::entry::Entry::Vacant(entry) => {
-                // New node: allocate key with overflow protection
-                // Check BEFORE incrementing to avoid leaving next_key in invalid state
-                const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+                    // New node: allocate key with overflow protection
+                    // Check BEFORE incrementing to avoid leaving next_key in invalid state
+                    const MAX_VALID_KEY: u64 = u64::MAX - 1000;
 
-                // CRITICAL: Drop the entry to release DashMap lock BEFORE acquiring inner lock
-                // This prevents lock ordering inversion (dashmap -> inner is FORBIDDEN)
-                drop(entry);
+                    // CRITICAL: Drop the entry to release DashMap lock BEFORE acquiring inner lock
+                    // This prevents lock ordering inversion (dashmap -> inner is FORBIDDEN)
+                    drop(entry);
 
-                // Step 1: Atomically allocate a unique key (no locks held)
-                let key = loop {
-                    let current = self.next_key.load(Ordering::SeqCst);
-                    if current > MAX_VALID_KEY {
+                    // Step 1: Atomically allocate a unique key (no locks held)
+                    let key = loop {
+                        let current = self.next_key.load(Ordering::SeqCst);
+                        if current > MAX_VALID_KEY {
+                            return Err(Error::Vector(VectorError::IndexError(
+                                "Maximum number of vectors exceeded (key overflow protection)"
+                                    .to_string(),
+                            )));
+                        }
+                        // Try to atomically increment; retry if another thread beat us
+                        match self.next_key.compare_exchange(
+                            current,
+                            current + 1,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(key) => break key,
+                            Err(_) => continue, // Retry with new current value
+                        }
+                    };
+
+                    // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
+                    // This prevents deadlock with search_with_filter which holds inner -> dashmap.
+                    let index = self.inner.write();
+
+                    // Check if we need to expand capacity
+                    if index.size() >= index.capacity() {
+                        // Double capacity, minimum 1024
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        index.reserve(new_capacity).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to expand capacity: {}",
+                                e
+                            )))
+                        })?;
+                    }
+
+                    // Step 3: Add to inner usearch index while holding write lock
+                    index.add(key, vector).map_err(|e| {
+                        Error::Vector(VectorError::IndexError(format!(
+                            "Failed to add vector: {}",
+                            e
+                        )))
+                    })?;
+
+                    // Release inner lock before accessing DashMap
+                    drop(index);
+
+                    // Step 4: Insert to mappings (dashmap) AFTER inner is updated
+                    // Handle race: another thread may have added this NodeId while we held inner lock
+                    // Use entry API to safely check for existence without overwriting (which causes Zombie Vectors)
+                    let race_detected = match self.id_mapping.entry(id) {
+                        dashmap::mapref::entry::Entry::Occupied(_) => true,
+                        dashmap::mapref::entry::Entry::Vacant(e) => {
+                            // Success: we claimed the ID
+                            e.insert(key);
+                            // Drop the entry lock implicitly here when e is consumed/scope ends
+                            false
+                        }
+                    };
+
+                    if race_detected {
+                        // Race detected: Another thread added this NodeId concurrently
+                        // Our vector is in inner with key=key, but someone else claimed the ID.
+                        // We must rollback our addition to avoid phantom vectors.
+
+                        // Acquire inner lock again to remove our key.
+                        // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
+                        let index = self.inner.write();
+                        index.remove(key).map_err(|e| {
+                            Error::Vector(VectorError::IndexError(format!(
+                                "Failed to rollback vector after concurrent add: {}",
+                                e
+                            )))
+                        })?;
+
+                        // The existing mapping wins; return error to indicate retry needed
                         return Err(Error::Vector(VectorError::IndexError(
-                            "Maximum number of vectors exceeded (key overflow protection)"
+                            "Concurrent add detected for same NodeId, vector already exists"
                                 .to_string(),
                         )));
                     }
-                    // Try to atomically increment; retry if another thread beat us
-                    match self.next_key.compare_exchange(
-                        current,
-                        current + 1,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(key) => break key,
-                        Err(_) => continue, // Retry with new current value
-                    }
-                };
-
-                // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
-                // This prevents deadlock with search_with_filter which holds inner -> dashmap.
-                let index = self.inner.write();
-
-                // Check if we need to expand capacity
-                if index.size() >= index.capacity() {
-                    // Double capacity, minimum 1024
-                    let new_capacity = (index.capacity() * 2).max(1024);
-                    index.reserve(new_capacity).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to expand capacity: {}",
-                            e
-                        )))
-                    })?;
-                }
-
-                // Step 3: Add to inner usearch index while holding write lock
-                index.add(key, vector).map_err(|e| {
-                    Error::Vector(VectorError::IndexError(format!(
-                        "Failed to add vector: {}",
-                        e
-                    )))
-                })?;
-
-                // Release inner lock before accessing DashMap
-                drop(index);
-
-                // Step 4: Insert to mappings (dashmap) AFTER inner is updated
-                // Handle race: another thread may have added this NodeId while we held inner lock
-                // Use entry API to safely check for existence without overwriting (which causes Zombie Vectors)
-                let race_detected = match self.id_mapping.entry(id) {
-                    dashmap::mapref::entry::Entry::Occupied(_) => true,
-                    dashmap::mapref::entry::Entry::Vacant(e) => {
-                        // Success: we claimed the ID
-                        e.insert(key);
-                        // Drop the entry lock implicitly here when e is consumed/scope ends
-                        false
-                    }
-                };
-
-                if race_detected {
-                    // Race detected: Another thread added this NodeId concurrently
-                    // Our vector is in inner with key=key, but someone else claimed the ID.
-                    // We must rollback our addition to avoid phantom vectors.
-
-                    // Acquire inner lock again to remove our key.
-                    // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let index = self.inner.write();
-                    index.remove(key).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to rollback vector after concurrent add: {}",
-                            e
-                        )))
-                    })?;
-
-                    // The existing mapping wins; return error to indicate retry needed
-                    return Err(Error::Vector(VectorError::IndexError(
-                        "Concurrent add detected for same NodeId, vector already exists"
-                            .to_string(),
-                    )));
-                }
 
                     // If no race, we successfully inserted into id_mapping.
                     // Now insert reverse mapping.
@@ -2953,6 +2953,59 @@ mod coverage_tests {
         TEST_RACE_HOOK.store(false, Ordering::SeqCst);
 
         // Verify node 1 exists (re-added) and has new vector
+        let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, id);
+        assert!(results[0].1 > 0.99);
+    }
+
+    #[test]
+    fn test_add_race_retry_value_change_coverage() {
+        // This test forces the "Occupied" path race condition where the mapping value changes
+        // (but key remains) while the lock is dropped. This covers the `*current_entry.value() != existing_key` branch.
+
+        use std::sync::Arc;
+        use std::thread;
+
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
+
+        // Pre-populate node 1
+        let id = NodeId::new(1).unwrap();
+        index.add(id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Enable race hook
+        TEST_RACE_HOOK.store(true, Ordering::SeqCst);
+
+        let index_clone = index.clone();
+        let handle = thread::spawn(move || {
+            // This add will hit "Occupied", drop lock, sleep 100ms (hook), then acquire inner.
+            // By the time it wakes, main thread will have changed the mapping for node 1.
+            // It should retry and succeed.
+            index_clone.add(id, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        });
+
+        // Sleep 10ms to ensure thread enters "add" and hits the hook sleep
+        thread::sleep(std::time::Duration::from_millis(10));
+
+        // Manually change the mapping for node 1 to a different key
+        // We use a raw insertion to DashMap to simulate a change that might happen via another path (e.g. restore/compact)
+        // or just another add.
+        // To be sure we trigger the `!= existing_key` check, we need to change the value in id_mapping.
+        // The value in id_mapping is the usearch key (u64).
+        // Let's insert a fake key.
+        index.id_mapping.insert(id, 9999);
+
+        // Join thread
+        handle.join().unwrap();
+
+        // Disable hook
+        TEST_RACE_HOOK.store(false, Ordering::SeqCst);
+
+        // Verify node 1 was updated correctly (the retry should overwrite our manual hack)
         let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, id);
