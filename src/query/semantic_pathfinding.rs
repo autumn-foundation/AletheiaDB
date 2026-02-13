@@ -254,11 +254,7 @@ impl<'a> SemanticPathfinder<'a> {
                         let semantic_cost = if let Some(emb) = target_embedding {
                             let sim = cosine_similarity(emb, query_embedding)?;
                             // SENTRY: Handle NaN similarity by assigning high cost
-                            if sim.is_nan() {
-                                1.0
-                            } else {
-                                1.0 - sim
-                            }
+                            if sim.is_nan() { 1.0 } else { 1.0 - sim }
                         } else {
                             1.0 // High cost if no embedding
                         };
@@ -565,7 +561,10 @@ mod tests {
             .create_node(
                 "NaN",
                 PropertyMapBuilder::new()
-                    .insert("embedding", PropertyValue::Vector(Arc::from(nan_vec.into_boxed_slice())))
+                    .insert(
+                        "embedding",
+                        PropertyValue::Vector(Arc::from(nan_vec.into_boxed_slice())),
+                    )
                     .build(),
             )
             .unwrap();
@@ -580,9 +579,7 @@ mod tests {
         let query = [1.0, 0.0, 0.0];
 
         // Should find path even with NaN, but treat NaN node as high cost.
-        let path = pathfinder
-            .find_path(start, end, &query, 10, false)
-            .unwrap();
+        let path = pathfinder.find_path(start, end, &query, 10, false).unwrap();
 
         assert!(path.is_some(), "Should find path");
         let p = path.unwrap();

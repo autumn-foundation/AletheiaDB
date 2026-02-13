@@ -30,7 +30,7 @@
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
 use crate::db::AletheiaDB;
-use crate::utils::{error::VectorError, Error, Result};
+use crate::utils::{Error, Result, error::VectorError};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -1004,7 +1004,10 @@ mod tests {
             .create_node(
                 "NaN",
                 PropertyMapBuilder::new()
-                    .insert("embedding", PropertyValue::Vector(Arc::from(nan_vec.into_boxed_slice())))
+                    .insert(
+                        "embedding",
+                        PropertyValue::Vector(Arc::from(nan_vec.into_boxed_slice())),
+                    )
                     .build(),
             )
             .unwrap();
