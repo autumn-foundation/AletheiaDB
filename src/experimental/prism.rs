@@ -78,11 +78,16 @@ impl<'a> Prism<'a> {
         let node = self.db.get_node(node_id)?;
 
         // Find first vector property
-        let vector = node.properties.iter()
+        let vector = node
+            .properties
+            .iter()
             .find_map(|(_, val)| val.as_vector())
-            .ok_or_else(|| Error::Vector(VectorError::IndexError(format!(
-                "Node {} has no vector properties to use as an axis", node_id
-            ))))?;
+            .ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Node {} has no vector properties to use as an axis",
+                    node_id
+                )))
+            })?;
 
         self.add_axis(name, vector.to_vec());
         Ok(())
@@ -165,11 +170,16 @@ impl<'a> Prism<'a> {
         let node = self.db.get_node(node_id)?;
 
         // Find first vector property
-        let vector = node.properties.iter()
+        let vector = node
+            .properties
+            .iter()
             .find_map(|(_, val)| val.as_vector())
-            .ok_or_else(|| Error::Vector(VectorError::IndexError(format!(
-                "Node {} has no vector properties to analyze", node_id
-            ))))?;
+            .ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Node {} has no vector properties to analyze",
+                    node_id
+                )))
+            })?;
 
         self.analyze(vector)
     }
@@ -194,7 +204,9 @@ impl<'a> Prism<'a> {
         }
 
         // Calculate difference
-        let diff: Vec<f32> = target.iter().zip(reconstruction.iter())
+        let diff: Vec<f32> = target
+            .iter()
+            .zip(reconstruction.iter())
             .map(|(t, r)| t - r)
             .collect();
 
