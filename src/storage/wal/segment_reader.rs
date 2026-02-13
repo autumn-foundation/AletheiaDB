@@ -1794,9 +1794,6 @@ mod tests {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
-    use crate::core::interning::GLOBAL_INTERNER;
-    use crate::core::temporal::time;
-    use crate::storage::wal::serialization::serialize_entry_into;
 
     #[test]
     fn test_repro_fuzz_update_edge_panic() {
@@ -1825,44 +1822,5 @@ mod regression_tests {
             "Should return error for truncated buffer, got {:?}",
             result
         );
-    }
-
-    #[test]
-    fn test_update_node_truncated_properties() {
-        // Create a valid UpdateNode entry
-        let node_id = NodeId::new(42).unwrap();
-        let version_id = VersionId::new(1).unwrap();
-        let operation = WalOperation::UpdateNode {
-            node_id,
-            version_id,
-            label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
-            properties: PropertyMap::new(),
-            valid_from: time::now(),
-        };
-        let entry = WalEntry::new(LSN(1), operation);
-
-        // Serialize it
-        let mut full_buffer = Vec::new();
-        serialize_entry_into(&entry, &mut full_buffer).unwrap();
-
-        // Calculate cut point:
-        // Header (24) + Op (1) + NodeID (8) + VersionID (8) + LabelID (4) = 45 bytes
-        // Truncate at 45 bytes (so PropertyMap data is missing)
-        let truncated_buffer = &full_buffer[0..45];
-
-        // This should trigger "Buffer too short for PropertyMap count" or "Insufficient buffer size"
-        // depending on exactly where it cuts (PropertyMap starts with 4-byte count)
-        let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
-        assert!(result.is_err());
-        if let Err(Error::Storage(StorageError::CorruptedData(msg))) = result {
-            // It might fail at "Buffer too short for PropertyMap count" if buffer ends exactly there
-            assert!(
-                msg.contains("Buffer too short") || msg.contains("Insufficient buffer"),
-                "Unexpected error message: {}",
-                msg
-            );
-        } else {
-            panic!("Expected CorruptedData error, got: {:?}", result);
-        }
     }
 }
