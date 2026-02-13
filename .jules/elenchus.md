@@ -72,16 +72,3 @@
 **Finding:** Critical recovery methods `IdGenerator::reset_to` and `ensure_at_least` were `pub(crate)` and completely untested. These are the foundation of crash recovery.
 **Evidence:** Code audit revealed these methods had no unit tests in `mod tests` or `mod proptests`.
 **Recommendation:** Added `mod sentry_tests` with concurrency tests for `ensure_at_least` and verification for `reset_to`.
-
-**[LSN Allocator Overflow]**
-**Module:** `src/storage/wal/lsn_allocator.rs`
-**Severity:** 🔴 Critical
-**Finding:** `allocate_batch` allowed silent integer overflow/wrapping if `next_lsn + count` exceeded `u64::MAX`. This would result in an invalid range (start > end) being returned, potentially causing data corruption or logical errors in the WAL.
-**Evidence:** Created `test_allocate_batch_overflow_panics` which initialized the allocator near `u64::MAX` and triggered an overflow, observing the wrapped result.
-**Resolution:** Modified `allocate` and `allocate_batch` to return Err on overflow ("LSN Allocator Overflow"). This converts a silent data corruption risk into a handled error, honoring the "Theoretical Limitation" contract.
-
-**[WAL Segment Reader Robustness]**
-**Module:** `src/storage/wal/segment_reader.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** The reader correctly handles truncated property data by validating buffer boundaries before and during property map deserialization.
-**Evidence:** Added `test_update_node_truncated_properties` which truncated an `UpdateNode` entry mid-properties. The reader correctly returned `Err(StorageError::CorruptedData)` instead of panicking.
