@@ -496,3 +496,190 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use crate::core::id::{EdgeId, NodeId, VersionId};
+    use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+    use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+    use crate::core::temporal::MAX_VALID_TIMESTAMP;
+    use crate::core::vector::SparseVec;
+    use crate::storage::wal::entry::{LSN, WalEntry, WalOperation};
+    use std::sync::Arc;
+
+    // Strategy for LSN
+    fn arb_lsn() -> impl Strategy<Value = LSN> {
+        any::<u64>().prop_map(LSN)
+    }
+
+    // Strategy for Timestamp (HybridTimestamp)
+    fn arb_timestamp() -> impl Strategy<Value = Timestamp> {
+        (0..=MAX_VALID_TIMESTAMP, any::<u32>())
+            .prop_map(|(w, l)| crate::core::hlc::HybridTimestamp::new(w, l).unwrap())
+    }
+
+    // Strategy for InternedString
+    // We use a limited set of strings to avoid filling the interner, plus some random ones
+    fn arb_interned_string() -> impl Strategy<Value = InternedString> {
+        prop_oneof![
+            Just("name".to_string()),
+            Just("age".to_string()),
+            Just("created_at".to_string()),
+            Just("label".to_string()),
+            "[a-z]{1,5}", // Short random strings
+        ]
+        .prop_map(|s| GLOBAL_INTERNER.intern(s).unwrap())
+    }
+
+    // Recursive strategy for PropertyValue
+    fn arb_property_value(depth: u32) -> impl Strategy<Value = PropertyValue> {
+        let leaf = prop_oneof![
+            Just(PropertyValue::Null),
+            any::<bool>().prop_map(PropertyValue::Bool),
+            any::<i64>().prop_map(PropertyValue::Int),
+            // Filter NaNs for strict equality checks
+            any::<f64>().prop_filter("No NaN", |f| !f.is_nan()).prop_map(PropertyValue::Float),
+            "[a-z0-9_]{0,32}".prop_map(|s| PropertyValue::String(Arc::from(s))),
+            prop::collection::vec(any::<u8>(), 0..32).prop_map(|v| PropertyValue::Bytes(Arc::from(v.as_slice()))),
+            // Small vectors for testing
+            prop::collection::vec(any::<f32>().prop_filter("No NaN", |f| !f.is_nan()), 0..16)
+                .prop_map(|v| PropertyValue::Vector(Arc::from(v.as_slice()))),
+        ];
+
+        leaf.prop_recursive(
+            depth,      // levels deep
+            64,         // max size of collection
+            4,          // items per collection
+            move |inner| {
+                prop_oneof![
+                    // Array
+                    prop::collection::vec(inner.clone(), 0..4)
+                        .prop_map(|v| PropertyValue::Array(Arc::new(v))),
+                    // SparseVector (can't be nested, but included here for completeness)
+                    // We generate valid SparseVecs
+                    (
+                        prop::collection::vec((any::<u32>(), any::<f32>().prop_filter("No NaN", |f| !f.is_nan())), 0..10),
+                        1..100u32 // dimension
+                    ).prop_filter_map("Invalid SparseVec", |(pairs, dim)| {
+                        let mut pairs = pairs;
+                        // Filter indices >= dimension
+                        pairs.retain(|(idx, val)| *idx < dim && *val != 0.0);
+                        // Sort by index and deduplicate
+                        pairs.sort_by_key(|(idx, _)| *idx);
+                        pairs.dedup_by_key(|(idx, _)| *idx);
+
+                        let (indices, values): (Vec<u32>, Vec<f32>) = pairs.into_iter().unzip();
+                        SparseVec::new(indices, values, dim).ok().map(PropertyValue::sparse_vector)
+                    })
+                ]
+            },
+        )
+    }
+
+    // Strategy for PropertyMap
+    fn arb_property_map() -> impl Strategy<Value = PropertyMap> {
+        prop::collection::hash_map(
+            arb_interned_string(),
+            arb_property_value(2), // Limit recursion depth
+            0..5
+        ).prop_map(|map| {
+            let mut builder = PropertyMapBuilder::new();
+            for (k, v) in map {
+                builder = builder.insert_by_key(k, v);
+            }
+            builder.build()
+        })
+    }
+
+    // Strategy for WalOperation
+    fn arb_wal_operation() -> impl Strategy<Value = WalOperation> {
+        let arb_node_id = any::<u64>().prop_map(|id| NodeId::new(id).unwrap());
+        let arb_edge_id = any::<u64>().prop_map(|id| EdgeId::new(id).unwrap());
+        let arb_version_id = any::<u64>().prop_map(|id| VersionId::new(id).unwrap());
+
+        prop_oneof![
+            // CreateNode
+            (arb_node_id.clone(), arb_interned_string(), arb_property_map(), arb_timestamp())
+                .prop_map(|(node_id, label, properties, valid_from)| WalOperation::CreateNode {
+                    node_id, label, properties, valid_from
+                }),
+            // CreateEdge
+            (arb_edge_id.clone(), arb_node_id.clone(), arb_node_id.clone(), arb_interned_string(), arb_property_map(), arb_timestamp())
+                .prop_map(|(edge_id, source, target, label, properties, valid_from)| WalOperation::CreateEdge {
+                    edge_id, source, target, label, properties, valid_from
+                }),
+            // UpdateNode
+            (arb_node_id.clone(), arb_version_id.clone(), arb_interned_string(), arb_property_map(), arb_timestamp())
+                .prop_map(|(node_id, version_id, label, properties, valid_from)| WalOperation::UpdateNode {
+                    node_id, version_id, label, properties, valid_from
+                }),
+            // UpdateEdge
+            (arb_edge_id.clone(), arb_version_id.clone(), arb_interned_string(), arb_property_map(), arb_timestamp())
+                .prop_map(|(edge_id, version_id, label, properties, valid_from)| WalOperation::UpdateEdge {
+                    edge_id, version_id, label, properties, valid_from
+                }),
+            // DeleteNode
+            (arb_node_id.clone(), arb_timestamp())
+                .prop_map(|(node_id, valid_from)| WalOperation::DeleteNode {
+                    node_id, valid_from
+                }),
+            // DeleteEdge
+            (arb_edge_id.clone(), arb_timestamp())
+                .prop_map(|(edge_id, valid_from)| WalOperation::DeleteEdge {
+                    edge_id, valid_from
+                }),
+            // Checkpoint
+            (arb_lsn(), arb_timestamp())
+                .prop_map(|(lsn, timestamp)| WalOperation::Checkpoint {
+                    lsn, timestamp
+                }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))] // Run 100 cases to keep it fast but effective
+
+        #[test]
+        fn test_wal_entry_round_trip(
+            lsn in arb_lsn(),
+            operation in arb_wal_operation()
+        ) {
+            let entry = WalEntry::new(lsn, operation);
+
+            // Serialize
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).expect("Serialization failed");
+
+            // Verify capacity estimate was sufficient
+            let estimated = estimate_entry_capacity(&entry.operation);
+            prop_assert!(buffer.len() <= estimated, "Buffer len {} > estimate {}", buffer.len(), estimated);
+
+            // Deserialize
+            // We use the same version assumed by current code (1)
+            let (deserialized, consumed) = super::super::segment_reader::parse_entry_at(&buffer, 0, 1)
+                .expect("Deserialization failed");
+
+            prop_assert_eq!(consumed, buffer.len(), "Did not consume all bytes");
+
+            // Compare fields
+            prop_assert_eq!(entry.lsn, deserialized.lsn, "LSN mismatch");
+
+            // Timestamp in WalEntry::new is set to time::now(), which we didn't control in the strategy.
+            // But we can check that deserialized timestamp matches original.
+            prop_assert_eq!(entry.timestamp, deserialized.timestamp, "Timestamp mismatch");
+
+            // Operation comparison (requires Debug match or manual destructuring if PartialEq not implemented fully)
+            // WalOperation doesn't derive PartialEq but PropertyValue does.
+            // Let's implement a helper or rely on Debug format equality for complex enums if needed,
+            // but usually PartialEq is derived for these.
+            // Checking source: WalOperation derives Clone, Debug. NO PartialEq!
+            // Wait, src/storage/wal/entry.rs: #[derive(Debug, Clone)] pub enum WalOperation ...
+            // It does NOT derive PartialEq.
+            //
+            // We need to assert equality manually or via Debug string. Debug string is robust enough for this.
+            prop_assert_eq!(format!("{:?}", entry.operation), format!("{:?}", deserialized.operation), "Operation mismatch");
+        }
+    }
+}

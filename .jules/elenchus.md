@@ -134,3 +134,10 @@
 **Finding:** Critical recovery methods `IdGenerator::reset_to` and `ensure_at_least` were `pub(crate)` and completely untested. These are the foundation of crash recovery.
 **Evidence:** Code audit revealed these methods had no unit tests in `mod tests` or `mod proptests`.
 **Recommendation:** Added `mod sentry_tests` with concurrency tests for `ensure_at_least` and verification for `reset_to`.
+
+**[WAL Entry Serialization Round-Trip]**
+**Module:** `src/storage/wal/serialization.rs`
+**Severity:** ⭐ Commended
+**Finding:** Added property-based round-trip testing (`test_wal_entry_round_trip`) that verifies `WalEntry` serialization/deserialization correctness for all operation types and property value variants (including sparse vectors). This addresses the "Gold Standard" requirement.
+**Evidence:** `proptest!` suite passes for 100 random valid entries.
+**Recommendation:** None. The tests are now robust.
