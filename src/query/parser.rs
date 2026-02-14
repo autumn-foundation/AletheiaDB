@@ -2037,3 +2037,67 @@ mod tests {
         // This implicitly tests From<LexerError> for ParseError
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    #[test]
+    fn test_parser_recursion_limit_nested_parens() {
+        // 🎯 Target: Parser recursion depth limit (DoS protection)
+        // 💣 Risk: Stack overflow from deeply nested queries
+        // 🧪 Strategy: Construct a query exceeding MAX_RECURSION_DEPTH
+
+        let depth = MAX_RECURSION_DEPTH + 1;
+        let query = format!(
+            "MATCH (n) WHERE {}(n.age > 10){} RETURN n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+
+        let result = Parser::parse(&query);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Recursion limit exceeded"),
+            "Expected recursion limit error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_parser_recursion_limit_nested_not() {
+        // 🎯 Target: Parser recursion depth limit for unary operators
+        // 💣 Risk: Stack overflow from deeply nested NOT operators
+
+        let depth = MAX_RECURSION_DEPTH + 1;
+        let query = format!(
+            "MATCH (n) WHERE {}n.active = true RETURN n",
+            "NOT ".repeat(depth)
+        );
+
+        let result = Parser::parse(&query);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Recursion limit exceeded"),
+            "Expected recursion limit error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_parser_recursion_limit_boundary() {
+        // 🧪 Strategy: Verify that exactly MAX_RECURSION_DEPTH is allowed
+
+        let depth = MAX_RECURSION_DEPTH;
+        let query = format!(
+            "MATCH (n) WHERE {}(n.age > 10){} RETURN n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+
+        let result = Parser::parse(&query);
+        assert!(result.is_ok(), "Should accept recursion up to the limit");
+    }
+}
