@@ -1754,7 +1754,9 @@ impl HnswIndex {
     pub fn set_ef_search(&self, ef_search: usize) {
         if IN_CALLBACK.with(|flag| flag.get()) {
             // Panic to prevent deadlock (contract violation)
-            panic!("Cannot call set_ef_search() from within an index callback (recursion detected)");
+            panic!(
+                "Cannot call set_ef_search() from within an index callback (recursion detected)"
+            );
         }
         let index = self.inner.read();
         index.change_expansion_search(ef_search);
@@ -1767,7 +1769,9 @@ impl HnswIndex {
     pub fn get_ef_search(&self) -> usize {
         if IN_CALLBACK.with(|flag| flag.get()) {
             // Panic to prevent deadlock (contract violation)
-            panic!("Cannot call get_ef_search() from within an index callback (recursion detected)");
+            panic!(
+                "Cannot call get_ef_search() from within an index callback (recursion detected)"
+            );
         }
         self.inner.read().expansion_search()
     }

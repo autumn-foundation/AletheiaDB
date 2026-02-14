@@ -55,7 +55,7 @@ use super::ast::*;
 use super::lexer::{Lexer, LexerError, Token};
 
 /// Maximum recursion depth for parsing expressions to prevent stack overflow.
-const MAX_RECURSION_DEPTH: usize = 100;
+const MAX_RECURSION_DEPTH: usize = 200;
 
 /// Error type for parser errors.
 ///

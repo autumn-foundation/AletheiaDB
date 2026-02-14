@@ -107,14 +107,19 @@ fn test_custom_metric_reentrancy_panic_on_len() {
         *guard = Some(Arc::downgrade(&index_arc));
     }
 
-    index_arc.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    index_arc
+        .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
 
     // This add should trigger metric execution.
     // The metric panics (caught), returning f32::MAX.
     // The add should succeed (graceful degradation).
     let result = index_arc.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]);
 
-    assert!(result.is_ok(), "Add should succeed despite metric panic (caught)");
+    assert!(
+        result.is_ok(),
+        "Add should succeed despite metric panic (caught)"
+    );
 }
 
 #[test]
@@ -137,7 +142,10 @@ fn test_custom_metric_reentrancy_search_returns_error() {
                 let res = index.search(&[0.0; 4], 1);
                 if res.is_err() {
                     let err = res.unwrap_err();
-                    if err.to_string().contains("Cannot perform search from within a callback") {
+                    if err
+                        .to_string()
+                        .contains("Cannot perform search from within a callback")
+                    {
                         error_seen_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
@@ -158,10 +166,17 @@ fn test_custom_metric_reentrancy_search_returns_error() {
         *guard = Some(Arc::downgrade(&index_arc));
     }
 
-    index_arc.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    index_arc
+        .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
 
     // This add triggers metric execution
-    index_arc.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+    index_arc
+        .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+        .unwrap();
 
-    assert!(error_seen.load(std::sync::atomic::Ordering::SeqCst), "Metric should have seen error from recursive search");
+    assert!(
+        error_seen.load(std::sync::atomic::Ordering::SeqCst),
+        "Metric should have seen error from recursive search"
+    );
 }
