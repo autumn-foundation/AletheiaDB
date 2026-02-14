@@ -2049,15 +2049,11 @@ mod sentry_tests {
         // 🧪 Strategy: Construct a query exceeding MAX_RECURSION_DEPTH
 
         let depth = MAX_RECURSION_DEPTH + 1;
-        let mut query = "MATCH (n) WHERE ".to_string();
-        for _ in 0..depth {
-            query.push('(');
-        }
-        query.push_str("n.age > 10");
-        for _ in 0..depth {
-            query.push(')');
-        }
-        query.push_str(" RETURN n");
+        let query = format!(
+            "MATCH (n) WHERE {}(n.age > 10){} RETURN n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
 
         let result = Parser::parse(&query);
         assert!(result.is_err());
