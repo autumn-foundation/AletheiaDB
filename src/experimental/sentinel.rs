@@ -211,22 +211,22 @@ impl SemanticRule for NumericRangeRule {
             )));
         }
 
-        if let Some(min) = self.min {
-            if num < min {
-                return Err(Error::other(format!(
-                    "Property '{}' value is less than minimum {}",
-                    self.property_name, min
-                )));
-            }
+        if let Some(min) = self.min
+            && num < min
+        {
+            return Err(Error::other(format!(
+                "Property '{}' value is less than minimum {}",
+                self.property_name, min
+            )));
         }
 
-        if let Some(max) = self.max {
-            if num > max {
-                return Err(Error::other(format!(
-                    "Property '{}' value is greater than maximum {}",
-                    self.property_name, max
-                )));
-            }
+        if let Some(max) = self.max
+            && num > max
+        {
+            return Err(Error::other(format!(
+                "Property '{}' value is greater than maximum {}",
+                self.property_name, max
+            )));
         }
 
         Ok(())
