@@ -173,12 +173,21 @@ impl TimeRange {
     /// Close this range at the given timestamp.
     ///
     /// Returns a new TimeRange with the same start but the specified end.
+    ///
+    /// # Errors
+    /// Returns `TemporalError::InvalidTimeRange` if end < start.
     #[inline]
-    pub const fn close_at(self, end: Timestamp) -> Self {
-        TimeRange {
+    pub fn close_at(self, end: Timestamp) -> Result<Self, TemporalError> {
+        if end < self.start {
+            return Err(TemporalError::InvalidTimeRange {
+                start: self.start,
+                end,
+            });
+        }
+        Ok(TimeRange {
             start: self.start,
             end,
-        }
+        })
     }
 
     /// Returns the duration of this range in microseconds.
@@ -381,31 +390,35 @@ impl BiTemporalInterval {
     ///
     /// This marks a fact as no longer valid in the real world.
     #[inline]
-    pub fn close_valid_time(self, end: Timestamp) -> Self {
-        BiTemporalInterval {
-            valid_time: self.valid_time.close_at(end),
+    pub fn close_valid_time(self, end: Timestamp) -> Result<Self, TemporalError> {
+        Ok(BiTemporalInterval {
+            valid_time: self.valid_time.close_at(end)?,
             transaction_time: self.transaction_time,
-        }
+        })
     }
 
     /// Close the transaction time dimension at the given timestamp.
     ///
     /// This marks when we stopped believing this version of the fact.
     #[inline]
-    pub fn close_transaction_time(self, end: Timestamp) -> Self {
-        BiTemporalInterval {
+    pub fn close_transaction_time(self, end: Timestamp) -> Result<Self, TemporalError> {
+        Ok(BiTemporalInterval {
             valid_time: self.valid_time,
-            transaction_time: self.transaction_time.close_at(end),
-        }
+            transaction_time: self.transaction_time.close_at(end)?,
+        })
     }
 
     /// Close both time dimensions.
     #[inline]
-    pub fn close_both(self, valid_end: Timestamp, tx_end: Timestamp) -> Self {
-        BiTemporalInterval {
-            valid_time: self.valid_time.close_at(valid_end),
-            transaction_time: self.transaction_time.close_at(tx_end),
-        }
+    pub fn close_both(
+        self,
+        valid_end: Timestamp,
+        tx_end: Timestamp,
+    ) -> Result<Self, TemporalError> {
+        Ok(BiTemporalInterval {
+            valid_time: self.valid_time.close_at(valid_end)?,
+            transaction_time: self.transaction_time.close_at(tx_end)?,
+        })
     }
 
     /// Serialize this BiTemporalInterval to bytes.
@@ -601,12 +614,23 @@ mod tests {
     #[test]
     fn test_time_range_close_at() {
         let open = TimeRange::from(100.into());
-        let closed = open.close_at(200.into());
+        let closed = open.close_at(200.into()).unwrap();
 
         assert!(open.is_current());
         assert!(!closed.is_current());
         assert_eq!(closed.start(), 100.into());
         assert_eq!(closed.end(), 200.into());
+    }
+
+    #[test]
+    fn test_time_range_close_at_invalid() {
+        let open = TimeRange::from(100.into());
+        let result = open.close_at(50.into());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimeRange { .. }
+        ));
     }
 
     #[test]
@@ -654,17 +678,17 @@ mod tests {
     fn test_bitemporal_close() {
         let interval = BiTemporalInterval::now(1000.into(), 2000.into());
 
-        let closed_valid = interval.close_valid_time(1500.into());
+        let closed_valid = interval.close_valid_time(1500.into()).unwrap();
         assert!(!closed_valid.is_currently_valid());
         assert!(closed_valid.is_currently_recorded());
         assert_eq!(closed_valid.valid_time().end(), 1500.into());
 
-        let closed_tx = interval.close_transaction_time(2500.into());
+        let closed_tx = interval.close_transaction_time(2500.into()).unwrap();
         assert!(closed_tx.is_currently_valid());
         assert!(!closed_tx.is_currently_recorded());
         assert_eq!(closed_tx.transaction_time().end(), 2500.into());
 
-        let closed_both = interval.close_both(1500.into(), 2500.into());
+        let closed_both = interval.close_both(1500.into(), 2500.into()).unwrap();
         assert!(!closed_both.is_currently_valid());
         assert!(!closed_both.is_currently_recorded());
     }
@@ -1262,7 +1286,7 @@ mod proptests {
             let interval = BiTemporalInterval::current(start);
             prop_assert!(interval.is_currently_valid());
 
-            let closed = interval.close_valid_time(close);
+            let closed = interval.close_valid_time(close).unwrap();
             prop_assert!(!closed.is_currently_valid());
             prop_assert_eq!(closed.valid_time().end(), close);
         }
@@ -1279,7 +1303,7 @@ mod proptests {
             let interval = BiTemporalInterval::current(start);
             prop_assert!(interval.is_currently_recorded());
 
-            let closed = interval.close_transaction_time(close);
+            let closed = interval.close_transaction_time(close).unwrap();
             prop_assert!(!closed.is_currently_recorded());
             prop_assert_eq!(closed.transaction_time().end(), close);
         }

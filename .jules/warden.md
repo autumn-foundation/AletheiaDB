@@ -11,3 +11,13 @@
 **2026-02-15 - Vector Deserialization Hardening Verification**
 **Threat:** Malicious inputs causing Denial of Service (DoS) via excessive allocation or memory safety issues in `unsafe` vector deserialization logic.
 **Defense:** Audited `src/core/property.rs` and `src/index/vector/hnsw.rs`. Verified presence of `MAX_VECTOR_DIMENSIONS`, `MAX_RECURSION_DEPTH`, and buffer bounds checks. Added `tests/warden_verification.rs` as a regression suite ("Test Exploits") to enforce these limits and prevent future regressions. Confirmed that `deserialize_vector` and `deserialize_sparse_vector` safely handle invalid inputs without panicking or accessing uninitialized memory.
+**2026-02-15 - Redundant Alignment Checks in HNSW Metric Wrapper**
+**Threat:** The `create_metric_wrapper` function in `src/index/vector/hnsw.rs` contained redundant alignment checks. While not a security vulnerability per se, it added complexity and potential for confusion. The bitwise check `(ptr as usize) & (align - 1)` is sufficient and more performant than `ptr.align_offset(align)`.
+**Defense:** Removed the redundant `align_offset` check, relying on the bitwise check for safety. Also added `test_load_mappings_count_limit` to `src/index/vector/hnsw.rs` to verify OOM protection for Version 2 mapping files, complementing the existing Version 1 test.
+**2026-02-15 - LSN Allocator Overflow**
+**Threat:** The atomic LSN allocator used `fetch_add` without overflow checking. While requiring ~5000 years at 100M/sec to overflow `u64`, a large batch allocation (e.g. `u64::MAX`) or eventual wraparound would cause duplicate LSNs, breaking WAL ordering and data consistency.
+**Defense:** Replaced `fetch_add` with `fetch_update` (CAS loop) in `src/storage/wal/lsn_allocator.rs` to atomically check for overflow *before* modifying the state. Added `tests/warden_security_tests.rs` to verify panic behavior on overflow attempts.
+
+**2026-02-15 - FFI Boundary Panic Resilience**
+**Threat:** A custom distance metric function provided by the user could panic (e.g., due to division by zero or explicit panic). Since this function is called from the C++ `usearch` library via FFI, allowing the panic to unwind across the FFI boundary causes Undefined Behavior (UB), typically aborting the process.
+**Defense:** Wrapped the user-provided metric closure in `std::panic::catch_unwind` within `create_metric_wrapper` in `src/index/vector/hnsw.rs`. If a panic occurs, it is caught, logged to stderr, and `f32::MAX` is returned to indicate infinite distance (no match), preserving process stability.

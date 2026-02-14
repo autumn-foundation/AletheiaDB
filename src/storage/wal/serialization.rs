@@ -496,3 +496,116 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+    use crate::core::id::NodeId;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+    use proptest::prelude::*;
+
+    // Helper to generate InternedString
+    fn arb_interned_string() -> impl Strategy<Value = InternedString> {
+        "[a-zA-Z0-9_]{1,10}".prop_map(|s| GLOBAL_INTERNER.intern(&s).unwrap())
+    }
+
+    // Helper to generate PropertyValue
+    fn arb_property_value() -> impl Strategy<Value = PropertyValue> {
+        prop_oneof![
+            Just(PropertyValue::Null),
+            any::<bool>().prop_map(PropertyValue::Bool),
+            any::<i64>().prop_map(PropertyValue::Int),
+            any::<f64>().prop_map(PropertyValue::Float),
+            "[a-zA-Z0-9]{0,20}".prop_map(|s| PropertyValue::string(&s)),
+        ]
+    }
+
+    // Helper to generate PropertyMap
+    fn arb_property_map() -> impl Strategy<Value = PropertyMap> {
+        prop::collection::vec(
+            (
+                "[a-z]{1,10}",        // Key
+                arb_property_value(), // Value
+            ),
+            0..10, // Size
+        )
+        .prop_map(|entries| {
+            let mut builder = PropertyMapBuilder::new();
+            for (k, v) in entries {
+                builder = builder.insert(&k, v);
+            }
+            builder.build()
+        })
+    }
+
+    // Helper to generate Timestamp
+    fn arb_timestamp() -> impl Strategy<Value = Timestamp> {
+        any::<i64>().prop_map(|t| HybridTimestamp::new_unchecked(t, 0))
+    }
+
+    // Helper to generate WalOperation
+    fn arb_wal_operation() -> impl Strategy<Value = WalOperation> {
+        prop_oneof![
+            // CreateNode
+            (
+                (1u64..u64::MAX).prop_map(|id| NodeId::new(id).unwrap()),
+                arb_interned_string(),
+                arb_property_map(),
+                arb_timestamp()
+            )
+                .prop_map(|(node_id, label, properties, valid_from)| {
+                    WalOperation::CreateNode {
+                        node_id,
+                        label,
+                        properties,
+                        valid_from,
+                    }
+                }),
+            // DeleteNode
+            (
+                (1u64..u64::MAX).prop_map(|id| NodeId::new(id).unwrap()),
+                arb_timestamp()
+            )
+                .prop_map(|(node_id, valid_from)| {
+                    WalOperation::DeleteNode {
+                        node_id,
+                        valid_from,
+                    }
+                }),
+            // Checkpoint
+            (any::<u64>().prop_map(LSN), arb_timestamp())
+                .prop_map(|(lsn, timestamp)| { WalOperation::Checkpoint { lsn, timestamp } })
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn test_estimate_capacity_is_upper_bound(
+            op in arb_wal_operation(),
+            lsn_val in any::<u64>()
+        ) {
+            let lsn = LSN(lsn_val);
+            let timestamp = HybridTimestamp::new_unchecked(1000, 0); // Dummy timestamp for entry
+
+            // Calculate estimate
+            let estimated = estimate_entry_capacity(&op);
+
+            // Perform actual serialization
+            let mut buffer = Vec::new();
+            serialize_operation_into(lsn, timestamp, &op, &mut buffer).unwrap();
+            let actual = buffer.len();
+
+            // Verify estimate >= actual
+            // Note: Our estimate might be slightly larger due to conservative sizing, but never smaller
+            prop_assert!(estimated >= actual, "Estimate {} < Actual {}", estimated, actual);
+
+            // Verify estimate isn't wildly inaccurate (e.g. > 2x actual + constant overhead)
+            // Small payloads might have high constant overhead relative to size, so be lenient
+            if actual > 100 {
+                prop_assert!(estimated <= actual * 2, "Estimate {} > 2x Actual {}", estimated, actual);
+            }
+        }
+    }
+}

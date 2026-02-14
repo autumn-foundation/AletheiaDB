@@ -1,7 +1,57 @@
 //! AletheiaDB MCP Server implementation.
 //!
-//! This module implements the MCP server that exposes AletheiaDB functionality
-//! through the Model Context Protocol.
+//! This module implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server
+//! for AletheiaDB, enabling Large Language Models (LLMs) to interact with the database.
+//!
+//! # Overview
+//!
+//! The MCP server exposes AletheiaDB's capabilities as a set of "tools" that an LLM can invoke.
+//! This allows AI agents to:
+//! - **Query Knowledge**: Retrieve nodes, edges, and their properties.
+//! - **Modify Graph**: Create, update, and delete nodes and edges.
+//! - **Semantic Search**: Find similar nodes using vector embeddings.
+//! - **Time Travel**: Query the graph as it existed at any point in history.
+//! - **Hybrid Search**: Combine graph traversal, vector search, and temporal filtering.
+//!
+//! # Available Tools
+//!
+//! The server exposes over 20 tools, categorized by function:
+//!
+//! | Category | Key Tools | Description |
+//! |----------|-----------|-------------|
+//! | **Nodes** | `get_node`, `create_node`, `update_node` | CRUD operations for nodes |
+//! | **Edges** | `get_edge`, `create_edge`, `traverse` | CRUD and traversal for edges |
+//! | **Vector** | `find_similar`, `enable_vector_index` | Semantic similarity search |
+//! | **Temporal** | `get_node_at_time`, `get_node_history` | Time-travel queries and history |
+//! | **Hybrid** | `hybrid_query` | Combined graph + vector + temporal queries |
+//!
+//! # Usage
+//!
+//! The server is typically run as a standalone binary communicating over stdio:
+//!
+//! ```bash
+//! cargo run --bin aletheia-mcp --features mcp-server
+//! ```
+//!
+//! Or embedded within a larger application:
+//!
+//! ```rust,ignore
+//! use std::sync::Arc;
+//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::mcp::AletheiaMcpServer;
+//! // Requires 'rmcp' dependency
+//! use rmcp::{ServiceExt, transport::stdio};
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = Arc::new(AletheiaDB::new()?);
+//! let server = AletheiaMcpServer::new(db);
+//!
+//! // Run the server over stdio (blocks until stdin closes)
+//! let service = server.serve(stdio()).await?;
+//! service.waiting().await?;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,7 +113,20 @@ const TRANSACTION_TIME_NOW: &str = "now";
 
 /// AletheiaDB MCP Server.
 ///
-/// Exposes AletheiaDB's graph, vector, and temporal capabilities through MCP.
+/// Exposes AletheiaDB's graph, vector, and temporal capabilities through the Model Context Protocol.
+/// This struct implements `rmcp::ServerHandler` to handle tool calls from an MCP client (typically an LLM).
+///
+/// # Resource Limits
+///
+/// To prevent Denial of Service (DoS) attacks and excessive resource usage, the server enforces several limits:
+/// - **Max Traversal Depth**: 20 hops (prevents infinite loops and stack overflows)
+/// - **Max Results**: 10,000 items (prevents OOM on large result sets)
+/// - **Max Vector K**: 1,000 nearest neighbors (limits expensive similarity calculations)
+///
+/// # Thread Safety
+///
+/// The server is thread-safe and can handle concurrent requests. It holds an `Arc` to the underlying
+/// database instance, which handles its own concurrency control via MVCC and lock-free structures.
 #[derive(Clone)]
 pub struct AletheiaMcpServer {
     db: Arc<AletheiaDB>,
@@ -71,11 +134,31 @@ pub struct AletheiaMcpServer {
 
 impl AletheiaMcpServer {
     /// Create a new MCP server wrapping a AletheiaDB instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - An `Arc` wrapping the initialized database instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::mcp::AletheiaMcpServer;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = Arc::new(AletheiaDB::new()?);
+    /// let server = AletheiaMcpServer::new(db);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(db: Arc<AletheiaDB>) -> Self {
         Self { db }
     }
 
     /// Get a reference to the underlying database.
+    ///
+    /// Useful if you need to access the database directly for operations not exposed via MCP.
     pub fn db(&self) -> &Arc<AletheiaDB> {
         &self.db
     }
@@ -96,6 +179,9 @@ impl AletheiaMcpServer {
     }
 
     /// Get a node by its ID.
+    ///
+    /// Returns the node's label and all properties in JSON format.
+    /// If the node is not found, returns an error JSON.
     pub fn get_node(&self, req: GetNodeRequest) -> String {
         Self::extract_text(self.handle_get_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -103,6 +189,9 @@ impl AletheiaMcpServer {
     }
 
     /// Create a new node.
+    ///
+    /// Creates a node with the specified label and optional properties.
+    /// Returns the created node's ID and details.
     pub fn create_node(&self, req: CreateNodeRequest) -> String {
         Self::extract_text(self.handle_create_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -110,6 +199,9 @@ impl AletheiaMcpServer {
     }
 
     /// Update a node's properties.
+    ///
+    /// Merges the provided properties with existing ones. Set a property to `null` to delete it.
+    /// Returns the updated node.
     pub fn update_node(&self, req: UpdateNodeRequest) -> String {
         Self::extract_text(self.handle_update_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -117,6 +209,9 @@ impl AletheiaMcpServer {
     }
 
     /// Delete a node.
+    ///
+    /// Permanently removes the node from the current state. Historical versions remain accessible via time-travel queries.
+    /// Fails if the node has connected edges (unless `delete_node_cascade` is used).
     pub fn delete_node(&self, req: DeleteNodeRequest) -> String {
         Self::extract_text(self.handle_delete_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -124,6 +219,8 @@ impl AletheiaMcpServer {
     }
 
     /// Delete a node and all its connected edges (cascade delete).
+    ///
+    /// Removes the node and any edges connected to it, maintaining referential integrity.
     pub fn delete_node_cascade(&self, req: DeleteNodeCascadeRequest) -> String {
         Self::extract_text(self.handle_delete_node_cascade(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -131,6 +228,9 @@ impl AletheiaMcpServer {
     }
 
     /// List nodes with optional filtering.
+    ///
+    /// Supports filtering by label and pagination (limit/offset).
+    /// Note: Listing all nodes without filters can be expensive on large graphs.
     pub fn list_nodes(&self, req: ListNodesRequest) -> String {
         Self::extract_text(self.handle_list_nodes(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -138,6 +238,8 @@ impl AletheiaMcpServer {
     }
 
     /// Count nodes.
+    ///
+    /// Returns the total number of nodes in the graph, or nodes matching a specific label.
     pub fn count_nodes(&self, req: CountNodesRequest) -> String {
         Self::extract_text(self.handle_count_nodes(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -145,6 +247,8 @@ impl AletheiaMcpServer {
     }
 
     /// Get an edge by its ID.
+    ///
+    /// Returns the edge's source, target, label, and properties.
     pub fn get_edge(&self, req: GetEdgeRequest) -> String {
         Self::extract_text(self.handle_get_edge(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -152,6 +256,9 @@ impl AletheiaMcpServer {
     }
 
     /// Create a new edge.
+    ///
+    /// Establishes a relationship between two existing nodes.
+    /// Fails if either source or target node does not exist.
     pub fn create_edge(&self, req: CreateEdgeRequest) -> String {
         Self::extract_text(self.handle_create_edge(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -159,6 +266,8 @@ impl AletheiaMcpServer {
     }
 
     /// Update an edge's properties.
+    ///
+    /// Merges properties similar to `update_node`.
     pub fn update_edge(&self, req: UpdateEdgeRequest) -> String {
         Self::extract_text(self.handle_update_edge(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -166,6 +275,8 @@ impl AletheiaMcpServer {
     }
 
     /// Delete an edge.
+    ///
+    /// Removes the relationship between two nodes.
     pub fn delete_edge(&self, req: DeleteEdgeRequest) -> String {
         Self::extract_text(self.handle_delete_edge(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -173,6 +284,8 @@ impl AletheiaMcpServer {
     }
 
     /// List edges.
+    ///
+    /// Lists edges with pagination. Note that filtering edges by label without a start node is not currently efficient.
     pub fn list_edges(&self, req: ListEdgesRequest) -> String {
         Self::extract_text(self.handle_list_edges(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -180,6 +293,8 @@ impl AletheiaMcpServer {
     }
 
     /// Count edges.
+    ///
+    /// Returns the total number of edges in the graph.
     pub fn count_edges(&self, req: CountEdgesRequest) -> String {
         Self::extract_text(self.handle_count_edges(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -187,6 +302,8 @@ impl AletheiaMcpServer {
     }
 
     /// Get outgoing edges from a node.
+    ///
+    /// Returns all edges starting from the specified node. Can be filtered by edge label.
     pub fn get_outgoing_edges(&self, req: GetOutgoingEdgesRequest) -> String {
         Self::extract_text(self.handle_get_outgoing_edges(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -194,6 +311,8 @@ impl AletheiaMcpServer {
     }
 
     /// Get incoming edges to a node.
+    ///
+    /// Returns all edges ending at the specified node. Can be filtered by edge label.
     pub fn get_incoming_edges(&self, req: GetIncomingEdgesRequest) -> String {
         Self::extract_text(self.handle_get_incoming_edges(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -201,6 +320,9 @@ impl AletheiaMcpServer {
     }
 
     /// Traverse the graph.
+    ///
+    /// Performs a multi-hop traversal starting from a node, following edges of a specific type.
+    /// Returns the path and the final nodes found.
     pub fn traverse(&self, req: TraverseRequest) -> String {
         Self::extract_text(self.handle_traverse(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -208,6 +330,9 @@ impl AletheiaMcpServer {
     }
 
     /// Find similar nodes.
+    ///
+    /// Performs a K-Nearest Neighbors (k-NN) search using vector embeddings.
+    /// Requires a vector index to be enabled on the target property.
     pub fn find_similar(&self, req: FindSimilarRequest) -> String {
         Self::extract_text(self.handle_find_similar(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -215,6 +340,9 @@ impl AletheiaMcpServer {
     }
 
     /// Enable vector index.
+    ///
+    /// Configures and builds an HNSW index on a specific property, enabling semantic search.
+    /// This is a prerequisite for `find_similar`.
     pub fn enable_vector_index(&self, req: EnableVectorIndexRequest) -> String {
         Self::extract_text(self.handle_enable_vector_index(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -222,6 +350,8 @@ impl AletheiaMcpServer {
     }
 
     /// List vector indexes.
+    ///
+    /// Returns a list of all active vector indexes and their configuration (dimensions, metric).
     pub fn list_vector_indexes(&self, req: ListVectorIndexesRequest) -> String {
         Self::extract_text(self.handle_list_vector_indexes(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -229,6 +359,8 @@ impl AletheiaMcpServer {
     }
 
     /// Get node at a specific time.
+    ///
+    /// Performs a time-travel query to retrieve the state of a node at a specific valid time and transaction time.
     pub fn get_node_at_time(&self, req: GetNodeAtTimeRequest) -> String {
         Self::extract_text(self.handle_get_node_at_time(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -236,6 +368,8 @@ impl AletheiaMcpServer {
     }
 
     /// Get edge at a specific time.
+    ///
+    /// Performs a time-travel query to retrieve the state of an edge at a specific valid time and transaction time.
     pub fn get_edge_at_time(&self, req: GetEdgeAtTimeRequest) -> String {
         Self::extract_text(self.handle_get_edge_at_time(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -243,6 +377,9 @@ impl AletheiaMcpServer {
     }
 
     /// Execute a hybrid query.
+    ///
+    /// Combines graph traversal, vector similarity, and temporal filtering into a single query.
+    /// Example: "Find 10 documents similar to this embedding, linked to User X, as of last week."
     pub fn hybrid_query(&self, req: HybridQueryRequest) -> String {
         Self::extract_text(self.handle_hybrid_query(
             serde_json::to_value(req).expect("request serialization should not fail"),

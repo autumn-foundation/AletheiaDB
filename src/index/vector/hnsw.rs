@@ -105,6 +105,16 @@ std::thread_local! {
     pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+type TestRaceHook = fn(&HnswIndex, NodeId);
+
+#[cfg(test)]
+std::thread_local! {
+    // Hook to simulate race conditions in add() Occupied path.
+    // Takes the HnswIndex instance and the NodeId being added.
+    static TEST_RACE_HOOK: std::cell::Cell<Option<TestRaceHook>> = const { std::cell::Cell::new(None) };
+}
+
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
 /// This ensures the flag is always reset, even if the callback panics.
 pub(crate) struct FilterCallbackGuard {
@@ -450,17 +460,27 @@ where
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
 
-        // Strict alignment check to prevent UB (Sentry Directive)
-        // f32 requires 4-byte alignment. accessing unaligned data via slice is UB.
-        if a.align_offset(std::mem::align_of::<f32>()) != 0
-            || b.align_offset(std::mem::align_of::<f32>()) != 0
-        {
-            panic!("usearch passed unaligned pointer to metric function");
-        }
-
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-        distance_fn(slice_a, slice_b)
+
+        // SAFETY: We wrap the user-provided closure in catch_unwind to prevent
+        // panics from unwinding across the FFI boundary into C++ code, which is UB.
+        // If a panic occurs, we return f32::MAX (infinite distance) to effectively
+        // ignore this comparison.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            distance_fn(slice_a, slice_b)
+        }));
+
+        match result {
+            Ok(val) => val,
+            Err(_) => {
+                // Log error to stderr so operator is aware of the issue
+                eprintln!(
+                    "Panic in custom metric function - returning max distance to avoid FFI UB"
+                );
+                f32::MAX
+            }
+        }
     })
 }
 
@@ -770,11 +790,43 @@ impl VectorIndex for HnswIndex {
                 // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
 
-                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
-                // where multiple threads try to update the same node concurrently (PR #575).
-                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
-                // causing "Duplicate keys not allowed" error.
+                // DEADLOCK FIX (Havoc): Release DashMap lock before acquiring Inner lock.
+                // This prevents deadlock with Vacant path which acquires Inner -> Map.
+                // We must re-verify the mapping after acquiring Inner lock.
+                drop(entry);
+
+                #[cfg(test)]
+                {
+                    // Hook to simulate race condition: simulate another thread changing/removing mapping
+                    // after we dropped the lock but before we acquired inner lock.
+                    if let Some(hook) = TEST_RACE_HOOK.with(|h| h.get()) {
+                        hook(self, id);
+                    }
+                }
+
+                // Acquire inner write lock
                 let index = self.inner.write();
+
+                // Re-verify mapping under Inner lock
+                // We need to lock the map again to check if the ID still maps to existing_key.
+                // This is safe because we hold Inner, so we are following Inner->Map order.
+                if let Some(current_entry) = self.id_mapping.get(&id) {
+                    if *current_entry != existing_key {
+                        // Mapping changed (concurrent update).
+                        // Since we don't hold the correct key anymore, we return a transient error.
+                        return Err(Error::Vector(VectorError::IndexError(
+                            "Concurrent modification detected during update (mapping changed)"
+                                .to_string(),
+                        )));
+                    }
+                    // Mapping is consistent. Proceed with update.
+                } else {
+                    // Mapping removed.
+                    // If the node was deleted, we shouldn't add a vector for it.
+                    return Err(Error::Vector(VectorError::IndexError(
+                        "Concurrent modification detected during update (node removed)".to_string(),
+                    )));
+                }
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
@@ -867,12 +919,21 @@ impl VectorIndex for HnswIndex {
                     )))
                 })?;
 
-                // Release inner lock before accessing DashMap
-                drop(index);
+                #[cfg(test)]
+                {
+                    // Hook to simulate race condition: simulate another thread adding mapping
+                    // after we checked it was vacant but before we inserted our mapping.
+                    if let Some(hook) = TEST_RACE_HOOK.with(|h| h.get()) {
+                        hook(self, id);
+                    }
+                }
 
-                // Step 4: Insert to mappings (dashmap) AFTER inner is updated
-                // Handle race: another thread may have added this NodeId while we held inner lock
-                // Use entry API to safely check for existence without overwriting (which causes Zombie Vectors)
+                // Step 4: Insert to mappings (dashmap) WHILE HOLDING INNER LOCK
+                // We keep the inner lock held to ensure atomicity with respect to save_internal().
+                // If we dropped the lock here, save_internal() could run, see the new vector in inner,
+                // but miss the mapping in id_mapping (Zombie Vector bug).
+                //
+                // Lock order check: Inner -> Map (via entry()). This is consistent with other operations.
                 let race_detected = match self.id_mapping.entry(id) {
                     dashmap::mapref::entry::Entry::Occupied(_) => true,
                     dashmap::mapref::entry::Entry::Vacant(e) => {
@@ -888,9 +949,7 @@ impl VectorIndex for HnswIndex {
                     // Our vector is in inner with key=key, but someone else claimed the ID.
                     // We must rollback our addition to avoid phantom vectors.
 
-                    // Acquire inner lock again to remove our key.
-                    // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let index = self.inner.write();
+                    // We already hold the inner write lock, so we can remove directly.
                     index.remove(key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
                             "Failed to rollback vector after concurrent add: {}",
@@ -907,9 +966,12 @@ impl VectorIndex for HnswIndex {
 
                 // If no race, we successfully inserted into id_mapping.
                 // Now insert reverse mapping.
-                // Note: We do this outside the id_mapping lock to reduce contention.
                 self.reverse_mapping.insert(key, id);
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+
+                // Explicitly drop index lock (though it would drop at end of scope)
+                drop(index);
+
                 Ok(())
             }
         }
@@ -952,6 +1014,15 @@ impl VectorIndex for HnswIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
+        // Check for re-entrant access during filtered search (prevents deadlock)
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot perform search from within a search_with_filter callback. \
+                 This prevents deadlocks when concurrent writers are pending."
+                    .to_string(),
+            )));
+        }
+
         // Validate query vector
         validate_vector(query)?;
 
@@ -1022,6 +1093,15 @@ impl VectorIndex for HnswIndex {
     where
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
+        // Check for re-entrant access during filtered search (prevents deadlock)
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot perform search_with_filter from within a search_with_filter callback. \
+                 This prevents deadlocks when concurrent writers are pending."
+                    .to_string(),
+            )));
+        }
+
         // Validate query vector
         validate_vector(query)?;
 
@@ -1192,25 +1272,21 @@ impl HnswIndex {
     /// and its mappings. It is separated from `save()` to allow the latter to use
     /// `tokio::task::block_in_place` when running within a Tokio runtime.
     fn save_internal(&self, path: &Path) -> Result<()> {
-        // DEADLOCK FIX (PR #751): Collect mappings BEFORE acquiring any locks
-        // This prevents lock ordering deadlock with add() which holds DashMap → inner lock order
+        // Acquire inner read lock first to ensure consistency between index and mappings.
+        // This prevents "Zombie Vectors" where a vector is added to the index but missed in the mappings snapshot.
+        let index = self.inner.read();
+
+        // Collect mappings while holding the inner lock.
+        // This is safe because `add` operations (Vacant and Occupied) release DashMap locks
+        // before acquiring the inner lock, or acquire inner then map (Vacant).
+        // Specifically:
+        // - add(Vacant): inner.write() -> id_mapping.insert() (Inner -> Map)
+        // - add(Occupied): drop(entry) -> inner.write() -> id_mapping.get() (Inner -> Map)
+        // - search_with_filter: inner.read() -> reverse_mapping.get() (Inner -> Map)
         //
-        // Lock Ordering Invariant:
-        //   1. inner (RwLock<Index>) - FIRST
-        //   2. id_mapping (DashMap) - SECOND
+        // Therefore, holding inner.read() and iterating id_mapping (which acquires shard locks)
+        // follows the consistent Inner -> Map lock order, preventing deadlocks.
         //
-        // Previous implementation violated this by:
-        //   1. Acquiring inner.read() first (line 991)
-        //   2. Then iterating id_mapping (line 1032), acquiring DashMap shard locks
-        //
-        // Meanwhile, add() (Occupied path) acquires locks in reverse order:
-        //   1. DashMap shard lock via entry() (line 634)
-        //   2. Then inner.write() (line 645)
-        //
-        // Result: Classic lock inversion deadlock.
-        //
-        // Solution: Collect all mappings into Vec with no locks held, sacrificing
-        // the "⚡ Bolt Optimization" streaming approach for correctness.
         // Memory cost: O(N) allocation (~16MB for 1M nodes), acceptable for infrequent save operation.
         let mappings: Vec<(NodeId, u64)> = self
             .id_mapping
@@ -1219,8 +1295,6 @@ impl HnswIndex {
             .collect();
         let count = mappings.len();
 
-        // Now acquire inner.read() with no other locks held
-        let index = self.inner.read();
         index
             .save(path.to_str().ok_or_else(|| {
                 Error::Vector(VectorError::IndexError(
@@ -1650,6 +1724,15 @@ fn load_mappings_with_integrity(
 }
 
 impl HnswIndex {
+    /// Returns the number of ID mappings.
+    ///
+    /// This is useful for consistency checks against `len()`.
+    /// Ideally, `len() == len_mappings()`. If `len() > len_mappings()`,
+    /// there are vectors in the index that cannot be retrieved (Zombie Vectors).
+    pub fn len_mappings(&self) -> usize {
+        self.id_mapping.len()
+    }
+
     /// Creates a new HNSW index from a configuration.
     pub fn new(config: HnswConfig) -> Result<Self> {
         HnswIndexBuilder::from_config(&config).build()
@@ -2600,6 +2683,50 @@ mod tests {
     }
 
     #[test]
+    fn test_load_mappings_count_limit() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Modify count to be MAX_MAPPINGS_COUNT + 1
+        let mut data = std::fs::read(&mappings_path).unwrap();
+        let count_offset = 15; // V2 offset
+        let huge_count = (super::MAX_MAPPINGS_COUNT + 1) as u64;
+
+        // Write huge count
+        let count_bytes = huge_count.to_le_bytes();
+        data[count_offset..count_offset + 8].copy_from_slice(&count_bytes);
+
+        // Update CRC
+        let crc_offset = data.len() - 4;
+        let mut hasher = Hasher::new();
+        hasher.update(&data[..crc_offset]);
+        let new_crc = hasher.finalize();
+        data[crc_offset..].copy_from_slice(&new_crc.to_le_bytes());
+
+        std::fs::write(&mappings_path, &data).unwrap();
+
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(
+                    msg.contains("exceeds maximum allowed"),
+                    "Expected max limit error, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("Expected IndexError with limit message, got: Ok(_)"),
+            Err(e) => panic!("Expected IndexError with limit message, got: Err({:?})", e),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_save_mappings_large_streaming() -> Result<()> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_streaming.usearch");
@@ -2808,6 +2935,145 @@ mod tests {
         let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 5);
     }
+
+    #[test]
+    fn test_add_race_retry_value_change_coverage() {
+        // Test that if another thread changes the mapping (value changed) while we are in add(),
+        // we detect it and return a retryable error.
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let node = NodeId::new(1).unwrap();
+
+        // 1. Add initial vector so we hit Occupied path
+        index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // 2. Set hook to change the mapping ID
+        TEST_RACE_HOOK.with(|h| {
+            h.set(Some(|idx, node_id| {
+                // Simulate another thread updating this node to a new key
+                // We just manually update the map here.
+                // Note: In real life, add() would do this via next_key, but here we just hack the map.
+                idx.id_mapping.insert(node_id, 999);
+                // Also update reverse mapping to keep index consistent (though add() logic only checks id_mapping)
+                idx.reverse_mapping.insert(999, node_id);
+            }))
+        });
+
+        // 3. Call add() again. It should hit Occupied path, trigger hook, fail validation.
+        let result = index.add(node, &[0.0, 1.0, 0.0, 0.0]);
+
+        // 4. Cleanup hook
+        TEST_RACE_HOOK.with(|h| h.set(None));
+
+        // 5. Assert error
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Concurrent modification detected"));
+                assert!(msg.contains("mapping changed"));
+            }
+            _ => panic!("Expected concurrent modification error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_add_race_retry_removal_coverage() {
+        // Test that if another thread removes the mapping while we are in add(),
+        // we detect it and return a retryable error.
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let node = NodeId::new(2).unwrap();
+
+        // 1. Add initial vector
+        index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // 2. Set hook to remove the mapping
+        TEST_RACE_HOOK.with(|h| {
+            h.set(Some(|idx, node_id| {
+                idx.id_mapping.remove(&node_id);
+            }))
+        });
+
+        // 3. Call add() again
+        let result = index.add(node, &[0.0, 1.0, 0.0, 0.0]);
+
+        // 4. Cleanup
+        TEST_RACE_HOOK.with(|h| h.set(None));
+
+        // 5. Assert error
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Concurrent modification detected"));
+                assert!(msg.contains("node removed"));
+            }
+            _ => panic!("Expected concurrent modification error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_add_race_vacant_coverage() {
+        // Test the race condition in the Vacant path:
+        // We checked map (Vacant), acquired inner lock, added to inner.
+        // Then we check map again. If it's Occupied (race!), we must rollback.
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let node = NodeId::new(3).unwrap();
+
+        // 1. Set hook to insert the mapping (simulating another thread winning the race)
+        TEST_RACE_HOOK.with(|h| {
+            h.set(Some(|idx, node_id| {
+                // Insert a dummy key to simulate another thread claiming this ID
+                idx.id_mapping.insert(node_id, 999);
+                // Note: We don't strictly need to add to inner/reverse for this test,
+                // as add() only checks id_mapping.
+            }))
+        });
+
+        // 2. Call add(). This uses the Vacant path because the node is new.
+        // It should trigger the hook, detect the race, rollback, and fail.
+        let result = index.add(node, &[0.5, 0.5, 0.5, 0.5]);
+
+        // 3. Cleanup
+        TEST_RACE_HOOK.with(|h| h.set(None));
+
+        // 4. Assert error
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Concurrent add detected"));
+                assert!(msg.contains("vector already exists"));
+            }
+            _ => panic!("Expected concurrent add error, got {:?}", result),
+        }
+
+        // 5. Verify rollback: The vector we tried to add should NOT be in the index.
+        // The index should be empty (except for potentially what the hook added, but hook only added mapping)
+        // Since hook didn't add to inner, inner size should be 0.
+        // Wait, add() adds to inner *before* hook. Then rollback removes it.
+        // So inner size should be 0.
+        assert_eq!(index.len(), 0);
+    }
+
+    #[test]
+    fn test_save_coverage() -> Result<()> {
+        // Basic save test to ensure save_internal lines are covered
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coverage.index");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+
+        // This triggers save_internal
+        index.save(&path)?;
+
+        assert!(path.exists());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2867,5 +3133,42 @@ mod coverage_tests {
 
         drop(guard);
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
+
+    #[test]
+    fn test_metric_wrapper_panic_resilience() {
+        // Ensure that a panicking metric function doesn't crash the process
+        // but returns f32::MAX instead.
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            panic!("Test panic");
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let data = [0.0f32; 4];
+        let ptr = data.as_ptr();
+
+        // This should NOT panic
+        let result = wrapper(ptr, ptr);
+
+        // Should return max distance
+        assert_eq!(result, f32::MAX);
+    }
+
+    #[test]
+    fn test_metric_wrapper_success_direct() {
+        // Ensure that a non-panicking metric function works correctly.
+        // This provides direct coverage of the Ok path in catch_unwind.
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let data_a = [1.0f32, 2.0, 3.0, 4.0];
+        let data_b = [1.5f32, 2.5, 3.5, 4.5];
+
+        let result = wrapper(data_a.as_ptr(), data_b.as_ptr());
+
+        // |1.0-1.5| + |2.0-2.5| + |3.0-3.5| + |4.0-4.5| = 0.5 * 4 = 2.0
+        assert!((result - 2.0).abs() < f32::EPSILON);
     }
 }

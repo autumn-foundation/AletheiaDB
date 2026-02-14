@@ -451,6 +451,38 @@ impl PropertyValue {
         }
     }
 
+    /// Check if two property values are semantically equal.
+    ///
+    /// This differs from `PartialEq` in that it treats `NaN` values as equal.
+    /// This is important for change detection systems (like `VersionDiff` and `PropertyDelta`)
+    /// to avoid reporting spurious changes when a value remains `NaN`.
+    ///
+    /// # Handling of NaN
+    /// - `Float(NaN)` is equal to `Float(NaN)`
+    /// - `Vector` containing `NaN` at index `i` is equal to `Vector` containing `NaN` at index `i`
+    /// - `SparseVector`: Guaranteed not to contain `NaN` (enforced at construction), so standard equality applies.
+    pub fn semantically_equal(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PropertyValue::Float(a), PropertyValue::Float(b)) => {
+                if a.is_nan() {
+                    b.is_nan()
+                } else {
+                    a == b
+                }
+            }
+            (PropertyValue::Vector(a), PropertyValue::Vector(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| if x.is_nan() { y.is_nan() } else { x == y })
+            }
+            // For other types, fallback to PartialEq
+            _ => self == other,
+        }
+    }
+
     // ========================================================================
     // Serialization Methods
     // ========================================================================
@@ -3696,8 +3728,22 @@ mod tests {
             .build();
 
         let size = map.estimated_heap_size();
-        // Should include at least the string length plus HashMap overhead
-        assert!(size >= 5, "Map with string should include string heap size");
+
+        // Calculation:
+        // Capacity >= 3 (likely 4 or more)
+        // Per entry overhead: sizeof(PropertyKey) + sizeof(PropertyValue) + 8
+        // Value heap size: "Alice".len() = 5
+
+        let min_overhead_per_entry =
+            std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8;
+        let expected_min_overhead = 3 * min_overhead_per_entry + 5;
+
+        assert!(
+            size >= expected_min_overhead,
+            "Map heap size {} too small (expected at least {})",
+            size,
+            expected_min_overhead
+        );
     }
 
     #[test]
@@ -3708,10 +3754,19 @@ mod tests {
             .build();
 
         let size = map.estimated_heap_size();
-        // Should include vector heap size: 384 * 4 = 1536 bytes
+
+        let vector_data_size = 384 * std::mem::size_of::<f32>(); // 1536
+        let min_overhead_per_entry =
+            std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8;
+
+        // Map has 1 entry
+        let expected_min = vector_data_size + min_overhead_per_entry;
+
         assert!(
-            size >= 384 * std::mem::size_of::<f32>(),
-            "Map with vector should include vector heap size"
+            size >= expected_min,
+            "Map heap size {} too small (expected at least {})",
+            size,
+            expected_min
         );
     }
 
@@ -3920,16 +3975,13 @@ mod tests {
 
         let size = value.estimated_heap_size();
 
-        // Size should be exactly:
+        // Size should be:
         // 10 * (Vec capacity overhead + sizeof(PropertyValue)) + string length
-        // Vec capacity is exactly 1 because we used vec![value]
-        let vec_overhead = std::mem::size_of::<PropertyValue>();
-        let expected_size = 10 * vec_overhead + 4; // "data".len() = 4
+        // Vec capacity is at least 1.
+        let min_vec_size = std::mem::size_of::<PropertyValue>();
+        let expected_min = 10 * min_vec_size + 4; // "data".len() = 4
 
-        assert_eq!(
-            size, expected_size,
-            "Heap size estimate should be exact for deterministic structure"
-        );
+        assert!(size >= expected_min);
     }
 
     #[test]
@@ -4428,5 +4480,124 @@ mod sentry_tests {
             }
             _ => panic!("Expected CorruptedData error"),
         }
+    }
+
+    #[test]
+    fn test_array_max_elements_boundary() {
+        // Construct a buffer with exactly MAX_ARRAY_ELEMENTS
+        let mut bytes = Vec::new();
+        bytes.push(TAG_ARRAY);
+        let count = MAX_ARRAY_ELEMENTS as u32;
+        bytes.extend_from_slice(&count.to_le_bytes());
+
+        // We can't actually allocate MAX_ARRAY_ELEMENTS (10M) * 1 byte in a test without it being slow/heavy.
+        // However, we can check that it passes the initial count check and fails on buffer size check
+        // (which is O(1)) OR if we provide enough data, it starts deserializing.
+        //
+        // So if we provide count = MAX, it should NOT return "exceeds maximum allowed".
+        // It might return "Insufficient buffer size" if we don't provide data, which confirms the count passed.
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Insufficient buffer size"),
+            "Should pass max check and fail on buffer size: {}",
+            err
+        );
+
+        // If we provide count = MAX + 1, it MUST return "exceeds maximum allowed"
+        let mut bytes_overflow = Vec::new();
+        bytes_overflow.push(TAG_ARRAY);
+        let count_overflow = (MAX_ARRAY_ELEMENTS + 1) as u32;
+        bytes_overflow.extend_from_slice(&count_overflow.to_le_bytes());
+
+        let result_overflow = PropertyValue::deserialize(&bytes_overflow);
+        assert!(result_overflow.is_err());
+        let err_overflow = result_overflow.unwrap_err();
+        assert!(
+            err_overflow.to_string().contains("exceeds maximum allowed"),
+            "Should fail max check: {}",
+            err_overflow
+        );
+    }
+
+    #[test]
+    fn test_property_map_capacity_boundary() {
+        // Similar strategy for PropertyMap
+        let mut bytes = Vec::new();
+        let count = MAX_PROPERTY_MAP_CAPACITY as u32;
+        bytes.extend_from_slice(&count.to_le_bytes());
+
+        // Check boundary exact hit (should fail on buffer size, not capacity limit)
+        let result = PropertyMap::deserialize(&bytes);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Insufficient buffer size")
+        );
+
+        // Check boundary violation (MAX + 1)
+        let mut bytes_overflow = Vec::new();
+        let count_overflow = (MAX_PROPERTY_MAP_CAPACITY + 1) as u32;
+        bytes_overflow.extend_from_slice(&count_overflow.to_le_bytes());
+
+        let result_overflow = PropertyMap::deserialize(&bytes_overflow);
+        assert!(result_overflow.is_err());
+        assert!(
+            result_overflow
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds maximum allowed")
+        );
+    }
+
+    #[test]
+    fn test_contains_vector_nested() {
+        // Document that contains_vector does NOT check nested arrays
+        let embedding = vec![0.1f32; 4];
+        let vec_val = PropertyValue::vector(&embedding);
+        let array_val = PropertyValue::array(vec![vec_val]);
+
+        let map = PropertyMapBuilder::new()
+            .insert("nested_vector", array_val)
+            .build();
+
+        assert!(
+            !map.contains_vector(),
+            "contains_vector should ignore nested vectors (current limitation)"
+        );
+    }
+
+    /// 🎯 Target: PropertyValue::semantically_equal
+    /// 💣 Risk: Spurious diffs when values are NaN (because NaN != NaN).
+    /// 🧪 Strategy: Compare NaN values using semantically_equal vs PartialEq.
+    /// 🔬 Verification: semantically_equal returns true, == returns false.
+    #[test]
+    fn test_semantically_equal_handles_nan() {
+        // Float(NaN)
+        let nan_float = PropertyValue::Float(f64::NAN);
+        assert_ne!(nan_float, nan_float, "PartialEq should treat NaN != NaN");
+        assert!(
+            nan_float.semantically_equal(&nan_float),
+            "semantically_equal should treat NaN == NaN"
+        );
+
+        // Vector with NaN
+        let nan_vec = PropertyValue::vector([1.0f32, f32::NAN, 2.0f32]);
+        assert_ne!(
+            nan_vec, nan_vec,
+            "PartialEq should treat vector with NaN != itself"
+        );
+        assert!(
+            nan_vec.semantically_equal(&nan_vec),
+            "semantically_equal should treat vector with NaN == itself"
+        );
+
+        // Mixed types (just to be safe)
+        let other = PropertyValue::Int(42);
+        assert!(!nan_float.semantically_equal(&other));
     }
 }

@@ -94,6 +94,19 @@ pub struct BackpressureConfig {
     pub max_sleep_us: u64,
 }
 
+impl BackpressureConfig {
+    /// Validate the configuration to prevent invalid states (e.g. infinite loops).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.initial_spins == 0 {
+            return Err("initial_spins must be > 0 to prevent infinite spin loops".to_string());
+        }
+        if self.max_spins < self.initial_spins {
+            return Err("max_spins must be >= initial_spins".to_string());
+        }
+        Ok(())
+    }
+}
+
 impl Default for BackpressureConfig {
     fn default() -> Self {
         Self {
@@ -452,6 +465,7 @@ impl WalRingBuffer {
     /// Panics if `capacity` is 0.
     pub fn with_config(capacity: usize, backpressure: BackpressureConfig) -> Self {
         assert!(capacity > 0, "Ring buffer capacity must be > 0");
+        backpressure.validate().expect("Invalid BackpressureConfig");
 
         // Round up to power of 2
         let capacity = capacity.next_power_of_two();
@@ -588,8 +602,9 @@ impl WalRingBuffer {
                             return Err(entry);
                         }
                         // Exponential backoff: double the spin limit
-                        current_spin_limit =
-                            (current_spin_limit.saturating_mul(2)).min(self.backpressure.max_spins);
+                        // Warden: Use max(1) to ensure progress even if initial_spins was 0 (defense in depth)
+                        current_spin_limit = (current_spin_limit.max(1).saturating_mul(2))
+                            .min(self.backpressure.max_spins);
                         spin_count = 0;
                     }
 
@@ -1351,5 +1366,37 @@ mod tests {
         let final_drained = buf.drain();
         assert_eq!(final_drained.len(), 1);
         assert_eq!(final_drained[0].data, vec![100]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Ring buffer capacity must be > 0")]
+    fn test_ring_buffer_zero_capacity() {
+        let _ = WalRingBuffer::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid BackpressureConfig: \"max_spins must be >= initial_spins\"")]
+    fn test_backpressure_invalid_config() {
+        let config = BackpressureConfig {
+            initial_spins: 100,
+            max_spins: 10, // Invalid: max < initial
+            base_sleep_us: 1,
+            max_sleep_us: 10,
+        };
+        let _ = WalRingBuffer::with_config(1024, config);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Invalid BackpressureConfig: \"initial_spins must be > 0 to prevent infinite spin loops\""
+    )]
+    fn test_backpressure_zero_initial_spins() {
+        let config = BackpressureConfig {
+            initial_spins: 0, // Invalid
+            max_spins: 10,
+            base_sleep_us: 1,
+            max_sleep_us: 10,
+        };
+        let _ = WalRingBuffer::with_config(1024, config);
     }
 }
