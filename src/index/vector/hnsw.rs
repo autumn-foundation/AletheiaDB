@@ -105,6 +105,13 @@ std::thread_local! {
     pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+std::thread_local! {
+    // Hook to simulate race conditions in add() Occupied path.
+    // Takes the HnswIndex instance and the NodeId being added.
+    static TEST_RACE_HOOK: std::cell::Cell<Option<fn(&HnswIndex, NodeId)>> = const { std::cell::Cell::new(None) };
+}
+
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
 /// This ensures the flag is always reset, even if the callback panics.
 pub(crate) struct FilterCallbackGuard {
@@ -766,6 +773,15 @@ impl VectorIndex for HnswIndex {
                 // This prevents deadlock with Vacant path which acquires Inner -> Map.
                 // We must re-verify the mapping after acquiring Inner lock.
                 drop(entry);
+
+                #[cfg(test)]
+                {
+                    // Hook to simulate race condition: simulate another thread changing/removing mapping
+                    // after we dropped the lock but before we acquired inner lock.
+                    if let Some(hook) = TEST_RACE_HOOK.with(|h| h.get()) {
+                        hook(self, id);
+                    }
+                }
 
                 // Acquire inner write lock
                 let index = self.inner.write();
@@ -2884,6 +2900,83 @@ mod tests {
         // Search for k=5 to force more comparisons
         let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn test_add_race_retry_value_change_coverage() {
+        // Test that if another thread changes the mapping (value changed) while we are in add(),
+        // we detect it and return a retryable error.
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let node = NodeId::new(1).unwrap();
+
+        // 1. Add initial vector so we hit Occupied path
+        index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // 2. Set hook to change the mapping ID
+        TEST_RACE_HOOK.with(|h| {
+            h.set(Some(|idx, node_id| {
+                // Simulate another thread updating this node to a new key
+                // We just manually update the map here.
+                // Note: In real life, add() would do this via next_key, but here we just hack the map.
+                idx.id_mapping.insert(node_id, 999);
+                // Also update reverse mapping to keep index consistent (though add() logic only checks id_mapping)
+                idx.reverse_mapping.insert(999, node_id);
+            }))
+        });
+
+        // 3. Call add() again. It should hit Occupied path, trigger hook, fail validation.
+        let result = index.add(node, &[0.0, 1.0, 0.0, 0.0]);
+
+        // 4. Cleanup hook
+        TEST_RACE_HOOK.with(|h| h.set(None));
+
+        // 5. Assert error
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Concurrent modification detected"));
+                assert!(msg.contains("mapping changed"));
+            }
+            _ => panic!("Expected concurrent modification error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_add_race_retry_removal_coverage() {
+        // Test that if another thread removes the mapping while we are in add(),
+        // we detect it and return a retryable error.
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let node = NodeId::new(2).unwrap();
+
+        // 1. Add initial vector
+        index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // 2. Set hook to remove the mapping
+        TEST_RACE_HOOK.with(|h| {
+            h.set(Some(|idx, node_id| {
+                idx.id_mapping.remove(&node_id);
+            }))
+        });
+
+        // 3. Call add() again
+        let result = index.add(node, &[0.0, 1.0, 0.0, 0.0]);
+
+        // 4. Cleanup
+        TEST_RACE_HOOK.with(|h| h.set(None));
+
+        // 5. Assert error
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Concurrent modification detected"));
+                assert!(msg.contains("node removed"));
+            }
+            _ => panic!("Expected concurrent modification error, got {:?}", result),
+        }
     }
 }
 
