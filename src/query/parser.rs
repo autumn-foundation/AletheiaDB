@@ -2092,7 +2092,7 @@ mod sentry_tests {
 
         let depth = MAX_RECURSION_DEPTH;
         let query = format!(
-            "MATCH (n) WHERE {}(n.age > 10){} RETURN n",
+            "MATCH (n) WHERE {}n.age > 10{} RETURN n",
             "(".repeat(depth),
             ")".repeat(depth)
         );
