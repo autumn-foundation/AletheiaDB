@@ -957,14 +957,37 @@ mod tests {
 
         let coordinator = FlushCoordinator::new(config).unwrap();
 
-        // First flush - creates segment
-        let entries: Vec<_> = (1..=5)
-            .map(|i| create_test_entry(i, &[i as u8; 50]))
-            .collect();
-        let stats = coordinator.flush(entries, true).unwrap();
+        // 1. Boundary Test: EXACTLY 100 bytes (header + data)
+        // WAL Header is 5 bytes. So we need 95 bytes of data.
+        // Actually, `current_segment_size` includes header.
+        // When we open segment, we write 5 bytes. Size = 5.
+        // We want to reach exactly 100.
+        // PendingEntry wrapper overhead is NOT written to disk in raw `write_all`.
+        // So if we write 95 bytes, total size = 5 + 95 = 100.
+        // 100 >= 100 -> Should Rotate.
 
-        // Should have rotated due to small segment size
-        assert!(stats.segment_rotated || coordinator.current_segment_size() < 100);
+        let entry1 = create_test_entry(1, &[0u8; 95]);
+        let stats1 = coordinator.flush(vec![entry1], true).unwrap();
+
+        // Should rotate because 5 (header) + 95 (data) = 100 >= 100
+        assert!(
+            stats1.segment_rotated,
+            "Should rotate at exactly segment_size (100). Size was {}",
+            coordinator.current_segment_size() // This will be 0 if rotated, or 100 if not
+        );
+        assert_eq!(coordinator.current_segment_size(), 0); // Reset after rotation
+
+        // 2. Boundary Test: 99 bytes (header + data)
+        // Size = 5 (new header) + 94 (data) = 99.
+        // 99 < 100 -> Should NOT Rotate.
+        let entry2 = create_test_entry(2, &[0u8; 94]);
+        let stats2 = coordinator.flush(vec![entry2], true).unwrap();
+
+        assert!(
+            !stats2.segment_rotated,
+            "Should NOT rotate at segment_size - 1 (99)"
+        );
+        assert_eq!(coordinator.current_segment_size(), 99);
     }
 
     #[test]
@@ -1093,30 +1116,50 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = FlushCoordinatorConfig::new(dir.path());
         config.segment_size = 50; // Very small
-        config.segments_to_retain = 2;
+        config.segments_to_retain = 2; // Retain 2 previous + 1 current = 3 total
 
         let coordinator = FlushCoordinator::new(config).unwrap();
 
-        // Create multiple small segments
+        // Create segments 1..10
+        // Each flush creates a new segment because data (100) > size (50)
         for i in 1..=10 {
             let entry = create_test_entry(i, &[i as u8; 100]);
             coordinator.flush(vec![entry], true).unwrap();
         }
 
-        // Count remaining segments
-        let segment_count = std::fs::read_dir(dir.path())
+        // We expect segments 8, 9, 10 to remain.
+        // 10 is current. 9 and 8 are retained.
+        // 1..7 should be deleted.
+
+        let mut segments: Vec<u64> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "log")
-                    .unwrap_or(false)
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().is_some_and(|ext| ext == "log") {
+                    path.file_stem()
+                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                } else {
+                    None
+                }
             })
-            .count();
+            .collect();
+        segments.sort();
 
-        // Should have at most segments_to_retain + 1 (current)
-        assert!(segment_count <= 3);
+        // Strict assertion: We must have exactly 3 segments.
+        assert_eq!(
+            segments.len(),
+            3,
+            "Should retain exactly 3 segments (2 + current). Found: {:?}",
+            segments
+        );
+
+        // Strict assertion: Verify exact IDs
+        // Current ID is 10 (created by 10th flush).
+        // cleanup retains `current_id` and `segments_to_retain` previous ones.
+        // retain_from = 10 - 2 = 8.
+        // Keeps ID >= 8: 8, 9, 10.
+        assert_eq!(segments, vec![8, 9, 10]);
     }
 
     // ============================================================
@@ -1177,54 +1220,72 @@ mod tests {
     #[test]
     fn test_truncate_to_lsn_removes_old_segments() {
         let dir = tempdir().unwrap();
+
+        // Use segment size 200.
+        // 10 entries of 20 bytes = 200 bytes.
+        // + Header (5 bytes) = 205 bytes.
+        // 205 >= 200 -> Rotates immediately after the batch.
         let mut config = FlushCoordinatorConfig::new(dir.path());
-        config.segment_size = 30; // Very small
+        config.segment_size = 200;
         config.segments_to_retain = 100; // Don't auto-cleanup
 
         let coordinator = FlushCoordinator::new(config).unwrap();
 
-        // Create segments with different LSN ranges
         // Segment 1: LSN 1-10
-        for i in 1..=10 {
-            coordinator
-                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
-                .unwrap();
-        }
+        let entries1: Vec<_> = (1..=10)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
+        coordinator.flush(entries1, true).unwrap();
 
         // Segment 2: LSN 11-20
-        for i in 11..=20 {
-            coordinator
-                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
-                .unwrap();
-        }
+        let entries2: Vec<_> = (11..=20)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
+        coordinator.flush(entries2, true).unwrap();
 
         // Segment 3: LSN 21-30
-        for i in 21..=30 {
-            coordinator
-                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
-                .unwrap();
-        }
-
-        // Count segments before truncation
-        let segments_before: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+        let entries3: Vec<_> = (21..=30)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
             .collect();
-        let count_before = segments_before.len();
+        coordinator.flush(entries3, true).unwrap();
 
-        // Truncate to LSN 15 - should remove segments where max_lsn < 15
+        // We expect 3 segments.
+        // Seg 1 (LSN 1-10) -> Rotated
+        // Seg 2 (LSN 11-20) -> Rotated
+        // Seg 3 (LSN 21-30) -> Rotated
+
+        // Truncate to LSN 15.
+        // Should remove Seg 1 (Max 10 < 15).
+        // Should KEEP Seg 2 (Max 20 >= 15).
+        // Should KEEP Seg 3 (Max 30 >= 15).
+
         let removed = coordinator.truncate_to_lsn(LSN(15)).unwrap();
 
-        // Count segments after truncation
-        let segments_after: Vec<_> = std::fs::read_dir(dir.path())
+        assert_eq!(removed, 1, "Should remove exactly 1 segment (LSN 1-10)");
+
+        // Verify Seg 1 is PHYSICALLY gone from disk.
+        // We use fs::read_dir directly to avoid relying on list_segments_with_metadata
+        // which might filter out files if metadata is missing (false negative).
+        let segment_ids: Vec<u64> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().is_some_and(|ext| ext == "log") {
+                    path.file_stem()
+                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        // Should have removed at least one segment
-        assert!(removed > 0 || count_before == segments_after.len());
+        assert!(
+            !segment_ids.contains(&1),
+            "Segment 1 should be physically deleted"
+        );
+        assert!(segment_ids.contains(&2), "Segment 2 should remain");
+        assert!(segment_ids.contains(&3), "Segment 3 should remain");
     }
 
     #[test]
