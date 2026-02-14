@@ -919,6 +919,15 @@ impl VectorIndex for HnswIndex {
                     )))
                 })?;
 
+                #[cfg(test)]
+                {
+                    // Hook to simulate race condition: simulate another thread adding mapping
+                    // after we checked it was vacant but before we inserted our mapping.
+                    if let Some(hook) = TEST_RACE_HOOK.with(|h| h.get()) {
+                        hook(self, id);
+                    }
+                }
+
                 // Step 4: Insert to mappings (dashmap) WHILE HOLDING INNER LOCK
                 // We keep the inner lock held to ensure atomicity with respect to save_internal().
                 // If we dropped the lock here, save_internal() could run, see the new vector in inner,
@@ -3002,6 +3011,68 @@ mod tests {
             }
             _ => panic!("Expected concurrent modification error, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_add_race_vacant_coverage() {
+        // Test the race condition in the Vacant path:
+        // We checked map (Vacant), acquired inner lock, added to inner.
+        // Then we check map again. If it's Occupied (race!), we must rollback.
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let node = NodeId::new(3).unwrap();
+
+        // 1. Set hook to insert the mapping (simulating another thread winning the race)
+        TEST_RACE_HOOK.with(|h| {
+            h.set(Some(|idx, node_id| {
+                // Insert a dummy key to simulate another thread claiming this ID
+                idx.id_mapping.insert(node_id, 999);
+                // Note: We don't strictly need to add to inner/reverse for this test,
+                // as add() only checks id_mapping.
+            }))
+        });
+
+        // 2. Call add(). This uses the Vacant path because the node is new.
+        // It should trigger the hook, detect the race, rollback, and fail.
+        let result = index.add(node, &[0.5, 0.5, 0.5, 0.5]);
+
+        // 3. Cleanup
+        TEST_RACE_HOOK.with(|h| h.set(None));
+
+        // 4. Assert error
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Concurrent add detected"));
+                assert!(msg.contains("vector already exists"));
+            }
+            _ => panic!("Expected concurrent add error, got {:?}", result),
+        }
+
+        // 5. Verify rollback: The vector we tried to add should NOT be in the index.
+        // The index should be empty (except for potentially what the hook added, but hook only added mapping)
+        // Since hook didn't add to inner, inner size should be 0.
+        // Wait, add() adds to inner *before* hook. Then rollback removes it.
+        // So inner size should be 0.
+        assert_eq!(index.len(), 0);
+    }
+
+    #[test]
+    fn test_save_coverage() -> Result<()> {
+        // Basic save test to ensure save_internal lines are covered
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coverage.index");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+
+        // This triggers save_internal
+        index.save(&path)?;
+
+        assert!(path.exists());
+        Ok(())
     }
 }
 
