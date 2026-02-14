@@ -762,11 +762,34 @@ impl VectorIndex for HnswIndex {
                 // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
 
-                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
-                // where multiple threads try to update the same node concurrently (PR #575).
-                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
-                // causing "Duplicate keys not allowed" error.
+                // DEADLOCK FIX (Havoc): Release DashMap lock before acquiring Inner lock.
+                // This prevents deadlock with Vacant path which acquires Inner -> Map.
+                // We must re-verify the mapping after acquiring Inner lock.
+                drop(entry);
+
+                // Acquire inner write lock
                 let index = self.inner.write();
+
+                // Re-verify mapping under Inner lock
+                // We need to lock the map again to check if the ID still maps to existing_key.
+                // This is safe because we hold Inner, so we are following Inner->Map order.
+                if let Some(current_entry) = self.id_mapping.get(&id) {
+                    if *current_entry != existing_key {
+                        // Mapping changed (concurrent update).
+                        // Since we don't hold the correct key anymore, we return a transient error.
+                        return Err(Error::Vector(VectorError::IndexError(
+                            "Concurrent modification detected during update (mapping changed)"
+                                .to_string(),
+                        )));
+                    }
+                    // Mapping is consistent. Proceed with update.
+                } else {
+                    // Mapping removed.
+                    // If the node was deleted, we shouldn't add a vector for it.
+                    return Err(Error::Vector(VectorError::IndexError(
+                        "Concurrent modification detected during update (node removed)".to_string(),
+                    )));
+                }
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
