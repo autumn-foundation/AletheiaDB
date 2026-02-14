@@ -2959,4 +2959,22 @@ mod coverage_tests {
         // Should return max distance
         assert_eq!(result, f32::MAX);
     }
+
+    #[test]
+    fn test_metric_wrapper_success_direct() {
+        // Ensure that a non-panicking metric function works correctly.
+        // This provides direct coverage of the Ok path in catch_unwind.
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let data_a = [1.0f32, 2.0, 3.0, 4.0];
+        let data_b = [1.5f32, 2.5, 3.5, 4.5];
+
+        let result = wrapper(data_a.as_ptr(), data_b.as_ptr());
+
+        // |1.0-1.5| + |2.0-2.5| + |3.0-3.5| + |4.0-4.5| = 0.5 * 4 = 2.0
+        assert!((result - 2.0).abs() < f32::EPSILON);
+    }
 }
