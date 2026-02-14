@@ -443,7 +443,7 @@ where
         if a.is_null() || b.is_null() {
             // This should never happen with a correct usearch implementation.
             // If it does, we return MAX distance instead of panicking to prevent UB (unwind across FFI).
-            eprintln!("usearch passed null pointer to metric function - returning max distance");
+            eprintln!("usearch passed null pointer to metric function (a={:p}, b={:p}) - returning max distance", a, b);
             return f32::MAX;
         }
 
