@@ -350,7 +350,11 @@ impl StringInterner {
     /// Returns a vector of strings sorted by their InternedString IDs.
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
-    pub fn get_all_strings(&self) -> Vec<String> {
+    ///
+    /// # Errors
+    /// Returns `Error::Storage(StorageError::InconsistentState)` if a consistent snapshot
+    /// cannot be obtained after 1000 retries due to high concurrency or state corruption.
+    pub fn get_all_strings(&self) -> crate::utils::error::Result<Vec<String>> {
         // Retry loop to ensure snapshot consistency under concurrent modifications.
         // DashMap iterators are not guaranteed to be consistent snapshots, so we
         // might miss items that were inserted during iteration or just before.
@@ -377,16 +381,18 @@ impl StringInterner {
             // strictly before string_to_id (which drives `count`), any item counted in
             // `len()` MUST exist in `id_to_string`. Missing it means we need to retry.
             if found_count == count {
-                return strings;
+                return Ok(strings);
             }
 
             // Liveness safety: prevent infinite loop if interner state is inconsistent
             // (e.g. if len() > id_to_string.len() permanently due to a bug).
             attempts += 1;
             if attempts > 1000 {
-                // Return best effort (may contain holes/empty strings)
-                // This is better than hanging indefinitely.
-                return strings;
+                return Err(crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::InconsistentState {
+                        reason: "Failed to obtain a consistent snapshot of the string interner after 1000 attempts due to high concurrency".to_string(),
+                    }
+                ));
             }
 
             // Backoff slightly to let concurrent operations settle
@@ -1221,7 +1227,7 @@ mod mutant_kill_tests {
         assert_eq!(second.as_u32(), 1);
         assert_eq!(third.as_u32(), 2);
 
-        let all = interner.get_all_strings();
+        let all = interner.get_all_strings().unwrap();
         assert_eq!(all.len(), interner.len());
         assert_eq!(
             all,
@@ -1299,14 +1305,18 @@ mod sentry_consistency_tests {
             thread::spawn(move || {
                 barrier.wait();
                 while running.load(std::sync::atomic::Ordering::Relaxed) {
-                    let all_strings = interner.get_all_strings();
-                    for (id, s) in all_strings.iter().enumerate() {
-                        assert!(
-                            !s.is_empty(),
-                            "Found empty string (hole) at ID {}! len={}",
-                            id,
-                            all_strings.len()
-                        );
+                    if let Ok(all_strings) = interner.get_all_strings() {
+                        for (id, s) in all_strings.iter().enumerate() {
+                            assert!(
+                                !s.is_empty(),
+                                "Found empty string (hole) at ID {}! len={}",
+                                id,
+                                all_strings.len()
+                            );
+                        }
+                    } else {
+                        // It is acceptable to fail to get a consistent snapshot under high load
+                        // But if we do get one (Ok), it MUST be consistent
                     }
                     // Yield to let writers proceed
                     thread::yield_now();

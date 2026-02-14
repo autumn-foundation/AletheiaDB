@@ -16,7 +16,9 @@ use super::{INTERNER_MAGIC, MANIFEST_VERSION};
 ///
 /// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_string_interner(path: &Path) -> Result<()> {
-    let strings = GLOBAL_INTERNER.get_all_strings();
+    let strings = GLOBAL_INTERNER.get_all_strings().map_err(|e| {
+        IndexPersistenceError::Serialization(format!("Failed to get interned strings: {}", e))
+    })?;
 
     let data = StringInternerData {
         magic: INTERNER_MAGIC,
