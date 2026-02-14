@@ -99,9 +99,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
-// Thread-local flag to detect re-entrant modification attempts during filtered search
-// or custom metric execution.
-// This prevents deadlocks when user callbacks try to access the index recursively.
+// Thread-local flag to detect re-entrant modification attempts during callbacks (filters or metrics).
+// This prevents deadlocks when user code tries to call back into the index while holding internal locks.
 std::thread_local! {
     pub(crate) static IN_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -469,8 +468,7 @@ where
         // If a panic occurs, we return f32::MAX (infinite distance) to effectively
         // ignore this comparison.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Set flag to prevent modifications or re-entrant access during callback
-            // to avoid deadlocks.
+            // Set thread-local flag to detect re-entrancy
             let _guard = CallbackGuard::new();
             distance_fn(slice_a, slice_b)
         }));
@@ -757,10 +755,10 @@ impl std::fmt::Debug for HnswIndex {
 
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
-        // Check for re-entrant modification during filtered search or custom metric (prevents deadlock)
+        // Check for re-entrant modification during callbacks (prevents deadlock)
         if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot modify index from within a callback (search_with_filter or custom metric). \
+                "Cannot modify index from within a callback (metric or filter). \
                  This would cause a deadlock due to lock re-entrancy. \
                  Consider collecting modifications and applying them after the operation completes."
                     .to_string(),
@@ -982,10 +980,10 @@ impl VectorIndex for HnswIndex {
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
-        // Check for re-entrant modification during filtered search or custom metric (prevents deadlock)
+        // Check for re-entrant modification during callbacks (prevents deadlock)
         if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot modify index from within a callback (search_with_filter or custom metric). \
+                "Cannot modify index from within a callback (metric or filter). \
                  This would cause a deadlock due to lock re-entrancy. \
                  Consider collecting modifications and applying them after the operation completes."
                     .to_string(),
@@ -1018,11 +1016,11 @@ impl VectorIndex for HnswIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
-        // Check for re-entrant access during filtered search or custom metric (prevents deadlock)
+        // Check for re-entrant access during callbacks (prevents deadlock)
         if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot perform search from within a callback (search_with_filter or custom metric). \
-                 This prevents deadlocks due to lock re-entrancy."
+                "Cannot perform search from within a callback (metric or filter). \
+                 This prevents deadlocks when concurrent writers are pending."
                     .to_string(),
             )));
         }
@@ -1097,11 +1095,11 @@ impl VectorIndex for HnswIndex {
     where
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
-        // Check for re-entrant access during filtered search or custom metric (prevents deadlock)
+        // Check for re-entrant access during callbacks (prevents deadlock)
         if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot perform search_with_filter from within a callback (search_with_filter or custom metric). \
-                 This prevents deadlocks due to lock re-entrancy."
+                "Cannot perform search_with_filter from within a callback (metric or filter). \
+                 This prevents deadlocks when concurrent writers are pending."
                     .to_string(),
             )));
         }
@@ -1133,7 +1131,7 @@ impl VectorIndex for HnswIndex {
         // For searches examining 1,000 nodes, this saves ~1-2μs total.
         //
         // DEADLOCK PREVENTION (PR #870):
-        // We set IN_FILTER_CALLBACK flag when calling the user's predicate to detect
+        // We set IN_CALLBACK flag when calling the user's predicate to detect
         // and prevent re-entrant modification attempts that would cause deadlock.
         let reverse_mapping = &self.reverse_mapping;
         let filter = |key: u64| -> bool {
@@ -1191,9 +1189,12 @@ impl VectorIndex for HnswIndex {
     }
 
     fn len(&self) -> usize {
+        // Check for re-entrant access (prevents deadlock)
         if IN_CALLBACK.with(|flag| flag.get()) {
-            // Panic to prevent deadlock (contract violation)
-            panic!("Cannot call len() from within an index callback (recursion detected)");
+            // We cannot return Result here, so we must panic.
+            // This panic will be caught by the catch_unwind in create_metric_wrapper
+            // or by the caller if it's a filter callback.
+            panic!("Cannot call len() from within a callback (metric or filter) due to deadlock risk.");
         }
         self.inner.read().size()
     }
@@ -1236,10 +1237,10 @@ impl VectorIndex for HnswIndex {
     /// If executed outside a Tokio runtime, or in a single-threaded runtime (where `block_in_place`
     /// would panic), it falls back to standard synchronous execution.
     fn save(&self, path: &Path) -> Result<()> {
-        // Check for re-entrant modification during filtered search or custom metric (prevents deadlock)
+        // Check for re-entrant modification during callbacks (prevents deadlock)
         if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot save index from within a callback (search_with_filter or custom metric). \
+                "Cannot save index from within a callback (metric or filter). \
                  This would cause a deadlock due to lock re-entrancy. \
                  Consider saving after the operation completes."
                     .to_string(),
@@ -1260,8 +1261,7 @@ impl VectorIndex for HnswIndex {
 
     fn memory_usage(&self) -> usize {
         if IN_CALLBACK.with(|flag| flag.get()) {
-            // Panic to prevent deadlock (contract violation)
-            panic!("Cannot call memory_usage() from within an index callback (recursion detected)");
+            panic!("Cannot call memory_usage() from within a callback due to deadlock risk.");
         }
         self.inner.read().memory_usage()
     }
@@ -1753,10 +1753,7 @@ impl HnswIndex {
     /// Sets the ef_search parameter for query-time search quality.
     pub fn set_ef_search(&self, ef_search: usize) {
         if IN_CALLBACK.with(|flag| flag.get()) {
-            // Panic to prevent deadlock (contract violation)
-            panic!(
-                "Cannot call set_ef_search() from within an index callback (recursion detected)"
-            );
+            panic!("Cannot call set_ef_search() from within a callback due to deadlock risk.");
         }
         let index = self.inner.read();
         index.change_expansion_search(ef_search);
@@ -1768,10 +1765,7 @@ impl HnswIndex {
     /// `set_ef_search` was called.
     pub fn get_ef_search(&self) -> usize {
         if IN_CALLBACK.with(|flag| flag.get()) {
-            // Panic to prevent deadlock (contract violation)
-            panic!(
-                "Cannot call get_ef_search() from within an index callback (recursion detected)"
-            );
+            panic!("Cannot call get_ef_search() from within a callback due to deadlock risk.");
         }
         self.inner.read().expansion_search()
     }
@@ -3134,7 +3128,7 @@ mod coverage_tests {
     }
 
     #[test]
-    fn test_filter_callback_guard_reset() {
+    fn test_callback_guard_reset() {
         // Ensure flag is initially false
         IN_CALLBACK.with(|flag| flag.set(false));
 
@@ -3149,7 +3143,7 @@ mod coverage_tests {
     }
 
     #[test]
-    fn test_filter_callback_guard_manual_drop() {
+    fn test_callback_guard_manual_drop() {
         IN_CALLBACK.with(|flag| flag.set(false));
 
         let guard = CallbackGuard::new();

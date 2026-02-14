@@ -86,6 +86,7 @@ fn test_custom_metric_reentrancy_panic_on_len() {
             guard.clone()
         };
 
+        #[allow(clippy::collapsible_if)]
         if let Some(weak_index) = maybe_index {
             if let Some(index) = weak_index.upgrade() {
                 // This should panic now (caught by wrapper), preventing deadlock
@@ -136,12 +137,12 @@ fn test_custom_metric_reentrancy_search_returns_error() {
             guard.clone()
         };
 
+        #[allow(clippy::collapsible_if)]
         if let Some(weak_index) = maybe_index {
             if let Some(index) = weak_index.upgrade() {
                 // This should return Error now (checked in search)
                 let res = index.search(&[0.0; 4], 1);
-                if res.is_err() {
-                    let err = res.unwrap_err();
+                if let Err(err) = res {
                     if err
                         .to_string()
                         .contains("Cannot perform search from within a callback")

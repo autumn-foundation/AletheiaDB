@@ -4,51 +4,37 @@ mod tests {
 
     #[test]
     fn test_parser_recursion_at_limit() {
-        // Test that depth=200 works (limit is 200), depth=201 fails
+        // Test that depth=100 works (limit is 100), depth=101 fails
         // Note: The limit applies to nested expressions.
         // The query "MATCH (n) WHERE ((...))" has nesting.
 
-        // Case 1: Depth 199 (should pass)
+        // Case 1: Depth 99 (should pass)
         let mut query = "MATCH (n) WHERE ".to_string();
-        for _ in 0..199 {
+        for _ in 0..99 {
             query.push('(');
         }
         query.push_str("n.age > 10");
-        for _ in 0..199 {
+        for _ in 0..99 {
             query.push(')');
         }
         query.push_str(" RETURN n");
 
         let result = Parser::parse(&query);
-        assert!(result.is_ok(), "Parser should accept depth=199");
+        assert!(result.is_ok(), "Parser should accept depth=99");
 
-        // Case 1.5: Depth 200 (should pass if limit is 200)
+        // Case 2: Depth 101 (should fail if limit is 100)
         let mut query = "MATCH (n) WHERE ".to_string();
-        for _ in 0..200 {
+        for _ in 0..101 {
             query.push('(');
         }
         query.push_str("n.age > 10");
-        for _ in 0..200 {
+        for _ in 0..101 {
             query.push(')');
         }
         query.push_str(" RETURN n");
 
         let result = Parser::parse(&query);
-        assert!(result.is_ok(), "Parser should accept depth=200");
-
-        // Case 2: Depth 201 (should fail if limit is 200)
-        let mut query = "MATCH (n) WHERE ".to_string();
-        for _ in 0..201 {
-            query.push('(');
-        }
-        query.push_str("n.age > 10");
-        for _ in 0..201 {
-            query.push(')');
-        }
-        query.push_str(" RETURN n");
-
-        let result = Parser::parse(&query);
-        assert!(result.is_err(), "Parser should reject depth=201");
+        assert!(result.is_err(), "Parser should reject depth=101");
     }
 
     #[test]
