@@ -1843,20 +1843,21 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
                 .resolve_with(key, |s| s.len())
                 .unwrap_or(256);
             let key_size = 4 + key_len;
-            let val_size = value
-                .serialized_size()
-                .expect("Recursion depth limit exceeded in FromIterator");
+            // Use penalty size if recursion limit exceeded to prevent panic.
+            // Incorrect size here is safe because serialize() re-checks limits.
+            // 10MB penalty discourages abuse.
+            const RECURSION_PENALTY_SIZE: usize = 10 * 1024 * 1024;
+
+            let val_size = value.serialized_size().unwrap_or(RECURSION_PENALTY_SIZE);
 
             size = size.saturating_add(key_size).saturating_add(val_size);
 
             if let Some(old_val) = map.insert(key, value) {
                 // If replaced, subtract the size of the old entry (key + value)
                 // Key size is the same since it's the same key ID
-                size = size.saturating_sub(key_size).saturating_sub(
-                    old_val
-                        .serialized_size()
-                        .expect("Recursion depth limit exceeded in FromIterator"),
-                );
+                size = size
+                    .saturating_sub(key_size)
+                    .saturating_sub(old_val.serialized_size().unwrap_or(RECURSION_PENALTY_SIZE));
             }
         }
 
@@ -4162,10 +4163,9 @@ mod sentry_tests {
     /// 🎯 Target: PropertyMap::from_iter
     /// 💣 Risk: Panics when recursion depth limit is exceeded.
     /// 🧪 Strategy: Construct a deeply nested structure and try to create a PropertyMap from it using collect().
-    /// 🔬 Verification: Expect panic with specific message.
+    /// 🔬 Verification: Expect NO panic (Warden fix), but subsequent serialize() should fail.
     #[test]
-    #[should_panic(expected = "Recursion depth limit exceeded in FromIterator")]
-    fn test_property_map_from_iter_panics_on_deep_recursion() {
+    fn test_property_map_from_iter_no_panic_on_deep_recursion() {
         // Construct a deeply nested value: Array(Array(...Array(Int(42))...))
         // Depth: MAX_RECURSION_DEPTH + 1
         let mut value = PropertyValue::Int(42);
@@ -4174,10 +4174,20 @@ mod sentry_tests {
             value = PropertyValue::Array(Arc::new(vec![value]));
         }
 
-        // This should panic because FromIterator uses expect() on serialized_size()
-        let _map: PropertyMap = vec![(GLOBAL_INTERNER.intern("deep").unwrap(), value)]
+        // This should NOT panic (Warden fix)
+        let map: PropertyMap = vec![(GLOBAL_INTERNER.intern("deep").unwrap(), value)]
             .into_iter()
             .collect();
+
+        // But serialization MUST fail because it re-checks depth
+        let result = map.serialize();
+        assert!(
+            result.is_err(),
+            "Serialization should fail due to recursion limit"
+        );
+
+        // Verify cached_size includes penalty
+        assert!(map.serialized_size() > 10 * 1024 * 1024);
     }
 
     /// 🎯 Target: PropertyMapBuilder::try_insert

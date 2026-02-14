@@ -21,3 +21,11 @@
 **2026-02-15 - FFI Boundary Panic Resilience**
 **Threat:** A custom distance metric function provided by the user could panic (e.g., due to division by zero or explicit panic). Since this function is called from the C++ `usearch` library via FFI, allowing the panic to unwind across the FFI boundary causes Undefined Behavior (UB), typically aborting the process.
 **Defense:** Wrapped the user-provided metric closure in `std::panic::catch_unwind` within `create_metric_wrapper` in `src/index/vector/hnsw.rs`. If a panic occurs, it is caught, logged to stderr, and `f32::MAX` is returned to indicate infinite distance (no match), preserving process stability.
+
+**2026-02-16 - DoS via Massive WAL Entry**
+**Threat:** A malicious user could submit a database operation (e.g. `CreateNode`) with a `PropertyMap` containing massive values (e.g. 10M element arrays or 100MB byte strings). `ConcurrentWal` would unknowingly serialize this into a huge buffer and attempt to append it to the `WalRingBuffer`. If multiple such requests occurred, the fixed-capacity (by slot) ring buffer would hold gigabytes of data, causing Out-Of-Memory (OOM) crashes.
+**Defense:** Introduced `MAX_WAL_ENTRY_SIZE` (64MB) in `src/storage/wal/entry.rs`. Modified `ConcurrentWal::serialize_entry` to check the estimated size against this limit *before* allocation, returning `StorageError::CapacityExceeded` if violated. Added `tests/warden_wal_dos.rs` to verify rejection.
+
+**2026-02-16 - Panic in PropertyMap::from_iter**
+**Threat:** The `PropertyMap::from_iter` method used `expect()` when calculating serialized size. If a user provided a deeply nested `PropertyValue` (exceeding `MAX_RECURSION_DEPTH` of 100), `serialized_size()` would return an error, causing `from_iter` to panic and crash the process. This crash vector was reachable via standard iterator usage.
+**Defense:** Replaced `expect()` with `unwrap_or(RECURSION_PENALTY_SIZE)` in `src/core/property.rs`. This allows map construction to proceed without crashing. Safety is maintained because the subsequent `serialize()` operation re-checks recursion depth and will fail gracefully (returning `Result::Err`) instead of panicking.

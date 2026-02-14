@@ -7,6 +7,17 @@ use crate::core::{
     temporal::{Timestamp, time},
 };
 
+/// Maximum size of a single WAL entry in bytes (64 MB).
+///
+/// This limit prevents DoS attacks where a malicious user constructs a huge
+/// entry (e.g., 1GB PropertyMap) to exhaust memory in the WAL ring buffer.
+/// Since the ring buffer has fixed slot count (default 1024), unbounded entry
+/// size would allow unbounded memory usage (1024 * 1GB = 1TB).
+///
+/// The limit is set to 64MB to match the default segment size. Entries larger
+/// than this would force immediate segment rotation anyway.
+pub const MAX_WAL_ENTRY_SIZE: usize = 64 * 1024 * 1024;
+
 /// Log Sequence Number - monotonically increasing identifier for WAL entries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LSN(pub u64);
