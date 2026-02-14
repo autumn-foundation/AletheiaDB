@@ -64,3 +64,36 @@ fn test_find_similar_with_predicate() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_find_similar_with_predicate_dimension_mismatch() -> Result<()> {
+    let db = AletheiaDB::new()?;
+    let config = HnswConfig::new(2, DistanceMetric::Cosine);
+    db.enable_vector_index("embedding", config)?;
+
+    // Create a node to ensure index exists and is active
+    let props = PropertyMapBuilder::new()
+        .insert_vector("embedding", &[1.0, 0.0])
+        .build();
+    db.create_node("Item", props)?;
+
+    // Try to search with wrong dimensions (3 instead of 2)
+    let query = vec![1.0, 0.0, 0.0];
+    let result = db.find_similar_with_predicate(
+        "embedding",
+        &query,
+        10,
+        |_| true
+    );
+
+    assert!(result.is_err());
+    match result {
+        Err(aletheiadb::utils::Error::Vector(aletheiadb::utils::error::VectorError::DimensionMismatch { expected, actual })) => {
+            assert_eq!(expected, 2);
+            assert_eq!(actual, 3);
+        },
+        _ => panic!("Expected DimensionMismatch error, got {:?}", result),
+    }
+
+    Ok(())
+}
