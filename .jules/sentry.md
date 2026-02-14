@@ -13,3 +13,7 @@
 ## 2026-02-15 - Unaligned SIMD Loads
 **Learning:** Rust's `Vec<f32>` only guarantees 4-byte alignment, but AVX2 `vmovaps` requires 32-byte alignment. Using aligned load intrinsics on standard Vecs is a segfault ticking time bomb.
 **Action:** Always use `loadu` (unaligned load) intrinsics unless alignment is manually enforced and verified. Added rigorous unaligned access tests in `src/core/vector/sentry_tests.rs` to prevent regression to aligned loads.
+
+## [Pre-existing Failure in Parser Recursion Test]
+**Learning:** Found a failing test `query::parser::sentry_tests::test_parser_recursion_limit_boundary` while verifying HNSW changes. It seems to fail consistently on the boundary condition (100 nested parens). This indicates an off-by-one error in recursion depth check or test expectation.
+**Action:** Logged for future investigation; proceeded with HNSW coverage improvements as they are isolated.

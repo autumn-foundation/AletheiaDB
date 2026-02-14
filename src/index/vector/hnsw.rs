@@ -1988,6 +1988,136 @@ mod sentry_tests {
         ));
         assert!(!is_retryable_usearch_error("Other error"));
     }
+
+    #[test]
+    fn test_hnsw_config_serialization_round_trip() {
+        let config = HnswConfig {
+            dimensions: 128,
+            metric: DistanceMetric::Euclidean,
+            m: 32,
+            ef_construction: 200,
+            ef_search: 100,
+            capacity: 5000,
+            quantization: Quantization::F16,
+            storage: StorageMode::InMemory,
+            custom_metric: None,
+        };
+
+        let mut buffer = Vec::new();
+        config.serialize_into(&mut buffer).unwrap();
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let deserialized = HnswConfig::deserialize_from(&mut cursor).unwrap();
+
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_hnsw_config_deserialize_legacy() {
+        // Legacy format: missing quantization byte
+        let config = HnswConfig {
+            dimensions: 128,
+            metric: DistanceMetric::Cosine,
+            m: 16,
+            ef_construction: 128,
+            ef_search: 64,
+            capacity: 1000,
+            quantization: Quantization::F32, // Default
+            storage: StorageMode::InMemory,
+            custom_metric: None,
+        };
+
+        let mut buffer = Vec::new();
+        // Manually write legacy format
+        buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
+        buffer.push(config.metric.to_u8());
+        buffer.extend_from_slice(&(config.m as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_construction as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_search as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.capacity as u64).to_le_bytes());
+        // STOP here (no quantization byte)
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let deserialized = HnswConfig::deserialize_from(&mut cursor).unwrap();
+
+        assert_eq!(config, deserialized);
+        assert_eq!(deserialized.quantization, Quantization::F32); // Check default
+    }
+
+    #[test]
+    fn test_hnsw_config_deserialize_invalid_metric() {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&128u64.to_le_bytes()); // dimensions
+        buffer.push(99); // Invalid metric
+        // rest doesn't matter much as it should fail early, but let's pad it
+        buffer.resize(100, 0);
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let result = HnswConfig::deserialize_from(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hnsw_config_deserialize_invalid_quantization() {
+        // Construct a buffer that is valid until quantization byte
+        let config = HnswConfig::default();
+        let mut buffer = Vec::new();
+        // Write valid parts manually to ensure we reach quantization read
+        buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
+        buffer.push(config.metric.to_u8());
+        buffer.extend_from_slice(&(config.m as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_construction as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_search as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.capacity as u64).to_le_bytes());
+
+        // Write INVALID quantization byte
+        buffer.push(99);
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let result = HnswConfig::deserialize_from(&mut cursor);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid quantization")
+        );
+    }
+
+    #[test]
+    fn test_builder_validation_limits() {
+        // M too large
+        let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine)
+            .m(100)
+            .build();
+        assert!(res.is_err());
+
+        // M too small
+        let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine)
+            .m(0)
+            .build();
+        assert!(res.is_err());
+
+        // Dimensions 0
+        let res = HnswIndexBuilder::new(0, DistanceMetric::Cosine).build();
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_custom_metric_safety_check() {
+        let result = HnswIndexBuilder::new(128, DistanceMetric::Cosine)
+            .quantization(Quantization::I8) // Not F32
+            .with_custom_metric("test", |_, _| 0.0)
+            .build();
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("only supported with F32")
+        );
+    }
 }
 
 #[cfg(test)]
