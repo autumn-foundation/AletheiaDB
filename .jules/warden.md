@@ -14,7 +14,9 @@
 **2026-02-15 - LSN Allocator Overflow**
 **Threat:** The atomic LSN allocator used `fetch_add` without overflow checking. While requiring ~5000 years at 100M/sec to overflow `u64`, a large batch allocation (e.g. `u64::MAX`) or eventual wraparound would cause duplicate LSNs, breaking WAL ordering and data consistency.
 **Defense:** Replaced `fetch_add` with `fetch_update` (CAS loop) in `src/storage/wal/lsn_allocator.rs` to atomically check for overflow *before* modifying the state. Added `tests/warden_security_tests.rs` to verify panic behavior on overflow attempts.
-
 **2026-02-14 - HNSW Index Capacity Enforcement**
 **Threat:** HNSW Index `add()` operation did not enforce the `MAX_MAPPINGS_COUNT` limit (100M). A user/attacker could create an index in memory with >100M vectors, which would save successfully but fail to load back (DoS/Data Loss), as the loader strictly enforced the limit.
 **Defense:** Enforced `MAX_MAPPINGS_COUNT` in `HnswIndex::add()` to reject insertions that would exceed the limit. Added `test_hnsw_capacity_limit` to verify enforcement.
+**2026-02-15 - FFI Boundary Panic Resilience**
+**Threat:** A custom distance metric function provided by the user could panic (e.g., due to division by zero or explicit panic). Since this function is called from the C++ `usearch` library via FFI, allowing the panic to unwind across the FFI boundary causes Undefined Behavior (UB), typically aborting the process.
+**Defense:** Wrapped the user-provided metric closure in `std::panic::catch_unwind` within `create_metric_wrapper` in `src/index/vector/hnsw.rs`. If a panic occurs, it is caught, logged to stderr, and `f32::MAX` is returned to indicate infinite distance (no match), preserving process stability.
