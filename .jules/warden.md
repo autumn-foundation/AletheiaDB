@@ -29,3 +29,7 @@
 **2026-02-16 - Panic in PropertyMap::from_iter**
 **Threat:** The `PropertyMap::from_iter` method used `expect()` when calculating serialized size. If a user provided a deeply nested `PropertyValue` (exceeding `MAX_RECURSION_DEPTH` of 100), `serialized_size()` would return an error, causing `from_iter` to panic and crash the process. This crash vector was reachable via standard iterator usage.
 **Defense:** Replaced `expect()` with `unwrap_or(RECURSION_PENALTY_SIZE)` in `src/core/property.rs`. This allows map construction to proceed without crashing. Safety is maintained because the subsequent `serialize()` operation re-checks recursion depth and will fail gracefully (returning `Result::Err`) instead of panicking.
+
+**2026-02-16 - Panic in Query Parser Recursion Check**
+**Threat:** A specifically crafted recursive query (e.g., `WHERE (((...true...)))`) containing a boolean literal predicate caused a panic in the query parser's recursion limit check test. While not a direct exploit in production (the parser would just return an error for invalid syntax), it caused a CI regression and highlighted a missing feature (boolean literals as predicates) that could lead to unexpected parsing failures or crashes in edge cases.
+**Defense:** Modified `src/query/parser.rs` to handle boolean literals as valid predicates (implicitly converting them to `true = true` or `false = true`). This ensures consistent behavior and prevents panics in recursion depth tests. Added regression tests `test_where_true` and `test_recursion_limit_with_true`.

@@ -915,7 +915,24 @@ impl Parser {
         }
 
         // Comparison operators
-        self.parse_comparison_predicate(expr)
+        match self.parse_comparison_predicate(expr.clone()) {
+            Ok(pred) => Ok(pred),
+            Err(e) => {
+                // Fallback: If it's a boolean literal, treat it as a predicate (e.g. "WHERE true")
+                // This is often used in tests or generated queries.
+                // We convert "true" to "true = true" and "false" to "false = true" (which is false)
+                if let Expression::Literal(PropertyValue::Bool(b)) = expr {
+                    let left = Expression::Literal(PropertyValue::Bool(b));
+                    let right = Expression::Literal(PropertyValue::Bool(true));
+                    return Ok(PredicateExpr::Comparison {
+                        left,
+                        op: ComparisonOp::Eq,
+                        right,
+                    });
+                }
+                Err(e)
+            }
+        }
     }
 
     fn parse_grouped_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
@@ -2035,5 +2052,26 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.message.contains("Unexpected character"));
         // This implicitly tests From<LexerError> for ParseError
+    }
+
+    #[test]
+    fn test_where_true() {
+        let query = Parser::parse("MATCH (n) WHERE true RETURN n");
+        assert!(query.is_ok(), "WHERE true should be valid");
+    }
+
+    #[test]
+    fn test_recursion_limit_with_true() {
+        let mut query = "MATCH (n) WHERE ".to_string();
+        for _ in 0..MAX_RECURSION_DEPTH {
+            query.push_str("(");
+        }
+        query.push_str("true");
+        for _ in 0..MAX_RECURSION_DEPTH {
+            query.push_str(")");
+        }
+        query.push_str(" RETURN n");
+        let result = Parser::parse(&query);
+        assert!(result.is_ok(), "Should accept recursion depth 100 with true");
     }
 }
