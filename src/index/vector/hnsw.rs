@@ -97,6 +97,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::panic::AssertUnwindSafe;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
@@ -452,7 +453,20 @@ where
 
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-        distance_fn(slice_a, slice_b)
+
+        // Wrap user-provided metric function to prevent panics from unwinding through FFI boundaries (UB)
+        // If the user's function panics, we catch it and return a safe fallback (f32::MAX)
+        // to prevent the process from aborting.
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| distance_fn(slice_a, slice_b)));
+
+        match result {
+            Ok(val) => val,
+            Err(_) => {
+                // Log error to stderr as fallback
+                eprintln!("Panic caught in custom metric function! Preventing process abort.");
+                f32::MAX
+            }
+        }
     })
 }
 
@@ -1066,7 +1080,17 @@ impl VectorIndex for HnswIndex {
             if let Some(node_id_ref) = reverse_mapping.get(&key) {
                 // Set flag to prevent modifications during callback
                 let _guard = FilterCallbackGuard::new();
-                predicate(node_id_ref.value())
+
+                // Wrap user-provided predicate to prevent panics from unwinding through FFI boundaries (UB)
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| predicate(node_id_ref.value())));
+
+                match result {
+                    Ok(val) => val,
+                    Err(_) => {
+                        eprintln!("Panic caught in search filter predicate! Preventing process abort.");
+                        false // Filter out the node safely
+                    }
+                }
             } else {
                 false
             }
