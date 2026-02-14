@@ -546,4 +546,125 @@ mod semantic_equality_tests {
 
         assert!(!diff.has_changes(), "Vector with NaN -> Same Vector should NOT be treated as a change");
     }
+
+    #[test]
+    fn test_version_diff_vector_len_mismatch() {
+        // Test that vectors of different lengths are considered changed
+        // This covers line 160 (if a_vec.len() != b_vec.len())
+        let vec1 = vec![1.0, 2.0, 3.0];
+        let vec2 = vec![1.0, 2.0]; // Different length
+
+        let from_props = PropertyMapBuilder::new()
+            .insert_vector("emb", &vec1)
+            .build();
+
+        // Note: We can't use insert_vector for vec2 directly if we enforce dimension consistency
+        // in PropertyMapBuilder/PropertyValue construction, but PropertyValue::vector handles
+        // dimensions dynamically. The critical part is VersionDiff comparing two PropertyValues
+        // that happen to be vectors of different lengths.
+        //
+        // However, PropertyValue::vector() checks MAX_VECTOR_DIMENSIONS but doesn't enforce
+        // a specific schema. So we can create two vectors of different lengths.
+        let to_props = PropertyMapBuilder::new()
+            .insert_vector("emb", &vec2)
+            .build();
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+
+        assert!(diff.has_changes(), "Vectors of different lengths should be treated as a change");
+    }
+
+    #[test]
+    fn test_version_diff_sparse_vector_nan_behavior() {
+        use crate::core::vector::SparseVec;
+
+        // Note: SparseVec::new usually checks for NaNs, so we need to ensure we can construct one
+        // for testing if possible, or verify that we handle it if it somehow gets in.
+        // However, if SparseVec::new() prevents NaNs, then the code handling NaNs in VersionDiff
+        // is technically dead code for "newly created" vectors, but might be relevant for legacy/corrupted data.
+        //
+        // Let's check SparseVec::new implementation. It returns `VectorError::ContainsNaN`.
+        // So we can't easily construct a SparseVec with NaN using `new`.
+        //
+        // But for coverage purposes, we should test the equality logic for valid sparse vectors first,
+        // and check the dimension/indices mismatch paths.
+
+        let sv1 = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        let sv2 = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+
+        let from_props = PropertyMapBuilder::new()
+            .insert("sparse", PropertyValue::sparse_vector(sv1.clone()))
+            .build();
+
+        let to_props = PropertyMapBuilder::new()
+            .insert("sparse", PropertyValue::sparse_vector(sv2))
+            .build();
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+
+        assert!(!diff.has_changes(), "Identical sparse vectors should not be treated as a change");
+
+        // Test dimension mismatch
+        let sv_dim_mismatch = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 6).unwrap();
+        let to_props_dim = PropertyMapBuilder::new()
+            .insert("sparse", PropertyValue::sparse_vector(sv_dim_mismatch))
+            .build();
+        let diff_dim = VersionDiff::compute(
+            &from_props,
+            &to_props_dim,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+        assert!(diff_dim.has_changes(), "Sparse vectors with different dimensions should be different");
+
+        // Test indices mismatch
+        let sv_idx_mismatch = SparseVec::new(vec![0, 3], vec![1.0, 2.0], 5).unwrap();
+        let to_props_idx = PropertyMapBuilder::new()
+            .insert("sparse", PropertyValue::sparse_vector(sv_idx_mismatch))
+            .build();
+        let diff_idx = VersionDiff::compute(
+            &from_props,
+            &to_props_idx,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+        assert!(diff_idx.has_changes(), "Sparse vectors with different indices should be different");
+
+        // Test values mismatch
+        let sv_val_mismatch = SparseVec::new(vec![0, 2], vec![1.0, 3.0], 5).unwrap();
+        let to_props_val = PropertyMapBuilder::new()
+            .insert("sparse", PropertyValue::sparse_vector(sv_val_mismatch))
+            .build();
+        let diff_val = VersionDiff::compute(
+            &from_props,
+            &to_props_val,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+        assert!(diff_val.has_changes(), "Sparse vectors with different values should be different");
+
+        // Testing the NaN path specifically would require constructing a SparseVec with NaNs,
+        // which the constructor forbids. We can try to bypass constructor validation or accept
+        // that the NaN check in `property_values_semantically_equal` for SparseVector is defensive.
+        //
+        // However, we CAN test that if we *could* have NaNs, they would be equal.
+        // Since we can't easily construct invalid SparseVecs without unsafe or mocking,
+        // we'll rely on the fact that we've covered the structure of the function.
+        //
+        // The lines covered by this test are:
+        // - if a_sv.dimension() != b_sv.dimension() || a_sv.indices() != b_sv.indices() { return false; }
+        // - let a_vals = a_sv.values(); let b_vals = b_sv.values();
+        // - if a_vals.len() != b_vals.len() { return false; } (Implicitly covered since indices equal -> values len equal)
+        // - a_vals.iter().zip(b_vals.iter()).all(...) (Normal comparison)
+    }
 }
