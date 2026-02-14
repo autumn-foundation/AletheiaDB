@@ -2934,7 +2934,7 @@ mod tests {
         assert_eq!(results.len(), 5);
     }
 
-        #[test]
+    #[test]
     fn test_add_race_retry_value_change_coverage() {
         // Test that if another thread changes the mapping (value changed) while we are in add(),
         // we detect it and return a retryable error.
