@@ -2935,7 +2935,10 @@ fn test_simd_safety_refactor_remainder() {
             assert!((mag_b - expected_mag_b).abs() < 1e-4, "SSE2 mag_b mismatch");
 
             let sq_diff = super::simd::x86_ops::squared_diff_sum_sse2(&a, &b);
-            assert!((sq_diff - expected_sq_diff).abs() < 1e-4, "SSE2 sq_diff mismatch");
+            assert!(
+                (sq_diff - expected_sq_diff).abs() < 1e-4,
+                "SSE2 sq_diff mismatch"
+            );
         }
     }
 
@@ -2947,7 +2950,10 @@ fn test_simd_safety_refactor_remainder() {
             assert!((mag_b - expected_mag_b).abs() < 1e-4, "AVX2 mag_b mismatch");
 
             let sq_diff = super::simd::x86_ops::squared_diff_sum_avx2(&a, &b);
-            assert!((sq_diff - expected_sq_diff).abs() < 1e-4, "AVX2 sq_diff mismatch");
+            assert!(
+                (sq_diff - expected_sq_diff).abs() < 1e-4,
+                "AVX2 sq_diff mismatch"
+            );
         }
     }
 }
