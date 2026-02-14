@@ -106,10 +106,13 @@ std::thread_local! {
 }
 
 #[cfg(test)]
+type TestRaceHook = fn(&HnswIndex, NodeId);
+
+#[cfg(test)]
 std::thread_local! {
     // Hook to simulate race conditions in add() Occupied path.
     // Takes the HnswIndex instance and the NodeId being added.
-    static TEST_RACE_HOOK: std::cell::Cell<Option<fn(&HnswIndex, NodeId)>> = const { std::cell::Cell::new(None) };
+    static TEST_RACE_HOOK: std::cell::Cell<Option<TestRaceHook>> = const { std::cell::Cell::new(None) };
 }
 
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
