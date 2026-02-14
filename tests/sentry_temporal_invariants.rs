@@ -1,7 +1,6 @@
-
 #[cfg(test)]
 mod tests {
-    use aletheiadb::core::temporal::{TimeRange, BiTemporalInterval, time};
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange, time};
     use aletheiadb::utils::error::TemporalError;
 
     #[test]
@@ -15,7 +14,10 @@ mod tests {
 
         // This MUST fail now
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TemporalError::InvalidTimeRange { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimeRange { .. }
+        ));
     }
 
     #[test]
@@ -28,6 +30,9 @@ mod tests {
 
         // This MUST fail now
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TemporalError::InvalidTimeRange { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimeRange { .. }
+        ));
     }
 }
