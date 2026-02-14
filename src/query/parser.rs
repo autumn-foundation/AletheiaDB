@@ -2072,6 +2072,10 @@ mod tests {
         }
         query.push_str(" RETURN n");
         let result = Parser::parse(&query);
-        assert!(result.is_ok(), "Should accept recursion depth 100 with true");
+        assert!(
+            result.is_ok(),
+            "Should accept recursion depth 100 with true: {:?}",
+            result.err()
+        );
     }
 }
