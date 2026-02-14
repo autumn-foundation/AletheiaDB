@@ -160,7 +160,7 @@ const MAX_K: usize = 100_000;
 #[cfg(not(test))]
 const MAX_MAPPINGS_COUNT: usize = 100_000_000;
 #[cfg(test)]
-const MAX_MAPPINGS_COUNT: usize = 100;
+const MAX_MAPPINGS_COUNT: usize = 10_000;
 
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
@@ -2897,7 +2897,10 @@ mod tests {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
                 assert!(msg.contains("Index capacity exceeded"));
             }
-            _ => panic!("Expected IndexError with capacity exceeded message, got {:?}", result),
+            _ => panic!(
+                "Expected IndexError with capacity exceeded message, got {:?}",
+                result
+            ),
         }
 
         // Updating existing node should still work
