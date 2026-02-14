@@ -100,7 +100,7 @@ impl VersionDiff {
                     // Property was added
                     added_builder = added_builder.insert_by_key(*key, to_value.clone());
                 }
-                Some(from_value) if from_value != to_value => {
+                Some(from_value) if !Self::semantically_equal(from_value, to_value) => {
                     // Property was modified
                     modified.push((*key, from_value.clone(), to_value.clone()));
                 }
@@ -136,6 +136,35 @@ impl VersionDiff {
     #[must_use]
     pub fn change_count(&self) -> usize {
         self.added.len() + self.removed.len() + self.modified.len()
+    }
+
+    /// Compare property values for semantic equality.
+    ///
+    /// This treats NaN values as equal for Float and Vector types, preventing
+    /// spurious "modified" records when a property remains NaN.
+    fn semantically_equal(v1: &PropertyValue, v2: &PropertyValue) -> bool {
+        match (v1, v2) {
+            (PropertyValue::Float(f1), PropertyValue::Float(f2)) => {
+                if f1.is_nan() && f2.is_nan() {
+                    true
+                } else {
+                    f1 == f2
+                }
+            }
+            (PropertyValue::Vector(vec1), PropertyValue::Vector(vec2)) => {
+                if vec1.len() != vec2.len() {
+                    return false;
+                }
+                vec1.iter().zip(vec2.iter()).all(|(a, b)| {
+                    if a.is_nan() && b.is_nan() {
+                        true
+                    } else {
+                        a == b
+                    }
+                })
+            }
+            _ => v1 == v2,
+        }
     }
 }
 
@@ -445,5 +474,45 @@ mod tests {
                 .build(),
             label: "Test".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::property::PropertyMapBuilder;
+
+    fn test_version_id(id: u64) -> VersionId {
+        VersionId::new(id).unwrap()
+    }
+
+    #[test]
+    fn test_version_diff_nan_handling() {
+        // 💣 Risk: Standard equality treats NaN != NaN, causing false positives in version diffs.
+        // 🧪 Strategy: Create properties with NaN values and verify they are considered unchanged.
+
+        // Note: We use try_vector to bypass panic checks if any, though here we use vector()
+        // which panics on dimension error, but NaN is valid float.
+        let from_props = PropertyMapBuilder::new()
+            .insert("float_nan", f64::NAN)
+            // Vector with NaN
+            .insert("vector_nan", PropertyValue::vector(vec![1.0, f32::NAN, 3.0]))
+            .build();
+
+        let to_props = PropertyMapBuilder::new()
+            .insert("float_nan", f64::NAN)
+            .insert("vector_nan", PropertyValue::vector(vec![1.0, f32::NAN, 3.0]))
+            .build();
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            test_version_id(1),
+            test_version_id(2),
+        );
+
+        // Without fix, this will fail because NaN != NaN
+        assert!(!diff.has_changes(), "NaN values should be treated as equal but got changes: {:?}", diff.modified);
+        assert_eq!(diff.change_count(), 0);
     }
 }
