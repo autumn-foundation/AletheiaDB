@@ -422,15 +422,13 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
 
 // Helper logic to execute the metric function safely.
 // Extracted to a helper function to improve test coverage attribution and reduce code bloat.
-fn execute_metric_safe<F>(
+// Takes a trait object to avoid monomorphization issues with coverage tools.
+fn execute_metric_safe(
     a: *const f32,
     b: *const f32,
     dims: usize,
-    distance_fn: &F,
-) -> f32
-where
-    F: Fn(&[f32], &[f32]) -> f32 + ?Sized,
-{
+    distance_fn: &dyn Fn(&[f32], &[f32]) -> f32,
+) -> f32 {
     // Check for null pointers to prevent UB
     if a.is_null() || b.is_null() {
         // This should never happen with a correct usearch implementation.
@@ -473,13 +471,10 @@ where
 }
 
 // Helper to create the metric wrapper - extracted for testing
-fn create_metric_wrapper<F>(
+fn create_metric_wrapper(
     dims: usize,
-    distance_fn: Arc<F>,
-) -> Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync>
-where
-    F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
-{
+    distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static>,
+) -> Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> {
     Box::new(move |a: *const f32, b: *const f32| {
         execute_metric_safe(a, b, dims, &*distance_fn)
     })
