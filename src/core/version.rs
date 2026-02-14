@@ -2370,7 +2370,8 @@ mod sentry_tests {
             let result_val = result.get_by_interned_key(&key).unwrap();
             assert_eq!(
                 result_val, &base_val,
-                "Case {}: Expected sparse delta to be ignored, but value changed", case
+                "Case {}: Expected sparse delta to be ignored, but value changed",
+                case
             );
         };
 
@@ -2414,13 +2415,16 @@ mod sentry_tests {
 
             assert!(
                 result.is_err(),
-                "Case {}: Expected error when materializing against non-vector, got Ok", case
+                "Case {}: Expected error when materializing against non-vector, got Ok",
+                case
             );
 
             let err = result.unwrap_err();
             assert!(
                 err.contains("not a vector"),
-                "Case {}: Expected 'not a vector' error, got '{}'", case, err
+                "Case {}: Expected 'not a vector' error, got '{}'",
+                case,
+                err
             );
         };
 
