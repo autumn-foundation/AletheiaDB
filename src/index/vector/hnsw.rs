@@ -452,8 +452,8 @@ where
         let align_mask = std::mem::align_of::<f32>() - 1;
         if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
             eprintln!(
-                "usearch passed unaligned pointer to metric function (expected alignment {}) - returning max distance",
-                std::mem::align_of::<f32>()
+                "usearch passed unaligned pointer to metric function (a={:p}, b={:p}, expected_align={}) - returning max distance",
+                a, b, std::mem::align_of::<f32>()
             );
             return f32::MAX;
         }
