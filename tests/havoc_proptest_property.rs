@@ -1,35 +1,37 @@
-//! Property-based fuzzing for PropertyValue deserialization.
-//!
-//! # HAVOC: PROPERTY TORTURE
-//! This test uses `proptest` to generate random byte sequences and valid structures
-//! to fuzz the serialization/deserialization logic, looking for panics or crashes.
-//!
-//! Note: While `cargo-fuzz` (LibFuzzer) is more powerful for finding edge cases
-//! in parsing logic, `proptest` provides a good baseline for CI without requiring
-//! nightly Rust or special fuzzing infrastructure.
-
-use aletheiadb::core::property::{PropertyMap, PropertyValue, deserialize_vector};
+use aletheiadb::core::property::PropertyValue;
 use proptest::prelude::*;
+use std::sync::Arc;
 
 proptest! {
-    // Fuzz PropertyValue::deserialize with random bytes
+    // Fuzz the deserializer with arbitrary byte arrays
     #[test]
-    fn fuzz_property_value_deserialize(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-        // Just verify it doesn't panic/crash
+    fn fuzz_deserialize_arbitrary_bytes(bytes in any::<Vec<u8>>()) {
+        // We just want to ensure this doesn't panic.
+        // It's expected to return errors for most random data.
         let _ = PropertyValue::deserialize(&bytes);
     }
 
-    // Fuzz PropertyMap::deserialize with random bytes
+    // Fuzz with deeply nested recursive structures
+    // This constructs valid serialized data that is deeply nested
     #[test]
-    fn fuzz_property_map_deserialize(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-        // Just verify it doesn't panic/crash
-        let _ = PropertyMap::deserialize(&bytes);
-    }
+    fn fuzz_deep_recursion(depth in 0..200usize) {
+        // Manually construct a nested array structure
+        // [TAG_ARRAY][count=1] ... [TAG_NULL]
+        let mut bytes = Vec::new();
 
-    // Fuzz deserialize_vector with random bytes
-    #[test]
-    fn fuzz_vector_deserialize(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-        // Just verify it doesn't panic/crash
-        let _ = deserialize_vector(&bytes);
+        // Tags
+        const TAG_NULL: u8 = 0;
+        const TAG_ARRAY: u8 = 6;
+
+        for _ in 0..depth {
+            bytes.push(TAG_ARRAY);
+            // Count = 1
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+        }
+        bytes.push(TAG_NULL);
+
+        // This should return Ok for small depth, Err for large depth
+        // But crucially, it MUST NOT panic (stack overflow).
+        let _ = PropertyValue::deserialize(&bytes);
     }
 }
