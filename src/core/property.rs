@@ -451,6 +451,42 @@ impl PropertyValue {
         }
     }
 
+    /// Check if two property values are semantically equal.
+    ///
+    /// This differs from `PartialEq` in that it treats `NaN` values as equal.
+    /// This is important for change detection systems (like `VersionDiff` and `PropertyDelta`)
+    /// to avoid reporting spurious changes when a value remains `NaN`.
+    ///
+    /// # Handling of NaN
+    /// - `Float(NaN)` is equal to `Float(NaN)`
+    /// - `Vector` containing `NaN` at index `i` is equal to `Vector` containing `NaN` at index `i`
+    /// - `SparseVector`: Guaranteed not to contain `NaN` (enforced at construction), so standard equality applies.
+    pub fn semantically_equal(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PropertyValue::Float(a), PropertyValue::Float(b)) => {
+                if a.is_nan() {
+                    b.is_nan()
+                } else {
+                    a == b
+                }
+            }
+            (PropertyValue::Vector(a), PropertyValue::Vector(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter().zip(b.iter()).all(|(x, y)| {
+                    if x.is_nan() {
+                        y.is_nan()
+                    } else {
+                        x == y
+                    }
+                })
+            }
+            // For other types, fallback to PartialEq
+            _ => self == other,
+        }
+    }
+
     // ========================================================================
     // Serialization Methods
     // ========================================================================
@@ -4537,5 +4573,26 @@ mod sentry_tests {
             !map.contains_vector(),
             "contains_vector should ignore nested vectors (current limitation)"
         );
+    }
+
+    /// 🎯 Target: PropertyValue::semantically_equal
+    /// 💣 Risk: Spurious diffs when values are NaN (because NaN != NaN).
+    /// 🧪 Strategy: Compare NaN values using semantically_equal vs PartialEq.
+    /// 🔬 Verification: semantically_equal returns true, == returns false.
+    #[test]
+    fn test_semantically_equal_handles_nan() {
+        // Float(NaN)
+        let nan_float = PropertyValue::Float(f64::NAN);
+        assert_ne!(nan_float, nan_float, "PartialEq should treat NaN != NaN");
+        assert!(nan_float.semantically_equal(&nan_float), "semantically_equal should treat NaN == NaN");
+
+        // Vector with NaN
+        let nan_vec = PropertyValue::vector([1.0f32, f32::NAN, 2.0f32]);
+        assert_ne!(nan_vec, nan_vec, "PartialEq should treat vector with NaN != itself");
+        assert!(nan_vec.semantically_equal(&nan_vec), "semantically_equal should treat vector with NaN == itself");
+
+        // Mixed types (just to be safe)
+        let other = PropertyValue::Int(42);
+        assert!(!nan_float.semantically_equal(&other));
     }
 }

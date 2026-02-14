@@ -134,3 +134,10 @@
 **Finding:** Critical recovery methods `IdGenerator::reset_to` and `ensure_at_least` were `pub(crate)` and completely untested. These are the foundation of crash recovery.
 **Evidence:** Code audit revealed these methods had no unit tests in `mod tests` or `mod proptests`.
 **Recommendation:** Added `mod sentry_tests` with concurrency tests for `ensure_at_least` and verification for `reset_to`.
+
+**[Spurious Version Diff for NaN]**
+**Module:** `aletheiadb::core::history`, `aletheiadb::core::version`
+**Severity:** 🟡 Suspect
+**Finding:** `VersionDiff::compute` and `PropertyDelta::from_diff` used standard `PartialEq` for `PropertyValue` comparisons. Since `NaN != NaN` in IEEE 754 (and Rust), a property whose value remains `NaN` across versions was incorrectly flagged as modified.
+**Evidence:** `tests/elenchus_repro_nan_diff.rs` failed, confirming that `NaN` -> `NaN` was flagged as a modification.
+**Resolution:** Implemented `PropertyValue::semantically_equal` which treats `NaN` as equal to `NaN` for `Float` and `Vector` variants. Updated `VersionDiff` and `PropertyDelta` to use this method for change detection. Added regression tests in `src/core/property.rs` and `src/core/version.rs`.
