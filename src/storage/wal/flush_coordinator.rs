@@ -1232,15 +1232,21 @@ mod tests {
         let coordinator = FlushCoordinator::new(config).unwrap();
 
         // Segment 1: LSN 1-10
-        let entries1: Vec<_> = (1..=10).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        let entries1: Vec<_> = (1..=10)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
         coordinator.flush(entries1, true).unwrap();
 
         // Segment 2: LSN 11-20
-        let entries2: Vec<_> = (11..=20).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        let entries2: Vec<_> = (11..=20)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
         coordinator.flush(entries2, true).unwrap();
 
         // Segment 3: LSN 21-30
-        let entries3: Vec<_> = (21..=30).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        let entries3: Vec<_> = (21..=30)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
         coordinator.flush(entries3, true).unwrap();
 
         // We expect 3 segments.
@@ -1274,7 +1280,10 @@ mod tests {
             })
             .collect();
 
-        assert!(!segment_ids.contains(&1), "Segment 1 should be physically deleted");
+        assert!(
+            !segment_ids.contains(&1),
+            "Segment 1 should be physically deleted"
+        );
         assert!(segment_ids.contains(&2), "Segment 2 should remain");
         assert!(segment_ids.contains(&3), "Segment 3 should remain");
     }
