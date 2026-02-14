@@ -94,10 +94,10 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::panic::AssertUnwindSafe;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
@@ -1082,12 +1082,15 @@ impl VectorIndex for HnswIndex {
                 let _guard = FilterCallbackGuard::new();
 
                 // Wrap user-provided predicate to prevent panics from unwinding through FFI boundaries (UB)
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| predicate(node_id_ref.value())));
+                let result =
+                    std::panic::catch_unwind(AssertUnwindSafe(|| predicate(node_id_ref.value())));
 
                 match result {
                     Ok(val) => val,
                     Err(_) => {
-                        eprintln!("Panic caught in search filter predicate! Preventing process abort.");
+                        eprintln!(
+                            "Panic caught in search filter predicate! Preventing process abort."
+                        );
                         false // Filter out the node safely
                     }
                 }

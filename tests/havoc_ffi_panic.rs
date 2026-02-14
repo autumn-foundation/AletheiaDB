@@ -1,6 +1,6 @@
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization};
-use aletheiadb::index::VectorIndex;
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization};
 
 #[test]
 fn test_ffi_panic_resilience_metric() {
@@ -45,11 +45,16 @@ fn test_ffi_panic_resilience_filter() {
     let query = vec![1.0, 0.0, 0.0, 0.0];
 
     // Search with a filter that panics
-    let results = index.search_with_filter(&query, 10, |_| {
-        panic!("Panic in filter predicate!");
-    }).expect("Search failed");
+    let results = index
+        .search_with_filter(&query, 10, |_| {
+            panic!("Panic in filter predicate!");
+        })
+        .expect("Search failed");
 
     // The wrapper should catch panic and return false (filter out).
     // So results should be empty.
-    assert!(results.is_empty(), "Expected empty results due to filter panic");
+    assert!(
+        results.is_empty(),
+        "Expected empty results due to filter panic"
+    );
 }
