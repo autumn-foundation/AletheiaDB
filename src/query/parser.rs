@@ -2091,15 +2091,11 @@ mod sentry_tests {
         // 🧪 Strategy: Verify that exactly MAX_RECURSION_DEPTH is allowed
 
         let depth = MAX_RECURSION_DEPTH;
-        let mut query = "MATCH (n) WHERE ".to_string();
-        for _ in 0..depth {
-            query.push('(');
-        }
-        query.push_str("n.age > 10");
-        for _ in 0..depth {
-            query.push(')');
-        }
-        query.push_str(" RETURN n");
+        let query = format!(
+            "MATCH (n) WHERE {}(n.age > 10){} RETURN n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
 
         let result = Parser::parse(&query);
         assert!(result.is_ok(), "Should accept recursion up to the limit");
