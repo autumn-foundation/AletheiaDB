@@ -2902,3 +2902,52 @@ fn test_simd_mismatched_lengths_safety() {
         );
     }
 }
+
+#[test]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn test_simd_safety_refactor_remainder() {
+    // Length 17:
+    // AVX2 (8): 2 chunks (16) + 1 remainder.
+    // SSE2 (4): 4 chunks (16) + 1 remainder.
+    let len = 17;
+    let a: Vec<f32> = (0..len).map(|i| i as f32).collect();
+    let b: Vec<f32> = (0..len).map(|i| (i + 1) as f32).collect();
+
+    // Expected values
+    let mut expected_dot = 0.0;
+    let mut expected_mag_a = 0.0;
+    let mut expected_mag_b = 0.0;
+    let mut expected_sq_diff = 0.0;
+
+    for i in 0..len {
+        expected_dot += a[i] * b[i];
+        expected_mag_a += a[i] * a[i];
+        expected_mag_b += b[i] * b[i];
+        let diff = a[i] - b[i];
+        expected_sq_diff += diff * diff;
+    }
+
+    if is_x86_feature_detected!("sse2") {
+        unsafe {
+            let (dot, mag_a, mag_b) = super::simd::x86_ops::dot_and_magnitudes_sse2(&a, &b);
+            assert!((dot - expected_dot).abs() < 1e-4, "SSE2 dot mismatch");
+            assert!((mag_a - expected_mag_a).abs() < 1e-4, "SSE2 mag_a mismatch");
+            assert!((mag_b - expected_mag_b).abs() < 1e-4, "SSE2 mag_b mismatch");
+
+            let sq_diff = super::simd::x86_ops::squared_diff_sum_sse2(&a, &b);
+            assert!((sq_diff - expected_sq_diff).abs() < 1e-4, "SSE2 sq_diff mismatch");
+        }
+    }
+
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        unsafe {
+            let (dot, mag_a, mag_b) = super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b);
+            assert!((dot - expected_dot).abs() < 1e-4, "AVX2 dot mismatch");
+            assert!((mag_a - expected_mag_a).abs() < 1e-4, "AVX2 mag_a mismatch");
+            assert!((mag_b - expected_mag_b).abs() < 1e-4, "AVX2 mag_b mismatch");
+
+            let sq_diff = super::simd::x86_ops::squared_diff_sum_avx2(&a, &b);
+            assert!((sq_diff - expected_sq_diff).abs() < 1e-4, "AVX2 sq_diff mismatch");
+        }
+    }
+}
