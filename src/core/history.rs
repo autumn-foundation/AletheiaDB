@@ -100,7 +100,7 @@ impl VersionDiff {
                     // Property was added
                     added_builder = added_builder.insert_by_key(*key, to_value.clone());
                 }
-                Some(from_value) if from_value != to_value => {
+                Some(from_value) if !from_value.semantically_equal(to_value) => {
                     // Property was modified
                     modified.push((*key, from_value.clone(), to_value.clone()));
                 }
@@ -386,18 +386,32 @@ mod tests {
 
     #[test]
     fn test_version_summary_has_changes() {
-        let summary = VersionSummary {
+        let mut summary = VersionSummary {
             version_id: test_version_id(1),
             version_number: 1,
             valid_from: test_timestamp(1000),
             transaction_time: test_timestamp(2000),
-            properties_added: 1,
+            properties_added: 0,
             properties_removed: 0,
             properties_modified: 0,
         };
 
+        // No changes
+        assert!(!summary.has_changes());
+
+        // Added only
+        summary.properties_added = 1;
         assert!(summary.has_changes());
-        assert_eq!(summary.change_count(), 1);
+        summary.properties_added = 0;
+
+        // Removed only
+        summary.properties_removed = 1;
+        assert!(summary.has_changes());
+        summary.properties_removed = 0;
+
+        // Modified only
+        summary.properties_modified = 1;
+        assert!(summary.has_changes());
     }
 
     #[test]

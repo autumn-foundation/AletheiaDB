@@ -392,7 +392,7 @@ impl PropertyDelta {
         // Find added and modified properties
         for (key, new_value) in new.iter() {
             match old.get_by_interned_key(key) {
-                Some(old_value) if old_value == new_value => {
+                Some(old_value) if old_value.semantically_equal(new_value) => {
                     // Unchanged, skip
                 }
                 Some(old_value) => {
@@ -2356,6 +2356,20 @@ mod sentry_tests {
             "PropertyDelta should apply full update on dimension change"
         );
         assert_eq!(applied_vec, &new_vec[..]);
+    }
+
+    #[test]
+    fn test_property_delta_handles_nan_no_change() {
+        // 🎯 Target: PropertyDelta::from_diff with NaN values
+        // 💣 Risk: NaN != NaN could cause spurious delta entries
+        // 🧪 Strategy: Create PropertyMap with NaN, create delta to same map.
+        // 🔬 Verification: Delta should be empty.
+
+        let nan_val = PropertyValue::Float(f64::NAN);
+        let props = PropertyMapBuilder::new().insert("val", nan_val).build();
+
+        let delta = PropertyDelta::from_diff(&props, &props);
+        assert!(delta.is_empty(), "NaN -> NaN should result in empty delta");
     }
 }
 
