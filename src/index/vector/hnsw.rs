@@ -2947,3 +2947,47 @@ mod coverage_tests {
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
     }
 }
+
+#[cfg(test)]
+mod panic_resilience_tests {
+    use super::*;
+
+    #[test]
+    fn test_metric_wrapper_panic_handling() {
+        // This test ensures that the metric wrapper correctly catches panics and returns f32::MAX
+        // This directly covers the Err path in create_metric_wrapper
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            panic!("Panic in custom metric!");
+        });
+
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let vec = [0.0f32; 4];
+        let ptr = vec.as_ptr();
+
+        // This should not panic the test, but return f32::MAX
+        let result = wrapper(ptr, ptr);
+        assert_eq!(result, f32::MAX);
+    }
+
+    #[test]
+    fn test_search_filter_panic_handling() -> Result<()> {
+        // This test ensures that search_with_filter catches panics in the predicate
+        // This directly covers the Err path in search_with_filter
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
+
+        let query = [1.0, 0.0, 0.0, 0.0];
+
+        // Search with a panicking filter
+        let results = index.search_with_filter(&query, 1, |_| {
+            panic!("Panic in filter!");
+        })?;
+
+        // Should return empty results as the node was filtered out due to panic
+        assert!(results.is_empty());
+        Ok(())
+    }
+}
