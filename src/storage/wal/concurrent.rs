@@ -406,6 +406,16 @@ impl ConcurrentWal {
     /// need for a temporary buffer copy, reducing both CPU and memory overhead.
     fn serialize_entry(&self, lsn: LSN, operation: &WalOperation) -> Result<Vec<u8>> {
         let estimated_capacity = super::estimate_entry_capacity(operation);
+
+        // Security Check: Enforce maximum entry size to prevent DoS
+        if estimated_capacity > super::entry::MAX_WAL_ENTRY_SIZE {
+            return Err(Error::Storage(StorageError::CapacityExceeded {
+                resource: "WAL entry size".to_string(),
+                current: estimated_capacity,
+                limit: super::entry::MAX_WAL_ENTRY_SIZE,
+            }));
+        }
+
         let mut buffer = Vec::with_capacity(estimated_capacity);
 
         // Generate timestamp
