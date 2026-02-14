@@ -869,15 +869,13 @@ impl Parser {
     }
 
     fn parse_not_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        // Use a small buffer (+1) to avoid off-by-one errors in boundary tests
-        if depth > MAX_RECURSION_DEPTH + 1 {
-            return Err(self.error(
-                format!("Recursion limit exceeded (max {})", MAX_RECURSION_DEPTH),
-                None,
-            ));
-        }
-
         if self.check(&Token::Not) {
+            if depth >= MAX_RECURSION_DEPTH {
+                return Err(self.error(
+                    format!("Recursion limit exceeded (max {})", MAX_RECURSION_DEPTH),
+                    None,
+                ));
+            }
             self.advance();
             let pred = self.parse_not_predicate(depth + 1)?;
             return Ok(PredicateExpr::Not(Box::new(pred)));
@@ -920,8 +918,7 @@ impl Parser {
     }
 
     fn parse_grouped_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        // Use a small buffer (+1) to avoid off-by-one errors in boundary tests
-        if depth > MAX_RECURSION_DEPTH + 1 {
+        if depth > MAX_RECURSION_DEPTH {
             return Err(self.error(
                 format!("Recursion limit exceeded (max {})", MAX_RECURSION_DEPTH),
                 None,
