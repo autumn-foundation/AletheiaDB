@@ -192,6 +192,9 @@ impl LatencyTracker {
 
     /// Record a latency sample.
     fn record(&self, duration: Duration) {
+        if self.max_samples == 0 {
+            return;
+        }
         let us = duration.as_micros() as u64;
         let mut samples = self.samples.lock();
         if samples.len() >= self.max_samples {
@@ -775,6 +778,35 @@ mod tests {
         assert_eq!(percentiles.p50_us, 0);
         assert_eq!(percentiles.p95_us, 0);
         assert_eq!(percentiles.p99_us, 0);
+    }
+
+    #[test]
+    fn test_latency_tracker_zero_max_samples() {
+        let tracker = LatencyTracker::new(0);
+        tracker.record(Duration::from_micros(500));
+
+        let percentiles = tracker.percentiles();
+        assert_eq!(percentiles.sample_count, 0);
+        assert_eq!(percentiles.p50_us, 0);
+    }
+
+    #[test]
+    fn test_latency_percentiles_even_samples() {
+        // Verify behavior for even number of samples (e.g. 4)
+        // Values: 10, 20, 30, 40
+        // Median (p50):
+        // Index = 4 * 0.5 = 2.0 -> index 2 -> value 30.
+        // Usually median is (20+30)/2 = 25, but this implementation picks upper middle.
+
+        let tracker = LatencyTracker::new(10);
+        tracker.record(Duration::from_micros(10));
+        tracker.record(Duration::from_micros(20));
+        tracker.record(Duration::from_micros(30));
+        tracker.record(Duration::from_micros(40));
+
+        let percentiles = tracker.percentiles();
+        assert_eq!(percentiles.sample_count, 4);
+        assert_eq!(percentiles.p50_us, 30);
     }
 
     #[test]
