@@ -2974,7 +2974,11 @@ mod race_condition_tests {
     fn test_add_race_retry_coverage() {
         // This test simulates a race condition where the mapping is removed
         // after the lock is dropped in the Occupied path.
-        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
         let node1 = NodeId::new(1).unwrap();
         index.add(node1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
@@ -3015,7 +3019,11 @@ mod race_condition_tests {
     fn test_add_race_retry_value_change_coverage() {
         // This test simulates a race where the mapping VALUE changes (different key)
         // after the lock is dropped in the Occupied path.
-        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
         let node1 = NodeId::new(1).unwrap();
         index.add(node1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
@@ -3060,7 +3068,11 @@ mod race_condition_tests {
     #[test]
     fn test_vacant_race_rollback_coverage() {
         // This test simulates a race in Vacant path where someone else claims the ID
-        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
         let node1 = NodeId::new(1).unwrap();
 
         // Setup the hook
