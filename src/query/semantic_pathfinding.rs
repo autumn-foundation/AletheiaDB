@@ -52,20 +52,13 @@ impl PartialOrd for State {
 ///
 /// Handles `NaN` similarity scores by assigning a high cost (1.0), which prevents
 /// pathfinding from getting stuck or panicking on invalid data.
-fn calculate_semantic_cost_from_embedding(
-    embedding: Option<&[f32]>,
-    query: &[f32],
-) -> Result<f32> {
+fn calculate_semantic_cost_from_embedding(embedding: Option<&[f32]>, query: &[f32]) -> Result<f32> {
     if let Some(emb) = embedding {
         let sim = cosine_similarity(emb, query)?;
         // SENTRY: Handle NaN similarity by returning max cost (1.0)
         // This ensures the pathfinder doesn't get stuck or propagate NaNs
         // which would break the priority queue ordering.
-        if sim.is_nan() {
-            Ok(1.0)
-        } else {
-            Ok(1.0 - sim)
-        }
+        if sim.is_nan() { Ok(1.0) } else { Ok(1.0 - sim) }
     } else {
         Ok(1.0) // High cost if no embedding
     }
@@ -274,8 +267,10 @@ impl<'a> SemanticPathfinder<'a> {
                             .get(&self.vector_property)
                             .and_then(|v| v.as_vector());
 
-                        let semantic_cost =
-                            calculate_semantic_cost_from_embedding(target_embedding, query_embedding)?;
+                        let semantic_cost = calculate_semantic_cost_from_embedding(
+                            target_embedding,
+                            query_embedding,
+                        )?;
 
                         let new_cost = cost + semantic_cost + 0.1;
 
