@@ -919,12 +919,12 @@ impl VectorIndex for HnswIndex {
                     )))
                 })?;
 
-                // Release inner lock before accessing DashMap
-                drop(index);
-
-                // Step 4: Insert to mappings (dashmap) AFTER inner is updated
-                // Handle race: another thread may have added this NodeId while we held inner lock
-                // Use entry API to safely check for existence without overwriting (which causes Zombie Vectors)
+                // Step 4: Insert to mappings (dashmap) WHILE HOLDING INNER LOCK
+                // We keep the inner lock held to ensure atomicity with respect to save_internal().
+                // If we dropped the lock here, save_internal() could run, see the new vector in inner,
+                // but miss the mapping in id_mapping (Zombie Vector bug).
+                //
+                // Lock order check: Inner -> Map (via entry()). This is consistent with other operations.
                 let race_detected = match self.id_mapping.entry(id) {
                     dashmap::mapref::entry::Entry::Occupied(_) => true,
                     dashmap::mapref::entry::Entry::Vacant(e) => {
@@ -940,9 +940,7 @@ impl VectorIndex for HnswIndex {
                     // Our vector is in inner with key=key, but someone else claimed the ID.
                     // We must rollback our addition to avoid phantom vectors.
 
-                    // Acquire inner lock again to remove our key.
-                    // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let index = self.inner.write();
+                    // We already hold the inner write lock, so we can remove directly.
                     index.remove(key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
                             "Failed to rollback vector after concurrent add: {}",
@@ -959,9 +957,12 @@ impl VectorIndex for HnswIndex {
 
                 // If no race, we successfully inserted into id_mapping.
                 // Now insert reverse mapping.
-                // Note: We do this outside the id_mapping lock to reduce contention.
                 self.reverse_mapping.insert(key, id);
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+
+                // Explicitly drop index lock (though it would drop at end of scope)
+                drop(index);
+
                 Ok(())
             }
         }
@@ -1262,25 +1263,21 @@ impl HnswIndex {
     /// and its mappings. It is separated from `save()` to allow the latter to use
     /// `tokio::task::block_in_place` when running within a Tokio runtime.
     fn save_internal(&self, path: &Path) -> Result<()> {
-        // DEADLOCK FIX (PR #751): Collect mappings BEFORE acquiring any locks
-        // This prevents lock ordering deadlock with add() which holds DashMap → inner lock order
+        // Acquire inner read lock first to ensure consistency between index and mappings.
+        // This prevents "Zombie Vectors" where a vector is added to the index but missed in the mappings snapshot.
+        let index = self.inner.read();
+
+        // Collect mappings while holding the inner lock.
+        // This is safe because `add` operations (Vacant and Occupied) release DashMap locks
+        // before acquiring the inner lock, or acquire inner then map (Vacant).
+        // Specifically:
+        // - add(Vacant): inner.write() -> id_mapping.insert() (Inner -> Map)
+        // - add(Occupied): drop(entry) -> inner.write() -> id_mapping.get() (Inner -> Map)
+        // - search_with_filter: inner.read() -> reverse_mapping.get() (Inner -> Map)
         //
-        // Lock Ordering Invariant:
-        //   1. inner (RwLock<Index>) - FIRST
-        //   2. id_mapping (DashMap) - SECOND
+        // Therefore, holding inner.read() and iterating id_mapping (which acquires shard locks)
+        // follows the consistent Inner -> Map lock order, preventing deadlocks.
         //
-        // Previous implementation violated this by:
-        //   1. Acquiring inner.read() first (line 991)
-        //   2. Then iterating id_mapping (line 1032), acquiring DashMap shard locks
-        //
-        // Meanwhile, add() (Occupied path) acquires locks in reverse order:
-        //   1. DashMap shard lock via entry() (line 634)
-        //   2. Then inner.write() (line 645)
-        //
-        // Result: Classic lock inversion deadlock.
-        //
-        // Solution: Collect all mappings into Vec with no locks held, sacrificing
-        // the "⚡ Bolt Optimization" streaming approach for correctness.
         // Memory cost: O(N) allocation (~16MB for 1M nodes), acceptable for infrequent save operation.
         let mappings: Vec<(NodeId, u64)> = self
             .id_mapping
@@ -1289,8 +1286,6 @@ impl HnswIndex {
             .collect();
         let count = mappings.len();
 
-        // Now acquire inner.read() with no other locks held
-        let index = self.inner.read();
         index
             .save(path.to_str().ok_or_else(|| {
                 Error::Vector(VectorError::IndexError(
@@ -1720,6 +1715,15 @@ fn load_mappings_with_integrity(
 }
 
 impl HnswIndex {
+    /// Returns the number of ID mappings.
+    ///
+    /// This is useful for consistency checks against `len()`.
+    /// Ideally, `len() == len_mappings()`. If `len() > len_mappings()`,
+    /// there are vectors in the index that cannot be retrieved (Zombie Vectors).
+    pub fn len_mappings(&self) -> usize {
+        self.id_mapping.len()
+    }
+
     /// Creates a new HNSW index from a configuration.
     pub fn new(config: HnswConfig) -> Result<Self> {
         HnswIndexBuilder::from_config(&config).build()
