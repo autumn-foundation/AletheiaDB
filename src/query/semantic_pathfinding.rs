@@ -48,6 +48,29 @@ impl PartialOrd for State {
     }
 }
 
+/// Helper function to calculate semantic cost from an embedding.
+///
+/// Handles `NaN` similarity scores by assigning a high cost (1.0), which prevents
+/// pathfinding from getting stuck or panicking on invalid data.
+fn calculate_semantic_cost_from_embedding(
+    embedding: Option<&[f32]>,
+    query: &[f32],
+) -> Result<f32> {
+    if let Some(emb) = embedding {
+        let sim = cosine_similarity(emb, query)?;
+        // SENTRY: Handle NaN similarity by returning max cost (1.0)
+        // This ensures the pathfinder doesn't get stuck or propagate NaNs
+        // which would break the priority queue ordering.
+        if sim.is_nan() {
+            Ok(1.0)
+        } else {
+            Ok(1.0 - sim)
+        }
+    } else {
+        Ok(1.0) // High cost if no embedding
+    }
+}
+
 /// A pathfinder that uses semantic similarity as a heuristic/cost.
 pub struct SemanticPathfinder<'a> {
     db: &'a AletheiaDB,
@@ -251,13 +274,8 @@ impl<'a> SemanticPathfinder<'a> {
                             .get(&self.vector_property)
                             .and_then(|v| v.as_vector());
 
-                        let semantic_cost = if let Some(emb) = target_embedding {
-                            let sim = cosine_similarity(emb, query_embedding)?;
-                            // SENTRY: Handle NaN similarity by assigning high cost
-                            if sim.is_nan() { 1.0 } else { 1.0 - sim }
-                        } else {
-                            1.0 // High cost if no embedding
-                        };
+                        let semantic_cost =
+                            calculate_semantic_cost_from_embedding(target_embedding, query_embedding)?;
 
                         let new_cost = cost + semantic_cost + 0.1;
 
@@ -283,28 +301,12 @@ impl<'a> SemanticPathfinder<'a> {
     fn calculate_semantic_cost(&self, node_id: NodeId, query: &[f32]) -> Result<f32> {
         let node = self.db.get_node(node_id)?;
 
-        #[allow(clippy::collapsible_if)]
-        if let Some(prop) = node.properties.get(&self.vector_property) {
-            if let Some(vec) = prop.as_vector() {
-                let sim = cosine_similarity(vec, query)?;
+        let target_embedding = node
+            .properties
+            .get(&self.vector_property)
+            .and_then(|v| v.as_vector());
 
-                // SENTRY: Handle NaN similarity by returning max cost (1.0)
-                // This ensures the pathfinder doesn't get stuck or propagate NaNs
-                // which would break the priority queue ordering.
-                if sim.is_nan() {
-                    return Ok(1.0);
-                }
-
-                // Clamp to [0, 2] (cosine sim is [-1, 1])
-                // We want high similarity -> low cost
-                // 1.0 - 1.0 = 0.0 (perfect match)
-                // 1.0 - (-1.0) = 2.0 (opposite)
-                return Ok(1.0 - sim);
-            }
-        }
-
-        // Penalize nodes without embeddings
-        Ok(1.0)
+        calculate_semantic_cost_from_embedding(target_embedding, query)
     }
 
     fn reconstruct_path(&self, came_from: HashMap<NodeId, NodeId>, current: NodeId) -> Vec<NodeId> {
