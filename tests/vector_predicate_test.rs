@@ -1,6 +1,6 @@
-use aletheiadb::{AletheiaDB, PropertyMapBuilder};
-use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::utils::Result;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 #[test]
 fn test_find_similar_with_predicate() -> Result<()> {
@@ -36,19 +36,14 @@ fn test_find_similar_with_predicate() -> Result<()> {
     // We expect Node 1 to be returned. Node 2 should be filtered out.
 
     let query = vec![1.0, 0.0];
-    let results = db.find_similar_with_predicate(
-        "embedding",
-        &query,
-        10,
-        |node_id| {
-            if let Ok(node) = db.get_node(*node_id)
-                && let Some(val) = node.properties.get("category")
-            {
-                return val.as_str() == Some("A");
-            }
-            false
+    let results = db.find_similar_with_predicate("embedding", &query, 10, |node_id| {
+        if let Ok(node) = db.get_node(*node_id)
+            && let Some(val) = node.properties.get("category")
+        {
+            return val.as_str() == Some("A");
         }
-    )?;
+        false
+    })?;
 
     // 4. Verify results
     // Should contain Node 1 (best match, category A)
@@ -57,10 +52,16 @@ fn test_find_similar_with_predicate() -> Result<()> {
 
     let ids: Vec<_> = results.iter().map(|(id, _)| *id).collect();
     assert!(ids.contains(&node1), "Node 1 should be found");
-    assert!(!ids.contains(&node2), "Node 2 should be filtered out by predicate");
+    assert!(
+        !ids.contains(&node2),
+        "Node 2 should be filtered out by predicate"
+    );
 
     // Also verify Node 3 is found if k is large enough (it satisfies predicate)
-    assert!(ids.contains(&node3), "Node 3 should be found (satisfies predicate)");
+    assert!(
+        ids.contains(&node3),
+        "Node 3 should be found (satisfies predicate)"
+    );
 
     Ok(())
 }
@@ -79,19 +80,16 @@ fn test_find_similar_with_predicate_dimension_mismatch() -> Result<()> {
 
     // Try to search with wrong dimensions (3 instead of 2)
     let query = vec![1.0, 0.0, 0.0];
-    let result = db.find_similar_with_predicate(
-        "embedding",
-        &query,
-        10,
-        |_| true
-    );
+    let result = db.find_similar_with_predicate("embedding", &query, 10, |_| true);
 
     assert!(result.is_err());
     match result {
-        Err(aletheiadb::utils::Error::Vector(aletheiadb::utils::error::VectorError::DimensionMismatch { expected, actual })) => {
+        Err(aletheiadb::utils::Error::Vector(
+            aletheiadb::utils::error::VectorError::DimensionMismatch { expected, actual },
+        )) => {
             assert_eq!(expected, 2);
             assert_eq!(actual, 3);
-        },
+        }
         _ => panic!("Expected DimensionMismatch error, got {:?}", result),
     }
 
