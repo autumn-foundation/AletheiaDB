@@ -1333,4 +1333,35 @@ mod sentry_consistency_tests {
         running.store(false, std::sync::atomic::Ordering::Relaxed);
         reader_handle.join().unwrap();
     }
+
+    #[test]
+    fn test_get_all_strings_consistency_failure_coverage() {
+        // This test artificially creates an inconsistent state to verify the error path
+        // of get_all_strings (retry limit exceeded).
+        let interner = StringInterner::new();
+
+        // 1. Intern a string normally to set up initial state
+        interner.intern("valid").unwrap();
+
+        // 2. Artificially insert into string_to_id WITHOUT adding to id_to_string.
+        // This increases len() (which uses string_to_id.len()) but creates a "hole"
+        // in id_to_string lookup.
+        // get_all_strings will see count=2, but only find 1 item in id_to_string.
+        // It will retry and eventually fail.
+        interner
+            .string_to_id
+            .insert(Arc::from("corrupt"), InternedString(1));
+
+        // 3. Verify get_all_strings fails
+        let result = interner.get_all_strings();
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Storage(
+                crate::utils::error::StorageError::InconsistentState { reason },
+            )) => {
+                assert!(reason.contains("Failed to obtain a consistent snapshot"));
+            }
+            _ => panic!("Expected InconsistentState error"),
+        }
+    }
 }
