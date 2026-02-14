@@ -3046,6 +3046,7 @@ mod consistency_tests {
         let mut race_detected = false;
         for handle in handles {
             let res = handle.join().unwrap();
+            #[allow(clippy::collapsible_if)]
             if let Err(Error::Vector(VectorError::IndexError(msg))) = res {
                 if msg.contains("Concurrent add detected") {
                     race_detected = true;
