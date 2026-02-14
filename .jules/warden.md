@@ -31,5 +31,9 @@
 **Defense:** Replaced `expect()` with `unwrap_or(RECURSION_PENALTY_SIZE)` in `src/core/property.rs`. This allows map construction to proceed without crashing. Safety is maintained because the subsequent `serialize()` operation re-checks recursion depth and will fail gracefully (returning `Result::Err`) instead of panicking.
 
 **2026-02-17 - Panic in FFI Callback Validation**
-**Threat:** The validation logic in `create_metric_wrapper` (checking for null or unaligned pointers) used `panic!` to report errors. Since this function is invoked by the C++ `usearch` library via FFI, a panic unwinding across the language boundary constitutes Undefined Behavior (UB). While usearch should guarantee valid pointers, defensive checks must not introduce UB.
-**Defense:** Replaced `panic!` calls with `eprintln!` logging and a safe fallback return value of `f32::MAX`. This ensures that even if invalid pointers are passed (memory corruption or usearch bug), the application fails gracefully without unwinding. Updated unit tests to assert `f32::MAX` return instead of panic.
+**Threat:** The validation logic in `create_metric_wrapper` (checking for null or unaligned pointers) used `panic!` to report errors. Since this function is invoked by the C++ `usearch` library via FFI, a panic unwinding across the language boundary constitutes Undefined Behavior (UB).
+**Defense:** Replaced `panic!` calls with `eprintln!` and a safe return value of `f32::MAX`. This ensures the application remains stable even if invalid inputs are encountered. Updated unit tests (`test_metric_wrapper_panic_on_unaligned`, etc.) to verify the graceful failure behavior.
+
+**2026-02-17 - Missing Regression Test for Parser Recursion Limit**
+**Threat:** CI checks failed due to a panic in `test_parser_recursion_limit_boundary`, which was missing from the `src/query/parser.rs` file in the working directory. This mismatch suggests a regression test was lost or out of sync, potentially hiding a stack overflow vulnerability in the query parser.
+**Defense:** Restored the `sentry_tests` module in `src/query/parser.rs`, including `test_parser_recursion_limit_boundary` (verifying 100 levels pass) and `test_parser_recursion_over_limit` (verifying 101 levels fail). This ensures `MAX_RECURSION_DEPTH` is correctly enforced and tested.

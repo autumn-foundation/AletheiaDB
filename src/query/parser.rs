@@ -2037,3 +2037,42 @@ mod tests {
         // This implicitly tests From<LexerError> for ParseError
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    #[test]
+    fn test_parser_recursion_limit_boundary() {
+        let depth = MAX_RECURSION_DEPTH;
+        let mut query = "MATCH (n) WHERE ".to_string();
+        for _ in 0..depth {
+            query.push('(');
+        }
+        query.push_str("n.age > 10");
+        for _ in 0..depth {
+            query.push(')');
+        }
+        query.push_str(" RETURN n");
+
+        let result = Parser::parse(&query);
+        assert!(result.is_ok(), "Should accept recursion up to the limit: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parser_recursion_over_limit() {
+        let depth = MAX_RECURSION_DEPTH + 1;
+        let mut query = "MATCH (n) WHERE ".to_string();
+        for _ in 0..depth {
+            query.push('(');
+        }
+        query.push_str("n.age > 10");
+        for _ in 0..depth {
+            query.push(')');
+        }
+        query.push_str(" RETURN n");
+
+        let result = Parser::parse(&query);
+        assert!(result.is_err(), "Should reject recursion over the limit");
+    }
+}
