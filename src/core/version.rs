@@ -2142,6 +2142,26 @@ mod sentry_tests {
     }
 
     #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_vector_delta_apply_dimension_mismatch_safe_return() {
+        // 🛡️ Sentry: Verify release-mode safety guard
+        // In release builds, apply() should return base unchanged on mismatch
+        let delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes: std::sync::Arc::new(vec![(0, 1.0)]),
+        };
+
+        // Base mismatch (5 vs 10)
+        let base = vec![0.0f32; 5];
+        let result = delta.apply(&base);
+
+        // Should return base unchanged
+        assert_eq!(result, base);
+        // Verify no changes applied
+        assert_eq!(result[0], 0.0);
+    }
+
+    #[test]
     fn test_vector_delta_from_diff_max_dimensions() {
         // Create vectors exceeding the maximum allowed dimension
         let len = MAX_VECTOR_DIMENSIONS + 1;
@@ -2320,6 +2340,110 @@ mod sentry_tests {
             Some(42),
             "Sparse delta should be silently ignored if base property is wrong type"
         );
+    }
+
+    #[test]
+    fn test_property_delta_apply_fail_open_comprehensive() {
+        // 🛡️ Sentry: Comprehensive check for fail-open behavior
+        // Verify sparse delta application is safely ignored for ALL non-vector types.
+
+        let key = GLOBAL_INTERNER.intern("test_prop").unwrap();
+        let mut delta = PropertyDelta::new();
+
+        // Sparse delta: modify index 0 -> 99.9
+        let changes = Arc::new(vec![(0, 99.9f32)]);
+        let vec_delta = VectorDelta::Sparse {
+            dimension: 5,
+            changes,
+        };
+        delta.vector_deltas.insert(key, vec_delta);
+
+        // Helper to check fail-open
+        let check_fail_open = |base_val: PropertyValue, case: &str| {
+            let base = PropertyMapBuilder::new()
+                .insert_by_key(key, base_val.clone())
+                .build();
+
+            let result = delta.apply(&base);
+
+            // Should match base value (delta ignored)
+            let result_val = result.get_by_interned_key(&key).unwrap();
+            assert_eq!(
+                result_val, &base_val,
+                "Case {}: Expected sparse delta to be ignored, but value changed", case
+            );
+        };
+
+        // Test cases for all non-vector variants
+        check_fail_open(PropertyValue::Null, "Null");
+        check_fail_open(PropertyValue::Bool(true), "Bool");
+        check_fail_open(PropertyValue::Int(123), "Int");
+        check_fail_open(PropertyValue::Float(1.23), "Float");
+        check_fail_open(PropertyValue::string("test"), "String");
+        check_fail_open(PropertyValue::bytes([1, 2, 3]), "Bytes");
+        check_fail_open(PropertyValue::array(vec![PropertyValue::Int(1)]), "Array");
+
+        // Note: SparseVector is also not compatible with VectorDelta (which is for dense vectors)
+        use crate::core::vector::SparseVec;
+        let sv = SparseVec::new(vec![0], vec![1.0], 5).unwrap();
+        check_fail_open(PropertyValue::sparse_vector(sv), "SparseVector");
+    }
+
+    #[test]
+    fn test_materialize_vector_deltas_fail_closed_comprehensive() {
+        // 🛡️ Sentry: Comprehensive check for fail-closed behavior
+        // Verify materialization fails for ALL non-vector types (unlike apply which is fail-open)
+
+        let key = GLOBAL_INTERNER.intern("test_prop").unwrap();
+        let changes = Arc::new(vec![(0, 99.9f32)]);
+        let vec_delta = VectorDelta::Sparse {
+            dimension: 5,
+            changes,
+        };
+
+        // Helper to check fail-closed
+        let check_fail_closed = |base_val: PropertyValue, case: &str| {
+            let mut delta = PropertyDelta::new();
+            delta.vector_deltas.insert(key, vec_delta.clone());
+
+            let base = PropertyMapBuilder::new()
+                .insert_by_key(key, base_val)
+                .build();
+
+            let result = delta.materialize_vector_deltas(&base);
+
+            assert!(
+                result.is_err(),
+                "Case {}: Expected error when materializing against non-vector, got Ok", case
+            );
+
+            let err = result.unwrap_err();
+            assert!(
+                err.contains("not a vector"),
+                "Case {}: Expected 'not a vector' error, got '{}'", case, err
+            );
+        };
+
+        // Test cases for all non-vector variants
+        check_fail_closed(PropertyValue::Null, "Null");
+        check_fail_closed(PropertyValue::Bool(true), "Bool");
+        check_fail_closed(PropertyValue::Int(123), "Int");
+        check_fail_closed(PropertyValue::Float(1.23), "Float");
+        check_fail_closed(PropertyValue::string("test"), "String");
+        check_fail_closed(PropertyValue::bytes([1, 2, 3]), "Bytes");
+        check_fail_closed(PropertyValue::array(vec![PropertyValue::Int(1)]), "Array");
+
+        use crate::core::vector::SparseVec;
+        let sv = SparseVec::new(vec![0], vec![1.0], 5).unwrap();
+        check_fail_closed(PropertyValue::sparse_vector(sv), "SparseVector");
+
+        // Also verify missing property fails
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(key, vec_delta);
+        let empty_base = PropertyMapBuilder::new().build();
+        let result = delta.materialize_vector_deltas(&empty_base);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
     }
 
     #[test]
