@@ -1434,10 +1434,7 @@ mod tests {
         assert!(segments.len() >= 2, "Expected at least 2 segments");
 
         // Find the oldest segment (lowest number)
-        let oldest_segment_path = segments.iter()
-            .min_by_key(|e| e.path())
-            .unwrap()
-            .path();
+        let oldest_segment_path = segments.iter().min_by_key(|e| e.path()).unwrap().path();
 
         // Find its metadata file
         // Note: FlushCoordinator naming is {:06}.log and {:06}.log.meta
@@ -1449,7 +1446,11 @@ mod tests {
             meta_path.set_file_name(name);
         }
 
-        assert!(meta_path.exists(), "Metadata file should exist: {:?}", meta_path);
+        assert!(
+            meta_path.exists(),
+            "Metadata file should exist: {:?}",
+            meta_path
+        );
 
         // 3. Delete the metadata file
         std::fs::remove_file(&meta_path).unwrap();
@@ -1461,7 +1462,13 @@ mod tests {
         let removed = coordinator.truncate_to_lsn(LSN(100)).unwrap();
 
         // 5. Verify conservative behavior
-        assert_eq!(removed, 0, "Should not remove segment if metadata is missing");
-        assert!(oldest_segment_path.exists(), "Segment log file should still exist");
+        assert_eq!(
+            removed, 0,
+            "Should not remove segment if metadata is missing"
+        );
+        assert!(
+            oldest_segment_path.exists(),
+            "Segment log file should still exist"
+        );
     }
 }
