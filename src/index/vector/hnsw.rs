@@ -99,10 +99,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
-// Thread-local flag to detect re-entrant modification attempts during filtered search.
-// This prevents deadlocks when user filter callbacks try to modify the index.
+// Thread-local flag to detect re-entrant modification attempts during filtered search
+// or custom metric execution.
+// This prevents deadlocks when user callbacks try to access the index recursively.
 std::thread_local! {
-    pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static IN_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -115,22 +116,22 @@ std::thread_local! {
     static TEST_RACE_HOOK: std::cell::Cell<Option<TestRaceHook>> = const { std::cell::Cell::new(None) };
 }
 
-/// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
+/// RAII guard that sets IN_CALLBACK to true on creation and restores previous value on drop.
 /// This ensures the flag is always reset, even if the callback panics.
-pub(crate) struct FilterCallbackGuard {
+pub(crate) struct CallbackGuard {
     prev: bool,
 }
 
-impl FilterCallbackGuard {
+impl CallbackGuard {
     pub(crate) fn new() -> Self {
-        let prev = IN_FILTER_CALLBACK.with(|flag| flag.replace(true));
-        FilterCallbackGuard { prev }
+        let prev = IN_CALLBACK.with(|flag| flag.replace(true));
+        CallbackGuard { prev }
     }
 }
 
-impl Drop for FilterCallbackGuard {
+impl Drop for CallbackGuard {
     fn drop(&mut self) {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(self.prev));
+        IN_CALLBACK.with(|flag| flag.set(self.prev));
     }
 }
 
@@ -468,6 +469,9 @@ where
         // If a panic occurs, we return f32::MAX (infinite distance) to effectively
         // ignore this comparison.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Set flag to prevent modifications or re-entrant access during callback
+            // to avoid deadlocks.
+            let _guard = CallbackGuard::new();
             distance_fn(slice_a, slice_b)
         }));
 
@@ -753,12 +757,12 @@ impl std::fmt::Debug for HnswIndex {
 
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+        // Check for re-entrant modification during filtered search or custom metric (prevents deadlock)
+        if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot modify index from within a search_with_filter callback. \
+                "Cannot modify index from within a callback (search_with_filter or custom metric). \
                  This would cause a deadlock due to lock re-entrancy. \
-                 Consider collecting modifications and applying them after the search completes."
+                 Consider collecting modifications and applying them after the operation completes."
                     .to_string(),
             )));
         }
@@ -978,12 +982,12 @@ impl VectorIndex for HnswIndex {
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+        // Check for re-entrant modification during filtered search or custom metric (prevents deadlock)
+        if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot modify index from within a search_with_filter callback. \
+                "Cannot modify index from within a callback (search_with_filter or custom metric). \
                  This would cause a deadlock due to lock re-entrancy. \
-                 Consider collecting modifications and applying them after the search completes."
+                 Consider collecting modifications and applying them after the operation completes."
                     .to_string(),
             )));
         }
@@ -1014,11 +1018,11 @@ impl VectorIndex for HnswIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
-        // Check for re-entrant access during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+        // Check for re-entrant access during filtered search or custom metric (prevents deadlock)
+        if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot perform search from within a search_with_filter callback. \
-                 This prevents deadlocks when concurrent writers are pending."
+                "Cannot perform search from within a callback (search_with_filter or custom metric). \
+                 This prevents deadlocks due to lock re-entrancy."
                     .to_string(),
             )));
         }
@@ -1093,11 +1097,11 @@ impl VectorIndex for HnswIndex {
     where
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
-        // Check for re-entrant access during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+        // Check for re-entrant access during filtered search or custom metric (prevents deadlock)
+        if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot perform search_with_filter from within a search_with_filter callback. \
-                 This prevents deadlocks when concurrent writers are pending."
+                "Cannot perform search_with_filter from within a callback (search_with_filter or custom metric). \
+                 This prevents deadlocks due to lock re-entrancy."
                     .to_string(),
             )));
         }
@@ -1135,7 +1139,7 @@ impl VectorIndex for HnswIndex {
         let filter = |key: u64| -> bool {
             if let Some(node_id_ref) = reverse_mapping.get(&key) {
                 // Set flag to prevent modifications during callback
-                let _guard = FilterCallbackGuard::new();
+                let _guard = CallbackGuard::new();
                 predicate(node_id_ref.value())
             } else {
                 false
@@ -1187,6 +1191,10 @@ impl VectorIndex for HnswIndex {
     }
 
     fn len(&self) -> usize {
+        if IN_CALLBACK.with(|flag| flag.get()) {
+            // Panic to prevent deadlock (contract violation)
+            panic!("Cannot call len() from within an index callback (recursion detected)");
+        }
         self.inner.read().size()
     }
 
@@ -1228,12 +1236,12 @@ impl VectorIndex for HnswIndex {
     /// If executed outside a Tokio runtime, or in a single-threaded runtime (where `block_in_place`
     /// would panic), it falls back to standard synchronous execution.
     fn save(&self, path: &Path) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+        // Check for re-entrant modification during filtered search or custom metric (prevents deadlock)
+        if IN_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
-                "Cannot save index from within a search_with_filter callback. \
+                "Cannot save index from within a callback (search_with_filter or custom metric). \
                  This would cause a deadlock due to lock re-entrancy. \
-                 Consider saving after the search completes."
+                 Consider saving after the operation completes."
                     .to_string(),
             )));
         }
@@ -1251,6 +1259,10 @@ impl VectorIndex for HnswIndex {
     }
 
     fn memory_usage(&self) -> usize {
+        if IN_CALLBACK.with(|flag| flag.get()) {
+            // Panic to prevent deadlock (contract violation)
+            panic!("Cannot call memory_usage() from within an index callback (recursion detected)");
+        }
         self.inner.read().memory_usage()
     }
 
@@ -1740,6 +1752,10 @@ impl HnswIndex {
 
     /// Sets the ef_search parameter for query-time search quality.
     pub fn set_ef_search(&self, ef_search: usize) {
+        if IN_CALLBACK.with(|flag| flag.get()) {
+            // Panic to prevent deadlock (contract violation)
+            panic!("Cannot call set_ef_search() from within an index callback (recursion detected)");
+        }
         let index = self.inner.read();
         index.change_expansion_search(ef_search);
     }
@@ -1749,6 +1765,10 @@ impl HnswIndex {
     /// Note: Returns the runtime value which may differ from config if
     /// `set_ef_search` was called.
     pub fn get_ef_search(&self) -> usize {
+        if IN_CALLBACK.with(|flag| flag.get()) {
+            // Panic to prevent deadlock (contract violation)
+            panic!("Cannot call get_ef_search() from within an index callback (recursion detected)");
+        }
         self.inner.read().expansion_search()
     }
 
@@ -3112,27 +3132,27 @@ mod coverage_tests {
     #[test]
     fn test_filter_callback_guard_reset() {
         // Ensure flag is initially false
-        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+        IN_CALLBACK.with(|flag| flag.set(false));
 
         {
-            let _guard = FilterCallbackGuard::new();
+            let _guard = CallbackGuard::new();
             // Verify flag is set to true
-            assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
+            assert!(IN_CALLBACK.with(|flag| flag.get()));
         }
 
         // Verify flag is reset to false after drop
-        assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        assert!(!IN_CALLBACK.with(|flag| flag.get()));
     }
 
     #[test]
     fn test_filter_callback_guard_manual_drop() {
-        IN_FILTER_CALLBACK.with(|flag| flag.set(false));
+        IN_CALLBACK.with(|flag| flag.set(false));
 
-        let guard = FilterCallbackGuard::new();
-        assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        let guard = CallbackGuard::new();
+        assert!(IN_CALLBACK.with(|flag| flag.get()));
 
         drop(guard);
-        assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+        assert!(!IN_CALLBACK.with(|flag| flag.get()));
     }
 
     #[test]
