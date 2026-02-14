@@ -465,7 +465,9 @@ where
             Ok(val) => val,
             Err(_) => {
                 // Log error to stderr so operator is aware of the issue
-                eprintln!("Panic in custom metric function - returning max distance to avoid FFI UB");
+                eprintln!(
+                    "Panic in custom metric function - returning max distance to avoid FFI UB"
+                );
                 f32::MAX
             }
         }
