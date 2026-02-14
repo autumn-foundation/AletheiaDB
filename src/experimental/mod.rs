@@ -4,6 +4,9 @@
 //! They are gated behind the `nova` feature flag.
 
 #[cfg(feature = "nova")]
+/// Ariadne: Semantic Thread Weaver.
+pub mod ariadne;
+#[cfg(feature = "nova")]
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
 #[cfg(feature = "nova")]

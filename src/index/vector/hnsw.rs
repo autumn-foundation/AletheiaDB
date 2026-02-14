@@ -2934,43 +2934,7 @@ mod tests {
         assert_eq!(results.len(), 5);
     }
 
-    #[test]
-    fn test_hnsw_capacity_limit() -> Result<()> {
-        // Test that we enforce MAX_MAPPINGS_COUNT
-        // In test mode, this is set to 100
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-        let limit = super::MAX_MAPPINGS_COUNT;
-
-        // Fill to capacity
-        for i in 0..limit {
-            let id = NodeId::new(i as u64 + 1).unwrap();
-            index.add(id, &[1.0, 0.0, 0.0, 0.0])?;
-        }
-
-        assert_eq!(index.len(), limit);
-
-        // Try to add one more - should fail
-        let overflow_id = NodeId::new(limit as u64 + 1).unwrap();
-        let result = index.add(overflow_id, &[1.0, 0.0, 0.0, 0.0]);
-        assert!(result.is_err());
-        match result {
-            Err(Error::Vector(VectorError::IndexError(msg))) => {
-                assert!(msg.contains("Index capacity exceeded"));
-            }
-            _ => panic!(
-                "Expected IndexError with capacity exceeded message, got {:?}",
-                result
-            ),
-        }
-
-        // Updating existing node should still work
-        let existing_id = NodeId::new(1).unwrap();
-        index.add(existing_id, &[0.0, 1.0, 0.0, 0.0])?;
-        assert_eq!(index.len(), limit);
-
-        Ok(())
-    }
-
+        #[test]
     fn test_add_race_retry_value_change_coverage() {
         // Test that if another thread changes the mapping (value changed) while we are in add(),
         // we detect it and return a retryable error.
@@ -3045,6 +3009,43 @@ mod tests {
             }
             _ => panic!("Expected concurrent modification error, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_hnsw_capacity_limit() -> Result<()> {
+        // Test that we enforce MAX_MAPPINGS_COUNT
+        // In test mode, this is set to 100
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        let limit = super::MAX_MAPPINGS_COUNT;
+
+        // Fill to capacity
+        for i in 0..limit {
+            let id = NodeId::new(i as u64 + 1).unwrap();
+            index.add(id, &[1.0, 0.0, 0.0, 0.0])?;
+        }
+
+        assert_eq!(index.len(), limit);
+
+        // Try to add one more - should fail
+        let overflow_id = NodeId::new(limit as u64 + 1).unwrap();
+        let result = index.add(overflow_id, &[1.0, 0.0, 0.0, 0.0]);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Index capacity exceeded"));
+            }
+            _ => panic!(
+                "Expected IndexError with capacity exceeded message, got {:?}",
+                result
+            ),
+        }
+
+        // Updating existing node should still work
+        let existing_id = NodeId::new(1).unwrap();
+        index.add(existing_id, &[0.0, 1.0, 0.0, 0.0])?;
+        assert_eq!(index.len(), limit);
+
+        Ok(())
     }
 }
 
