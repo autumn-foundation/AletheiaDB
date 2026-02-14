@@ -29,3 +29,7 @@
 **2026-02-16 - Panic in PropertyMap::from_iter**
 **Threat:** The `PropertyMap::from_iter` method used `expect()` when calculating serialized size. If a user provided a deeply nested `PropertyValue` (exceeding `MAX_RECURSION_DEPTH` of 100), `serialized_size()` would return an error, causing `from_iter` to panic and crash the process. This crash vector was reachable via standard iterator usage.
 **Defense:** Replaced `expect()` with `unwrap_or(RECURSION_PENALTY_SIZE)` in `src/core/property.rs`. This allows map construction to proceed without crashing. Safety is maintained because the subsequent `serialize()` operation re-checks recursion depth and will fail gracefully (returning `Result::Err`) instead of panicking.
+
+**2026-02-17 - Panic in FFI Callback Validation**
+**Threat:** The validation logic in `create_metric_wrapper` (checking for null or unaligned pointers) used `panic!` to report errors. Since this function is invoked by the C++ `usearch` library via FFI, a panic unwinding across the language boundary constitutes Undefined Behavior (UB). While usearch should guarantee valid pointers, defensive checks must not introduce UB.
+**Defense:** Replaced `panic!` calls with `eprintln!` logging and a safe fallback return value of `f32::MAX`. This ensures that even if invalid pointers are passed (memory corruption or usearch bug), the application fails gracefully without unwinding. Updated unit tests to assert `f32::MAX` return instead of panic.

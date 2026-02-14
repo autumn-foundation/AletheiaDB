@@ -442,19 +442,20 @@ where
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
             // This should never happen with a correct usearch implementation.
-            // If it does, we panic to prevent UB from dereferencing null.
-            // We cannot return an error here because the signature is fixed by usearch trait.
-            panic!("usearch passed null pointer to metric function");
+            // If it does, we return MAX distance instead of panicking to prevent UB (unwind across FFI).
+            eprintln!("usearch passed null pointer to metric function - returning max distance");
+            return f32::MAX;
         }
 
         // Check for alignment to prevent UB
         // Use bitwise check for power-of-2 alignment (f32 align is 4)
         let align_mask = std::mem::align_of::<f32>() - 1;
         if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
-            panic!(
-                "usearch passed unaligned pointer to metric function (expected alignment {})",
+            eprintln!(
+                "usearch passed unaligned pointer to metric function (expected alignment {}) - returning max distance",
                 std::mem::align_of::<f32>()
             );
+            return f32::MAX;
         }
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
@@ -1966,7 +1967,6 @@ mod sentry_tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
     fn test_metric_wrapper_panic_on_unaligned() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
@@ -1978,7 +1978,8 @@ mod sentry_tests {
         let aligned_vec = [0.0f32; 4];
         let aligned_ptr = aligned_vec.as_ptr();
 
-        wrapper(unaligned_ptr, aligned_ptr);
+        // Should return max distance instead of panicking
+        assert_eq!(wrapper(unaligned_ptr, aligned_ptr), f32::MAX);
     }
 
     #[test]
@@ -2013,7 +2014,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
     fn test_metric_wrapper_panic_on_unaligned() {
         // This test ensures that the metric wrapper correctly detects unaligned pointers.
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
@@ -2031,8 +2031,8 @@ mod tests {
         let unaligned_ptr = unsafe { aligned_ptr.add(1) } as *const f32;
         let valid_ptr = aligned_ptr as *const f32;
 
-        // Pass unaligned pointer - should panic
-        wrapper(valid_ptr, unaligned_ptr);
+        // Should return max distance instead of panicking
+        assert_eq!(wrapper(valid_ptr, unaligned_ptr), f32::MAX);
     }
 
     #[test]
@@ -2449,10 +2449,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "usearch passed null pointer")]
     fn test_metric_wrapper_panic_on_null() {
         // This test ensures that the metric wrapper correctly detects null pointers
-        // and panics to prevent UB. This covers the safety check added for FFI.
+        // and returns max distance to prevent UB. This covers the safety check added for FFI.
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
 
@@ -2461,8 +2460,8 @@ mod tests {
         let valid_ptr = vec.as_ptr();
         let null_ptr = std::ptr::null();
 
-        // Pass null pointer - should panic
-        wrapper(valid_ptr, null_ptr);
+        // Should return max distance instead of panicking
+        assert_eq!(wrapper(valid_ptr, null_ptr), f32::MAX);
     }
 
     #[test]
@@ -3081,7 +3080,6 @@ mod coverage_tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "usearch passed null pointer")]
     fn test_metric_wrapper_null_pointer() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
@@ -3090,12 +3088,11 @@ mod coverage_tests {
         let valid_data = [0.0f32; 4];
         let valid_ptr = valid_data.as_ptr();
 
-        // This should panic
-        wrapper(null_ptr, valid_ptr);
+        // Should return max distance instead of panicking
+        assert_eq!(wrapper(null_ptr, valid_ptr), f32::MAX);
     }
 
     #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
     fn test_metric_wrapper_unaligned_pointer() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
@@ -3105,8 +3102,8 @@ mod coverage_tests {
         let valid_data = [0.0f32; 4];
         let valid_ptr = valid_data.as_ptr();
 
-        // This should panic
-        wrapper(unaligned_ptr, valid_ptr);
+        // Should return max distance instead of panicking
+        assert_eq!(wrapper(unaligned_ptr, valid_ptr), f32::MAX);
     }
 
     #[test]
