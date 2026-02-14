@@ -1,9 +1,9 @@
+use aletheiadb::core::id::NodeId;
 use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
 use aletheiadb::core::temporal::time;
-use aletheiadb::core::id::NodeId;
-use aletheiadb::storage::wal::concurrent::{ConcurrentWal, ConcurrentWalConfig};
 use aletheiadb::storage::wal::WalOperation;
+use aletheiadb::storage::wal::concurrent::{ConcurrentWal, ConcurrentWalConfig};
 use tempfile::tempdir;
 
 #[test]
@@ -19,9 +19,7 @@ fn test_wal_entry_size_limit() {
     let huge_bytes = vec![0u8; size];
     let huge_prop = PropertyValue::bytes(huge_bytes);
 
-    let properties = PropertyMapBuilder::new()
-        .insert("huge", huge_prop)
-        .build();
+    let properties = PropertyMapBuilder::new().insert("huge", huge_prop).build();
 
     let op = WalOperation::CreateNode {
         node_id: NodeId::new(1).unwrap(),

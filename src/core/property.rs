@@ -1816,20 +1816,16 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
             // 10MB penalty discourages abuse.
             const RECURSION_PENALTY_SIZE: usize = 10 * 1024 * 1024;
 
-            let val_size = value
-                .serialized_size()
-                .unwrap_or(RECURSION_PENALTY_SIZE);
+            let val_size = value.serialized_size().unwrap_or(RECURSION_PENALTY_SIZE);
 
             size = size.saturating_add(key_size).saturating_add(val_size);
 
             if let Some(old_val) = map.insert(key, value) {
                 // If replaced, subtract the size of the old entry (key + value)
                 // Key size is the same since it's the same key ID
-                size = size.saturating_sub(key_size).saturating_sub(
-                    old_val
-                        .serialized_size()
-                        .unwrap_or(RECURSION_PENALTY_SIZE),
-                );
+                size = size
+                    .saturating_sub(key_size)
+                    .saturating_sub(old_val.serialized_size().unwrap_or(RECURSION_PENALTY_SIZE));
             }
         }
 
@@ -4153,7 +4149,10 @@ mod sentry_tests {
 
         // But serialization MUST fail because it re-checks depth
         let result = map.serialize();
-        assert!(result.is_err(), "Serialization should fail due to recursion limit");
+        assert!(
+            result.is_err(),
+            "Serialization should fail due to recursion limit"
+        );
 
         // Verify cached_size includes penalty
         assert!(map.serialized_size() > 10 * 1024 * 1024);
