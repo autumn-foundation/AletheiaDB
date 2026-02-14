@@ -2779,13 +2779,17 @@ mod tests {
                     prop_assert!(timeline2_entries[i-1].0 <= timeline2_entries[i].0);
                 }
 
-                // Both timelines should have the same versions at the same sorted positions
-                prop_assert_eq!(timeline1_entries.len(), timeline2_entries.len());
-                for i in 0..timeline1_entries.len() {
-                    prop_assert_eq!(timeline1_entries[i].0, timeline2_entries[i].0, "Start times should match");
-                    prop_assert_eq!(timeline1_entries[i].1, timeline2_entries[i].1, "End times should match");
-                    prop_assert_eq!(timeline1_entries[i].2, timeline2_entries[i].2, "Version IDs should match");
-                }
+                // Canonicalize order for comparison:
+                // Internal order of elements with equal start time depends on insertion order (metadata_idx),
+                // which changes when we shuffle the input. To compare sets, we must sort deterministically.
+                let mut t1_sorted = timeline1_entries.clone();
+                t1_sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+
+                let mut t2_sorted = timeline2_entries.clone();
+                t2_sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+
+                // Both timelines should have the same versions
+                prop_assert_eq!(t1_sorted, t2_sorted);
             }
 
             /// Property: Time range queries should return exactly the versions that overlap
