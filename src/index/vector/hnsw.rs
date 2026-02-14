@@ -859,12 +859,12 @@ impl VectorIndex for HnswIndex {
                     )))
                 })?;
 
-                // Release inner lock before accessing DashMap
-                drop(index);
+                // Step 4: Insert to mappings (dashmap) WHILE HOLDING inner lock
+                // This prevents Zombie Vectors (Index > Mapping) if save() interrupts.
+                // Lock Order: Inner (Write) -> Shard (Lock). Consistent with save().
 
-                // Step 4: Insert to mappings (dashmap) AFTER inner is updated
-                // Handle race: another thread may have added this NodeId while we held inner lock
-                // Use entry API to safely check for existence without overwriting (which causes Zombie Vectors)
+                // Handle race: another thread may have added this NodeId while we released Shard lock
+                // Use entry API to safely check for existence without overwriting
                 let race_detected = match self.id_mapping.entry(id) {
                     dashmap::mapref::entry::Entry::Occupied(_) => true,
                     dashmap::mapref::entry::Entry::Vacant(e) => {
@@ -879,16 +879,17 @@ impl VectorIndex for HnswIndex {
                     // Race detected: Another thread added this NodeId concurrently
                     // Our vector is in inner with key=key, but someone else claimed the ID.
                     // We must rollback our addition to avoid phantom vectors.
+                    // Since we hold inner lock, we can remove it immediately.
 
-                    // Acquire inner lock again to remove our key.
-                    // We do this AFTER releasing the id_mapping lock to minimize contention and deadlock risk.
-                    let index = self.inner.write();
                     index.remove(key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
                             "Failed to rollback vector after concurrent add: {}",
                             e
                         )))
                     })?;
+
+                    // Drop inner lock
+                    drop(index);
 
                     // The existing mapping wins; return error to indicate retry needed
                     return Err(Error::Vector(VectorError::IndexError(
@@ -899,8 +900,12 @@ impl VectorIndex for HnswIndex {
 
                 // If no race, we successfully inserted into id_mapping.
                 // Now insert reverse mapping.
-                // Note: We do this outside the id_mapping lock to reduce contention.
+                // We do this while holding inner lock to ensure full consistency.
                 self.reverse_mapping.insert(key, id);
+
+                // Drop inner lock AFTER everything is consistent
+                drop(index);
+
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
@@ -925,18 +930,28 @@ impl VectorIndex for HnswIndex {
             )));
         }
 
-        // Find the key for this NodeId
-        if let Some((_, key)) = self.id_mapping.remove(&id) {
-            self.reverse_mapping.remove(&key);
-
+        // Get the key for this NodeId (without removing it yet)
+        if let Some(key) = self.id_mapping.get(&id).map(|k| *k) {
             // Native delete in usearch
+            // Acquire inner write lock FIRST
             let index = self.inner.write();
+
             index.remove(key).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to remove vector: {}",
                     e
                 )))
             })?;
+
+            // Remove from mappings WHILE holding inner lock to ensure consistency.
+            // Safe: Lock order is Inner -> Shard.
+            // We use remove_if to handle race conditions where another thread might have updated the key.
+            // If the key in mapping is different from what we retrieved, we don't remove it.
+            self.id_mapping.remove_if(&id, |_, k| *k == key);
+            self.reverse_mapping.remove(&key);
+
+            // Drop inner lock
+            drop(index);
 
             self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
         }
@@ -1259,12 +1274,7 @@ impl HnswIndex {
         let mut writer = BufWriter::new(file);
 
         // Use Vec iterator instead of DashMap iterator
-        Self::write_mappings_to_writer(
-            &mut writer,
-            mappings.into_iter(),
-            count,
-            &self.config,
-        )?;
+        Self::write_mappings_to_writer(&mut writer, mappings.into_iter(), count, &self.config)?;
 
         // Save inner index AFTER mappings are safely on disk
         index
@@ -2992,7 +3002,7 @@ mod consistency_tests {
         thread::sleep(run_duration);
         running.store(false, Ordering::Relaxed);
 
-        let total_added = writer_handle.join().unwrap();
+        let _total_added = writer_handle.join().unwrap();
         saver_handle.join().unwrap();
 
         // Now load the index from disk
@@ -3005,14 +3015,20 @@ mod consistency_tests {
         assert!(
             mapping_count >= loaded_len,
             "Zombie vectors detected! Inner: {}, Mappings: {}. We have {} zombies.",
-            loaded_len, mapping_count, loaded_len.saturating_sub(mapping_count)
+            loaded_len,
+            mapping_count,
+            loaded_len.saturating_sub(mapping_count)
         );
     }
 
     #[test]
     fn test_add_race_condition_vacant() {
         // Trigger the "Concurrent add detected" logic in Vacant path
-        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
         let id = NodeId::new(1).unwrap();
 
         let threads = 10;
@@ -3047,7 +3063,11 @@ mod consistency_tests {
     #[test]
     fn test_add_race_condition_occupied() {
         // Trigger the retry loop in Occupied path
-        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
         let id = NodeId::new(1).unwrap();
 
         // Initial add
