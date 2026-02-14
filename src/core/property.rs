@@ -474,13 +474,9 @@ impl PropertyValue {
                 if a.len() != b.len() {
                     return false;
                 }
-                a.iter().zip(b.iter()).all(|(x, y)| {
-                    if x.is_nan() {
-                        y.is_nan()
-                    } else {
-                        x == y
-                    }
-                })
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| if x.is_nan() { y.is_nan() } else { x == y })
             }
             // For other types, fallback to PartialEq
             _ => self == other,
@@ -4584,12 +4580,21 @@ mod sentry_tests {
         // Float(NaN)
         let nan_float = PropertyValue::Float(f64::NAN);
         assert_ne!(nan_float, nan_float, "PartialEq should treat NaN != NaN");
-        assert!(nan_float.semantically_equal(&nan_float), "semantically_equal should treat NaN == NaN");
+        assert!(
+            nan_float.semantically_equal(&nan_float),
+            "semantically_equal should treat NaN == NaN"
+        );
 
         // Vector with NaN
         let nan_vec = PropertyValue::vector([1.0f32, f32::NAN, 2.0f32]);
-        assert_ne!(nan_vec, nan_vec, "PartialEq should treat vector with NaN != itself");
-        assert!(nan_vec.semantically_equal(&nan_vec), "semantically_equal should treat vector with NaN == itself");
+        assert_ne!(
+            nan_vec, nan_vec,
+            "PartialEq should treat vector with NaN != itself"
+        );
+        assert!(
+            nan_vec.semantically_equal(&nan_vec),
+            "semantically_equal should treat vector with NaN == itself"
+        );
 
         // Mixed types (just to be safe)
         let other = PropertyValue::Int(42);

@@ -2366,9 +2366,7 @@ mod sentry_tests {
         // 🔬 Verification: Delta should be empty.
 
         let nan_val = PropertyValue::Float(f64::NAN);
-        let props = PropertyMapBuilder::new()
-            .insert("val", nan_val)
-            .build();
+        let props = PropertyMapBuilder::new().insert("val", nan_val).build();
 
         let delta = PropertyDelta::from_diff(&props, &props);
         assert!(delta.is_empty(), "NaN -> NaN should result in empty delta");
