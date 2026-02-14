@@ -106,16 +106,21 @@ std::thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) static TEST_RACE_HOOK: std::sync::RwLock<Option<Box<dyn Fn(&str) + Send + Sync>>> =
-    std::sync::RwLock::new(None);
+type RaceHook = Box<dyn Fn(&str) + Send + Sync>;
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static TEST_RACE_HOOK: std::cell::RefCell<Option<RaceHook>> = const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 fn trigger_race_hook(point: &str) {
-    if let Ok(guard) = TEST_RACE_HOOK.read() {
-        if let Some(hook) = &*guard {
+    #[allow(clippy::collapsible_if)] // if let chains are unstable
+    TEST_RACE_HOOK.with(|hook_cell| {
+        if let Some(hook) = &*hook_cell.borrow() {
             hook(point);
         }
-    }
+    });
 }
 
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
@@ -2984,15 +2989,15 @@ mod race_condition_tests {
 
         // Setup the hook
         let index_clone = Arc::clone(&index);
-        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
-            *guard = Some(Box::new(move |point| {
+        TEST_RACE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |point| {
                 if point == "occupied_lock_dropped" {
                     // Remove the node while the lock is dropped
                     // This simulates another thread removing it
                     index_clone.id_mapping.remove(&node1);
                 }
             }));
-        }
+        });
 
         // Trigger the add which goes to Occupied path
         // It should encounter the race (mapping gone), loop around,
@@ -3000,9 +3005,9 @@ mod race_condition_tests {
         index.add(node1, &[0.0, 1.0, 0.0, 0.0]).unwrap();
 
         // Cleanup hook
-        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
-            *guard = None;
-        }
+        TEST_RACE_HOOK.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
 
         // Verify state
         // Inner index has 2 vectors (key 0 and key 1) because the first one became a zombie
@@ -3029,8 +3034,8 @@ mod race_condition_tests {
 
         // Setup the hook
         let index_clone = Arc::clone(&index);
-        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
-            *guard = Some(Box::new(move |point| {
+        TEST_RACE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |point| {
                 if point == "occupied_lock_dropped" {
                     // Change the mapping key to something else
                     // This simulates another thread re-adding it with a new key (unlikely but possible logic path)
@@ -3040,7 +3045,7 @@ mod race_condition_tests {
                     index_clone.reverse_mapping.insert(2, node1);
                 }
             }));
-        }
+        });
 
         // Trigger the add
         // It should detect the key mismatch, loop around, and handle it.
@@ -3051,9 +3056,9 @@ mod race_condition_tests {
         index.add(node1, &[0.0, 1.0, 0.0, 0.0]).unwrap();
 
         // Cleanup hook
-        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
-            *guard = None;
-        }
+        TEST_RACE_HOOK.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
 
         // Verify
         // Inner has key=0 and key=2.
@@ -3080,22 +3085,22 @@ mod race_condition_tests {
         // We use a counter to only trigger once to avoid infinite recursion
         let triggered = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
-            *guard = Some(Box::new(move |point| {
-                if point == "vacant_inner_added" {
-                    if !triggered.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        // Simulate another thread adding the node
-                        // We use a different key (555) to simulate another thread's allocation
-                        index_clone.id_mapping.insert(node1, 555);
-                        // Also add to reverse mapping for consistency, though add() doesn't check it during race detection
-                        index_clone.reverse_mapping.insert(555, node1);
+        TEST_RACE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |point| {
+                if point == "vacant_inner_added"
+                    && !triggered.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    // Simulate another thread adding the node
+                    // We use a different key (555) to simulate another thread's allocation
+                    index_clone.id_mapping.insert(node1, 555);
+                    // Also add to reverse mapping for consistency, though add() doesn't check it during race detection
+                    index_clone.reverse_mapping.insert(555, node1);
 
-                        // Note: we don't add to inner index here because we are mocking the race
-                        // The race detection in add() only checks id_mapping.
-                    }
+                    // Note: we don't add to inner index here because we are mocking the race
+                    // The race detection in add() only checks id_mapping.
                 }
             }));
-        }
+        });
 
         // Trigger add
         // 1. Vacant -> adds to inner (key=0) -> Hook triggers
@@ -3109,9 +3114,9 @@ mod race_condition_tests {
         // 9. Adds 555 to inner.
         index.add(node1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
-        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
-            *guard = None;
-        }
+        TEST_RACE_HOOK.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
 
         // Verify
         // Inner should have 555.
