@@ -564,4 +564,30 @@ mod tests {
         assert_eq!(collected[0], event1);
         assert_eq!(collected[1], event2);
     }
+
+    #[test]
+    #[should_panic(expected = "Observer panic!")]
+    fn test_notify_observers_propagates_panic() {
+        // 💣 Risk: A panicking observer crashes the storage operation.
+        // This test confirms the current behavior (fail-fast).
+
+        struct PanickingObserver;
+
+        impl StorageObserver for PanickingObserver {
+            fn on_event(&self, _event: &StorageEvent) -> Result<()> {
+                panic!("Observer panic!");
+            }
+        }
+
+        let observer = Arc::new(PanickingObserver);
+        let observers: Vec<Observer> = vec![observer as Observer];
+
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        notify_observers(&observers, &event);
+    }
 }

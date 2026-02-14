@@ -552,4 +552,89 @@ mod tests {
             label: "Test".to_string(),
         }
     }
+
+    #[test]
+    fn test_version_diff_nan_equality() {
+        // Setup: Create two property maps with the same key but seemingly different NaN values
+        // (IEEE 754 says NaN != NaN, but our system should treat them as "no change")
+
+        let from_props = PropertyMapBuilder::new()
+            .insert("score", PropertyValue::Float(f64::NAN))
+            .build();
+
+        let to_props = PropertyMapBuilder::new()
+            .insert("score", PropertyValue::Float(f64::NAN))
+            .build();
+
+        // Compute diff
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            test_version_id(1),
+            test_version_id(2),
+        );
+
+        // Verify: Should report NO changes
+        assert!(
+            diff.modified.is_empty(),
+            "VersionDiff should ignore NaN -> NaN 'changes' for Float"
+        );
+        assert!(!diff.has_changes(), "VersionDiff should not report changes");
+    }
+
+    #[test]
+    fn test_version_diff_vector_nan_equality() {
+        // Setup: Vector containing NaN
+        let vec_with_nan = vec![1.0, f32::NAN, 3.0];
+
+        let from_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&vec_with_nan))
+            .build();
+
+        let to_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&vec_with_nan))
+            .build();
+
+        // Compute diff
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            test_version_id(1),
+            test_version_id(2),
+        );
+
+        // Verify: Should report NO changes
+        assert!(
+            diff.modified.is_empty(),
+            "VersionDiff should ignore NaN -> NaN 'changes' for Vector"
+        );
+        assert!(!diff.has_changes(), "VersionDiff should not report changes");
+    }
+
+    #[test]
+    fn test_version_diff_null_equality() {
+        // Setup: Null -> Null
+        let from_props = PropertyMapBuilder::new()
+            .insert("data", PropertyValue::Null)
+            .build();
+
+        let to_props = PropertyMapBuilder::new()
+            .insert("data", PropertyValue::Null)
+            .build();
+
+        // Compute diff
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            test_version_id(1),
+            test_version_id(2),
+        );
+
+        // Verify
+        assert!(
+            diff.modified.is_empty(),
+            "VersionDiff should ignore Null -> Null"
+        );
+        assert!(!diff.has_changes());
+    }
 }
