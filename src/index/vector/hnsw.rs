@@ -157,7 +157,10 @@ const MAX_K: usize = 100_000;
 /// Set to 100 Million (100_000_000), which is well above reasonable single-index limits
 /// but low enough to prevent catastrophic OOM on typical servers.
 /// 100M entries * (16 bytes data + ~32 bytes DashMap overhead) ≈ 4.8GB RAM.
+#[cfg(not(test))]
 const MAX_MAPPINGS_COUNT: usize = 100_000_000;
+#[cfg(test)]
+const MAX_MAPPINGS_COUNT: usize = 100;
 
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
@@ -838,6 +841,14 @@ impl VectorIndex for HnswIndex {
                 // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
                 let index = self.inner.write();
+
+                // Security Check: Enforce maximum capacity to prevent creating indexes that cannot be loaded
+                if index.size() >= MAX_MAPPINGS_COUNT {
+                    return Err(Error::Vector(VectorError::IndexError(format!(
+                        "Index capacity exceeded (max {} vectors)",
+                        MAX_MAPPINGS_COUNT
+                    ))));
+                }
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
@@ -2861,6 +2872,40 @@ mod tests {
         // Search for k=5 to force more comparisons
         let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn test_hnsw_capacity_limit() -> Result<()> {
+        // Test that we enforce MAX_MAPPINGS_COUNT
+        // In test mode, this is set to 100
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        let limit = super::MAX_MAPPINGS_COUNT;
+
+        // Fill to capacity
+        for i in 0..limit {
+            let id = NodeId::new(i as u64 + 1).unwrap();
+            index.add(id, &[1.0, 0.0, 0.0, 0.0])?;
+        }
+
+        assert_eq!(index.len(), limit);
+
+        // Try to add one more - should fail
+        let overflow_id = NodeId::new(limit as u64 + 1).unwrap();
+        let result = index.add(overflow_id, &[1.0, 0.0, 0.0, 0.0]);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Index capacity exceeded"));
+            }
+            _ => panic!("Expected IndexError with capacity exceeded message, got {:?}", result),
+        }
+
+        // Updating existing node should still work
+        let existing_id = NodeId::new(1).unwrap();
+        index.add(existing_id, &[0.0, 1.0, 0.0, 0.0])?;
+        assert_eq!(index.len(), limit);
+
+        Ok(())
     }
 }
 
