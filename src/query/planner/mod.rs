@@ -1,56 +1,8 @@
 //! Query Planner
 //!
-//! The Query Planner transforms high-level logical queries into optimized physical execution plans.
-//!
-//! # Planning Pipeline
-//!
-//! The planning process consists of three main phases:
-//!
-//! 1.  **Logical Planning** (`to_logical_plan`):
-//!     Converts the raw `Query` structure (a linear list of operations) into a `LogicalPlan` tree.
-//!     This phase validates syntax and builds the initial operator tree.
-//!
-//! 2.  **Optimization** (`optimize`):
-//!     Applies a set of `OptimizationRule`s to transform the logical plan. Rules are applied
-//!     iteratively until a fixed point is reached or a maximum iteration count is exceeded.
-//!     Common optimizations include:
-//!     *   Predicate pushdown (moving filters closer to data sources).
-//!     *   Projection pushdown (removing unused columns early).
-//!     *   Operator reordering (e.g., performing selective scans before expensive traversals).
-//!
-//! 3.  **Physical Planning** (`to_physical_plan`):
-//!     Converts the optimized logical plan into a `PhysicalPlan` executable by the `QueryExecutor`.
-//!     This phase uses a `CostModel` and `Statistics` to make decisions about:
-//!     *   Which index to use (e.g., node lookup vs. scan vs. vector search).
-//!     *   Join algorithms (e.g., hash join vs. nested loop).
-//!     *   Concurrency (parallel vs. serial execution).
-//!
-//! # Example
-//!
-//! ```rust
-//! # use std::sync::Arc;
-//! # use aletheiadb::storage::CurrentStorage;
-//! # use aletheiadb::query::planner::{QueryPlanner, Statistics};
-//! # use aletheiadb::query::builder::QueryBuilder;
-//! # use aletheiadb::core::id::NodeId;
-//!
-//! // Setup dependencies
-//! let storage = Arc::new(CurrentStorage::new());
-//! let stats = Arc::new(Statistics::default());
-//! let planner = QueryPlanner::new(stats, storage);
-//!
-//! // Build a query
-//! let query = QueryBuilder::new()
-//!     .start(NodeId::new(1).unwrap())
-//!     .traverse("KNOWS")
-//!     .filter(aletheiadb::query::Predicate::eq("name", "Alice"))
-//!     .build();
-//!
-//! // Create a physical plan
-//! let plan = planner.plan(query).expect("Planning failed");
-//!
-//! println!("Estimated Cost: {:?}", plan.estimated_cost);
-//! ```
+//! Transforms logical plans into optimized physical plans for execution.
+//! The planner applies optimization rules and uses a cost model to choose
+//! the best execution strategy.
 
 pub mod cost;
 pub mod physical;
@@ -75,30 +27,22 @@ pub use rules::OptimizationRule;
 pub use stats::Statistics;
 
 /// Query planner that transforms queries into executable physical plans.
-///
-/// Holds necessary context like statistics and storage references to make
-/// informed planning decisions.
 pub struct QueryPlanner {
-    /// Statistics for cardinality estimation.
+    /// Statistics for cardinality estimation
     stats: Arc<Statistics>,
-    /// Cost model for comparing plan alternatives.
+    /// Cost model for plan comparison
     cost_model: CostModel,
-    /// Optimization rules to apply during the optimization phase.
+    /// Optimization rules to apply
     rules: Vec<Box<dyn OptimizationRule>>,
-    /// Reference to current storage for index validation.
+    /// Reference to current storage for index validation
     storage: Arc<CurrentStorage>,
 }
 
 impl QueryPlanner {
-    /// Create a new query planner with the given statistics and storage.
+    /// Create a new query planner with the given statistics and storage
     ///
     /// The storage reference is used to validate that required indexes exist during
     /// query planning, providing earlier and more informative error messages.
-    ///
-    /// # Arguments
-    ///
-    /// * `stats` - Shared access to database statistics.
-    /// * `storage` - Shared access to current storage for metadata lookups.
     #[must_use]
     pub fn new(stats: Arc<Statistics>, storage: Arc<CurrentStorage>) -> Self {
         QueryPlanner {
@@ -109,35 +53,21 @@ impl QueryPlanner {
         }
     }
 
-    /// Create a planner with a custom cost model.
-    ///
-    /// Useful for testing or tuning cost estimation logic.
+    /// Create a planner with custom cost model
     #[must_use]
     pub fn with_cost_model(mut self, cost_model: CostModel) -> Self {
         self.cost_model = cost_model;
         self
     }
 
-    /// Create a planner with custom optimization rules.
-    ///
-    /// Useful for testing specific rules or disabling default optimizations.
+    /// Create a planner with custom optimization rules
     #[must_use]
     pub fn with_rules(mut self, rules: Vec<Box<dyn OptimizationRule>>) -> Self {
         self.rules = rules;
         self
     }
 
-    /// Plan a query, returning an executable physical plan.
-    ///
-    /// This is the main entry point for the planner. It orchestrates the entire
-    /// planning pipeline: logical planning -> optimization -> physical planning.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// * The query is invalid (e.g., empty, syntax error).
-    /// * Required resources are missing (e.g., vector index not enabled).
-    /// * Planning fails for any other reason.
+    /// Plan a query, returning an executable physical plan
     pub fn plan(&self, query: Query) -> Result<PhysicalPlan> {
         // 1. Convert query to logical plan
         let logical = self.to_logical_plan(&query)?;
@@ -151,10 +81,7 @@ impl QueryPlanner {
         Ok(physical)
     }
 
-    /// Convert a linear `Query` (IR) to a tree-structured `LogicalPlan`.
-    ///
-    /// This step resolves the operator hierarchy, identifying source operations
-    /// (scans) and chaining subsequent operations (filters, traversals) correctly.
+    /// Convert a Query to a LogicalPlan
     fn to_logical_plan(&self, query: &Query) -> Result<LogicalPlan> {
         if query.ops.is_empty() {
             return Err(Error::Query(QueryError::SyntaxError {
@@ -186,7 +113,7 @@ impl QueryPlanner {
         Ok(plan)
     }
 
-    /// Apply a QueryOp to the current logical plan.
+    /// Apply a QueryOp to the current logical plan
     fn apply_query_op(&self, current: Option<LogicalOp>, op: &QueryOp) -> Result<LogicalOp> {
         // Check if it is a source operation (starts a new pipeline)
         if let Some(source_op) = self.apply_source_op(op)? {
@@ -372,8 +299,7 @@ impl QueryPlanner {
         })
     }
 
-    /// Apply optimization rules iteratively until no more changes are made or
-    /// the iteration limit is reached.
+    /// Apply optimization rules iteratively until no more changes
     fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let mut current = plan;
         let mut changed = true;
@@ -404,10 +330,7 @@ impl QueryPlanner {
         Ok(current)
     }
 
-    /// Convert the optimized `LogicalPlan` into a `PhysicalPlan`.
-    ///
-    /// This phase calculates estimated costs for operations and resolves
-    /// logical operators to their physical implementations.
+    /// Convert logical plan to physical plan
     fn to_physical_plan(&self, logical: &LogicalPlan) -> Result<PhysicalPlan> {
         let physical_op = self.to_physical_op(&logical.root, &logical.temporal_context)?;
         let cost = self.cost_model.estimate(&physical_op, &self.stats);

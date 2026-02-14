@@ -540,7 +540,7 @@ impl HistoricalStorage {
         // For tombstones, close the valid_time at valid_from to create an empty interval [valid_from, valid_from)
         // This represents "entity is no longer valid starting from this point"
         if is_tombstone {
-            temporal = temporal.close_valid_time(valid_from);
+            temporal = temporal.close_valid_time(valid_from)?;
         }
 
         // Check capacity limit using cached count (O(1) operation, DoS protection)
@@ -631,7 +631,7 @@ impl HistoricalStorage {
             // Capture the intervals before modification for temporal index update
             let old_temporal = *prev.temporal();
 
-            Self::close_previous_version_intervals(prev, version_id, &temporal);
+            Self::close_previous_version_intervals(prev, version_id, &temporal)?;
 
             // Update temporal indexes to reflect the closed intervals (Issue #209)
             if let Some(ref indexes) = self.temporal_indexes {
@@ -734,7 +734,7 @@ impl HistoricalStorage {
         // For tombstones, close the valid_time at valid_from to create an empty interval [valid_from, valid_from)
         // This represents "entity is no longer valid starting from this point"
         if is_tombstone {
-            temporal = temporal.close_valid_time(valid_from);
+            temporal = temporal.close_valid_time(valid_from)?;
         }
 
         // Check capacity limit using cached count (O(1) operation, DoS protection)
@@ -837,7 +837,7 @@ impl HistoricalStorage {
             // Capture the intervals before modification for temporal index update
             let old_temporal = *prev.temporal();
 
-            Self::close_previous_version_intervals(prev, version_id, &temporal);
+            Self::close_previous_version_intervals(prev, version_id, &temporal)?;
 
             // Update temporal indexes to reflect the closed intervals (Issue #209)
             if let Some(ref indexes) = self.temporal_indexes {
@@ -1709,7 +1709,7 @@ impl HistoricalStorage {
         let node_id = version.node_id;
 
         // Use TemporalVersion trait method
-        version.close_transaction_time(end_timestamp);
+        version.close_transaction_time(end_timestamp)?;
 
         // Update temporal index to reflect the closed interval (Issue #209)
         if let Some(ref indexes) = self.temporal_indexes {
@@ -1739,7 +1739,7 @@ impl HistoricalStorage {
         let target = version.target;
 
         // Use TemporalVersion trait method
-        version.close_transaction_time(end_timestamp);
+        version.close_transaction_time(end_timestamp)?;
 
         // Update temporal index to reflect the closed interval (Issue #209)
         if let Some(ref indexes) = self.temporal_indexes {
@@ -2398,7 +2398,7 @@ impl HistoricalStorage {
         prev_version: &mut V,
         new_version_id: VersionId,
         new_temporal: &BiTemporalInterval,
-    ) {
+    ) -> Result<()> {
         prev_version.set_next_version(Some(new_version_id));
 
         // Work on a local copy, apply modifications, then write back
@@ -2407,17 +2407,18 @@ impl HistoricalStorage {
         if prev_temporal.is_currently_valid()
             && new_temporal.valid_time().start() > prev_temporal.valid_time().start()
         {
-            prev_temporal = prev_temporal.close_valid_time(new_temporal.valid_time().start());
+            prev_temporal = prev_temporal.close_valid_time(new_temporal.valid_time().start())?;
         }
 
         if prev_temporal.is_currently_recorded()
             && new_temporal.transaction_time().start() > prev_temporal.transaction_time().start()
         {
             prev_temporal =
-                prev_temporal.close_transaction_time(new_temporal.transaction_time().start());
+                prev_temporal.close_transaction_time(new_temporal.transaction_time().start())?;
         }
 
         *prev_version.temporal_mut() = prev_temporal;
+        Ok(())
     }
 
     /// Extract version metadata and data for copy-out reconstruction (nodes).

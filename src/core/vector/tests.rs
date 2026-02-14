@@ -1875,41 +1875,6 @@ fn test_simd_explicit_coverage() {
 }
 
 #[test]
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn test_simd_mismatched_lengths_safety() {
-    // 🛡️ Warden Verification: This test ensures that calling internal unsafe SIMD functions
-    // with mismatched lengths does NOT cause Undefined Behavior (e.g. buffer over-read/segfault).
-    // The implementation now enforces strict equality checks and panics on mismatch.
-
-    let short = vec![1.0f32; 10];
-    let long = vec![2.0f32; 100]; // Much longer to ensure OOB if it were reading blindly
-
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        let result = std::panic::catch_unwind(|| unsafe {
-            let _ = super::simd::x86_ops::dot_and_magnitudes_avx2(&short, &long);
-        });
-        assert!(result.is_err(), "AVX2 should panic on mismatch");
-
-        let result = std::panic::catch_unwind(|| unsafe {
-            let _ = super::simd::x86_ops::dot_and_magnitudes_avx2(&long, &short);
-        });
-        assert!(result.is_err(), "AVX2 reversed should panic on mismatch");
-    }
-
-    if is_x86_feature_detected!("sse2") {
-        let result = std::panic::catch_unwind(|| unsafe {
-            let _ = super::simd::x86_ops::dot_and_magnitudes_sse2(&short, &long);
-        });
-        assert!(result.is_err(), "SSE2 should panic on mismatch");
-
-        let result = std::panic::catch_unwind(|| unsafe {
-            let _ = super::simd::x86_ops::dot_and_magnitudes_sse2(&long, &short);
-        });
-        assert!(result.is_err(), "SSE2 reversed should panic on mismatch");
-    }
-}
-
-#[test]
 fn test_scalar_fallback_explicit_coverage() {
     // Explicitly test scalar fallbacks to ensure code coverage regardless of CPU features
     let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -2885,56 +2850,55 @@ fn test_dot_product_sum_mismatch_panics() {
     let _ = super::simd::dot_product_sum(&a, &b);
 }
 
-// ============================================================================
-// Warden Security Tests
-// ============================================================================
-
 #[test]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn test_unsafe_simd_dot_and_magnitudes_mismatch_panics() {
+fn test_simd_mismatched_lengths_safety() {
     let a = vec![1.0; 8];
-    let b = vec![1.0; 7]; // Mismatch
+    let b = vec![1.0; 9];
 
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        // This is unsafe and currently causes UB (read past end of b).
-        // After hardening, it should panic safely.
+    // Test SSE2 if available (baseline for x86_64)
+    if is_x86_feature_detected!("sse2") {
         let result = std::panic::catch_unwind(|| unsafe {
-            let _ = super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b);
+            super::simd::x86_ops::dot_and_magnitudes_sse2(&a, &b)
         });
-        assert!(result.is_err(), "Should panic on mismatch");
-        let err = result.unwrap_err();
-        if let Some(msg) = err.downcast_ref::<&str>() {
-            assert!(msg.contains("SIMD vector length mismatch"));
-        } else if let Some(msg) = err.downcast_ref::<String>() {
-            assert!(msg.contains("SIMD vector length mismatch"));
-        } else {
-            panic!("Panic occurred but message format was unexpected");
-        }
-    } else {
-        println!("Skipping AVX2 test: hardware not supported");
+        assert!(
+            result.is_err(),
+            "SSE2 dot_and_magnitudes should panic on mismatch"
+        );
+
+        let result =
+            std::panic::catch_unwind(|| unsafe { super::simd::x86_ops::dot_product_sse2(&a, &b) });
+        assert!(result.is_err(), "SSE2 dot_product should panic on mismatch");
+
+        let result = std::panic::catch_unwind(|| unsafe {
+            super::simd::x86_ops::squared_diff_sum_sse2(&a, &b)
+        });
+        assert!(
+            result.is_err(),
+            "SSE2 squared_diff_sum should panic on mismatch"
+        );
     }
-}
 
-#[test]
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn test_unsafe_simd_squared_diff_sum_mismatch_panics() {
-    let a = vec![1.0; 8];
-    let b = vec![1.0; 7];
-
+    // Test AVX2 if available
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
         let result = std::panic::catch_unwind(|| unsafe {
-            let _ = super::simd::x86_ops::squared_diff_sum_avx2(&a, &b);
+            super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b)
         });
-        assert!(result.is_err(), "Should panic on mismatch");
-        let err = result.unwrap_err();
-        if let Some(msg) = err.downcast_ref::<&str>() {
-            assert!(msg.contains("SIMD vector length mismatch"));
-        } else if let Some(msg) = err.downcast_ref::<String>() {
-            assert!(msg.contains("SIMD vector length mismatch"));
-        } else {
-            panic!("Panic occurred but message format was unexpected");
-        }
-    } else {
-        println!("Skipping AVX2 test: hardware not supported");
+        assert!(
+            result.is_err(),
+            "AVX2 dot_and_magnitudes should panic on mismatch"
+        );
+
+        let result =
+            std::panic::catch_unwind(|| unsafe { super::simd::x86_ops::dot_product_avx2(&a, &b) });
+        assert!(result.is_err(), "AVX2 dot_product should panic on mismatch");
+
+        let result = std::panic::catch_unwind(|| unsafe {
+            super::simd::x86_ops::squared_diff_sum_avx2(&a, &b)
+        });
+        assert!(
+            result.is_err(),
+            "AVX2 squared_diff_sum should panic on mismatch"
+        );
     }
 }

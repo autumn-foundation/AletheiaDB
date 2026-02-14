@@ -4,6 +4,9 @@
 //! They are gated behind the `nova` feature flag.
 
 #[cfg(feature = "nova")]
+/// Ariadne: Semantic Thread Weaver.
+pub mod ariadne;
+#[cfg(feature = "nova")]
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
 #[cfg(feature = "nova")]
@@ -28,11 +31,17 @@ pub mod graph_context;
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
 #[cfg(feature = "nova")]
+/// Prism: Semantic Spectroscopy for Vectors.
+pub mod prism;
+#[cfg(feature = "nova")]
 /// Prophet Link Prediction Engine.
 pub mod prophet;
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
+#[cfg(feature = "nova")]
+/// Sherlock: Temporal Pattern Matching Engine.
+pub mod sherlock;
 #[cfg(feature = "nova")]
 /// Temporal Diff Engine for computing snapshot differences.
 pub mod temporal_diff;

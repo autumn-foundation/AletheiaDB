@@ -33,28 +33,26 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
-        assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         unsafe {
-            // Sentry Hardening: Slice to common length to ensure robust iterator zip behavior
-            // even if caller violates length equality invariant.
-            let len = a.len().min(b.len());
-            let a = &a[..len];
-            let b = &b[..len];
-
-            let a_chunks = a.chunks_exact(8);
-            let b_chunks = b.chunks_exact(8);
-            let a_rem = a_chunks.remainder();
-            let b_rem = b_chunks.remainder();
+            let len = a.len();
+            let chunks = len / 8;
+            let remainder = len % 8;
 
             // Accumulators for 8 floats at a time
             let mut dot_acc = _mm256_setzero_ps();
             let mut mag_a_acc = _mm256_setzero_ps();
             let mut mag_b_acc = _mm256_setzero_ps();
 
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
             // Process 8 floats at a time
-            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
-                let va = _mm256_loadu_ps(va_chunk.as_ptr());
-                let vb = _mm256_loadu_ps(vb_chunk.as_ptr());
+            for i in 0..chunks {
+                let offset = i * 8;
+                let va = _mm256_loadu_ps(a_ptr.add(offset));
+                let vb = _mm256_loadu_ps(b_ptr.add(offset));
 
                 // Fused multiply-add for dot product and magnitudes
                 dot_acc = _mm256_fmadd_ps(va, vb, dot_acc);
@@ -68,11 +66,16 @@ pub(crate) mod x86_ops {
             let mag_b = horizontal_sum_avx(mag_b_acc);
 
             // Handle remainder with safe scalar operations.
+            // Using safe indexing here as the compiler optimizes away bounds checks
+            // when the loop bound is known to be < 8 (the chunk size).
             let mut dot_rem = 0.0f32;
             let mut mag_a_rem = 0.0f32;
             let mut mag_b_rem = 0.0f32;
 
-            for (ai, bi) in a_rem.iter().zip(b_rem.iter()) {
+            let start = chunks * 8;
+            for i in 0..remainder {
+                let ai = a[start + i];
+                let bi = b[start + i];
                 dot_rem += ai * bi;
                 mag_a_rem += ai * ai;
                 mag_b_rem += bi * bi;
@@ -106,27 +109,26 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_sse2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
-        assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         unsafe {
-            // Sentry Hardening: Slice to common length
-            let len = a.len().min(b.len());
-            let a = &a[..len];
-            let b = &b[..len];
-
-            let a_chunks = a.chunks_exact(4);
-            let b_chunks = b.chunks_exact(4);
-            let a_rem = a_chunks.remainder();
-            let b_rem = b_chunks.remainder();
+            let len = a.len();
+            let chunks = len / 4;
+            let remainder = len % 4;
 
             // Accumulators for 4 floats at a time
             let mut dot_acc = _mm_setzero_ps();
             let mut mag_a_acc = _mm_setzero_ps();
             let mut mag_b_acc = _mm_setzero_ps();
 
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
             // Process 4 floats at a time
-            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
-                let va = _mm_loadu_ps(va_chunk.as_ptr());
-                let vb = _mm_loadu_ps(vb_chunk.as_ptr());
+            for i in 0..chunks {
+                let offset = i * 4;
+                let va = _mm_loadu_ps(a_ptr.add(offset));
+                let vb = _mm_loadu_ps(b_ptr.add(offset));
 
                 // Multiply and accumulate
                 dot_acc = _mm_add_ps(dot_acc, _mm_mul_ps(va, vb));
@@ -140,11 +142,16 @@ pub(crate) mod x86_ops {
             let mag_b = horizontal_sum_sse(mag_b_acc);
 
             // Handle remainder with safe scalar operations.
+            // Using safe indexing here as the compiler optimizes away bounds checks
+            // when the loop bound is known to be < 4 (the chunk size).
             let mut dot_rem = 0.0f32;
             let mut mag_a_rem = 0.0f32;
             let mut mag_b_rem = 0.0f32;
 
-            for (ai, bi) in a_rem.iter().zip(b_rem.iter()) {
+            let start = chunks * 4;
+            for i in 0..remainder {
+                let ai = a[start + i];
+                let bi = b[start + i];
                 dot_rem += ai * bi;
                 mag_a_rem += ai * ai;
                 mag_b_rem += bi * bi;
@@ -180,14 +187,11 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
-            let len = a.len().min(b.len());
-            let a = &a[..len];
-            let b = &b[..len];
-
             let a_chunks = a.chunks_exact(8);
             let b_chunks = b.chunks_exact(8);
             let a_rem = a_chunks.remainder();
@@ -229,14 +233,11 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
-            let len = a.len().min(b.len());
-            let a = &a[..len];
-            let b = &b[..len];
-
             let a_chunks = a.chunks_exact(4);
             let b_chunks = b.chunks_exact(4);
             let a_rem = a_chunks.remainder();
@@ -275,27 +276,27 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn squared_diff_sum_avx2(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
-            let len = a.len().min(b.len());
-            let a = &a[..len];
-            let b = &b[..len];
-
-            let a_chunks = a.chunks_exact(8);
-            let b_chunks = b.chunks_exact(8);
-            let a_rem = a_chunks.remainder();
-            let b_rem = b_chunks.remainder();
+            let len = a.len();
+            let chunks = len / 8;
+            let remainder = len % 8;
 
             // Accumulator for 8 floats at a time
             let mut acc = _mm256_setzero_ps();
 
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
             // Process 8 floats at a time
-            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
-                let va = _mm256_loadu_ps(va_chunk.as_ptr());
-                let vb = _mm256_loadu_ps(vb_chunk.as_ptr());
+            for i in 0..chunks {
+                let offset = i * 8;
+                let va = _mm256_loadu_ps(a_ptr.add(offset));
+                let vb = _mm256_loadu_ps(b_ptr.add(offset));
 
                 // Compute difference
                 let diff = _mm256_sub_ps(va, vb);
@@ -308,8 +309,9 @@ pub(crate) mod x86_ops {
             let mut sum = horizontal_sum_avx(acc);
 
             // Handle remainder with scalar operations
-            for (ai, bi) in a_rem.iter().zip(b_rem.iter()) {
-                let diff = ai - bi;
+            let start = chunks * 8;
+            for i in 0..remainder {
+                let diff = a[start + i] - b[start + i];
                 sum += diff * diff;
             }
 
@@ -326,27 +328,27 @@ pub(crate) mod x86_ops {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn squared_diff_sum_sse2(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len(), "SIMD vector length mismatch");
+        // Warden: Enforce length equality to prevent buffer over-reads
+        assert_eq!(a.len(), b.len());
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
-            let len = a.len().min(b.len());
-            let a = &a[..len];
-            let b = &b[..len];
-
-            let a_chunks = a.chunks_exact(4);
-            let b_chunks = b.chunks_exact(4);
-            let a_rem = a_chunks.remainder();
-            let b_rem = b_chunks.remainder();
+            let len = a.len();
+            let chunks = len / 4;
+            let remainder = len % 4;
 
             // Accumulator for 4 floats at a time
             let mut acc = _mm_setzero_ps();
 
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
             // Process 4 floats at a time
-            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
-                let va = _mm_loadu_ps(va_chunk.as_ptr());
-                let vb = _mm_loadu_ps(vb_chunk.as_ptr());
+            for i in 0..chunks {
+                let offset = i * 4;
+                let va = _mm_loadu_ps(a_ptr.add(offset));
+                let vb = _mm_loadu_ps(b_ptr.add(offset));
 
                 // Compute difference
                 let diff = _mm_sub_ps(va, vb);
@@ -359,8 +361,9 @@ pub(crate) mod x86_ops {
             let mut sum = horizontal_sum_sse(acc);
 
             // Handle remainder with scalar operations
-            for (ai, bi) in a_rem.iter().zip(b_rem.iter()) {
-                let diff = ai - bi;
+            let start = chunks * 4;
+            for i in 0..remainder {
+                let diff = a[start + i] - b[start + i];
                 sum += diff * diff;
             }
 

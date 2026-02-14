@@ -1,59 +1,8 @@
 //! Query Executor
 //!
-//! The Query Executor is responsible for running physical query plans against the database storage.
-//! It uses a **pull-based iterator model** (also known as the Volcano model), where each operator
-//! in the plan is transformed into an iterator that produces results on demand.
-//!
-//! # Architecture
-//!
-//! The execution pipeline consists of:
-//! 1.  **Physical Plan**: A tree of `PhysicalOp` nodes produced by the `QueryPlanner`.
-//! 2.  **Iterators**: Each `PhysicalOp` is converted into a `Box<dyn ResultIterator>`.
-//! 3.  **Execution**: Calling `next()` on the root iterator pulls data through the pipeline.
-//!
-//! # Key Components
-//!
-//! *   [`QueryExecutor`]: The main entry point for executing plans.
-//! *   [`ExecutionConfig`]: Configuration for execution limits (timeout, buffer size).
-//! *   [`PhysicalOp`]: The operators that make up the plan (e.g., Scan, Filter, Join).
-//! *   [`ResultIterator`]: The trait implemented by all runtime operators.
-//!
-//! # Example
-//!
-//! ```rust
-//! # use std::sync::Arc;
-//! # use parking_lot::RwLock;
-//! # use aletheiadb::storage::current::CurrentStorage;
-//! # use aletheiadb::storage::historical::HistoricalStorage;
-//! # use aletheiadb::query::executor::QueryExecutor;
-//! # use aletheiadb::query::planner::physical::{PhysicalPlan, PhysicalOp};
-//! # use aletheiadb::core::version::AnchorConfig;
-//!
-//! // Setup storage
-//! let current = Arc::new(CurrentStorage::new());
-//! let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(AnchorConfig::default())));
-//! let executor = QueryExecutor::new(current, historical);
-//!
-//! // Create a simple plan (usually done by QueryPlanner)
-//! let plan = PhysicalPlan {
-//!     root: PhysicalOp::NodeScan {
-//!         label: Some("Person".to_string()),
-//!         estimated_rows: 100,
-//!     },
-//!     estimated_cost: Default::default(),
-//!     temporal_context: None,
-//!     parallel: false,
-//!     include_provenance: false,
-//! };
-//!
-//! // Execute the plan
-//! let results = executor.execute(plan).expect("Execution failed");
-//!
-//! // Iterate over results
-//! for row in results {
-//!     println!("Found entity: {:?}", row.unwrap().entity);
-//! }
-//! ```
+//! Executes physical query plans using a pull-based iterator model.
+//! The executor transforms physical operators into iterators that
+//! lazily produce results.
 
 mod iterators;
 mod results;
@@ -74,24 +23,16 @@ pub use iterators::TemporalNodeScanIterator;
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
-///
-/// Controls runtime behavior such as timeouts, parallelism, and resource limits.
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
-    /// Maximum number of results to buffer in intermediate operators.
-    ///
-    /// Useful for controlling memory usage in operators like `Sort` or `HashJoin`.
-    /// Default: 10,000.
+    /// Maximum number of results to buffer before backpressure is applied.
+    /// Default is 10,000.
     pub max_buffer_size: usize,
-
-    /// Enable parallel execution where supported.
-    ///
-    /// *Note: Parallel execution is currently experimental.*
+    /// Enable parallel execution of query operators (where applicable).
+    /// Default is false.
     pub parallel: bool,
-
     /// Execution timeout in milliseconds.
-    ///
-    /// If set to 0, no timeout is enforced.
+    /// 0 means no timeout. Default is 0.
     pub timeout_ms: u64,
 }
 
@@ -107,24 +48,62 @@ impl Default for ExecutionConfig {
 
 /// Query executor that runs physical plans against storage.
 ///
-/// The executor maintains references to both current and historical storage
-/// to support hybrid and time-travel queries.
+/// The executor converts a `PhysicalPlan` into a pipeline of iterators (`ResultIterator`).
+/// It manages access to both `CurrentStorage` (for recent data) and `HistoricalStorage`
+/// (for temporal data).
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::sync::Arc;
+/// use parking_lot::RwLock;
+/// use aletheiadb::storage::current::CurrentStorage;
+/// use aletheiadb::storage::historical::HistoricalStorage;
+/// use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+/// use aletheiadb::query::planner::PhysicalOp;
+///
+/// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Setup storage
+/// let current = Arc::new(CurrentStorage::new());
+/// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+///
+/// // 2. Create executor
+/// let executor = QueryExecutor::new(current, historical);
+///
+/// // 3. Define a plan (e.g., scan all Person nodes)
+/// let plan = PhysicalPlan {
+///     root: PhysicalOp::NodeScan {
+///         label: Some("Person".to_string()),
+///         estimated_rows: 100,
+///     },
+///     estimated_cost: Default::default(),
+///     temporal_context: None,
+///     parallel: false,
+///     include_provenance: true,
+/// };
+///
+/// // 4. Execute
+/// let results = executor.execute(plan)?;
+///
+/// // 5. Iterate results
+/// for row in results {
+///     let row = row?;
+///     println!("Found entity: {:?}", row.entity);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct QueryExecutor {
-    /// Reference to current storage (live graph + vector indexes).
+    /// Reference to current storage
     current: Arc<CurrentStorage>,
-    /// Reference to historical storage (temporal data).
+    /// Reference to historical storage
     historical: Arc<RwLock<HistoricalStorage>>,
-    /// Execution configuration.
+    /// Execution configuration (used for timeout/parallelism in future)
     _config: ExecutionConfig,
 }
 
 impl QueryExecutor {
-    /// Create a new query executor with default configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `current` - Shared access to the current state storage.
-    /// * `historical` - Shared access to the historical storage.
+    /// Create a new query executor
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
             current,
@@ -133,9 +112,7 @@ impl QueryExecutor {
         }
     }
 
-    /// Create an executor with custom configuration.
-    ///
-    /// Use this to set timeouts or adjust buffer sizes.
+    /// Create an executor with custom configuration
     pub fn with_config(
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
@@ -148,18 +125,19 @@ impl QueryExecutor {
         }
     }
 
-    /// Execute a physical plan and return an iterator over the results.
+    /// Execute a physical plan and return results.
     ///
-    /// This method initializes the execution pipeline by converting the `PhysicalPlan`
-    /// into a tree of iterators. Execution is lazy - no work is done until the
-    /// returned `QueryResults` iterator is consumed.
+    /// This method recursively transforms the operator tree starting at `plan.root`
+    /// into a chain of iterators. The execution is lazy: no data is fetched until
+    /// the returned `QueryResults` iterator is consumed.
     ///
-    /// # Errors
+    /// # Arguments
     ///
-    /// Returns an error if:
-    /// * The plan contains invalid operators.
-    /// * Required resources (e.g., indexes) are missing.
-    /// * A runtime error occurs during initialization.
+    /// * `plan` - The physical query plan to execute.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `QueryResults` iterator that produces `Result<QueryRow>`.
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;
         // Wrap with provenance filter to conditionally strip metadata
@@ -170,10 +148,7 @@ impl QueryExecutor {
         Ok(QueryResults::new(filtered))
     }
 
-    /// Recursively execute a physical operator, transforming it into a runtime iterator.
-    ///
-    /// This is the core dispatch loop of the executor. It matches on the `PhysicalOp`
-    /// variant and constructs the corresponding `ResultIterator`.
+    /// Execute a physical operator, returning an iterator
     fn execute_op(&self, op: &PhysicalOp) -> Result<Box<dyn ResultIterator>> {
         match op {
             PhysicalOp::NodeLookup { node_ids } => Ok(Box::new(

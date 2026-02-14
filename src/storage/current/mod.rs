@@ -1250,6 +1250,41 @@ impl CurrentStorage {
         self.run_vector_search(&index, embedding, k, Some(label), None)
     }
 
+    /// Find k most similar nodes with a custom predicate.
+    ///
+    /// This allows filtering candidates based on arbitrary criteria (e.g., property values).
+    /// The predicate is called for each candidate node. If it returns true, the node is included.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property with the vector index to search
+    /// * `query` - The query embedding vector
+    /// * `k` - Maximum number of results to return
+    /// * `predicate` - A closure that takes a `NodeId` and returns `true` if the node should be included
+    pub fn find_similar_with_predicate<F>(
+        &self,
+        property_name: &str,
+        query: &[f32],
+        k: usize,
+        predicate: F,
+    ) -> Result<Vec<(NodeId, f32)>>
+    where
+        F: Fn(&NodeId) -> bool + Send + Sync,
+    {
+        let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
+
+        if query.len() != config.dimensions {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::DimensionMismatch {
+                    expected: config.dimensions,
+                    actual: query.len(),
+                },
+            ));
+        }
+
+        index.search_with_filter(query, k, predicate)
+    }
+
     // ========================================================================
     // Multi-Property Vector Search Methods (Issue #389)
     // ========================================================================
