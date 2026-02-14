@@ -105,6 +105,19 @@ std::thread_local! {
     pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+pub(crate) static TEST_RACE_HOOK: std::sync::RwLock<Option<Box<dyn Fn(&str) + Send + Sync>>> =
+    std::sync::RwLock::new(None);
+
+#[cfg(test)]
+fn trigger_race_hook(point: &str) {
+    if let Ok(guard) = TEST_RACE_HOOK.read() {
+        if let Some(hook) = &*guard {
+            hook(point);
+        }
+    }
+}
+
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
 /// This ensures the flag is always reset, even if the callback panics.
 pub(crate) struct FilterCallbackGuard {
@@ -772,6 +785,9 @@ impl VectorIndex for HnswIndex {
                     // inner lock and then request map lock.
                     drop(entry);
 
+                    #[cfg(test)]
+                    trigger_race_hook("occupied_lock_dropped");
+
                     let index = self.inner.write();
 
                     // CRITICAL: Re-verify mapping under inner lock to prevent Zombie Vectors
@@ -884,6 +900,9 @@ impl VectorIndex for HnswIndex {
 
                     // Release inner lock before accessing DashMap
                     drop(index);
+
+                    #[cfg(test)]
+                    trigger_race_hook("vacant_inner_added");
 
                     // Step 4: Insert to mappings (dashmap) AFTER inner is updated
                     // Handle race: another thread may have added this NodeId while we held inner lock
@@ -2943,5 +2962,155 @@ mod coverage_tests {
 
         drop(guard);
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
+    }
+}
+
+#[cfg(test)]
+mod race_condition_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_add_race_retry_coverage() {
+        // This test simulates a race condition where the mapping is removed
+        // after the lock is dropped in the Occupied path.
+        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Setup the hook
+        let index_clone = Arc::clone(&index);
+        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
+            *guard = Some(Box::new(move |point| {
+                if point == "occupied_lock_dropped" {
+                    // Remove the node while the lock is dropped
+                    // This simulates another thread removing it
+                    index_clone.id_mapping.remove(&node1);
+                }
+            }));
+        }
+
+        // Trigger the add which goes to Occupied path
+        // It should encounter the race (mapping gone), loop around,
+        // find Vacant (since we removed it), and add it again.
+        index.add(node1, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+
+        // Cleanup hook
+        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
+            *guard = None;
+        }
+
+        // Verify state
+        // Inner index has 2 vectors (key 0 and key 1) because the first one became a zombie
+        // when we manually removed it from the map.
+        assert_eq!(index.len(), 2);
+        // But map only has 1 entry
+        assert_eq!(index.id_mapping.len(), 1);
+
+        let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1).unwrap();
+        assert_eq!(results[0].0, node1);
+    }
+
+    #[test]
+    fn test_add_race_retry_value_change_coverage() {
+        // This test simulates a race where the mapping VALUE changes (different key)
+        // after the lock is dropped in the Occupied path.
+        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Setup the hook
+        let index_clone = Arc::clone(&index);
+        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
+            *guard = Some(Box::new(move |point| {
+                if point == "occupied_lock_dropped" {
+                    // Change the mapping key to something else
+                    // This simulates another thread re-adding it with a new key (unlikely but possible logic path)
+                    // Use a small key (2) to avoid potential capacity issues with huge gaps in usearch
+                    index_clone.id_mapping.insert(node1, 2);
+                    // Also update reverse mapping for consistency so search can find it
+                    index_clone.reverse_mapping.insert(2, node1);
+                }
+            }));
+        }
+
+        // Trigger the add
+        // It should detect the key mismatch, loop around, and handle it.
+        // Note: The loop will see Occupied again, but this time it will use the NEW key (2)
+        // because we updated the map.
+        // However, key 2 doesn't exist in inner index, so index.contains(2) will be false,
+        // so it won't try to remove it, it will just add/overwrite.
+        index.add(node1, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+
+        // Cleanup hook
+        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
+            *guard = None;
+        }
+
+        // Verify
+        // Inner has key=0 and key=2.
+        assert_eq!(index.len(), 2);
+
+        // Search for 0.0... should find node1 (via key 2).
+        let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1).unwrap();
+        assert!(!results.is_empty(), "Search returned no results");
+        assert_eq!(results[0].0, node1);
+    }
+
+    #[test]
+    fn test_vacant_race_rollback_coverage() {
+        // This test simulates a race in Vacant path where someone else claims the ID
+        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+        let node1 = NodeId::new(1).unwrap();
+
+        // Setup the hook
+        let index_clone = Arc::clone(&index);
+        // We use a counter to only trigger once to avoid infinite recursion
+        let triggered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
+            *guard = Some(Box::new(move |point| {
+                if point == "vacant_inner_added" {
+                    if !triggered.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        // Simulate another thread adding the node
+                        // We use a different key (555) to simulate another thread's allocation
+                        index_clone.id_mapping.insert(node1, 555);
+                        // Also add to reverse mapping for consistency, though add() doesn't check it during race detection
+                        index_clone.reverse_mapping.insert(555, node1);
+
+                        // Note: we don't add to inner index here because we are mocking the race
+                        // The race detection in add() only checks id_mapping.
+                    }
+                }
+            }));
+        }
+
+        // Trigger add
+        // 1. Vacant -> adds to inner (key=0) -> Hook triggers
+        // 2. Hook inserts 555 to map
+        // 3. Main thread resumes, tries insert(node1, 0).
+        // 4. Map has 555 (Occupied). Race detected!
+        // 5. Main thread removes its key (0) from inner (rollback) and continues loop.
+        // 6. Loop -> Occupied (555).
+        // 7. Proceed to add/update 555.
+        // 8. index.contains(555) -> False (hook didn't add to inner).
+        // 9. Adds 555 to inner.
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        if let Ok(mut guard) = TEST_RACE_HOOK.write() {
+            *guard = None;
+        }
+
+        // Verify
+        // Inner should have 555.
+        // Key 0 should be gone (rollback).
+        // Map should point to 555.
+
+        // Check map
+        assert_eq!(*index.id_mapping.get(&node1).unwrap(), 555);
+
+        // Check inner size - should be 1 (only 555, 0 was rolled back)
+        // Hook didn't add 555 to inner, loop 2 did.
+        assert_eq!(index.len(), 1);
     }
 }
