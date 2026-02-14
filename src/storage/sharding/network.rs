@@ -7,6 +7,7 @@
 #![allow(clippy::collapsible_if)]
 
 use super::types::{ShardId, ShardState};
+use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, TxId};
 use std::collections::HashMap;
 use std::fmt;
@@ -199,10 +200,16 @@ pub trait ShardClient: Send + Sync + fmt::Debug {
     fn is_healthy(&self) -> bool;
 
     /// Send a prepare request for 2PC.
-    fn prepare(&self, tx_id: TxId, operations: &[u8]) -> NetworkResult<PrepareResponse>;
+    fn prepare(
+        &self,
+        tx_id: TxId,
+        operations: &[u8],
+        timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<PrepareResponse>;
 
     /// Send a commit request for 2PC.
-    fn commit(&self, tx_id: TxId) -> NetworkResult<CommitResponse>;
+    fn commit(&self, tx_id: TxId, timestamp: Option<HybridTimestamp>)
+        -> NetworkResult<CommitResponse>;
 
     /// Send an abort request for 2PC.
     fn abort(&self, tx_id: TxId) -> NetworkResult<AbortResponse>;
@@ -733,7 +740,12 @@ impl ShardClient for MockShardClient {
         *self.healthy.read().unwrap()
     }
 
-    fn prepare(&self, _tx_id: TxId, _operations: &[u8]) -> NetworkResult<PrepareResponse> {
+    fn prepare(
+        &self,
+        _tx_id: TxId,
+        _operations: &[u8],
+        _timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<PrepareResponse> {
         self.increment_call("prepare");
         self.check_fail()?;
 
@@ -750,7 +762,11 @@ impl ShardClient for MockShardClient {
             .ok_or(NetworkError::ProtocolError("No response configured".into()))
     }
 
-    fn commit(&self, _tx_id: TxId) -> NetworkResult<CommitResponse> {
+    fn commit(
+        &self,
+        _tx_id: TxId,
+        _timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<CommitResponse> {
         self.increment_call("commit");
         self.check_fail()?;
 
@@ -1137,7 +1153,7 @@ mod tests {
     fn test_mock_client_prepare() {
         let client = MockShardClient::new(make_shard_id(0));
 
-        let response = client.prepare(TxId::new(1), &[]).unwrap();
+        let response = client.prepare(TxId::new(1), &[], None).unwrap();
         assert!(response.ready);
         assert_eq!(client.call_count("prepare"), 1);
     }
@@ -1146,7 +1162,7 @@ mod tests {
     fn test_mock_client_commit() {
         let client = MockShardClient::new(make_shard_id(0));
 
-        let response = client.commit(TxId::new(1)).unwrap();
+        let response = client.commit(TxId::new(1), None).unwrap();
         assert!(response.success);
         assert_eq!(client.call_count("commit"), 1);
     }
@@ -1165,7 +1181,7 @@ mod tests {
         let client = MockShardClient::new(make_shard_id(0));
         client.set_healthy(false);
 
-        let result = client.prepare(TxId::new(1), &[]);
+        let result = client.prepare(TxId::new(1), &[], None);
         assert!(matches!(result, Err(NetworkError::ShardUnavailable(_))));
     }
 
@@ -1179,11 +1195,11 @@ mod tests {
             duration: Duration::from_secs(30),
         });
 
-        let result = client.prepare(TxId::new(1), &[]);
+        let result = client.prepare(TxId::new(1), &[], None);
         assert!(matches!(result, Err(NetworkError::Timeout { .. })));
 
         // Next call should succeed
-        let result = client.prepare(TxId::new(2), &[]);
+        let result = client.prepare(TxId::new(2), &[], None);
         assert!(result.is_ok());
     }
 
@@ -1196,7 +1212,7 @@ mod tests {
             reason: Some("test".to_string()),
         });
 
-        let response = client.prepare(TxId::new(1), &[]).unwrap();
+        let response = client.prepare(TxId::new(1), &[], None).unwrap();
         assert!(!response.ready);
         assert_eq!(response.reason, Some("test".to_string()));
     }

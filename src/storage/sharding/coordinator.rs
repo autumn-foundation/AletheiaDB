@@ -2,12 +2,37 @@
 
 use super::config::{RebalanceConfig, ShardConfig};
 use super::router::{ShardRouter, TraversalPlan};
-use super::transaction::{DistributedTransaction, DistributedTxError, TwoPhaseCommitLog};
+use super::transaction::{
+    DistributedTransaction, DistributedTxError, TransactionPhase, TwoPhaseCommitLog,
+};
 use super::types::{ShardId, ShardMetrics, ShardState, ShardStatus};
+use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{IdGenerator, TxId};
+use crate::core::temporal::time;
+use crate::utils::error::TemporalError;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
+
+/// Maximum allowed backward clock drift in microseconds (5 minutes).
+const MAX_BACKWARD_DRIFT_US: i64 = 5 * 60 * 1_000_000;
+
+/// Maximum allowed forward clock jump in microseconds (1 hour).
+const MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000;
+
+fn is_clock_skew_self_heal_enabled() -> bool {
+    static CLOCK_SKEW_AUTO_HEAL: OnceLock<Option<bool>> = OnceLock::new();
+    CLOCK_SKEW_AUTO_HEAL
+        .get_or_init(|| {
+            std::env::var("ALETHEIADB_AUTO_HEAL_CLOCK_SKEW").ok().map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes" | "enabled"
+                )
+            })
+        })
+        .unwrap_or(false)
+}
 
 /// Result of recovery operation.
 #[derive(Debug, Clone)]
@@ -52,6 +77,8 @@ pub struct ShardConnection {
     pub endpoint: String,
     /// Whether the connection is healthy.
     pub healthy: bool,
+    /// Remote HLC frontier observed from this shard.
+    hlc_frontier: Mutex<HybridTimestamp>,
     /// Last successful ping time.
     pub last_ping: Option<Instant>,
 }
@@ -63,12 +90,18 @@ impl ShardConnection {
             shard_id,
             endpoint,
             healthy: true,
+            hlc_frontier: Mutex::new(time::now()),
             last_ping: None,
         }
     }
 
     /// Simulate a prepare call to the shard.
-    pub fn prepare(&self, _tx_id: TxId) -> Result<(), DistributedTxError> {
+    pub fn prepare(
+        &self,
+        _tx_id: TxId,
+        timestamp: Option<HybridTimestamp>,
+    ) -> Result<(), DistributedTxError> {
+        self.apply_remote_timestamp(timestamp);
         if !self.healthy {
             return Err(DistributedTxError::ParticipantUnavailable {
                 shard_id: self.shard_id,
@@ -79,7 +112,12 @@ impl ShardConnection {
     }
 
     /// Simulate a commit call to the shard.
-    pub fn commit(&self, _tx_id: TxId) -> Result<(), DistributedTxError> {
+    pub fn commit(
+        &self,
+        _tx_id: TxId,
+        commit_timestamp: Option<HybridTimestamp>,
+    ) -> Result<(), DistributedTxError> {
+        self.apply_remote_timestamp(commit_timestamp);
         if !self.healthy {
             return Err(DistributedTxError::ParticipantUnavailable {
                 shard_id: self.shard_id,
@@ -98,6 +136,16 @@ impl ShardConnection {
         }
         // In a real implementation, this would make an RPC call
         Ok(())
+    }
+
+    fn apply_remote_timestamp(&self, timestamp: Option<HybridTimestamp>) {
+        if let Some(remote_ts) = timestamp {
+            if let Ok(mut frontier) = self.hlc_frontier.lock() {
+                if let Ok(updated) = frontier.receive(remote_ts, time::now().wallclock()) {
+                    *frontier = updated;
+                }
+            }
+        }
     }
 
     /// Perform a health check.
@@ -133,6 +181,8 @@ pub struct ShardCoordinator {
     active_transactions: RwLock<HashMap<TxId, DistributedTransaction>>,
     /// Commit log for recovery.
     commit_log: RwLock<TwoPhaseCommitLog>,
+    /// Coordinating HLC frontier used to assign cross-shard commit timestamps.
+    commit_clock: Mutex<HybridTimestamp>,
     /// Metrics per shard.
     metrics: RwLock<HashMap<ShardId, Arc<ShardMetrics>>>,
     /// Rebalance configuration.
@@ -169,6 +219,7 @@ impl ShardCoordinator {
             tx_id_generator: IdGenerator::new(),
             active_transactions: RwLock::new(HashMap::new()),
             commit_log: RwLock::new(TwoPhaseCommitLog::new()),
+            commit_clock: Mutex::new(time::now()),
             metrics: RwLock::new(metrics),
             rebalance_config: RebalanceConfig::default(),
             transaction_timeout,
@@ -180,6 +231,99 @@ impl ShardCoordinator {
     pub fn with_rebalance_config(mut self, config: RebalanceConfig) -> Self {
         self.rebalance_config = config;
         self
+    }
+
+    fn next_commit_timestamp(&self) -> Result<HybridTimestamp, DistributedTxError> {
+        let mut frontier = self
+            .commit_clock
+            .lock()
+            .map_err(|_| DistributedTxError::Aborted {
+                reason: "Clock frontier lock poisoned".to_string(),
+            })?;
+
+        let current_wallclock = time::now();
+        let drift = current_wallclock.wallclock() - frontier.wallclock();
+        let self_heal_clock_skew = is_clock_skew_self_heal_enabled();
+        let mut effective_wallclock = current_wallclock.wallclock();
+        let mut healed = false;
+        let mut _self_heal_reason: Option<&'static str> = None;
+
+        if drift < -MAX_BACKWARD_DRIFT_US {
+            if !self_heal_clock_skew {
+                return Err(DistributedTxError::Aborted {
+                    reason: format!(
+                        "Clock skew detected: backward drift {}us exceeds max {}us",
+                        drift,
+                        -MAX_BACKWARD_DRIFT_US
+                    ),
+                });
+            }
+
+            healed = true;
+            effective_wallclock = frontier.wallclock();
+            _self_heal_reason = Some("backward");
+        }
+
+        if drift > MAX_FORWARD_JUMP_US {
+            if !self_heal_clock_skew {
+                return Err(DistributedTxError::Aborted {
+                    reason: format!(
+                        "Clock skew detected: forward drift {}us exceeds max {}us",
+                        drift,
+                        MAX_FORWARD_JUMP_US
+                    ),
+                });
+            }
+
+            healed = true;
+            effective_wallclock = frontier.wallclock();
+            _self_heal_reason = Some("forward");
+        }
+
+        if self_heal_clock_skew && healed {
+            #[cfg(feature = "observability")]
+            tracing::warn!(
+                wallclock_ts = %current_wallclock,
+                prev_ts = %frontier,
+                drift_us = drift,
+                reason = _self_heal_reason.unwrap_or("unknown"),
+                "Self-healing clock skew by clamping to local HLC frontier"
+            );
+        }
+
+        let next = frontier.send(effective_wallclock).or_else(|error| {
+            if self_heal_clock_skew {
+                if let TemporalError::LogicalCounterOverflow {
+                    current_logical: _current_logical,
+                    wallclock,
+                } = error
+                {
+                    let fallback_wallclock = wallclock.checked_add(1).ok_or_else(|| {
+                        DistributedTxError::Aborted {
+                            reason: format!(
+                                "HLC logical counter overflow while self-healing at wallclock={}",
+                                wallclock
+                            ),
+                        }
+                    })?;
+                    return frontier.send(fallback_wallclock).map_err(|fallback_error| {
+                        DistributedTxError::Aborted {
+                            reason: format!(
+                                "HLC timestamp generation failed while self-healing: {}",
+                                fallback_error
+                            ),
+                        }
+                    });
+                }
+            }
+
+            Err(DistributedTxError::Aborted {
+                reason: format!("Failed to advance HLC frontier: {}", error),
+            })
+        })?;
+
+        *frontier = next;
+        Ok(next)
     }
 
     /// Get the router.
@@ -265,6 +409,14 @@ impl ShardCoordinator {
         // Begin prepare phase
         transaction.begin_prepare()?;
 
+        // Allocate a single commit timestamp for prepare + commit.
+        // This keeps participant RPCs causally ordered even if wallclock
+        // shifts during the two-phase commit sequence.
+        if transaction.commit_timestamp.is_none() {
+            transaction.commit_timestamp = Some(self.next_commit_timestamp()?);
+        }
+        let prepare_timestamp = transaction.commit_timestamp;
+
         // Send prepare to all participants
         let connections = self
             .connections
@@ -275,7 +427,7 @@ impl ShardCoordinator {
 
         for shard_id in transaction.participant_shards() {
             if let Some(conn) = connections.get(&shard_id) {
-                match conn.prepare(tx_id) {
+                match conn.prepare(tx_id, prepare_timestamp) {
                     Ok(()) => transaction.record_prepare_success(shard_id),
                     Err(DistributedTxError::ParticipantUnavailable { .. }) => {
                         transaction.record_unreachable(shard_id);
@@ -350,6 +502,14 @@ impl ShardCoordinator {
                 })?
         };
 
+        let commit_timestamp = if let Some(commit_timestamp) = transaction.commit_timestamp {
+            Some(commit_timestamp)
+        } else {
+            let timestamp = self.next_commit_timestamp()?;
+            transaction.commit_timestamp = Some(timestamp);
+            Some(timestamp)
+        };
+
         // CRITICAL: Log the commit decision BEFORE sending commits
         // This ensures we can recover if the coordinator crashes
         {
@@ -359,12 +519,34 @@ impl ShardCoordinator {
                 .map_err(|_| DistributedTxError::Aborted {
                     reason: "Lock poisoned".to_string(),
                 })?;
-            log.log_commit(tx_id, transaction.participant_shards());
+
+            let should_log = match log.get_decision(tx_id) {
+                Some(existing) => {
+                    !transaction.commit_decision_logged
+                        || existing.commit_timestamp != commit_timestamp
+                        || existing.decision != true
+                }
+                None => true,
+            };
+
+            if should_log {
+                log.log_commit(
+                    tx_id,
+                    transaction.participant_shards(),
+                    commit_timestamp,
+                );
+                transaction.commit_decision_logged = true;
+            }
         }
-        transaction.commit_decision_logged = true;
 
         // Begin commit phase
-        transaction.begin_commit()?;
+        match transaction.phase {
+            TransactionPhase::Committing => {}
+            TransactionPhase::Failed | TransactionPhase::Prepared => {
+                transaction.phase = TransactionPhase::Committing;
+            }
+            _ => transaction.begin_commit()?,
+        }
 
         // Send commit to all participants with retry
         let connections = self
@@ -381,7 +563,7 @@ impl ShardCoordinator {
                 let mut retry_count = 0;
 
                 loop {
-                    match conn.commit(tx_id) {
+                    match conn.commit(tx_id, commit_timestamp) {
                         Ok(()) => {
                             transaction.record_commit_success(shard_id);
                             break;
@@ -520,6 +702,7 @@ impl ShardCoordinator {
                 timeout: tx.timeout,
                 retries_remaining: tx.retries_remaining,
                 commit_decision_logged: tx.commit_decision_logged,
+                commit_timestamp: tx.commit_timestamp,
             }
         })
     }
@@ -542,7 +725,7 @@ impl ShardCoordinator {
                 })?;
             log.decisions_to_replay()
                 .into_iter()
-                .map(|d| (d.tx_id, d.participants.clone()))
+                .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
                 .collect::<Vec<_>>()
         };
 
@@ -550,7 +733,7 @@ impl ShardCoordinator {
         let mut dead_lettered = Vec::new();
         let max_recovery_attempts = 5;
 
-        for (tx_id, participants) in decisions {
+        for (tx_id, participants, commit_timestamp) in decisions {
             // Create a transaction in committing state for recovery
             let mut tx = DistributedTransaction::new(tx_id, participants, self.transaction_timeout);
             tx.begin_prepare().ok();
@@ -559,6 +742,7 @@ impl ShardCoordinator {
             }
             tx.mark_prepared().ok();
             tx.begin_commit().ok();
+            tx.commit_timestamp = commit_timestamp;
             tx.commit_decision_logged = true;
 
             // Insert into active transactions
@@ -671,11 +855,11 @@ impl ShardCoordinator {
             log.decisions_to_replay()
                 .into_iter()
                 .filter(|d| d.tx_id == tx_id)
-                .map(|d| (d.tx_id, d.participants.clone()))
+                .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
                 .collect::<Vec<_>>()
         };
 
-        if let Some((found_tx_id, participants)) = decisions.into_iter().next() {
+        if let Some((found_tx_id, participants, commit_timestamp)) = decisions.into_iter().next() {
             let mut tx =
                 DistributedTransaction::new(found_tx_id, participants, self.transaction_timeout);
             tx.begin_prepare().ok();
@@ -684,6 +868,7 @@ impl ShardCoordinator {
             }
             tx.mark_prepared().ok();
             tx.begin_commit().ok();
+            tx.commit_timestamp = commit_timestamp;
             tx.commit_decision_logged = true;
 
             if let Ok(mut txns) = self.active_transactions.write() {
@@ -800,16 +985,32 @@ impl std::fmt::Debug for ShardCoordinator {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::storage::sharding::config::ShardDefinition;
+  mod tests {
+      use super::*;
+      use crate::storage::sharding::config::ShardDefinition;
+  
+      fn test_config() -> ShardConfig {
+          ShardConfig::new(vec![
+              ShardDefinition::new(0, "shard0:9000", vec!["Person"]),
+              ShardDefinition::new(1, "shard1:9000", vec!["Place"]),
+          ])
+      }
 
-    fn test_config() -> ShardConfig {
-        ShardConfig::new(vec![
-            ShardDefinition::new(0, "shard0:9000", vec!["Person"]),
-            ShardDefinition::new(1, "shard1:9000", vec!["Place"]),
-        ])
-    }
+      fn run_distributed_tx(
+          coordinator: &ShardCoordinator,
+          shards: &[ShardId],
+      ) -> Result<HybridTimestamp, DistributedTxError> {
+          let tx_id = coordinator.begin_distributed_transaction(shards.to_vec())?;
+          coordinator.prepare_distributed_transaction(tx_id)?;
+          let commit_timestamp = coordinator
+              .get_transaction(tx_id)
+              .and_then(|tx| tx.commit_timestamp)
+              .ok_or_else(|| DistributedTxError::Aborted {
+                  reason: "Missing commit timestamp after prepare".to_string(),
+              })?;
+          coordinator.commit_distributed_transaction(tx_id)?;
+          Ok(commit_timestamp)
+      }
 
     #[test]
     fn test_coordinator_creation() {
@@ -886,6 +1087,21 @@ mod tests {
         assert!(result.is_ok());
 
         // Commit
+        let result = coordinator.commit_distributed_transaction(tx_id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_coordinator_prepare_sets_commit_timestamp() {
+        let coordinator = ShardCoordinator::new(test_config());
+        let shards = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
+
+        let tx_id = coordinator.begin_distributed_transaction(shards).unwrap();
+        assert!(coordinator.prepare_distributed_transaction(tx_id).is_ok());
+
+        let tx = coordinator.get_transaction(tx_id).unwrap();
+        assert!(tx.commit_timestamp.is_some());
+
         let result = coordinator.commit_distributed_transaction(tx_id);
         assert!(result.is_ok());
     }
@@ -968,13 +1184,13 @@ mod tests {
         let mut conn = ShardConnection::new(shard_id, "localhost:9000".to_string());
 
         assert!(conn.healthy);
-        assert!(conn.prepare(TxId::new(1)).is_ok());
-        assert!(conn.commit(TxId::new(1)).is_ok());
+        assert!(conn.prepare(TxId::new(1), None).is_ok());
+        assert!(conn.commit(TxId::new(1), None).is_ok());
         assert!(conn.abort(TxId::new(1)).is_ok());
 
         conn.mark_unhealthy();
         assert!(!conn.healthy);
-        assert!(conn.prepare(TxId::new(2)).is_err());
+        assert!(conn.prepare(TxId::new(2), None).is_err());
 
         conn.mark_healthy();
         assert!(conn.healthy);
@@ -1050,8 +1266,8 @@ mod tests {
         conn.mark_unhealthy();
 
         // All operations should fail when unhealthy
-        assert!(conn.prepare(TxId::new(1)).is_err());
-        assert!(conn.commit(TxId::new(1)).is_err());
+        assert!(conn.prepare(TxId::new(1), None).is_err());
+        assert!(conn.commit(TxId::new(1), None).is_err());
         assert!(conn.abort(TxId::new(1)).is_err());
     }
 
@@ -1181,5 +1397,236 @@ mod tests {
         let debug = format!("{:?}", result);
         assert!(debug.contains("recovered"));
         assert!(debug.contains("dead_lettered"));
+    }
+
+    #[test]
+    fn test_next_commit_timestamp_backward_skew() {
+        let coordinator = ShardCoordinator::new(test_config());
+        let now = time::now().wallclock();
+        let self_heal = is_clock_skew_self_heal_enabled();
+        let skewed_frontier = now + (MAX_BACKWARD_DRIFT_US * 2);
+
+        {
+            let mut frontier = coordinator
+                .commit_clock
+                .lock()
+                .expect("commit_clock lock should be available");
+            *frontier = crate::core::hlc::HybridTimestamp::new(skewed_frontier, 0).unwrap();
+        }
+
+        let result = coordinator.next_commit_timestamp();
+
+        if self_heal {
+            assert!(result.is_ok());
+            let committed = result.unwrap();
+            assert_eq!(committed.wallclock(), skewed_frontier);
+            assert_eq!(committed.logical(), 1);
+        } else {
+            let error = result.expect_err("expected backward skew to abort when self-heal is disabled");
+            let reason = match error {
+                DistributedTxError::Aborted { reason } => reason,
+                _ => panic!("unexpected error variant: {error:?}"),
+            };
+            assert!(
+                reason.contains("backward")
+            );
+        }
+    }
+
+    #[test]
+    fn test_next_commit_timestamp_forward_skew() {
+        let coordinator = ShardCoordinator::new(test_config());
+        let now = time::now().wallclock();
+        let self_heal = is_clock_skew_self_heal_enabled();
+        let skewed_frontier = now - (MAX_FORWARD_JUMP_US * 2);
+
+        {
+            let mut frontier = coordinator
+                .commit_clock
+                .lock()
+                .expect("commit_clock lock should be available");
+            *frontier = crate::core::hlc::HybridTimestamp::new(skewed_frontier, 0).unwrap();
+        }
+
+        let result = coordinator.next_commit_timestamp();
+
+        if self_heal {
+            assert!(result.is_ok());
+            let committed = result.unwrap();
+            assert_eq!(committed.wallclock(), skewed_frontier);
+            assert_eq!(committed.logical(), 1);
+        } else {
+            let error = result.expect_err("expected forward skew to abort when self-heal is disabled");
+            let reason = match error {
+                DistributedTxError::Aborted { reason } => reason,
+                _ => panic!("unexpected error variant: {error:?}"),
+            };
+            assert!(
+                reason.contains("forward")
+            );
+        }
+    }
+
+    #[test]
+    fn test_prepare_with_backward_skew_distributed_tx() {
+        let coordinator = ShardCoordinator::new(test_config());
+        let now = time::now().wallclock();
+        let skewed_frontier = now + (MAX_BACKWARD_DRIFT_US * 2);
+
+        {
+            let mut frontier = coordinator
+                .commit_clock
+                .lock()
+                .expect("commit_clock lock should be available");
+            *frontier = crate::core::hlc::HybridTimestamp::new(skewed_frontier, 0).unwrap();
+        }
+
+        let tx_id = coordinator
+            .begin_distributed_transaction(vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()])
+            .unwrap();
+
+        let self_heal = is_clock_skew_self_heal_enabled();
+        let result = coordinator.prepare_distributed_transaction(tx_id);
+
+        if self_heal {
+            assert!(result.is_ok());
+            let tx = coordinator.get_transaction(tx_id).unwrap();
+            assert!(tx.commit_timestamp.is_some());
+            assert!(coordinator.commit_distributed_transaction(tx_id).is_ok());
+        } else {
+            assert!(result.is_err());
+            let error = result.expect_err("expected backward skew to abort when self-heal is disabled");
+            let reason = match error {
+                DistributedTxError::Aborted { reason } => reason,
+                _ => panic!("unexpected error variant: {error:?}"),
+            };
+            assert!(reason.contains("backward"));
+        }
+    }
+
+    #[test]
+    fn test_prepare_with_forward_skew_distributed_tx() {
+        let coordinator = ShardCoordinator::new(test_config());
+        let now = time::now().wallclock();
+        let skewed_frontier = now - (MAX_FORWARD_JUMP_US * 2);
+
+        {
+            let mut frontier = coordinator
+                .commit_clock
+                .lock()
+                .expect("commit_clock lock should be available");
+            *frontier = crate::core::hlc::HybridTimestamp::new(skewed_frontier, 0).unwrap();
+        }
+
+        let tx_id = coordinator
+            .begin_distributed_transaction(vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()])
+            .unwrap();
+
+        let self_heal = is_clock_skew_self_heal_enabled();
+        let result = coordinator.prepare_distributed_transaction(tx_id);
+
+        if self_heal {
+            assert!(result.is_ok());
+            let tx = coordinator.get_transaction(tx_id).unwrap();
+            assert!(tx.commit_timestamp.is_some());
+            assert!(coordinator.commit_distributed_transaction(tx_id).is_ok());
+        } else {
+            assert!(result.is_err());
+            let error = result.expect_err("expected forward skew to abort when self-heal is disabled");
+            let reason = match error {
+                DistributedTxError::Aborted { reason } => reason,
+                _ => panic!("unexpected error variant: {error:?}"),
+            };
+            assert!(reason.contains("forward"));
+        }
+    }
+
+    #[test]
+      fn test_repeated_backward_skew_prepare_commit_flow() {
+          let coordinator = ShardCoordinator::new(test_config());
+          let shards = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
+          let self_heal = is_clock_skew_self_heal_enabled();
+
+        // First prepare/commit starts with a heavily backward-skewed frontier.
+        let first_frontier = time::now().wallclock() + (MAX_BACKWARD_DRIFT_US * 2);
+        {
+            let mut frontier = coordinator
+                .commit_clock
+                .lock()
+                .expect("commit_clock lock should be available");
+            *frontier = crate::core::hlc::HybridTimestamp::new(first_frontier, 0).unwrap();
+        }
+
+        let first = run_distributed_tx(&coordinator, &shards);
+
+        if !self_heal {
+            assert!(first.is_err());
+            let error = first.expect_err("expected backward skew abort when self-heal is disabled");
+            let reason = match error {
+                DistributedTxError::Aborted { reason } => reason,
+                _ => panic!("unexpected error variant: {error:?}"),
+            };
+            assert!(reason.contains("backward"));
+            return;
+        }
+
+        let first = first.unwrap();
+
+        // Second prepare/commit hits backward skew again with a slightly newer frontier.
+        let second_frontier = first.wallclock() + 1;
+        {
+            let mut frontier = coordinator
+                .commit_clock
+                .lock()
+                .expect("commit_clock lock should be available");
+            *frontier = crate::core::hlc::HybridTimestamp::new(second_frontier, 0).unwrap();
+        }
+
+        let second = run_distributed_tx(&coordinator, &shards).unwrap();
+        assert!(second > first);
+    }
+
+    #[test]
+      fn test_repeated_forward_skew_prepare_commit_flow() {
+          let coordinator = ShardCoordinator::new(test_config());
+          let shards = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
+          let self_heal = is_clock_skew_self_heal_enabled();
+
+        // First prepare/commit with an aggressively forward-skewed frontier.
+        let first_frontier = time::now().wallclock() - (MAX_FORWARD_JUMP_US * 2);
+        {
+            let mut frontier = coordinator
+                .commit_clock
+                .lock()
+                .expect("commit_clock lock should be available");
+            *frontier = crate::core::hlc::HybridTimestamp::new(first_frontier, 0).unwrap();
+        }
+
+        let first = run_distributed_tx(&coordinator, &shards);
+        if !self_heal {
+            assert!(first.is_err());
+            let error = first.expect_err("expected forward skew to abort when self-heal is disabled");
+            let reason = match error {
+                DistributedTxError::Aborted { reason } => reason,
+                _ => panic!("unexpected error variant: {error:?}"),
+            };
+            assert!(reason.contains("forward"));
+            return;
+        }
+
+        let first = first.unwrap();
+
+        // Second prepare/commit again under forward-skew pressure.
+        let second_frontier = first.wallclock() + (MAX_FORWARD_JUMP_US * 2);
+        {
+            let mut frontier = coordinator
+                .commit_clock
+                .lock()
+                .expect("commit_clock lock should be available");
+            *frontier = crate::core::hlc::HybridTimestamp::new(second_frontier, 0).unwrap();
+        }
+
+        let second = run_distributed_tx(&coordinator, &shards).unwrap();
+        assert!(second > first);
     }
 }
