@@ -139,12 +139,15 @@ impl<'a> Ariadne<'a> {
         });
 
         let mut visited = HashSet::new();
-        visited.insert(start_node);
 
         let mut best_path = Vec::new();
         let mut max_path_len = 0;
 
         while let Some(state) = pq.pop() {
+            if !visited.insert(state.node_id) {
+                continue;
+            }
+
             // Check if we reached goal
             if let Some(goal) = goal_node {
                 if state.node_id == goal {
