@@ -44,7 +44,7 @@
 //! The parser is implemented as a recursive descent parser. It consumes a stream of `Token`s
 //! produced by the `Lexer`.
 //!
-//! - **Recursion Depth**: Limited to [`MAX_RECURSION_DEPTH`] to prevent stack overflow on deeply nested predicates.
+//! - **Recursion Depth**: Limited to 100 to prevent stack overflow on deeply nested predicates.
 //! - **Error Handling**: Returns detailed `ParseError`s with position information to help users debug syntax errors.
 
 use std::sync::Arc;
