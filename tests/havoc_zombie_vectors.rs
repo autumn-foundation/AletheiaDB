@@ -1,7 +1,10 @@
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, HnswIndex, HnswConfig};
-use aletheiadb::index::VectorIndex;
 use aletheiadb::core::id::NodeId;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 
 /// 👺 HAVOC: ZOMBIE VECTOR HUNTER
@@ -34,7 +37,7 @@ fn test_havoc_zombie_vectors() {
         let index = Arc::new(
             HnswIndexBuilder::new(4, DistanceMetric::Cosine)
                 .build()
-                .unwrap()
+                .unwrap(),
         );
 
         let running = Arc::new(AtomicBool::new(true));
@@ -46,13 +49,13 @@ fn test_havoc_zombie_vectors() {
 
         // SAVER THREAD: Continuously saves the index
         let saver = thread::spawn(move || {
-             while running_saver.load(Ordering::Relaxed) {
-                 // We ignore errors here because we might be saving while the writer
-                 // is hammering the index, and we only care if a *successful* save
-                 // produces a corrupted file.
-                 let _ = index_saver.save(&path_saver);
-                 thread::yield_now();
-             }
+            while running_saver.load(Ordering::Relaxed) {
+                // We ignore errors here because we might be saving while the writer
+                // is hammering the index, and we only care if a *successful* save
+                // produces a corrupted file.
+                let _ = index_saver.save(&path_saver);
+                thread::yield_now();
+            }
         });
 
         // WRITER THREAD: Adds vectors
@@ -78,7 +81,7 @@ fn test_havoc_zombie_vectors() {
             // Check if the mappings file also exists (it should if save worked)
             let mappings_path = path.with_extension("usearch.mappings");
             if mappings_path.exists() {
-                 let loaded = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine))
+                let loaded = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine))
                     .expect("Failed to load index");
 
                 let inner_count = loaded.len();
@@ -91,7 +94,10 @@ fn test_havoc_zombie_vectors() {
                          Index Vectors (Inner): {}\n\
                          Mapped Vectors (ID Map): {}\n\
                          Zombies: {}",
-                        i, inner_count, map_count, inner_count - map_count
+                        i,
+                        inner_count,
+                        map_count,
+                        inner_count - map_count
                     );
                 }
             }
