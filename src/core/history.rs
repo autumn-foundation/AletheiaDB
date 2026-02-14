@@ -502,18 +502,14 @@ mod tests {
 #[cfg(test)]
 mod semantic_equality_tests {
     use super::*;
-    use crate::core::property::{PropertyMapBuilder, PropertyValue};
     use crate::core::id::VersionId;
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
 
     #[test]
     fn test_version_diff_nan_behavior() {
-        let from_props = PropertyMapBuilder::new()
-            .insert("score", f64::NAN)
-            .build();
+        let from_props = PropertyMapBuilder::new().insert("score", f64::NAN).build();
 
-        let to_props = PropertyMapBuilder::new()
-            .insert("score", f64::NAN)
-            .build();
+        let to_props = PropertyMapBuilder::new().insert("score", f64::NAN).build();
 
         let diff = VersionDiff::compute(
             &from_props,
@@ -523,7 +519,10 @@ mod semantic_equality_tests {
         );
 
         // Currently this fails (returns true) because NaN != NaN
-        assert!(!diff.has_changes(), "NaN -> NaN should NOT be treated as a change");
+        assert!(
+            !diff.has_changes(),
+            "NaN -> NaN should NOT be treated as a change"
+        );
     }
 
     #[test]
@@ -544,7 +543,10 @@ mod semantic_equality_tests {
             VersionId::new(2).unwrap(),
         );
 
-        assert!(!diff.has_changes(), "Vector with NaN -> Same Vector should NOT be treated as a change");
+        assert!(
+            !diff.has_changes(),
+            "Vector with NaN -> Same Vector should NOT be treated as a change"
+        );
     }
 
     #[test]
@@ -576,7 +578,10 @@ mod semantic_equality_tests {
             VersionId::new(2).unwrap(),
         );
 
-        assert!(diff.has_changes(), "Vectors of different lengths should be treated as a change");
+        assert!(
+            diff.has_changes(),
+            "Vectors of different lengths should be treated as a change"
+        );
     }
 
     #[test]
@@ -612,7 +617,10 @@ mod semantic_equality_tests {
             VersionId::new(2).unwrap(),
         );
 
-        assert!(!diff.has_changes(), "Identical sparse vectors should not be treated as a change");
+        assert!(
+            !diff.has_changes(),
+            "Identical sparse vectors should not be treated as a change"
+        );
 
         // Test dimension mismatch
         let sv_dim_mismatch = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 6).unwrap();
@@ -625,7 +633,10 @@ mod semantic_equality_tests {
             VersionId::new(1).unwrap(),
             VersionId::new(2).unwrap(),
         );
-        assert!(diff_dim.has_changes(), "Sparse vectors with different dimensions should be different");
+        assert!(
+            diff_dim.has_changes(),
+            "Sparse vectors with different dimensions should be different"
+        );
 
         // Test indices mismatch
         let sv_idx_mismatch = SparseVec::new(vec![0, 3], vec![1.0, 2.0], 5).unwrap();
@@ -638,7 +649,10 @@ mod semantic_equality_tests {
             VersionId::new(1).unwrap(),
             VersionId::new(2).unwrap(),
         );
-        assert!(diff_idx.has_changes(), "Sparse vectors with different indices should be different");
+        assert!(
+            diff_idx.has_changes(),
+            "Sparse vectors with different indices should be different"
+        );
 
         // Test values mismatch
         let sv_val_mismatch = SparseVec::new(vec![0, 2], vec![1.0, 3.0], 5).unwrap();
@@ -651,7 +665,10 @@ mod semantic_equality_tests {
             VersionId::new(1).unwrap(),
             VersionId::new(2).unwrap(),
         );
-        assert!(diff_val.has_changes(), "Sparse vectors with different values should be different");
+        assert!(
+            diff_val.has_changes(),
+            "Sparse vectors with different values should be different"
+        );
 
         // Testing the NaN path specifically would require constructing a SparseVec with NaNs,
         // which the constructor forbids. We can try to bypass constructor validation or accept
