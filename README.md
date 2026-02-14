@@ -473,9 +473,21 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
-// Generate natural language history of a node
+// Ensure you have features = ["nova"] enabled in Cargo.toml
+
+// 1. Setup database and node (for self-contained example)
+let db = AletheiaDB::new().unwrap();
+let node_id = db.write(|tx| {
+    tx.create_node("Person", PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .build()
+    )
+})?;
+
+// 2. Generate natural language history of a node
 let generator = NarrativeGenerator::new(&db);
 let narrative = generator.generate_node_narrative(node_id)?;
 
