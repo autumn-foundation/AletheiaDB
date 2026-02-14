@@ -38,12 +38,12 @@ pub(crate) fn create_temporal_interval(
     valid_from: Timestamp,
     tx_time: Timestamp,
     is_tombstone: bool,
-) -> BiTemporalInterval {
+) -> Result<BiTemporalInterval> {
     let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
     if is_tombstone {
-        temporal = temporal.close_valid_time(valid_from);
+        temporal = temporal.close_valid_time(valid_from)?;
     }
-    temporal
+    Ok(temporal)
 }
 
 /// Apply a node creation or update to storage.
@@ -94,7 +94,7 @@ pub(crate) fn apply_node_write(
     )?;
 
     // Index in temporal indexes with bi-temporal interval
-    let temporal = create_temporal_interval(valid_from, commit_timestamp, false);
+    let temporal = create_temporal_interval(valid_from, commit_timestamp, false)?;
     tx.temporal_indexes
         .insert_node_version(node_id, version_id, temporal)?;
 
@@ -162,7 +162,7 @@ pub(crate) fn apply_edge_write(
     )?;
 
     // Index in temporal indexes with bi-temporal interval
-    let temporal = create_temporal_interval(valid_from, commit_timestamp, false);
+    let temporal = create_temporal_interval(valid_from, commit_timestamp, false)?;
     tx.temporal_indexes
         .insert_edge_version(edge_id, version_id, temporal)?;
 
@@ -198,7 +198,7 @@ pub(crate) fn apply_node_delete(
     }
 
     // Create tombstone interval using centralized logic
-    let tombstone_temporal = create_temporal_interval(valid_from, commit_timestamp, true);
+    let tombstone_temporal = create_temporal_interval(valid_from, commit_timestamp, true)?;
 
     // Add tombstone version to historical storage
     historical.add_node_version(
@@ -241,7 +241,7 @@ pub(crate) fn apply_edge_delete(
     }
 
     // Create tombstone interval using centralized logic
-    let tombstone_temporal = create_temporal_interval(valid_from, commit_timestamp, true);
+    let tombstone_temporal = create_temporal_interval(valid_from, commit_timestamp, true)?;
 
     // Add tombstone version to historical storage
     historical.add_edge_version(

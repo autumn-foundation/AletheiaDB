@@ -13,6 +13,7 @@ use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
+use crate::utils::error::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -318,9 +319,10 @@ pub trait TemporalVersion {
     ///
     /// This marks the version as no longer being the "current knowledge" after
     /// the specified timestamp. Used when a version is superseded or deleted.
-    fn close_transaction_time(&mut self, end_timestamp: Timestamp) {
+    fn close_transaction_time(&mut self, end_timestamp: Timestamp) -> Result<()> {
         let temporal = self.temporal_mut();
-        *temporal = temporal.close_transaction_time(end_timestamp);
+        *temporal = temporal.close_transaction_time(end_timestamp)?;
+        Ok(())
     }
 }
 
@@ -539,7 +541,10 @@ impl PropertyDelta {
     /// Moves materialized vectors from `vector_deltas` to `changed`, converting them
     /// to full `PropertyValue::Vector` instances. After this operation, `vector_deltas`
     /// will only contain `VectorDelta::Full` entries (which are then moved to `changed`).
-    pub fn materialize_vector_deltas(&mut self, base: &PropertyMap) -> Result<(), String> {
+    pub fn materialize_vector_deltas(
+        &mut self,
+        base: &PropertyMap,
+    ) -> std::result::Result<(), String> {
         // Materialize ALL vector deltas (both Sparse and Full) into regular changed properties
         // This is necessary for persistence since the persistence format doesn't support VectorDelta
         let keys: Vec<_> = self.vector_deltas.keys().copied().collect();
@@ -2522,7 +2527,7 @@ mod mutant_kill_tests {
         let mut node = make_node_anchor();
         let end = Timestamp::from(2_000);
 
-        node.close_transaction_time(end);
+        node.close_transaction_time(end).unwrap();
 
         assert_eq!(node.temporal().transaction_time().end(), end);
         assert_eq!(node.temporal().valid_time().end(), TIMESTAMP_MAX);
