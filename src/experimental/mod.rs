@@ -28,6 +28,9 @@ pub mod fishing;
 /// Graph context exporter for LLM integration.
 pub mod graph_context;
 #[cfg(feature = "nova")]
+/// Hindsight: Counterfactual Graph Analysis Engine.
+pub mod hindsight;
+#[cfg(feature = "nova")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
 #[cfg(feature = "nova")]
