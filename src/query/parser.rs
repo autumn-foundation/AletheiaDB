@@ -2071,11 +2071,10 @@ mod sentry_tests {
         // 💣 Risk: Stack overflow from deeply nested NOT operators
 
         let depth = MAX_RECURSION_DEPTH + 1;
-        let mut query = "MATCH (n) WHERE ".to_string();
-        for _ in 0..depth {
-            query.push_str("NOT ");
-        }
-        query.push_str("n.active = true RETURN n");
+        let query = format!(
+            "MATCH (n) WHERE {}n.active = true RETURN n",
+            "NOT ".repeat(depth)
+        );
 
         let result = Parser::parse(&query);
         assert!(result.is_err());
