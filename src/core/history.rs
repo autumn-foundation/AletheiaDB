@@ -496,12 +496,18 @@ mod sentry_tests {
         let from_props = PropertyMapBuilder::new()
             .insert("float_nan", f64::NAN)
             // Vector with NaN
-            .insert("vector_nan", PropertyValue::vector(vec![1.0, f32::NAN, 3.0]))
+            .insert(
+                "vector_nan",
+                PropertyValue::vector(vec![1.0, f32::NAN, 3.0]),
+            )
             .build();
 
         let to_props = PropertyMapBuilder::new()
             .insert("float_nan", f64::NAN)
-            .insert("vector_nan", PropertyValue::vector(vec![1.0, f32::NAN, 3.0]))
+            .insert(
+                "vector_nan",
+                PropertyValue::vector(vec![1.0, f32::NAN, 3.0]),
+            )
             .build();
 
         let diff = VersionDiff::compute(
@@ -512,7 +518,11 @@ mod sentry_tests {
         );
 
         // Without fix, this will fail because NaN != NaN
-        assert!(!diff.has_changes(), "NaN values should be treated as equal but got changes: {:?}", diff.modified);
+        assert!(
+            !diff.has_changes(),
+            "NaN values should be treated as equal but got changes: {:?}",
+            diff.modified
+        );
         assert_eq!(diff.change_count(), 0);
     }
 }
