@@ -1,8 +1,7 @@
 use aletheiadb::storage::wal::entry::LSN;
-use aletheiadb::storage::wal::flush_coordinator::{
-    FlushCoordinator, FlushCoordinatorConfig, SegmentMetadata,
-};
+use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
 use aletheiadb::storage::wal::ring_buffer::PendingEntry;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::tempdir;
@@ -25,22 +24,22 @@ fn test_flush_coordinator_race_condition() {
     // Use multiple threads to create contention on segment rotation
     let num_threads = 50;
     let entries_per_thread = 100;
+    let lsn_counter = Arc::new(AtomicU64::new(0));
 
     for _ in 0..10 {
         let barrier = Arc::new(Barrier::new(num_threads));
         let mut handles = Vec::new();
 
-        for t in 0..num_threads {
+        for _ in 0..num_threads {
             let coordinator = Arc::clone(&coordinator);
             let barrier = Arc::clone(&barrier);
+            let lsn_counter = Arc::clone(&lsn_counter);
 
             handles.push(thread::spawn(move || {
                 barrier.wait();
-                for i in 0..entries_per_thread {
+                for _ in 0..entries_per_thread {
                     // LSN is unique across threads to allow checking later
-                    // We use a large multiplier to avoid collisions between iterations
-                    let lsn =
-                        (t * entries_per_thread + i) as u64 + (coordinator.total_flushes() * 1000);
+                    let lsn = lsn_counter.fetch_add(1, Ordering::Relaxed);
                     // Store LSN in data for verification (little endian)
                     let data = lsn.to_le_bytes().to_vec();
                     let entry = PendingEntry::new_async(LSN(lsn), data);
@@ -63,13 +62,12 @@ fn test_flush_coordinator_race_condition() {
     if let Ok(entries) = std::fs::read_dir(&dir_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "log") {
-                if let Some(id) = path
+            if path.extension().is_some_and(|ext| ext == "log")
+                && let Some(id) = path
                     .file_stem()
                     .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
-                {
-                    segments.push((id, path));
-                }
+            {
+                segments.push((id, path));
             }
         }
     }
