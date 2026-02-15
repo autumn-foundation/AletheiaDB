@@ -1444,10 +1444,7 @@ mod tests {
             *frontier = crate::core::hlc::HybridTimestamp::new(old_wallclock, 0).unwrap();
         }
 
-        if !try_simulate_past_timestamp(
-            &coordinator,
-            Duration::from_micros(idle_gap_us as u64),
-        ) {
+        if !try_simulate_past_timestamp(&coordinator, Duration::from_micros(idle_gap_us as u64)) {
             println!(
                 "Skipping test_next_commit_timestamp_allows_idle_forward_drift due to insufficient uptime"
             );
@@ -1467,10 +1464,7 @@ mod tests {
         // Use Duration::MAX which is guaranteed to be longer than any system uptime
         let huge_duration = Duration::MAX;
 
-        assert!(!try_simulate_past_timestamp(
-            &coordinator,
-            huge_duration
-        ));
+        assert!(!try_simulate_past_timestamp(&coordinator, huge_duration));
     }
 
     #[test]
