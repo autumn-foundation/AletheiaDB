@@ -50,7 +50,10 @@ fn run_deadlock_repro() {
         let _ = index_clone.search_with_filter(&query, 5, |id| {
             // Only sync once
             if !triggered_clone.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                println!("Thread A: Inside filter callback for node {:?} - Triggering barrier", id);
+                println!(
+                    "Thread A: Inside filter callback for node {:?} - Triggering barrier",
+                    id
+                );
 
                 // Signal Thread B to start 'add'
                 barrier_clone.wait();

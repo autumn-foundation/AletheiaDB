@@ -169,6 +169,10 @@ const MAX_K: usize = 100_000;
 /// 100M entries * (16 bytes data + ~32 bytes DashMap overhead) ≈ 4.8GB RAM.
 const MAX_MAPPINGS_COUNT: usize = 100_000_000;
 
+/// Number of sharded locks for entry updates.
+/// 64 locks provide reasonable contention reduction for concurrent updates.
+const NUM_ENTRY_LOCKS: usize = 64;
+
 /// Convert our DistanceMetric to usearch's MetricKind
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
     match metric {
@@ -695,7 +699,7 @@ impl HnswIndexBuilder {
             max_k: MAX_K,
             is_mmap: false,
             save_lock: Arc::new(RwLock::new(())),
-            entry_locks: (0..64).map(|_| Mutex::new(())).collect(),
+            entry_locks: (0..NUM_ENTRY_LOCKS).map(|_| Mutex::new(())).collect(),
         })
     }
 }
@@ -799,6 +803,11 @@ impl VectorIndex for HnswIndex {
         let lock_idx = (id.as_u64() as usize) % self.entry_locks.len();
         let _key_guard = self.entry_locks[lock_idx].lock();
 
+        // Acquire save_lock (shared) to prevent concurrent saves (Zombie Vectors).
+        // CRITICAL: Must be acquired BEFORE interacting with id_mapping to ensure
+        // atomic update of (mapping + index) relative to save().
+        let _save_guard = self.save_lock.read();
+
         // Get or create key for this NodeId
         // Use entry API for atomic check-and-update to prevent race conditions
         match self.id_mapping.entry(id) {
@@ -821,10 +830,6 @@ impl VectorIndex for HnswIndex {
                         hook(self, id);
                     }
                 }
-
-                // Acquire save_lock (shared) to prevent concurrent saves (Zombie Vectors).
-                // This allows concurrent adds and searches.
-                let _save_guard = self.save_lock.read();
 
                 // Acquire inner read lock (shared).
                 // usearch handles concurrent adds internally.
@@ -874,10 +879,24 @@ impl VectorIndex for HnswIndex {
                 }
 
                 // Add the new vector while still holding the lock
-                self.retry_usearch(
-                    || index.add(existing_key, vector),
-                    "Failed to add vector",
-                )?;
+                if let Err(e) =
+                    self.retry_usearch(|| index.add(existing_key, vector), "Failed to add vector")
+                {
+                    // Check for "Duplicate keys" error which indicates inconsistency between contains() and add()
+                    if e.to_string().contains("Duplicate keys") {
+                        // Force remove and retry add
+                        self.retry_usearch(
+                            || index.remove(existing_key),
+                            "Failed to force remove existing vector",
+                        )?;
+                        self.retry_usearch(
+                            || index.add(existing_key, vector),
+                            "Failed to add vector after force remove",
+                        )?;
+                    } else {
+                        return Err(e);
+                    }
+                }
 
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -912,8 +931,7 @@ impl VectorIndex for HnswIndex {
                     }
                 };
 
-                // Acquire save_lock (shared) to prevent concurrent saves.
-                let _save_guard = self.save_lock.read();
+                // Note: save_lock is already held at start of function.
 
                 // Step 2: Acquire inner read lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
@@ -930,10 +948,7 @@ impl VectorIndex for HnswIndex {
                 }
 
                 // Step 3: Add to inner usearch index while holding write lock
-                self.retry_usearch(
-                    || index.add(key, vector),
-                    "Failed to add vector",
-                )?;
+                self.retry_usearch(|| index.add(key, vector), "Failed to add vector")?;
 
                 #[cfg(test)]
                 {
@@ -1023,10 +1038,7 @@ impl VectorIndex for HnswIndex {
 
             // Native delete in usearch (thread-safe, takes &self)
             let index = self.inner.read();
-            self.retry_usearch(
-                || index.remove(key),
-                "Failed to remove vector",
-            )?;
+            self.retry_usearch(|| index.remove(key), "Failed to remove vector")?;
 
             self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
         }
@@ -1903,7 +1915,7 @@ impl HnswIndex {
             max_k: MAX_K,
             is_mmap: false,
             save_lock: Arc::new(RwLock::new(())),
-            entry_locks: (0..64).map(|_| Mutex::new(())).collect(),
+            entry_locks: (0..NUM_ENTRY_LOCKS).map(|_| Mutex::new(())).collect(),
         })
     }
 
@@ -1971,7 +1983,7 @@ impl HnswIndex {
             max_k: MAX_K,
             is_mmap: true,
             save_lock: Arc::new(RwLock::new(())),
-            entry_locks: (0..64).map(|_| Mutex::new(())).collect(),
+            entry_locks: (0..NUM_ENTRY_LOCKS).map(|_| Mutex::new(())).collect(),
         })
     }
 }
