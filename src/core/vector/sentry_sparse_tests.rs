@@ -73,3 +73,29 @@ fn test_sparse_squared_euclidean_distance_correctness() {
     let dist = sparse_squared_euclidean_distance(&a, &b).unwrap();
     assert!((dist - 26.0).abs() < 1e-6, "Expected 26.0, got {}", dist);
 }
+
+#[test]
+fn test_sparse_cosine_similarity_threshold_behavior() {
+    // 🛡️ Sentry: Verify that vectors with squared magnitude below SQUARED_MAGNITUDE_THRESHOLD
+    // are treated as zero vectors (similarity 0.0), even if their linear magnitude is above the threshold.
+    //
+    // Threshold is 1e-14.
+    // Construct vector with squared magnitude 0.5e-14.
+    // Value = sqrt(0.5e-14) ≈ 0.707e-7.
+    // Magnitude = 0.707e-7.
+    //
+    // If logic uses magnitude < 1e-14, then 0.707e-7 < 1e-14 is FALSE.
+    // So it treats it as valid -> returns 1.0 (self-similarity).
+    //
+    // If logic uses squared_magnitude < 1e-14, then 0.5e-14 < 1e-14 is TRUE.
+    // So it treats it as zero -> returns 0.0.
+
+    let val = (0.5 * 1e-14f32).sqrt();
+    let a = SparseVec::new(vec![0], vec![val], 1).unwrap();
+
+    // We expect it to be treated as zero vector because it's below the squared magnitude threshold
+    // Current implementation fails this because it compares magnitude vs threshold
+    let sim = sparse_cosine_similarity(&a, &a).unwrap();
+
+    assert_eq!(sim, 0.0, "Vector with squared magnitude < threshold should be treated as zero");
+}
