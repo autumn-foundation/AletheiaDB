@@ -1,4 +1,5 @@
 use super::ops::*;
+use super::simd::*;
 
 // ============================================================================
 // Unaligned Memory Access Tests
@@ -56,6 +57,31 @@ where
         for j in 0..4 {
             buffer[offset + i * 4 + j] = bytes[j];
         }
+    }
+
+    f(slice);
+}
+
+/// Helper to create a byte-aligned mutable f32 slice.
+///
+/// Identical logic to `with_unaligned_f32_slice` but yields `&mut [f32]`.
+fn with_unaligned_f32_slice_mut<F>(len: usize, f: F)
+where
+    F: FnOnce(&mut [f32]),
+{
+    let mut buffer = vec![0u8; 64 + len * 4];
+    let ptr = buffer.as_ptr() as usize;
+    let mut offset = 0;
+    while (ptr + offset) & 3 != 0 || (ptr + offset) & 31 == 0 {
+        offset += 1;
+    }
+    assert!(offset + len * 4 <= buffer.len());
+
+    let slice_ptr = unsafe { buffer.as_mut_ptr().add(offset) as *mut f32 };
+    let slice = unsafe { std::slice::from_raw_parts_mut(slice_ptr, len) };
+
+    for (i, val) in slice.iter_mut().enumerate() {
+        *val = (i as f32) * 1.0;
     }
 
     f(slice);
@@ -289,4 +315,169 @@ fn test_simd_dot_product_sum_zero_length() {
     let b: Vec<f32> = vec![];
     let res = super::simd::dot_product_sum(&a, &b);
     assert_eq!(res, 0.0);
+}
+
+#[test]
+fn test_simd_dot_and_magnitudes_large_vector() {
+    // 🧪 Strategy: Test with large vectors to exercise SIMD loop unrolling and remainder handling.
+    let len = 1023; // Prime number large enough to have chunks and remainder
+    let a: Vec<f32> = (0..len).map(|i| (i % 10) as f32).collect();
+    let b: Vec<f32> = (0..len).map(|i| ((i + 1) % 10) as f32).collect();
+
+    let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes(&a, &b);
+
+    // Calculate expected scalar values
+    let expected_dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let expected_mag_a: f32 = a.iter().map(|x| x * x).sum();
+    let expected_mag_b: f32 = b.iter().map(|x| x * x).sum();
+
+    // Allow small epsilon for floating point accumulation differences
+    // 0.01 is stricter but should still pass if SIMD implementation is reasonably precise
+    let epsilon = 0.01;
+    assert!(
+        (dot - expected_dot).abs() < epsilon,
+        "Dot product mismatch: {} vs {}",
+        dot,
+        expected_dot
+    );
+    assert!(
+        (mag_a - expected_mag_a).abs() < epsilon,
+        "Mag A mismatch: {} vs {}",
+        mag_a,
+        expected_mag_a
+    );
+    assert!(
+        (mag_b - expected_mag_b).abs() < epsilon,
+        "Mag B mismatch: {} vs {}",
+        mag_b,
+        expected_mag_b
+    );
+}
+
+#[test]
+fn test_simd_dot_product_associativity() {
+    // 🧪 Strategy: Check if SIMD (chunked sum) produces significantly different results
+    // from Scalar (sequential sum) for a sensitive dataset.
+    // Floating point addition is non-associative.
+
+    let len = 1000;
+    // Use values with alternating magnitudes to exacerbate rounding errors
+    let a: Vec<f32> = (0..len)
+        .map(|i| if i % 2 == 0 { 1.0e5 } else { 1.0 })
+        .collect();
+    let b: Vec<f32> = (0..len)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0e5 })
+        .collect();
+
+    // Scalar sum: (1e5 * 1) + (1 * -1e5) + ... = 1e5 - 1e5 = 0
+    // But sequential sum might drift.
+    let scalar_dot = super::simd::dot_product_scalar(&a, &b);
+
+    // SIMD sum: sums 8 lanes independently.
+    // Lane 0: 1e5, 1e5, ... -> Sum(1e5)
+    // Lane 1: -1e5, -1e5, ... -> Sum(-1e5)
+    // Then horizontal sum.
+    let simd_dot = super::simd::dot_product_sum(&a, &b);
+
+    // We expect them to be close, but maybe not identical.
+    // This test documents the behavior.
+    let diff = (scalar_dot - simd_dot).abs();
+
+    // They should be reasonably close for this balanced dataset
+    assert!(
+        diff < 1.0,
+        "SIMD vs Scalar divergence: scalar {}, simd {}, diff {}",
+        scalar_dot,
+        simd_dot,
+        diff
+    );
+}
+
+// ============================================================================
+// Scale In Place Tests (Added via Sentry consolidation)
+// ============================================================================
+
+#[test]
+fn test_scale_in_place_basic() {
+    let mut v = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    scale_in_place(&mut v, 2.0);
+    assert_eq!(v, vec![2.0, 4.0, 6.0, 8.0, 10.0]);
+}
+
+#[test]
+fn test_scale_in_place_zero_length() {
+    // Should not panic
+    let mut v: Vec<f32> = vec![];
+    scale_in_place(&mut v, 2.0);
+    assert!(v.is_empty());
+}
+
+#[test]
+fn test_scale_in_place_unaligned() {
+    // 💣 Risk: SIMD operations using aligned instructions on unaligned memory cause SIGSEGV.
+    // 🧪 Strategy: Force unaligned memory access using helper.
+    with_unaligned_f32_slice_mut(100, |v| {
+        // Capture original values for verification
+        let original: Vec<f32> = v.to_vec();
+        scale_in_place(&mut *v, 2.0);
+
+        for (i, &val) in v.iter().enumerate() {
+            assert!(
+                (val - original[i] * 2.0).abs() < 1e-6,
+                "Index {}: {} vs {}",
+                i,
+                val,
+                original[i] * 2.0
+            );
+        }
+    });
+}
+
+#[test]
+fn test_scale_in_place_large_vector() {
+    // 🧪 Strategy: Use prime length to test SIMD loop unrolling + remainder handling
+    let len = 1023;
+    let mut v: Vec<f32> = (0..len).map(|i| i as f32).collect();
+    let original = v.clone();
+
+    scale_in_place(&mut v, 0.5);
+
+    for (i, &val) in v.iter().enumerate() {
+        assert!((val - original[i] * 0.5).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn test_scale_in_place_nan_scalar() {
+    // 💣 Risk: NaN should propagate to all elements.
+    let mut v = vec![1.0, 2.0, 3.0];
+    scale_in_place(&mut v, f32::NAN);
+
+    for val in v {
+        assert!(val.is_nan());
+    }
+}
+
+#[test]
+fn test_scale_in_place_inf_scalar() {
+    // 💣 Risk: Infinity should propagate.
+    let mut v = vec![1.0, -2.0, 0.0];
+    scale_in_place(&mut v, f32::INFINITY);
+
+    assert_eq!(v[0], f32::INFINITY);
+    assert_eq!(v[1], f32::NEG_INFINITY);
+    assert!(v[2].is_nan()); // 0 * Inf = NaN
+}
+
+#[test]
+fn test_scale_in_place_zero_scalar() {
+    // 💣 Risk: Zero scalar should zero out the vector.
+    // Note: Inf * 0 is NaN, so we test that too.
+    let mut v = vec![1.0, 2.0, f32::INFINITY, f32::NAN];
+    scale_in_place(&mut v, 0.0);
+
+    assert_eq!(v[0], 0.0);
+    assert_eq!(v[1], 0.0);
+    assert!(v[2].is_nan()); // Inf * 0 = NaN
+    assert!(v[3].is_nan()); // NaN * 0 = NaN
 }

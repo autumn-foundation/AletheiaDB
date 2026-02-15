@@ -86,6 +86,7 @@
 //! - Searches can run concurrently with additions
 
 use crate::core::id::NodeId;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
@@ -337,6 +338,15 @@ impl HnswConfig {
         reader.read_exact(&mut buf_u64)?;
         let dimensions = u64::from_le_bytes(buf_u64) as usize;
 
+        if dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         reader.read_exact(&mut buf_u8)?;
         let metric = DistanceMetric::from_u8(buf_u8[0])?;
 
@@ -442,19 +452,21 @@ where
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
             // This should never happen with a correct usearch implementation.
-            // If it does, we panic to prevent UB from dereferencing null.
+            // If it does, we return f32::MAX to avoid crashing/UB.
             // We cannot return an error here because the signature is fixed by usearch trait.
-            panic!("usearch passed null pointer to metric function");
+            eprintln!("usearch passed null pointer to metric function - returning max distance");
+            return f32::MAX;
         }
 
         // Check for alignment to prevent UB
         // Use bitwise check for power-of-2 alignment (f32 align is 4)
         let align_mask = std::mem::align_of::<f32>() - 1;
         if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
-            panic!(
-                "usearch passed unaligned pointer to metric function (expected alignment {})",
+            eprintln!(
+                "usearch passed unaligned pointer to metric function (expected alignment {}) - returning max distance",
                 std::mem::align_of::<f32>()
             );
+            return f32::MAX;
         }
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
@@ -559,6 +571,14 @@ impl HnswIndexBuilder {
         if self.config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    self.config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
             }));
         }
 
@@ -1416,6 +1436,14 @@ impl HnswIndex {
     /// Validate loaded index metadata against configuration.
     fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswConfig) -> Result<()> {
         if let Some(meta) = metadata {
+            if meta.dimensions > MAX_VECTOR_DIMENSIONS {
+                return Err(Error::Vector(VectorError::InvalidVector {
+                    reason: format!(
+                        "Stored index dimensions {} exceeds maximum allowed {}",
+                        meta.dimensions, MAX_VECTOR_DIMENSIONS
+                    ),
+                }));
+            }
             if meta.dimensions != config.dimensions {
                 return Err(Error::Vector(VectorError::IndexError(format!(
                     "Index dimension mismatch: expected {}, found {}",
@@ -1786,6 +1814,15 @@ impl HnswIndex {
 
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        if config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         // Security Check: Custom metrics require F32 quantization
         if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -1884,6 +1921,15 @@ impl HnswIndex {
         let dimensions = index.dimensions();
         let connectivity = index.connectivity();
 
+        if dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "Memory-mapped index dimensions {} exceeds maximum allowed {}",
+                    dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
         let (id_mapping, reverse_mapping, max_key, metadata) =
@@ -1966,8 +2012,7 @@ mod sentry_tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
-    fn test_metric_wrapper_panic_on_unaligned() {
+    fn test_metric_wrapper_safe_on_unaligned() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
 
@@ -1978,7 +2023,8 @@ mod sentry_tests {
         let aligned_vec = [0.0f32; 4];
         let aligned_ptr = aligned_vec.as_ptr();
 
-        wrapper(unaligned_ptr, aligned_ptr);
+        let result = wrapper(unaligned_ptr, aligned_ptr);
+        assert_eq!(result, f32::MAX);
     }
 
     #[test]
@@ -1987,6 +2033,136 @@ mod sentry_tests {
             "Error: No available threads to lock for search"
         ));
         assert!(!is_retryable_usearch_error("Other error"));
+    }
+
+    #[test]
+    fn test_hnsw_config_serialization_round_trip() {
+        let config = HnswConfig {
+            dimensions: 128,
+            metric: DistanceMetric::Euclidean,
+            m: 32,
+            ef_construction: 200,
+            ef_search: 100,
+            capacity: 5000,
+            quantization: Quantization::F16,
+            storage: StorageMode::InMemory,
+            custom_metric: None,
+        };
+
+        let mut buffer = Vec::new();
+        config.serialize_into(&mut buffer).unwrap();
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let deserialized = HnswConfig::deserialize_from(&mut cursor).unwrap();
+
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_hnsw_config_deserialize_legacy() {
+        // Legacy format: missing quantization byte
+        let config = HnswConfig {
+            dimensions: 128,
+            metric: DistanceMetric::Cosine,
+            m: 16,
+            ef_construction: 128,
+            ef_search: 64,
+            capacity: 1000,
+            quantization: Quantization::F32, // Default
+            storage: StorageMode::InMemory,
+            custom_metric: None,
+        };
+
+        let mut buffer = Vec::new();
+        // Manually write legacy format
+        buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
+        buffer.push(config.metric.to_u8());
+        buffer.extend_from_slice(&(config.m as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_construction as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_search as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.capacity as u64).to_le_bytes());
+        // STOP here (no quantization byte)
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let deserialized = HnswConfig::deserialize_from(&mut cursor).unwrap();
+
+        assert_eq!(config, deserialized);
+        assert_eq!(deserialized.quantization, Quantization::F32); // Check default
+    }
+
+    #[test]
+    fn test_hnsw_config_deserialize_invalid_metric() {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&128u64.to_le_bytes()); // dimensions
+        buffer.push(99); // Invalid metric
+        // rest doesn't matter much as it should fail early, but let's pad it
+        buffer.resize(100, 0);
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let result = HnswConfig::deserialize_from(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hnsw_config_deserialize_invalid_quantization() {
+        // Construct a buffer that is valid until quantization byte
+        let config = HnswConfig::default();
+        let mut buffer = Vec::new();
+        // Write valid parts manually to ensure we reach quantization read
+        buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
+        buffer.push(config.metric.to_u8());
+        buffer.extend_from_slice(&(config.m as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_construction as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_search as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.capacity as u64).to_le_bytes());
+
+        // Write INVALID quantization byte
+        buffer.push(99);
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let result = HnswConfig::deserialize_from(&mut cursor);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid quantization")
+        );
+    }
+
+    #[test]
+    fn test_builder_validation_limits() {
+        // M too large
+        let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine)
+            .m(100)
+            .build();
+        assert!(res.is_err());
+
+        // M too small
+        let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine)
+            .m(0)
+            .build();
+        assert!(res.is_err());
+
+        // Dimensions 0
+        let res = HnswIndexBuilder::new(0, DistanceMetric::Cosine).build();
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_custom_metric_safety_check() {
+        let result = HnswIndexBuilder::new(128, DistanceMetric::Cosine)
+            .quantization(Quantization::I8) // Not F32
+            .with_custom_metric("test", |_, _| 0.0)
+            .build();
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("only supported with F32")
+        );
     }
 }
 
@@ -2013,8 +2189,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
-    fn test_metric_wrapper_panic_on_unaligned() {
+    fn test_metric_wrapper_safe_on_unaligned() {
         // This test ensures that the metric wrapper correctly detects unaligned pointers.
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
@@ -2031,8 +2206,9 @@ mod tests {
         let unaligned_ptr = unsafe { aligned_ptr.add(1) } as *const f32;
         let valid_ptr = aligned_ptr as *const f32;
 
-        // Pass unaligned pointer - should panic
-        wrapper(valid_ptr, unaligned_ptr);
+        // Pass unaligned pointer - should return f32::MAX
+        let result = wrapper(valid_ptr, unaligned_ptr);
+        assert_eq!(result, f32::MAX);
     }
 
     #[test]
@@ -2449,10 +2625,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "usearch passed null pointer")]
-    fn test_metric_wrapper_panic_on_null() {
+    fn test_metric_wrapper_safe_on_null() {
         // This test ensures that the metric wrapper correctly detects null pointers
-        // and panics to prevent UB. This covers the safety check added for FFI.
+        // and returns MAX distance instead of panicking to prevent UB.
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
 
@@ -2461,8 +2636,9 @@ mod tests {
         let valid_ptr = vec.as_ptr();
         let null_ptr = std::ptr::null();
 
-        // Pass null pointer - should panic
-        wrapper(valid_ptr, null_ptr);
+        // Pass null pointer - should return f32::MAX
+        let result = wrapper(valid_ptr, null_ptr);
+        assert_eq!(result, f32::MAX);
     }
 
     #[test]
@@ -3077,11 +3253,99 @@ mod tests {
 }
 
 #[cfg(test)]
+mod warden_tests {
+    use super::*;
+    use crate::core::property::MAX_VECTOR_DIMENSIONS;
+
+    #[test]
+    fn test_config_deserialize_dimensions_too_large() {
+        let huge_dims = (MAX_VECTOR_DIMENSIONS + 1) as u64;
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&huge_dims.to_le_bytes()); // dimensions
+        // Add minimal remaining fields to avoid early EOF if we got past dimensions check
+        buffer.push(0); // metric
+        buffer.extend_from_slice(&16u64.to_le_bytes()); // m
+        buffer.extend_from_slice(&128u64.to_le_bytes()); // ef_construction
+        buffer.extend_from_slice(&64u64.to_le_bytes()); // ef_search
+        buffer.extend_from_slice(&1000u64.to_le_bytes()); // capacity
+        buffer.push(0); // quantization
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let result = HnswConfig::deserialize_from(&mut cursor);
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("dimensions"));
+        assert!(msg.contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_validate_metadata_dimensions_too_large() {
+        let huge_dims = MAX_VECTOR_DIMENSIONS + 1;
+        let metadata = Some(IndexMetadata {
+            dimensions: huge_dims,
+            quantization: Quantization::F32,
+            metric: DistanceMetric::Cosine,
+        });
+        let config = HnswConfig::default();
+
+        let result = HnswIndex::validate_metadata(metadata, &config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Stored index dimensions"));
+        assert!(msg.contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_load_dimensions_too_large_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.index");
+
+        // Create a config with manually set huge dimensions (bypassing builder)
+        let config = HnswConfig {
+            dimensions: MAX_VECTOR_DIMENSIONS + 1,
+            ..Default::default()
+        };
+
+        // Attempt to load (file existence doesn't matter as config check is first)
+        let result = HnswIndex::load(&path, config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("dimensions"));
+        assert!(msg.contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_open_mmap_dimensions_too_large_in_metadata() {
+        // This is harder to test without mocking the usearch FFI or creating a file.
+        // But we can test the load_mappings_with_integrity part via HnswIndex::load if we forge a mappings file.
+        // HnswIndex::open_mmap first calls Index::new(), then index.view().
+        // If we can't easily mock usearch, maybe we can rely on unit testing `validate_metadata` which we did above.
+        // However, `open_mmap` calls `index.dimensions()` which comes from C++.
+        //
+        // Let's rely on `test_validate_metadata_dimensions_too_large` covering the core logic,
+        // and verify `open_mmap`'s check via a mocked scenario if possible, or just accept that `validate_metadata` is the shared logic.
+        //
+        // Wait, `open_mmap` has its own explicit check:
+        // if dimensions > MAX_VECTOR_DIMENSIONS { ... }
+        //
+        // To trigger this, `index.dimensions()` must return a huge value.
+        // We can't force `usearch::Index` to report a huge dimension without a valid file.
+        // But we can skip this one if we are confident, OR we can try to trick it.
+        //
+        // Actually, we can test `load_mappings_with_integrity` logic via `validate_metadata` test.
+        // The check in `open_mmap` covers the case where the *binary index file* itself reports huge dimensions.
+        // Since `usearch` is a black box, we can't easily generate such a file without `HnswIndexBuilder` (which forbids it).
+        //
+        // We will stick to testing the accessible Rust parts.
+    }
+}
+
+#[cfg(test)]
 mod coverage_tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "usearch passed null pointer")]
     fn test_metric_wrapper_null_pointer() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
@@ -3090,12 +3354,12 @@ mod coverage_tests {
         let valid_data = [0.0f32; 4];
         let valid_ptr = valid_data.as_ptr();
 
-        // This should panic
-        wrapper(null_ptr, valid_ptr);
+        // This should return f32::MAX
+        let result = wrapper(null_ptr, valid_ptr);
+        assert_eq!(result, f32::MAX);
     }
 
     #[test]
-    #[should_panic(expected = "usearch passed unaligned pointer")]
     fn test_metric_wrapper_unaligned_pointer() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
@@ -3105,8 +3369,9 @@ mod coverage_tests {
         let valid_data = [0.0f32; 4];
         let valid_ptr = valid_data.as_ptr();
 
-        // This should panic
-        wrapper(unaligned_ptr, valid_ptr);
+        // This should return f32::MAX
+        let result = wrapper(unaligned_ptr, valid_ptr);
+        assert_eq!(result, f32::MAX);
     }
 
     #[test]

@@ -130,12 +130,19 @@ pub trait ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
     /// let edges = tx.get_outgoing_edges(node_id);
     /// for edge_id in edges {
     ///     let edge = tx.get_edge(edge_id)?;
     ///     println!("-> {}", edge.target);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
 
@@ -240,11 +247,17 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, api::transaction::WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node(
     ///     "Person",
     ///     properties! { "name" => "Alice", "age" => 30 }
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn create_node(&mut self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.create_node_with_valid_time(label, properties, None)
@@ -266,13 +279,21 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId, api::transaction::WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let bob_id = NodeId::new(2)?;
     /// let edge_id = tx.create_edge(
     ///     alice_id,
     ///     bob_id,
     ///     "KNOWS",
     ///     properties! { "since" => 2024 }
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn create_edge(
         &mut self,
@@ -303,12 +324,19 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId, api::transaction::WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
     /// // Only updates "age", preserves "name"
     /// tx.update_node(
     ///     node_id,
     ///     properties! { "age" => 31 }
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn update_node(&mut self, node_id: NodeId, properties: PropertyMap) -> Result<()> {
         self.update_node_with_valid_time(node_id, properties, None)
@@ -331,11 +359,18 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::EdgeId, api::transaction::WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let edge_id = EdgeId::new(1)?;
     /// tx.update_edge(
     ///     edge_id,
     ///     properties! { "strength" => 0.95 }
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn update_edge(&mut self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
         self.update_edge_with_valid_time(edge_id, properties, None)

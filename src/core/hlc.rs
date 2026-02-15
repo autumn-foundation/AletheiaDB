@@ -514,6 +514,30 @@ mod tests {
     }
 
     #[test]
+    fn test_receive_collision_oracle() {
+        // Oracle Test: Hardcoded scenario to verify collision logic without reconstructing the formula
+        // Scenario: Local(1000, 10) receives Msg(1000, 20) with physical clock 1000.
+        // Rule: max(1000, 1000, 1000) -> 1000.
+        // Logical: max(10, 20) + 1 = 21.
+        let local = HybridTimestamp::new(1000, 10).unwrap();
+        let msg = HybridTimestamp::new(1000, 20).unwrap();
+        let next = local.receive(msg, 1000).unwrap();
+
+        assert_eq!(next.wallclock(), 1000);
+        assert_eq!(next.logical(), 21);
+
+        // Scenario: Local(1000, 20) receives Msg(1000, 10) with physical clock 1000.
+        // Rule: max(1000, 1000, 1000) -> 1000.
+        // Logical: max(20, 10) + 1 = 21.
+        let local = HybridTimestamp::new(1000, 20).unwrap();
+        let msg = HybridTimestamp::new(1000, 10).unwrap();
+        let next = local.receive(msg, 1000).unwrap();
+
+        assert_eq!(next.wallclock(), 1000);
+        assert_eq!(next.logical(), 21);
+    }
+
+    #[test]
     fn test_send_logic() {
         let ts = HybridTimestamp::new(1000, 5).unwrap();
 
@@ -755,11 +779,21 @@ mod proptests {
             new_wallclock in valid_wallclock()
         ) {
             // send() might fail if logical overflows, but for random inputs probability is low.
-            // However, we should handle the Result.
-            if let Ok(next) = current.send(new_wallclock) {
-                prop_assert!(next > current);
-                prop_assert!(next.wallclock() >= new_wallclock);
-                prop_assert!(next.wallclock() >= current.wallclock());
+            // However, we should handle the Result explicitly.
+            match current.send(new_wallclock) {
+                Ok(next) => {
+                    prop_assert!(next > current);
+                    prop_assert!(next.wallclock() >= new_wallclock);
+                    prop_assert!(next.wallclock() >= current.wallclock());
+                }
+                Err(e) => {
+                    // Only overflow errors are expected for valid inputs
+                    prop_assert!(
+                        matches!(e, TemporalError::LogicalCounterOverflow { .. }),
+                        "Unexpected error: {:?}",
+                        e
+                    );
+                }
             }
         }
 

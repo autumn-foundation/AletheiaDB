@@ -28,10 +28,16 @@ use std::sync::Arc;
 ///
 /// # Example
 ///
-/// ```ignore
-/// let tx = db.read_transaction();
+/// ```rust,no_run
+/// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let db = AletheiaDB::new()?;
+/// # let node_id = NodeId::new(1)?;
+/// let tx = db.read_transaction()?;
 /// let node = tx.get_node(node_id)?;
 /// // No commit needed - transaction is read-only
+/// # Ok(())
+/// # }
 /// ```
 pub struct ReadTransaction {
     tx_id: TxId,

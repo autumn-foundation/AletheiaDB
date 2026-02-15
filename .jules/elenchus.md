@@ -141,3 +141,45 @@
 **Finding:** `VersionDiff::compute` and `PropertyDelta::from_diff` used standard `PartialEq` for `PropertyValue` comparisons. Since `NaN != NaN` in IEEE 754 (and Rust), a property whose value remains `NaN` across versions was incorrectly flagged as modified.
 **Evidence:** `tests/elenchus_repro_nan_diff.rs` failed, confirming that `NaN` -> `NaN` was flagged as a modification.
 **Resolution:** Implemented `PropertyValue::semantically_equal` which treats `NaN` as equal to `NaN` for `Float` and `Vector` variants. Updated `VersionDiff` and `PropertyDelta` to use this method for change detection. Added regression tests in `src/core/property.rs` and `src/core/version.rs`.
+
+**[Loose WAL Segment Rotation]**
+**Module:** `src/storage/wal/flush_coordinator.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `test_segment_rotation` used a large payload (1000% of segment size) to trigger rotation, which masked potential off-by-one errors or loose inequality checks (`>` vs `>=`) in the implementation.
+**Evidence:** `tests/elenchus_flush_coordinator.rs` demonstrated that a loose check would still pass the original test.
+**Resolution:** Strengthened `test_segment_rotation` to test the exact boundary condition (writing exactly `segment_size` bytes triggers rotation; `segment_size - 1` does not).
+
+**[Weak Retention Verification]**
+**Module:** `src/storage/wal/flush_coordinator.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `test_cleanup_old_segments` asserted `segment_count <= retain_limit + 1`. This assertion would pass even if the implementation deleted *all* previous segments, failing to retain history.
+**Evidence:** Reproduction test showed that aggressive deletion (keeping only current) would satisfy the original assertion.
+**Resolution:** Updated the test to assert the exact number of segments and verify that the specific expected segment IDs are present.
+
+**[Ambiguous Truncation Assertion]**
+**Module:** `src/storage/wal/flush_coordinator.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `test_truncate_to_lsn_removes_old_segments` used an assertion `removed > 0 || count_before == count_after`, which allows "doing nothing" to be considered a success.
+**Evidence:** Reproduction test confirmed that a broken implementation (returning 0 removed) would pass.
+**Resolution:** Modified the test to setup a scenario where exactly 1 segment *must* be removed and asserted `removed == 1`.
+
+**[HLC Monotonicity Assertion Weakness]**
+**Module:** `src/core/hlc.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `prop_send_monotonicity` silently swallows errors unless they are explicitly `LogicalCounterOverflow`. If `send` returned an unexpected error (e.g., due to a bug in validation logic), the test would pass silently.
+**Evidence:** Code inspection: `if let Ok(next) = current.send(new_wallclock) { ... }`.
+**Recommendation:** Modify the test to explicitly match `Err` variants and fail on unexpected ones.
+
+**[HLC Collision Tautology]**
+**Module:** `src/core/hlc.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `prop_receive_causality_collision` mirrors the implementation logic (`max(l1, l2) + 1`) to verify the result. This proves only that the implementation matches the test's reimplementation, not that the logic is correct according to spec.
+**Evidence:** `let expected_logical = local_logical.max(msg_logical).checked_add(1);`.
+**Recommendation:** Add an Oracle-style test with hardcoded values to anchor the behavior to specific expected outcomes.
+
+**[Loose SIMD Precision Check]**
+**Module:** `src/core/vector/sentry_tests.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `test_simd_dot_and_magnitudes_large_vector` uses a very loose epsilon (`0.1`) for comparing SIMD vs Scalar results. This could mask significant precision loss or subtle logic errors in remainder handling.
+**Evidence:** `let epsilon = 0.1;` for a sum around 30,000.
+**Recommendation:** Tighten the epsilon to `0.01` or `0.005` to enforce stricter adherence to scalar precision.

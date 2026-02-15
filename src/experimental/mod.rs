@@ -28,6 +28,9 @@ pub mod fishing;
 /// Graph context exporter for LLM integration.
 pub mod graph_context;
 #[cfg(feature = "nova")]
+/// Hindsight: Counterfactual Graph Analysis Engine.
+pub mod hindsight;
+#[cfg(feature = "nova")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
 #[cfg(feature = "nova")]
@@ -48,3 +51,7 @@ pub mod temporal_diff;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
+
+#[cfg(feature = "nova")]
+/// Sentinel: Semantic Firewall for validating data insertion.
+pub mod sentinel;

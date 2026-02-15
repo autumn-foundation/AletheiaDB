@@ -14,15 +14,18 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use aletheiadb::PropertyMapBuilder;
-    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
     /// let node_id = db.create_node(
     ///     "Person",
     ///     PropertyMapBuilder::new()
     ///         .insert("name", "Alice")
     ///         .build()
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.write(|tx| tx.create_node(label, properties))
@@ -35,15 +38,20 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use aletheiadb::PropertyMapBuilder;
-    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = NodeId::new(1)?;
+    /// # let target_id = NodeId::new(2)?;
     /// let edge_id = db.create_edge(
     ///     source_id,
     ///     target_id,
     ///     "KNOWS",
     ///     PropertyMapBuilder::new().insert("since", 2024).build()
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn create_edge(
         &self,
@@ -88,7 +96,10 @@ impl AletheiaDB {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
     /// // Process all Person nodes
     /// for node_id in db.scan_nodes_by_label("Person") {
     ///     let node = db.get_node(node_id)?;
@@ -98,6 +109,8 @@ impl AletheiaDB {
     /// // Count nodes by label
     /// let person_count = db.scan_nodes_by_label("Person").count();
     /// let product_count = db.scan_nodes_by_label("Product").count();
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # See Also

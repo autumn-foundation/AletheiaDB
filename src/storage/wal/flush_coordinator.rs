@@ -316,9 +316,7 @@ impl FlushCoordinator {
     }
 
     /// Open or create the current segment file.
-    fn ensure_segment_open(&self) -> Result<()> {
-        let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-
+    fn ensure_segment_open(&self, writer_guard: &mut Option<BufWriter<File>>) -> Result<()> {
         if writer_guard.is_some() {
             return Ok(());
         }
@@ -379,31 +377,28 @@ impl FlushCoordinator {
 
     /// Rotate to a new segment if current exceeds size limit.
     ///
-    /// # Safety Invariant
+    /// # Thread Safety
     ///
-    /// This method assumes single-threaded access from the flush coordinator.
-    /// Multiple threads should not call `flush()` concurrently, which is the
-    /// only caller of this method. The FlushCoordinator is designed for use
-    /// with a single background flush thread.
-    fn maybe_rotate_segment(&self) -> Result<bool> {
+    /// This method is called while holding the `writer` lock from `flush()`.
+    /// This ensures that segment rotation is atomic with respect to other
+    /// flush operations.
+    fn maybe_rotate_segment(&self, writer_guard: &mut Option<BufWriter<File>>) -> Result<bool> {
         let current_size = self.current_segment_size.load(Ordering::Relaxed);
 
         if current_size >= self.config.segment_size as u64 {
             let closing_segment_id = self.current_segment_id.load(Ordering::Relaxed);
 
-            // Flush and sync current segment
-            {
-                let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref mut writer) = *writer_guard {
-                    writer.flush().map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!(
-                            "Failed to flush WAL segment: {}",
-                            e
-                        )))
-                    })?;
-                }
-                *writer_guard = None;
+            // Flush current segment
+            if let Some(writer) = writer_guard {
+                writer.flush().map_err(|e| {
+                    Error::Storage(StorageError::IoError(format!(
+                        "Failed to flush WAL segment: {}",
+                        e
+                    )))
+                })?;
             }
+            // Close writer (drops BufWriter)
+            *writer_guard = None;
 
             // Sync before closing
             if self.config.sync_on_flush {
@@ -602,8 +597,11 @@ impl FlushCoordinator {
         // Inner function to perform I/O operations.
         // This allows us to catch errors and notify pending entries before returning.
         let do_flush = || -> Result<FlushStats> {
+            // Acquire lock once for the entire operation to ensure thread safety
+            let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+
             // Ensure segment is open
-            self.ensure_segment_open()?;
+            self.ensure_segment_open(&mut writer_guard)?;
 
             let mut bytes_written = 0usize;
 
@@ -613,7 +611,6 @@ impl FlushCoordinator {
 
             // Write all entries
             {
-                let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
                 let writer = writer_guard.as_mut().ok_or_else(|| {
                     Error::Storage(StorageError::WalError {
                         reason: "WAL writer not initialized".to_string(),
@@ -667,7 +664,7 @@ impl FlushCoordinator {
                 .fetch_add(bytes_written as u64, Ordering::Relaxed);
 
             // Check for rotation
-            let segment_rotated = self.maybe_rotate_segment()?;
+            let segment_rotated = self.maybe_rotate_segment(&mut writer_guard)?;
 
             // Update metrics
             self.total_entries_flushed
@@ -957,14 +954,37 @@ mod tests {
 
         let coordinator = FlushCoordinator::new(config).unwrap();
 
-        // First flush - creates segment
-        let entries: Vec<_> = (1..=5)
-            .map(|i| create_test_entry(i, &[i as u8; 50]))
-            .collect();
-        let stats = coordinator.flush(entries, true).unwrap();
+        // 1. Boundary Test: EXACTLY 100 bytes (header + data)
+        // WAL Header is 5 bytes. So we need 95 bytes of data.
+        // Actually, `current_segment_size` includes header.
+        // When we open segment, we write 5 bytes. Size = 5.
+        // We want to reach exactly 100.
+        // PendingEntry wrapper overhead is NOT written to disk in raw `write_all`.
+        // So if we write 95 bytes, total size = 5 + 95 = 100.
+        // 100 >= 100 -> Should Rotate.
 
-        // Should have rotated due to small segment size
-        assert!(stats.segment_rotated || coordinator.current_segment_size() < 100);
+        let entry1 = create_test_entry(1, &[0u8; 95]);
+        let stats1 = coordinator.flush(vec![entry1], true).unwrap();
+
+        // Should rotate because 5 (header) + 95 (data) = 100 >= 100
+        assert!(
+            stats1.segment_rotated,
+            "Should rotate at exactly segment_size (100). Size was {}",
+            coordinator.current_segment_size() // This will be 0 if rotated, or 100 if not
+        );
+        assert_eq!(coordinator.current_segment_size(), 0); // Reset after rotation
+
+        // 2. Boundary Test: 99 bytes (header + data)
+        // Size = 5 (new header) + 94 (data) = 99.
+        // 99 < 100 -> Should NOT Rotate.
+        let entry2 = create_test_entry(2, &[0u8; 94]);
+        let stats2 = coordinator.flush(vec![entry2], true).unwrap();
+
+        assert!(
+            !stats2.segment_rotated,
+            "Should NOT rotate at segment_size - 1 (99)"
+        );
+        assert_eq!(coordinator.current_segment_size(), 99);
     }
 
     #[test]
@@ -1093,30 +1113,50 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = FlushCoordinatorConfig::new(dir.path());
         config.segment_size = 50; // Very small
-        config.segments_to_retain = 2;
+        config.segments_to_retain = 2; // Retain 2 previous + 1 current = 3 total
 
         let coordinator = FlushCoordinator::new(config).unwrap();
 
-        // Create multiple small segments
+        // Create segments 1..10
+        // Each flush creates a new segment because data (100) > size (50)
         for i in 1..=10 {
             let entry = create_test_entry(i, &[i as u8; 100]);
             coordinator.flush(vec![entry], true).unwrap();
         }
 
-        // Count remaining segments
-        let segment_count = std::fs::read_dir(dir.path())
+        // We expect segments 8, 9, 10 to remain.
+        // 10 is current. 9 and 8 are retained.
+        // 1..7 should be deleted.
+
+        let mut segments: Vec<u64> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "log")
-                    .unwrap_or(false)
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().is_some_and(|ext| ext == "log") {
+                    path.file_stem()
+                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                } else {
+                    None
+                }
             })
-            .count();
+            .collect();
+        segments.sort();
 
-        // Should have at most segments_to_retain + 1 (current)
-        assert!(segment_count <= 3);
+        // Strict assertion: We must have exactly 3 segments.
+        assert_eq!(
+            segments.len(),
+            3,
+            "Should retain exactly 3 segments (2 + current). Found: {:?}",
+            segments
+        );
+
+        // Strict assertion: Verify exact IDs
+        // Current ID is 10 (created by 10th flush).
+        // cleanup retains `current_id` and `segments_to_retain` previous ones.
+        // retain_from = 10 - 2 = 8.
+        // Keeps ID >= 8: 8, 9, 10.
+        assert_eq!(segments, vec![8, 9, 10]);
     }
 
     // ============================================================
@@ -1177,54 +1217,72 @@ mod tests {
     #[test]
     fn test_truncate_to_lsn_removes_old_segments() {
         let dir = tempdir().unwrap();
+
+        // Use segment size 200.
+        // 10 entries of 20 bytes = 200 bytes.
+        // + Header (5 bytes) = 205 bytes.
+        // 205 >= 200 -> Rotates immediately after the batch.
         let mut config = FlushCoordinatorConfig::new(dir.path());
-        config.segment_size = 30; // Very small
+        config.segment_size = 200;
         config.segments_to_retain = 100; // Don't auto-cleanup
 
         let coordinator = FlushCoordinator::new(config).unwrap();
 
-        // Create segments with different LSN ranges
         // Segment 1: LSN 1-10
-        for i in 1..=10 {
-            coordinator
-                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
-                .unwrap();
-        }
+        let entries1: Vec<_> = (1..=10)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
+        coordinator.flush(entries1, true).unwrap();
 
         // Segment 2: LSN 11-20
-        for i in 11..=20 {
-            coordinator
-                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
-                .unwrap();
-        }
+        let entries2: Vec<_> = (11..=20)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
+        coordinator.flush(entries2, true).unwrap();
 
         // Segment 3: LSN 21-30
-        for i in 21..=30 {
-            coordinator
-                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
-                .unwrap();
-        }
-
-        // Count segments before truncation
-        let segments_before: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+        let entries3: Vec<_> = (21..=30)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
             .collect();
-        let count_before = segments_before.len();
+        coordinator.flush(entries3, true).unwrap();
 
-        // Truncate to LSN 15 - should remove segments where max_lsn < 15
+        // We expect 3 segments.
+        // Seg 1 (LSN 1-10) -> Rotated
+        // Seg 2 (LSN 11-20) -> Rotated
+        // Seg 3 (LSN 21-30) -> Rotated
+
+        // Truncate to LSN 15.
+        // Should remove Seg 1 (Max 10 < 15).
+        // Should KEEP Seg 2 (Max 20 >= 15).
+        // Should KEEP Seg 3 (Max 30 >= 15).
+
         let removed = coordinator.truncate_to_lsn(LSN(15)).unwrap();
 
-        // Count segments after truncation
-        let segments_after: Vec<_> = std::fs::read_dir(dir.path())
+        assert_eq!(removed, 1, "Should remove exactly 1 segment (LSN 1-10)");
+
+        // Verify Seg 1 is PHYSICALLY gone from disk.
+        // We use fs::read_dir directly to avoid relying on list_segments_with_metadata
+        // which might filter out files if metadata is missing (false negative).
+        let segment_ids: Vec<u64> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().is_some_and(|ext| ext == "log") {
+                    path.file_stem()
+                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        // Should have removed at least one segment
-        assert!(removed > 0 || count_before == segments_after.len());
+        assert!(
+            !segment_ids.contains(&1),
+            "Segment 1 should be physically deleted"
+        );
+        assert!(segment_ids.contains(&2), "Segment 2 should remain");
+        assert!(segment_ids.contains(&3), "Segment 3 should remain");
     }
 
     #[test]
@@ -1355,7 +1413,10 @@ mod tests {
         let coordinator = FlushCoordinator::new(config).unwrap();
 
         // 2. Open segment to get sync handle
-        coordinator.ensure_segment_open().unwrap();
+        {
+            let mut writer_guard = coordinator.writer.lock().unwrap();
+            coordinator.ensure_segment_open(&mut writer_guard).unwrap();
+        }
 
         // 3. Replace sync_handle with a File opening /dev/null
         // fsync on /dev/null returns EINVAL on Linux, which causes sync_data to fail.
@@ -1394,6 +1455,81 @@ mod tests {
             err_msg.contains("Failed to sync WAL"),
             "Error should be about syncing, got: {}",
             err_msg
+        );
+    }
+
+    #[test]
+    fn test_truncate_safe_defaults_on_missing_metadata() {
+        // 💣 Risk: If .meta file is missing, truncation logic should be conservative
+        // and NOT delete the segment, to prevent accidental data loss.
+
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 50; // Small size to force rotation
+        config.segments_to_retain = 100; // Don't auto-cleanup
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 1. Create a segment with LSN 1-10
+        // Entries: 10 * ~20 bytes = 200 bytes > 50 bytes, so it will rotate
+        let entries: Vec<_> = (1..=10)
+            .map(|i| create_test_entry(i, &[i as u8; 10]))
+            .collect();
+
+        coordinator.flush(entries, true).unwrap();
+
+        // Force rotation by writing more entries
+        let entries2: Vec<_> = (11..=20)
+            .map(|i| create_test_entry(i, &[i as u8; 10]))
+            .collect();
+        coordinator.flush(entries2, true).unwrap();
+
+        // 2. Identify the first segment
+        let segments = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+            .collect::<Vec<_>>();
+
+        // Should have at least 2 segments (one closed, one active)
+        assert!(segments.len() >= 2, "Expected at least 2 segments");
+
+        // Find the oldest segment (lowest number)
+        let oldest_segment_path = segments.iter().min_by_key(|e| e.path()).unwrap().path();
+
+        // Find its metadata file
+        // Note: FlushCoordinator naming is {:06}.log and {:06}.log.meta
+        // We handle path extension carefully
+        let mut meta_path = oldest_segment_path.clone();
+        if let Some(name) = meta_path.file_name() {
+            let mut name = name.to_os_string();
+            name.push(".meta");
+            meta_path.set_file_name(name);
+        }
+
+        assert!(
+            meta_path.exists(),
+            "Metadata file should exist: {:?}",
+            meta_path
+        );
+
+        // 3. Delete the metadata file
+        std::fs::remove_file(&meta_path).unwrap();
+        assert!(!meta_path.exists());
+
+        // 4. Try to truncate up to LSN 100 (which is > max LSN of 10)
+        // If metadata were present, this would delete the segment.
+        // Without metadata, it should be CONSERVATIVE and keep it.
+        let removed = coordinator.truncate_to_lsn(LSN(100)).unwrap();
+
+        // 5. Verify conservative behavior
+        assert_eq!(
+            removed, 0,
+            "Should not remove segment if metadata is missing"
+        );
+        assert!(
+            oldest_segment_path.exists(),
+            "Segment log file should still exist"
         );
     }
 }
