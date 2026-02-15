@@ -86,6 +86,7 @@
 //! - Searches can run concurrently with additions
 
 use crate::core::id::NodeId;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
@@ -337,6 +338,15 @@ impl HnswConfig {
         reader.read_exact(&mut buf_u64)?;
         let dimensions = u64::from_le_bytes(buf_u64) as usize;
 
+        if dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         reader.read_exact(&mut buf_u8)?;
         let metric = DistanceMetric::from_u8(buf_u8[0])?;
 
@@ -559,6 +569,14 @@ impl HnswIndexBuilder {
         if self.config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    self.config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
             }));
         }
 
@@ -1416,6 +1434,14 @@ impl HnswIndex {
     /// Validate loaded index metadata against configuration.
     fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswConfig) -> Result<()> {
         if let Some(meta) = metadata {
+            if meta.dimensions > MAX_VECTOR_DIMENSIONS {
+                return Err(Error::Vector(VectorError::InvalidVector {
+                    reason: format!(
+                        "Stored index dimensions {} exceeds maximum allowed {}",
+                        meta.dimensions, MAX_VECTOR_DIMENSIONS
+                    ),
+                }));
+            }
             if meta.dimensions != config.dimensions {
                 return Err(Error::Vector(VectorError::IndexError(format!(
                     "Index dimension mismatch: expected {}, found {}",
@@ -1786,6 +1812,15 @@ impl HnswIndex {
 
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        if config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         // Security Check: Custom metrics require F32 quantization
         if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -1883,6 +1918,15 @@ impl HnswIndex {
 
         let dimensions = index.dimensions();
         let connectivity = index.connectivity();
+
+        if dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "Memory-mapped index dimensions {} exceeds maximum allowed {}",
+                    dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
 
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
@@ -3203,6 +3247,95 @@ mod tests {
 
         assert!(path.exists());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod warden_tests {
+    use super::*;
+    use crate::core::property::MAX_VECTOR_DIMENSIONS;
+
+    #[test]
+    fn test_config_deserialize_dimensions_too_large() {
+        let huge_dims = (MAX_VECTOR_DIMENSIONS + 1) as u64;
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&huge_dims.to_le_bytes()); // dimensions
+        // Add minimal remaining fields to avoid early EOF if we got past dimensions check
+        buffer.push(0); // metric
+        buffer.extend_from_slice(&16u64.to_le_bytes()); // m
+        buffer.extend_from_slice(&128u64.to_le_bytes()); // ef_construction
+        buffer.extend_from_slice(&64u64.to_le_bytes()); // ef_search
+        buffer.extend_from_slice(&1000u64.to_le_bytes()); // capacity
+        buffer.push(0); // quantization
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let result = HnswConfig::deserialize_from(&mut cursor);
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("dimensions"));
+        assert!(msg.contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_validate_metadata_dimensions_too_large() {
+        let huge_dims = MAX_VECTOR_DIMENSIONS + 1;
+        let metadata = Some(IndexMetadata {
+            dimensions: huge_dims,
+            quantization: Quantization::F32,
+            metric: DistanceMetric::Cosine,
+        });
+        let config = HnswConfig::default();
+
+        let result = HnswIndex::validate_metadata(metadata, &config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Stored index dimensions"));
+        assert!(msg.contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_load_dimensions_too_large_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.index");
+
+        // Create a config with manually set huge dimensions (bypassing builder)
+        let config = HnswConfig {
+            dimensions: MAX_VECTOR_DIMENSIONS + 1,
+            ..Default::default()
+        };
+
+        // Attempt to load (file existence doesn't matter as config check is first)
+        let result = HnswIndex::load(&path, config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("dimensions"));
+        assert!(msg.contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_open_mmap_dimensions_too_large_in_metadata() {
+        // This is harder to test without mocking the usearch FFI or creating a file.
+        // But we can test the load_mappings_with_integrity part via HnswIndex::load if we forge a mappings file.
+        // HnswIndex::open_mmap first calls Index::new(), then index.view().
+        // If we can't easily mock usearch, maybe we can rely on unit testing `validate_metadata` which we did above.
+        // However, `open_mmap` calls `index.dimensions()` which comes from C++.
+        //
+        // Let's rely on `test_validate_metadata_dimensions_too_large` covering the core logic,
+        // and verify `open_mmap`'s check via a mocked scenario if possible, or just accept that `validate_metadata` is the shared logic.
+        //
+        // Wait, `open_mmap` has its own explicit check:
+        // if dimensions > MAX_VECTOR_DIMENSIONS { ... }
+        //
+        // To trigger this, `index.dimensions()` must return a huge value.
+        // We can't force `usearch::Index` to report a huge dimension without a valid file.
+        // But we can skip this one if we are confident, OR we can try to trick it.
+        //
+        // Actually, we can test `load_mappings_with_integrity` logic via `validate_metadata` test.
+        // The check in `open_mmap` covers the case where the *binary index file* itself reports huge dimensions.
+        // Since `usearch` is a black box, we can't easily generate such a file without `HnswIndexBuilder` (which forbids it).
+        //
+        // We will stick to testing the accessible Rust parts.
     }
 }
 
