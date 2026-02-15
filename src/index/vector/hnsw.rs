@@ -947,7 +947,7 @@ impl VectorIndex for HnswIndex {
                     )?;
                 }
 
-                // Step 3: Add to inner usearch index while holding read lock
+                // Step 3: Add to inner usearch index while holding write lock
                 self.retry_usearch(|| index.add(key, vector), "Failed to add vector")?;
 
                 #[cfg(test)]
