@@ -73,3 +73,41 @@ fn test_sparse_squared_euclidean_distance_correctness() {
     let dist = sparse_squared_euclidean_distance(&a, &b).unwrap();
     assert!((dist - 26.0).abs() < 1e-6, "Expected 26.0, got {}", dist);
 }
+
+#[test]
+fn test_sparse_cosine_similarity_threshold_behavior() {
+    // 🛡️ Sentry: Verify that vectors with squared magnitude < SQUARED_MAGNITUDE_THRESHOLD (1e-14)
+    // are treated as zero vectors (similarity 0.0), even if their linear magnitude is > 1e-14.
+    //
+    // The previous implementation used `magnitude() < SQUARED_MAGNITUDE_THRESHOLD`, which
+    // effectively compared `sqrt(sq_mag) < 1e-14`. This meant vectors with squared magnitude
+    // between 1e-28 and 1e-14 were NOT treated as zero, potentially leading to instability.
+    //
+    // We construct a vector with squared magnitude = 0.9 * 1e-14 = 9e-15.
+    // Its linear magnitude is sqrt(9e-15) ≈ 9.48e-8.
+    //
+    // If threshold check is correct (squared vs squared): 9e-15 < 1e-14 -> true -> return 0.0.
+    // If threshold check is incorrect (linear vs squared): 9.48e-8 < 1e-14 -> false -> return 1.0 (self-similarity).
+
+    use crate::core::vector::constants::SQUARED_MAGNITUDE_THRESHOLD;
+
+    // Create a vector with a single element such that val^2 = 0.9 * threshold
+    let target_sq_mag = 0.9 * SQUARED_MAGNITUDE_THRESHOLD;
+    let val = target_sq_mag.sqrt();
+
+    let vec = SparseVec::new(vec![0], vec![val], 10).unwrap();
+
+    // Verify our construction
+    let actual_sq_mag = vec.squared_magnitude();
+    assert!((actual_sq_mag - target_sq_mag).abs() < 1e-20);
+    assert!(actual_sq_mag < SQUARED_MAGNITUDE_THRESHOLD);
+
+    // Compute similarity with itself
+    // Should be 0.0 because it's considered a zero vector
+    let similarity = sparse_cosine_similarity(&vec, &vec).unwrap();
+
+    assert_eq!(
+        similarity, 0.0,
+        "Vector with squared magnitude < threshold should be treated as zero vector"
+    );
+}

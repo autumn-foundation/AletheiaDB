@@ -75,6 +75,140 @@ impl ClockSkewDirection {
     }
 }
 
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    /// 🎯 Target: evaluate_clock_skew
+    /// 💣 Risk: Incorrect self-healing or violation detection in complex scenarios.
+    /// 🧪 Strategy: Table-driven test covering all combinations of drift direction, limits, and self-heal setting.
+    #[test]
+    fn test_evaluate_clock_skew_table() {
+        struct TestCase {
+            current: i64,
+            frontier: i64,
+            max_forward: Option<i64>,
+            self_heal: bool,
+            expected_decision: Option<(i64, Option<ClockSkewDirection>)>, // None implies Violation
+            description: &'static str,
+        }
+
+        let cases = vec![
+            // Case 1: Normal forward progress (no drift)
+            TestCase {
+                current: 1000,
+                frontier: 900,
+                max_forward: Some(500),
+                self_heal: false,
+                expected_decision: Some((1000, None)),
+                description: "Normal forward progress",
+            },
+            // Case 2: Minor backward drift (within limit)
+            TestCase {
+                current: 900,
+                frontier: 1000,
+                max_forward: Some(500),
+                self_heal: false,
+                expected_decision: Some((900, None)),
+                description: "Minor backward drift",
+            },
+            // Case 3: Backward drift > limit, self-heal=false (Violation)
+            TestCase {
+                current: 1000,
+                frontier: 1000 + MAX_BACKWARD_DRIFT_US + 1,
+                max_forward: Some(500),
+                self_heal: false,
+                expected_decision: None,
+                description: "Backward drift violation",
+            },
+            // Case 4: Backward drift > limit, self-heal=true (Healed)
+            TestCase {
+                current: 1000,
+                frontier: 1000 + MAX_BACKWARD_DRIFT_US + 1,
+                max_forward: Some(500),
+                self_heal: true,
+                expected_decision: Some((1000 + MAX_BACKWARD_DRIFT_US + 1, Some(ClockSkewDirection::Backward))),
+                description: "Backward drift self-healed",
+            },
+            // Case 5: Minor forward drift (within limit)
+            TestCase {
+                current: 1200,
+                frontier: 1000,
+                max_forward: Some(500),
+                self_heal: false,
+                expected_decision: Some((1200, None)),
+                description: "Minor forward drift",
+            },
+            // Case 6: Forward drift > limit, self-heal=false (Violation)
+            TestCase {
+                current: 1600,
+                frontier: 1000,
+                max_forward: Some(500),
+                self_heal: false,
+                expected_decision: None,
+                description: "Forward drift violation",
+            },
+            // Case 7: Forward drift > limit, self-heal=true (Healed)
+            TestCase {
+                current: 1600,
+                frontier: 1000,
+                max_forward: Some(500),
+                self_heal: true,
+                expected_decision: Some((1000, Some(ClockSkewDirection::Forward))),
+                description: "Forward drift self-healed",
+            },
+            // Case 8: Forward drift > limit, max_forward=None (Allowed)
+            TestCase {
+                current: 2000000,
+                frontier: 1000,
+                max_forward: None,
+                self_heal: false,
+                expected_decision: Some((2000000, None)),
+                description: "Unbounded forward drift allowed",
+            },
+            // Case 9: Exact backward limit (Allowed)
+            TestCase {
+                current: 1000,
+                frontier: 1000 + MAX_BACKWARD_DRIFT_US,
+                max_forward: Some(500),
+                self_heal: false,
+                expected_decision: Some((1000, None)), // Not a violation yet? Check implementation: drift < -MAX...
+                description: "Exact backward limit",
+            },
+        ];
+
+        for case in cases {
+            let result = evaluate_clock_skew(
+                case.current,
+                case.frontier,
+                case.max_forward,
+                case.self_heal,
+            );
+
+            match (result, case.expected_decision) {
+                (Ok(decision), Some((expected_wc, expected_dir))) => {
+                    assert_eq!(decision.effective_wallclock, expected_wc, "{} (wallclock)", case.description);
+                    assert_eq!(decision.healed_direction, expected_dir, "{} (direction)", case.description);
+                }
+                (Err(violation), None) => {
+                    // Violation expected and received
+                    // Check if direction is correct based on drift
+                    let drift = case.current - case.frontier;
+                    let expected_dir = if drift < 0 { ClockSkewDirection::Backward } else { ClockSkewDirection::Forward };
+                    assert_eq!(violation.direction, expected_dir, "{} (violation direction)", case.description);
+                }
+                (Ok(decision), None) => {
+                    panic!("{}: Expected violation, but got success: {:?}", case.description, decision);
+                }
+                (Err(violation), Some(_)) => {
+                    panic!("{}: Expected success, but got violation: {:?}", case.description, violation);
+                }
+            }
+        }
+    }
+
+}
+
 /// Result of evaluating wallclock drift against configured skew policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockSkewDecision {
