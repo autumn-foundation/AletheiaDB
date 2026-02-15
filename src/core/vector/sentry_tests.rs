@@ -290,3 +290,40 @@ fn test_simd_dot_product_sum_zero_length() {
     let res = super::simd::dot_product_sum(&a, &b);
     assert_eq!(res, 0.0);
 }
+
+#[test]
+fn test_simd_dot_and_magnitudes_large_vector() {
+    // 🧪 Strategy: Test with large vectors to exercise SIMD loop unrolling and remainder handling.
+    let len = 1023; // Prime number large enough to have chunks and remainder
+    let a: Vec<f32> = (0..len).map(|i| (i % 10) as f32).collect();
+    let b: Vec<f32> = (0..len).map(|i| ((i + 1) % 10) as f32).collect();
+
+    let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes(&a, &b);
+
+    // Calculate expected scalar values
+    let expected_dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let expected_mag_a: f32 = a.iter().map(|x| x * x).sum();
+    let expected_mag_b: f32 = b.iter().map(|x| x * x).sum();
+
+    // Allow small epsilon for floating point accumulation differences
+    // 0.1 is safe for sum around 30,000 (machine epsilon approx 0.0036 at this magnitude)
+    let epsilon = 0.1;
+    assert!(
+        (dot - expected_dot).abs() < epsilon,
+        "Dot product mismatch: {} vs {}",
+        dot,
+        expected_dot
+    );
+    assert!(
+        (mag_a - expected_mag_a).abs() < epsilon,
+        "Mag A mismatch: {} vs {}",
+        mag_a,
+        expected_mag_a
+    );
+    assert!(
+        (mag_b - expected_mag_b).abs() < epsilon,
+        "Mag B mismatch: {} vs {}",
+        mag_b,
+        expected_mag_b
+    );
+}

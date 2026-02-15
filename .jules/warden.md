@@ -11,9 +11,11 @@
 **2026-02-15 - Vector Deserialization Hardening Verification**
 **Threat:** Malicious inputs causing Denial of Service (DoS) via excessive allocation or memory safety issues in `unsafe` vector deserialization logic.
 **Defense:** Audited `src/core/property.rs` and `src/index/vector/hnsw.rs`. Verified presence of `MAX_VECTOR_DIMENSIONS`, `MAX_RECURSION_DEPTH`, and buffer bounds checks. Added `tests/warden_verification.rs` as a regression suite ("Test Exploits") to enforce these limits and prevent future regressions. Confirmed that `deserialize_vector` and `deserialize_sparse_vector` safely handle invalid inputs without panicking or accessing uninitialized memory.
+
 **2026-02-15 - Redundant Alignment Checks in HNSW Metric Wrapper**
 **Threat:** The `create_metric_wrapper` function in `src/index/vector/hnsw.rs` contained redundant alignment checks. While not a security vulnerability per se, it added complexity and potential for confusion. The bitwise check `(ptr as usize) & (align - 1)` is sufficient and more performant than `ptr.align_offset(align)`.
 **Defense:** Removed the redundant `align_offset` check, relying on the bitwise check for safety. Also added `test_load_mappings_count_limit` to `src/index/vector/hnsw.rs` to verify OOM protection for Version 2 mapping files, complementing the existing Version 1 test.
+
 **2026-02-15 - LSN Allocator Overflow**
 **Threat:** The atomic LSN allocator used `fetch_add` without overflow checking. While requiring ~5000 years at 100M/sec to overflow `u64`, a large batch allocation (e.g. `u64::MAX`) or eventual wraparound would cause duplicate LSNs, breaking WAL ordering and data consistency.
 **Defense:** Replaced `fetch_add` with `fetch_update` (CAS loop) in `src/storage/wal/lsn_allocator.rs` to atomically check for overflow *before* modifying the state. Added `tests/warden_security_tests.rs` to verify panic behavior on overflow attempts.
@@ -29,3 +31,7 @@
 **2026-02-16 - Panic in PropertyMap::from_iter**
 **Threat:** The `PropertyMap::from_iter` method used `expect()` when calculating serialized size. If a user provided a deeply nested `PropertyValue` (exceeding `MAX_RECURSION_DEPTH` of 100), `serialized_size()` would return an error, causing `from_iter` to panic and crash the process. This crash vector was reachable via standard iterator usage.
 **Defense:** Replaced `expect()` with `unwrap_or(RECURSION_PENALTY_SIZE)` in `src/core/property.rs`. This allows map construction to proceed without crashing. Safety is maintained because the subsequent `serialize()` operation re-checks recursion depth and will fail gracefully (returning `Result::Err`) instead of panicking.
+
+**2026-02-16 - SIMD Loop Safety Hardening**
+**Threat:** `dot_and_magnitudes_avx2` and `dot_and_magnitudes_sse2` functions in `src/core/vector/simd.rs` used manual pointer arithmetic (`ptr.add(offset)`) inside the main processing loop. While logically correct given the `chunks` calculation, explicit pointer arithmetic in loops is brittle and prone to off-by-one errors or bounds check bypasses if logic changes.
+**Defense:** Refactored both functions to use `chunks_exact` and `zip` iterator combinators. This eliminates manual pointer arithmetic from the loop body, relying instead on the standard library's verified slice iteration logic. The `unsafe` block scope is reduced to only the intrinsics themselves (which require unsafe). Verified with `test_simd_dot_and_magnitudes_large_vector` to ensure correctness on large inputs.
