@@ -1434,7 +1434,12 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            *observed_at = Instant::now() - Duration::from_micros(idle_gap_us as u64);
+            // On Windows/CI, Instant is monotonic from boot and may panic if we subtract more than uptime.
+            // We use checked_sub and fallback to a safe past instant if underflow occurs.
+            let now = Instant::now();
+            *observed_at = now
+                .checked_sub(Duration::from_micros(idle_gap_us as u64))
+                .unwrap_or(now);
         }
 
         let result = coordinator.next_commit_timestamp();

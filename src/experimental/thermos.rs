@@ -157,9 +157,7 @@ mod tests {
         let thermos = Thermos::new(&db);
         let window = TimeRange::new(t0, t1).unwrap();
 
-        let reading = thermos
-            .measure_temperature(node, "vec", window)
-            .unwrap();
+        let reading = thermos.measure_temperature(node, "vec", window).unwrap();
 
         assert_eq!(reading.update_count, 2);
         assert!(reading.volatility < 1e-5);
@@ -194,9 +192,7 @@ mod tests {
         let thermos = Thermos::new(&db);
         let window = TimeRange::new(t0, t1).unwrap();
 
-        let reading = thermos
-            .measure_temperature(node, "vec", window)
-            .unwrap();
+        let reading = thermos.measure_temperature(node, "vec", window).unwrap();
 
         assert_eq!(reading.update_count, 2);
         // Volatility should be exactly 5.0
@@ -245,9 +241,7 @@ mod tests {
         let thermos = Thermos::new(&db);
         let window = TimeRange::new(t0, t1).unwrap();
 
-        let reading = thermos
-            .measure_temperature(node, "vec", window)
-            .unwrap();
+        let reading = thermos.measure_temperature(node, "vec", window).unwrap();
 
         assert_eq!(reading.update_count, 3);
         assert!((reading.volatility - 2.0).abs() < 1e-5);
