@@ -4,7 +4,6 @@ use aletheiadb::core::property::PropertyMap;
 use aletheiadb::core::temporal::time;
 use aletheiadb::storage::wal::concurrent::{ConcurrentWal, ConcurrentWalConfig};
 use aletheiadb::storage::wal::entry::{MAX_WAL_ENTRY_SIZE, WalOperation};
-use std::sync::Arc;
 use tempfile::tempdir;
 
 fn test_operation(id: u64) -> WalOperation {
@@ -18,7 +17,6 @@ fn test_operation(id: u64) -> WalOperation {
 
 // Create a huge operation that exceeds MAX_WAL_ENTRY_SIZE
 fn huge_operation(id: u64) -> WalOperation {
-    let mut props = PropertyMap::new();
     // MAX_WAL_ENTRY_SIZE is 64MB.
     // Create a property map larger than that.
     // A vector of f32 is dense. 64MB / 4 = 16M floats.
