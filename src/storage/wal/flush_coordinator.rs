@@ -216,6 +216,8 @@ pub struct FlushCoordinator {
     current_segment_max_lsn: AtomicU64,
     /// Entry count in the current segment.
     current_segment_entry_count: AtomicU64,
+    /// Lock for serializing flush operations.
+    flush_lock: Mutex<()>,
 }
 
 impl FlushCoordinator {
@@ -241,6 +243,7 @@ impl FlushCoordinator {
             current_segment_min_lsn: AtomicU64::new(u64::MAX),
             current_segment_max_lsn: AtomicU64::new(0),
             current_segment_entry_count: AtomicU64::new(0),
+            flush_lock: Mutex::new(()),
         };
 
         // Find the latest segment ID
@@ -596,6 +599,12 @@ impl FlushCoordinator {
         if entries.is_empty() {
             return Ok(FlushStats::default());
         }
+
+        // Acquire flush lock to serialize operations
+        // This prevents race conditions during segment rotation where metadata
+        // tracking could be reset while another thread is writing to the new segment.
+        // See tests/havoc_flush_race.rs for reproduction.
+        let _flush_guard = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         let start = Instant::now();
 
