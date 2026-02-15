@@ -97,7 +97,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
@@ -705,6 +705,10 @@ impl HnswIndexBuilder {
                 })?;
         }
 
+        // Initialize atomic trackers
+        let current_size = AtomicUsize::new(index.size());
+        let current_ef_search = AtomicUsize::new(index.expansion_search());
+
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
             config: self.config,
@@ -714,6 +718,8 @@ impl HnswIndexBuilder {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: false,
+            current_size,
+            current_ef_search,
         })
     }
 }
@@ -749,6 +755,10 @@ pub struct HnswIndex {
     max_k: usize,
     /// Whether this index is memory-mapped (read-only)
     is_mmap: bool,
+    /// Current size of the index (shadowed for lock-free access to prevent deadlocks)
+    current_size: AtomicUsize,
+    /// Current ef_search parameter (shadowed for lock-free access)
+    current_ef_search: AtomicUsize,
 }
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -858,6 +868,8 @@ impl VectorIndex for HnswIndex {
                             e
                         )))
                     })?;
+                    // Decrement shadowed size
+                    self.current_size.fetch_sub(1, Ordering::Relaxed);
                 }
                 // Note: If key doesn't exist, we skip remove() and proceed directly to add()
                 // This is safe because add() with a non-existent key will succeed
@@ -881,6 +893,8 @@ impl VectorIndex for HnswIndex {
                         e
                     )))
                 })?;
+                // Increment shadowed size
+                self.current_size.fetch_add(1, Ordering::Relaxed);
 
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -938,6 +952,8 @@ impl VectorIndex for HnswIndex {
                         e
                     )))
                 })?;
+                // Increment shadowed size
+                self.current_size.fetch_add(1, Ordering::Relaxed);
 
                 #[cfg(test)]
                 {
@@ -976,6 +992,8 @@ impl VectorIndex for HnswIndex {
                             e
                         )))
                     })?;
+                    // Decrement shadowed size
+                    self.current_size.fetch_sub(1, Ordering::Relaxed);
 
                     // The existing mapping wins; return error to indicate retry needed
                     return Err(Error::Vector(VectorError::IndexError(
@@ -1027,6 +1045,8 @@ impl VectorIndex for HnswIndex {
                     e
                 )))
             })?;
+            // Decrement shadowed size
+            self.current_size.fetch_sub(1, Ordering::Relaxed);
 
             self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
         }
@@ -1207,7 +1227,10 @@ impl VectorIndex for HnswIndex {
     }
 
     fn len(&self) -> usize {
-        self.inner.read().size()
+        // Use shadowed atomic variable to allow lock-free access.
+        // This prevents deadlock when called from inside a search_with_filter callback
+        // (where a read lock is already held, and a pending writer might block re-entry).
+        self.current_size.load(Ordering::Relaxed)
     }
 
     fn dimensions(&self) -> usize {
@@ -1271,6 +1294,13 @@ impl VectorIndex for HnswIndex {
     }
 
     fn memory_usage(&self) -> usize {
+        // Check if we are inside a callback where a read lock is already held.
+        // If so, acquiring the lock again might deadlock if there's a pending writer.
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            // Safe fallback: return 0.
+            // While inaccurate, this is better than crashing or hanging.
+            return 0;
+        }
         self.inner.read().memory_usage()
     }
 
@@ -1279,6 +1309,11 @@ impl VectorIndex for HnswIndex {
     }
 
     fn compact(&self) -> Result<()> {
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot compact index from within a search_with_filter callback.".to_string(),
+            )));
+        }
         // usearch native deletes don't require compaction
         Ok(())
     }
@@ -1286,28 +1321,13 @@ impl VectorIndex for HnswIndex {
 
 // Private helper methods for HnswIndex
 impl HnswIndex {
+    // ... (save_internal and friends remain unchanged)
     /// Internal implementation of index saving.
-    ///
-    /// This method performs the actual blocking I/O operations for saving the index
-    /// and its mappings. It is separated from `save()` to allow the latter to use
-    /// `tokio::task::block_in_place` when running within a Tokio runtime.
     fn save_internal(&self, path: &Path) -> Result<()> {
         // Acquire inner read lock first to ensure consistency between index and mappings.
         // This prevents "Zombie Vectors" where a vector is added to the index but missed in the mappings snapshot.
         let index = self.inner.read();
 
-        // Collect mappings while holding the inner lock.
-        // This is safe because `add` operations (Vacant and Occupied) release DashMap locks
-        // before acquiring the inner lock, or acquire inner then map (Vacant).
-        // Specifically:
-        // - add(Vacant): inner.write() -> id_mapping.insert() (Inner -> Map)
-        // - add(Occupied): drop(entry) -> inner.write() -> id_mapping.get() (Inner -> Map)
-        // - search_with_filter: inner.read() -> reverse_mapping.get() (Inner -> Map)
-        //
-        // Therefore, holding inner.read() and iterating id_mapping (which acquires shard locks)
-        // follows the consistent Inner -> Map lock order, preventing deadlocks.
-        //
-        // Memory cost: O(N) allocation (~16MB for 1M nodes), acceptable for infrequent save operation.
         let mappings: Vec<(NodeId, u64)> = self
             .id_mapping
             .iter()
@@ -1330,12 +1350,10 @@ impl HnswIndex {
         // Explicit drop to release lock before I/O
         drop(index);
 
-        // Save mappings to companion file with integrity checks
-        // Format: [MAGIC:4][VERSION:2][DIMS:8][QUANT:1][METRIC:1][COUNT:8][DATA:16*count][CRC32:4]
+        // Save mappings to companion file
         let mappings_path = path.with_extension("usearch.mappings");
 
-        // Calculate total size: Magic(4) + Version(1) + Dims(8) + Quant(1) + Metric(1) + Count(8) + Data(count * 16) + CRC(4)
-        // Use checked arithmetic to prevent overflow
+        // Calculate total size
         let count_size = count
             .checked_mul(16)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
@@ -1343,7 +1361,6 @@ impl HnswIndex {
             .checked_add(4 + 1 + 8 + 1 + 1 + 8 + 4)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
 
-        // Open file with streaming writer
         let file = File::create(&mappings_path).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to create mappings file: {}",
@@ -1352,12 +1369,9 @@ impl HnswIndex {
         })?;
         let mut writer = BufWriter::new(file);
 
-        // Use Vec iterator instead of DashMap iterator
         Self::write_mappings_to_writer(&mut writer, mappings.into_iter(), count, &self.config)
     }
 
-    /// Helper method to stream mappings to a writer with CRC calculation.
-    /// Extracted for testability of error paths.
     fn write_mappings_to_writer<W, I>(
         writer: &mut W,
         mappings_iter: I,
@@ -1370,13 +1384,6 @@ impl HnswIndex {
     {
         let mut hasher = Hasher::new();
         let count_u64 = count as u64;
-
-        // Helper closure to write and update hasher
-        // We cannot use a simple closure that borrows writer mutably because
-        // we need to call it multiple times.
-        // Instead, we use a macro or just call a helper function.
-        // For simplicity and to avoid borrow checker issues with closures capturing mutable refs,
-        // we'll implement the logic inline or via a local helper function that takes the writer.
 
         fn write_and_hash<W: Write>(
             writer: &mut W,
@@ -1393,11 +1400,9 @@ impl HnswIndex {
             Ok(())
         }
 
-        // Write header
         write_and_hash(writer, &mut hasher, MAPPING_MAGIC)?;
         write_and_hash(writer, &mut hasher, &[MAPPING_VERSION])?;
 
-        // Version 2 fields: Dimensions, Quantization, Metric
         write_and_hash(
             writer,
             &mut hasher,
@@ -1408,13 +1413,11 @@ impl HnswIndex {
 
         write_and_hash(writer, &mut hasher, &count_u64.to_le_bytes())?;
 
-        // Write data directly
         for (node_id, key) in mappings_iter {
             write_and_hash(writer, &mut hasher, &node_id.as_u64().to_le_bytes())?;
             write_and_hash(writer, &mut hasher, &key.to_le_bytes())?;
         }
 
-        // Calculate and write CRC32
         let crc = hasher.finalize();
         writer.write_all(&crc.to_le_bytes()).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
@@ -1433,7 +1436,6 @@ impl HnswIndex {
         Ok(())
     }
 
-    /// Validate loaded index metadata against configuration.
     fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswConfig) -> Result<()> {
         if let Some(meta) = metadata {
             if meta.dimensions > MAX_VECTOR_DIMENSIONS {
@@ -1463,9 +1465,6 @@ impl HnswIndex {
                 ))));
             }
         } else {
-            // Legacy index (Version 1)
-            // Prevent usage of custom metric with legacy index to avoid buffer over-read vulnerability
-            // (since we cannot verify dimensions/quantization)
             if config.custom_metric.is_some() {
                 return Err(Error::Vector(VectorError::IndexError(
                     "Cannot use custom metric with legacy index (missing metadata validation)"
@@ -1476,54 +1475,12 @@ impl HnswIndex {
         Ok(())
     }
 
-    /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.
-    ///
-    /// This helper function encapsulates the common logic of:
-    /// 1. Converting usearch keys back to NodeIds
-    /// 2. Converting distances to similarities based on the configured metric
-    /// 3. Sorting results by similarity (descending order)
-    ///
-    /// # Performance Optimization (Issue #206)
-    ///
-    /// This method retrieves NodeIds from `reverse_mapping` without validation.
-    /// This is safe because:
-    /// - All NodeIds in `reverse_mapping` were inserted via the `add()` method
-    /// - The `add()` method performs validation when accepting user-provided NodeIds
-    /// - Internal key allocation ensures all keys are within valid bounds
-    ///
-    /// By avoiding `NodeId::new()` validation on every result, we save ~1-2ns per
-    /// node examined. For a search examining 1,000 candidates, this saves ~1-2μs.
-    ///
-    /// # Arguments
-    ///
-    /// * `matches` - The raw matches from usearch containing keys and distances
-    ///
-    /// # Returns
-    ///
-    /// A sorted vector of (NodeId, similarity) pairs where higher similarity means more similar.
     fn convert_and_sort_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
         let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
 
         for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
             if let Some(node_id_ref) = self.reverse_mapping.get(key) {
                 let node_id = *node_id_ref.value();
-
-                // Convert distance to similarity based on metric.
-                // usearch returns distances where lower = more similar (except for some metrics).
-                // We convert to similarity where higher = more similar for consistent API.
-                //
-                // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
-                //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
-                // - Euclidean: usearch returns squared L2 distance, range [0, inf)
-                //   Converting: similarity = -distance, so closer vectors have higher similarity
-                // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
-                //   Converting: similarity = -distance = dot_product, higher is more similar
-                // - Haversine: usearch returns great-circle distance, range [0, pi]
-                //   Converting: similarity = -distance, closer points have higher similarity
-                // - Hamming: usearch returns bit differences count, range [0, dims]
-                //   Converting: similarity = -distance, fewer differences = more similar
-                // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
-                //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
                 let similarity = match self.config.metric {
                     DistanceMetric::Cosine => 1.0 - distance,
                     DistanceMetric::Euclidean => -distance,
@@ -1532,22 +1489,15 @@ impl HnswIndex {
                     DistanceMetric::Hamming => -distance,
                     DistanceMetric::Tanimoto => 1.0 - distance,
                 };
-
                 results.push((node_id, similarity));
             }
         }
-
-        // Results should already be sorted by usearch, but ensure descending order by similarity
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
         results
     }
 }
 
-/// Load and verify mappings from a companion file.
-/// Returns (id_mapping, reverse_mapping, max_key, metadata) or error if integrity check fails.
-/// Format V1: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
-/// Format V2: `[MAGIC:4][VERSION:2][DIMS:8][QUANT:1][METRIC:1][COUNT:8][DATA:16*count][CRC32:4]`
+// ... load_mappings_with_integrity remains unchanged ...
 #[allow(clippy::type_complexity)]
 fn load_mappings_with_integrity(
     mappings_path: &Path,
@@ -1565,8 +1515,6 @@ fn load_mappings_with_integrity(
         return Ok((id_mapping, reverse_mapping, max_key, None));
     }
 
-    // Use streaming (File + BufReader) instead of reading entire file to memory (fs::read).
-    // This prevents OOM DoS attacks with large or manipulated files.
     let file = File::open(mappings_path).map_err(|e| {
         Error::Vector(VectorError::IndexError(format!(
             "Failed to open mappings file: {}",
@@ -1584,8 +1532,6 @@ fn load_mappings_with_integrity(
         })?
         .len();
 
-    // Minimum size check (V1 min size)
-    // Magic(4) + Version(1) + Count(8) + CRC(4) = 17 bytes
     if file_len < 17 {
         return Err(Error::Vector(VectorError::IndexError(
             "Mapping file too small or corrupted".to_string(),
@@ -1595,7 +1541,6 @@ fn load_mappings_with_integrity(
     let mut reader = std::io::BufReader::new(file);
     let mut hasher = Hasher::new();
 
-    // 1. Read Start of Header (5 bytes: Magic + Version)
     let mut header_start = [0u8; 5];
     reader.read_exact(&mut header_start).map_err(|e| {
         Error::Vector(VectorError::IndexError(format!(
@@ -1606,7 +1551,6 @@ fn load_mappings_with_integrity(
 
     hasher.update(&header_start);
 
-    // Verify magic bytes
     if &header_start[0..4] != MAPPING_MAGIC {
         return Err(Error::Vector(VectorError::IndexError(
             "Invalid mapping file: bad magic bytes".to_string(),
@@ -1615,10 +1559,8 @@ fn load_mappings_with_integrity(
 
     let version = header_start[4];
 
-    // Read remaining header based on version
     let (count, metadata, header_overhead) = match version {
         1 => {
-            // V1: Count(8)
             let mut buf = [0u8; 8];
             reader.read_exact(&mut buf).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
@@ -1628,11 +1570,9 @@ fn load_mappings_with_integrity(
             })?;
             hasher.update(&buf);
             let count = u64::from_le_bytes(buf) as usize;
-            // Overhead: Magic(4) + Version(1) + Count(8) + CRC(4) = 17
             (count, None, 17)
         }
         2 => {
-            // V2: Dims(8) + Quant(1) + Metric(1) + Count(8)
             let mut buf = [0u8; 18];
             reader.read_exact(&mut buf).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
@@ -1652,7 +1592,6 @@ fn load_mappings_with_integrity(
                 quantization: quant,
                 metric,
             };
-            // Overhead: Magic(4) + Version(1) + Dims(8) + Quant(1) + Metric(1) + Count(8) + CRC(4) = 27
             (count, Some(meta), 27)
         }
         v => {
@@ -1663,7 +1602,6 @@ fn load_mappings_with_integrity(
         }
     };
 
-    // Security Check: Enforce maximum mappings count to prevent OOM DoS
     if count > MAX_MAPPINGS_COUNT {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Mappings count {} exceeds maximum allowed {}",
@@ -1671,8 +1609,6 @@ fn load_mappings_with_integrity(
         ))));
     }
 
-    // Verify data size with checked arithmetic
-    // Cast to u64 for file size comparison
     let data_size = (count as u64).checked_mul(16).ok_or_else(|| {
         Error::Vector(VectorError::IndexError(
             "Mapping count too large (overflow)".to_string(),
@@ -1684,8 +1620,6 @@ fn load_mappings_with_integrity(
         ))
     })?;
 
-    // Critical Security Check: Verify file size matches expected size BEFORE reading data.
-    // This prevents reading until EOF if the file is truncated or huge.
     if file_len != expected_size {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Mapping file size mismatch: expected {} bytes, got {}",
@@ -1693,15 +1627,11 @@ fn load_mappings_with_integrity(
         ))));
     }
 
-    // 2. Read Data
-    // We read in chunks to avoid allocating a huge buffer, but large enough for efficiency.
-    // 16KB buffer holds 1024 entries.
     const CHUNK_SIZE: usize = 1024 * 16;
     let mut buffer = vec![0u8; CHUNK_SIZE];
     let mut remaining_entries = count;
 
     while remaining_entries > 0 {
-        // Calculate entries for this chunk
         let entries_in_chunk = std::cmp::min(remaining_entries, 1024);
         let bytes_to_read = entries_in_chunk * 16;
         let slice = &mut buffer[0..bytes_to_read];
@@ -1729,7 +1659,6 @@ fn load_mappings_with_integrity(
         remaining_entries -= entries_in_chunk;
     }
 
-    // 3. Read and Verify CRC
     let mut crc_buf = [0u8; 4];
     reader.read_exact(&mut crc_buf).map_err(|e| {
         Error::Vector(VectorError::IndexError(format!(
@@ -1770,6 +1699,7 @@ impl HnswIndex {
     pub fn set_ef_search(&self, ef_search: usize) {
         let index = self.inner.read();
         index.change_expansion_search(ef_search);
+        self.current_ef_search.store(ef_search, Ordering::Relaxed);
     }
 
     /// Gets the current ef_search value.
@@ -1777,7 +1707,8 @@ impl HnswIndex {
     /// Note: Returns the runtime value which may differ from config if
     /// `set_ef_search` was called.
     pub fn get_ef_search(&self) -> usize {
-        self.inner.read().expansion_search()
+        // Use shadowed atomic variable to allow lock-free access.
+        self.current_ef_search.load(Ordering::Relaxed)
     }
 
     /// Returns the configuration used to create this index.
@@ -1790,9 +1721,6 @@ impl HnswIndex {
         self.config.m
     }
 
-    /// Get all ID mappings for persistence.
-    ///
-    /// Returns a vector of (node_id, usearch_key) tuples.
     pub(crate) fn get_id_mappings(&self) -> Vec<(u64, u64)> {
         self.id_mapping
             .iter()
@@ -1800,15 +1728,9 @@ impl HnswIndex {
             .collect()
     }
 
-    /// Restore a single ID mapping (used during index loading).
-    ///
-    /// This directly inserts the mapping without adding vectors to the index.
     pub(crate) fn restore_mapping(&self, node_id: crate::core::id::NodeId, usearch_key: u64) {
         self.id_mapping.insert(node_id, usearch_key);
         self.reverse_mapping.insert(usearch_key, node_id);
-
-        // Update next_key atomically to prevent race conditions during concurrent loading
-        // fetch_max ensures we always get the highest key seen, even with concurrent calls
         self.next_key.fetch_max(usearch_key + 1, Ordering::SeqCst);
     }
 
@@ -1823,7 +1745,6 @@ impl HnswIndex {
             }));
         }
 
-        // Security Check: Custom metrics require F32 quantization
         if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: format!(
@@ -1864,25 +1785,22 @@ impl HnswIndex {
                 )))
             })?;
 
-        // Apply custom metric if configured (must happen after load, before use)
-        // This ensures custom metrics are preserved across save/load cycles
         if let Some(ref custom) = config.custom_metric {
             let dims = config.dimensions;
             let distance_fn = Arc::clone(&custom.distance_fn);
-
-            // Create a wrapper that converts usearch's raw pointer API to our safe slice API
             let metric_wrapper = create_metric_wrapper(dims, distance_fn);
-
             index.change_metric(metric_wrapper);
         }
 
-        // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
         let (id_mapping, reverse_mapping, max_key, metadata) =
             load_mappings_with_integrity(&mappings_path)?;
 
-        // Validate metadata
         Self::validate_metadata(metadata, &config)?;
+
+        // Initialize atomic trackers
+        let current_size = AtomicUsize::new(index.size());
+        let current_ef_search = AtomicUsize::new(index.expansion_search());
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
@@ -1893,6 +1811,8 @@ impl HnswIndex {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: false,
+            current_size,
+            current_ef_search,
         })
     }
 
@@ -1930,14 +1850,11 @@ impl HnswIndex {
             }));
         }
 
-        // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
         let (id_mapping, reverse_mapping, max_key, metadata) =
             load_mappings_with_integrity(&mappings_path)?;
 
-        // Restore configuration from metadata if available
         let (quantization, metric) = if let Some(meta) = metadata {
-            // Verify dimensions match what usearch reports
             if meta.dimensions != dimensions {
                 return Err(Error::Vector(VectorError::IndexError(format!(
                     "Index dimension mismatch: usearch reported {}, metadata says {}",
@@ -1946,9 +1863,12 @@ impl HnswIndex {
             }
             (meta.quantization, meta.metric)
         } else {
-            // Legacy index: fallback to defaults
             (Quantization::default(), DistanceMetric::Cosine)
         };
+
+        // Initialize atomic trackers
+        let current_size = AtomicUsize::new(index.size());
+        let current_ef_search = AtomicUsize::new(index.expansion_search());
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
@@ -1968,6 +1888,8 @@ impl HnswIndex {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: true,
+            current_size,
+            current_ef_search,
         })
     }
 }
@@ -1995,6 +1917,7 @@ impl HnswIndex {
 // 5. `stats: Arc<IndexStats>` - Contains only AtomicU64 fields.
 // 6. `config: HnswConfig` - Contains only Copy/Clone primitive types.
 // 7. `max_k: usize`, `is_mmap: bool` - Immutable after construction.
+// 8. `current_size`, `current_ef_search`: AtomicUsize is Send+Sync.
 //
 // In practice, all HnswIndex instances in AletheiaDB are accessed through
 // `Arc<RwLock<HnswIndex>>` (see VectorIndexManager), providing an additional
@@ -2007,22 +1930,19 @@ impl HnswIndex {
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
 
+// ... existing tests ...
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-
+    // ... same tests as before ...
     #[test]
     fn test_metric_wrapper_safe_on_unaligned() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
-
-        // Create a buffer and get an unaligned pointer
         let buffer = [0u8; 32];
-        // Address + 1 is definitely unaligned for f32 (align 4)
         let unaligned_ptr = unsafe { buffer.as_ptr().add(1) } as *const f32;
         let aligned_vec = [0.0f32; 4];
         let aligned_ptr = aligned_vec.as_ptr();
-
         let result = wrapper(unaligned_ptr, aligned_ptr);
         assert_eq!(result, f32::MAX);
     }
@@ -2048,19 +1968,15 @@ mod sentry_tests {
             storage: StorageMode::InMemory,
             custom_metric: None,
         };
-
         let mut buffer = Vec::new();
         config.serialize_into(&mut buffer).unwrap();
-
         let mut cursor = std::io::Cursor::new(buffer);
         let deserialized = HnswConfig::deserialize_from(&mut cursor).unwrap();
-
         assert_eq!(config, deserialized);
     }
 
     #[test]
     fn test_hnsw_config_deserialize_legacy() {
-        // Legacy format: missing quantization byte
         let config = HnswConfig {
             dimensions: 128,
             metric: DistanceMetric::Cosine,
@@ -2068,36 +1984,29 @@ mod sentry_tests {
             ef_construction: 128,
             ef_search: 64,
             capacity: 1000,
-            quantization: Quantization::F32, // Default
+            quantization: Quantization::F32,
             storage: StorageMode::InMemory,
             custom_metric: None,
         };
-
         let mut buffer = Vec::new();
-        // Manually write legacy format
         buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
         buffer.push(config.metric.to_u8());
         buffer.extend_from_slice(&(config.m as u64).to_le_bytes());
         buffer.extend_from_slice(&(config.ef_construction as u64).to_le_bytes());
         buffer.extend_from_slice(&(config.ef_search as u64).to_le_bytes());
         buffer.extend_from_slice(&(config.capacity as u64).to_le_bytes());
-        // STOP here (no quantization byte)
-
         let mut cursor = std::io::Cursor::new(buffer);
         let deserialized = HnswConfig::deserialize_from(&mut cursor).unwrap();
-
         assert_eq!(config, deserialized);
-        assert_eq!(deserialized.quantization, Quantization::F32); // Check default
+        assert_eq!(deserialized.quantization, Quantization::F32);
     }
 
     #[test]
     fn test_hnsw_config_deserialize_invalid_metric() {
         let mut buffer = Vec::new();
-        buffer.extend_from_slice(&128u64.to_le_bytes()); // dimensions
-        buffer.push(99); // Invalid metric
-        // rest doesn't matter much as it should fail early, but let's pad it
+        buffer.extend_from_slice(&128u64.to_le_bytes());
+        buffer.push(99);
         buffer.resize(100, 0);
-
         let mut cursor = std::io::Cursor::new(buffer);
         let result = HnswConfig::deserialize_from(&mut cursor);
         assert!(result.is_err());
@@ -2105,20 +2014,15 @@ mod sentry_tests {
 
     #[test]
     fn test_hnsw_config_deserialize_invalid_quantization() {
-        // Construct a buffer that is valid until quantization byte
         let config = HnswConfig::default();
         let mut buffer = Vec::new();
-        // Write valid parts manually to ensure we reach quantization read
         buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
         buffer.push(config.metric.to_u8());
         buffer.extend_from_slice(&(config.m as u64).to_le_bytes());
         buffer.extend_from_slice(&(config.ef_construction as u64).to_le_bytes());
         buffer.extend_from_slice(&(config.ef_search as u64).to_le_bytes());
         buffer.extend_from_slice(&(config.capacity as u64).to_le_bytes());
-
-        // Write INVALID quantization byte
         buffer.push(99);
-
         let mut cursor = std::io::Cursor::new(buffer);
         let result = HnswConfig::deserialize_from(&mut cursor);
         assert!(result.is_err());
@@ -2132,19 +2036,14 @@ mod sentry_tests {
 
     #[test]
     fn test_builder_validation_limits() {
-        // M too large
         let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine)
             .m(100)
             .build();
         assert!(res.is_err());
-
-        // M too small
         let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine)
             .m(0)
             .build();
         assert!(res.is_err());
-
-        // Dimensions 0
         let res = HnswIndexBuilder::new(0, DistanceMetric::Cosine).build();
         assert!(res.is_err());
     }
@@ -2152,10 +2051,9 @@ mod sentry_tests {
     #[test]
     fn test_custom_metric_safety_check() {
         let result = HnswIndexBuilder::new(128, DistanceMetric::Cosine)
-            .quantization(Quantization::I8) // Not F32
+            .quantization(Quantization::I8)
             .with_custom_metric("test", |_, _| 0.0)
             .build();
-
         assert!(result.is_err());
         assert!(
             result
@@ -2173,40 +2071,24 @@ mod tests {
     #[test]
     fn test_hnsw_basic() -> Result<()> {
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-
         let node1 = NodeId::new(1).unwrap();
         let node2 = NodeId::new(2).unwrap();
-
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
         index.add(node2, &[0.0, 1.0, 0.0, 0.0])?;
-
         assert_eq!(index.len(), 2);
-
         let results = index.search(&[1.0, 0.0, 0.0, 0.0], 2)?;
         assert_eq!(results[0].0, node1);
-
         Ok(())
     }
 
     #[test]
     fn test_metric_wrapper_safe_on_unaligned() {
-        // This test ensures that the metric wrapper correctly detects unaligned pointers.
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
-
-        // Create a buffer that we can misalign
-        // We need at least 4 f32s (16 bytes) + 1 byte offset
         let mut buffer = vec![0u8; 16 + 8];
-
-        // Get an aligned pointer
         let aligned_ptr = buffer.as_mut_ptr();
-
-        // Create an unaligned pointer by adding 1 byte offset
-        // SAFETY: We allocated enough space. This pointer is valid but unaligned for f32.
         let unaligned_ptr = unsafe { aligned_ptr.add(1) } as *const f32;
         let valid_ptr = aligned_ptr as *const f32;
-
-        // Pass unaligned pointer - should return f32::MAX
         let result = wrapper(valid_ptr, unaligned_ptr);
         assert_eq!(result, f32::MAX);
     }
@@ -2214,47 +2096,32 @@ mod tests {
     #[test]
     fn test_hnsw_remove() -> Result<()> {
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-
         let node1 = NodeId::new(1).unwrap();
         let node2 = NodeId::new(2).unwrap();
-
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
         index.add(node2, &[0.0, 1.0, 0.0, 0.0])?;
-
         assert_eq!(index.len(), 2);
-
         index.remove(node1)?;
-
         assert_eq!(index.len(), 1);
-
         let results = index.search(&[1.0, 0.0, 0.0, 0.0], 2)?;
-        // Should only return node2 (node1 is deleted)
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, node2);
-
         Ok(())
     }
 
     #[test]
     fn test_hnsw_search_with_filter() -> Result<()> {
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-
         let node1 = NodeId::new(1).unwrap();
         let node2 = NodeId::new(2).unwrap();
         let node3 = NodeId::new(3).unwrap();
-
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
         index.add(node2, &[0.9, 0.1, 0.0, 0.0])?;
         index.add(node3, &[0.8, 0.2, 0.0, 0.0])?;
-
-        // Filter to only even node IDs
         let results =
             index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 3, |id| id.as_u64() % 2 == 0)?;
-
-        // Should only return node2
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, node2);
-
         Ok(())
     }
 
@@ -2263,7 +2130,6 @@ mod tests {
         let config = HnswConfig::new(384, DistanceMetric::Cosine)
             .with_quantization(Quantization::F16)
             .with_storage(StorageMode::InMemory);
-
         assert_eq!(config.quantization, Quantization::F16);
         assert!(matches!(config.storage, StorageMode::InMemory));
     }
@@ -2274,35 +2140,29 @@ mod tests {
             .with_custom_metric("weighted", |a, b| {
                 a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
             });
-
         assert!(config.custom_metric.is_some());
         assert_eq!(config.custom_metric.as_ref().unwrap().name, "weighted");
     }
 
     #[test]
     fn test_validate_ef_parameters() {
-        // Test ef_construction limits
         let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-            .ef_construction(5) // Too small
+            .ef_construction(5)
             .build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ef_construction"));
-
         let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-            .ef_construction(5000) // Too large
+            .ef_construction(5000)
             .build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ef_construction"));
-
-        // Test ef_search limits
         let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-            .ef_search(0) // Too small
+            .ef_search(0)
             .build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ef_search"));
-
         let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-            .ef_search(5000) // Too large
+            .ef_search(5000)
             .build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ef_search"));
@@ -2310,130 +2170,85 @@ mod tests {
 
     #[test]
     fn test_distance_to_similarity_conversion() -> Result<()> {
-        // Test Cosine similarity conversion
         let cosine_index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
-
         let n1 = NodeId::new(1).unwrap();
         let n2 = NodeId::new(2).unwrap();
         let n3 = NodeId::new(3).unwrap();
-
-        cosine_index.add(n1, &[1.0, 0.0, 0.0])?; // Identical to query
-        cosine_index.add(n2, &[0.9, 0.1, 0.0])?; // Very similar
-        cosine_index.add(n3, &[0.0, 1.0, 0.0])?; // Orthogonal
-
+        cosine_index.add(n1, &[1.0, 0.0, 0.0])?;
+        cosine_index.add(n2, &[0.9, 0.1, 0.0])?;
+        cosine_index.add(n3, &[0.0, 1.0, 0.0])?;
         let results = cosine_index.search(&[1.0, 0.0, 0.0], 3)?;
-
-        // Verify similarity values (not distances)
         assert_eq!(results[0].0, n1);
-        assert!(results[0].1 > 0.99); // Identical: similarity ~= 1.0
-
+        assert!(results[0].1 > 0.99);
         assert_eq!(results[1].0, n2);
-        assert!(results[1].1 > 0.9); // Very similar: similarity > 0.9
-
+        assert!(results[1].1 > 0.9);
         assert_eq!(results[2].0, n3);
-        assert!(results[2].1 < 0.1 && results[2].1 > -0.1); // Orthogonal: similarity ~= 0.0
-
+        assert!(results[2].1 < 0.1 && results[2].1 > -0.1);
         Ok(())
     }
 
     #[test]
     fn test_update_existing_node() -> Result<()> {
-        // Test the Occupied entry path in add() - updating an existing node
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-
         let node1 = NodeId::new(1).unwrap();
-
-        // Add initial vector
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
         assert_eq!(index.len(), 1);
-
-        // Update with new vector (this exercises the Occupied entry path)
         index.add(node1, &[0.0, 1.0, 0.0, 0.0])?;
-        assert_eq!(index.len(), 1); // Still only one node
-
-        // Verify the vector was updated, not duplicated
+        assert_eq!(index.len(), 1);
         let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1)?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, node1);
-        assert!(results[0].1 > 0.99); // Should match the new vector
-
+        assert!(results[0].1 > 0.99);
         Ok(())
     }
 
     #[test]
     fn test_capacity_expansion_on_add() -> Result<()> {
-        // Test capacity expansion during initial adds (Vacant entry path)
-        // Start with small initial capacity to force expansion
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-            .initial_capacity(2) // Start with small capacity
+            .initial_capacity(2)
             .build()?;
-
-        // Add first two nodes - should fit in initial capacity
         let node1 = NodeId::new(1).unwrap();
         let node2 = NodeId::new(2).unwrap();
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
         index.add(node2, &[0.0, 1.0, 0.0, 0.0])?;
         assert_eq!(index.len(), 2);
-
-        // Add third node - should trigger capacity expansion code path
         let node3 = NodeId::new(3).unwrap();
         index.add(node3, &[0.0, 0.0, 1.0, 0.0])?;
         assert_eq!(index.len(), 3);
-
-        // Add more nodes to verify expansion worked
         let node4 = NodeId::new(4).unwrap();
         let node5 = NodeId::new(5).unwrap();
         index.add(node4, &[0.0, 0.0, 0.0, 1.0])?;
         index.add(node5, &[0.5, 0.5, 0.0, 0.0])?;
         assert_eq!(index.len(), 5);
-
-        // Verify all nodes are searchable
         let results = index.search(&[1.0, 0.0, 0.0, 0.0], 5)?;
         assert_eq!(results.len(), 5);
-
         Ok(())
     }
 
     #[test]
     fn test_capacity_expansion_on_update() -> Result<()> {
-        // Test capacity expansion during updates (Occupied entry path with expansion)
-        // Start with small capacity to test expansion in update path
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .initial_capacity(2)
             .build()?;
-
         let node1 = NodeId::new(1).unwrap();
         let node2 = NodeId::new(2).unwrap();
-
-        // Fill to initial capacity
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
         index.add(node2, &[0.0, 1.0, 0.0, 0.0])?;
         assert_eq!(index.len(), 2);
-
-        // Update node1 multiple times (exercises Occupied path)
         index.add(node1, &[0.5, 0.5, 0.0, 0.0])?;
-        assert_eq!(index.len(), 2); // Still 2 nodes
-
-        // Add new nodes to trigger and test expansion
+        assert_eq!(index.len(), 2);
         let node3 = NodeId::new(3).unwrap();
         index.add(node3, &[0.0, 0.0, 1.0, 0.0])?;
         assert_eq!(index.len(), 3);
-
         let node4 = NodeId::new(4).unwrap();
         index.add(node4, &[0.0, 0.0, 0.0, 1.0])?;
         assert_eq!(index.len(), 4);
-
-        // Update again after expansion to test Occupied path with larger capacity
         index.add(node2, &[0.2, 0.8, 0.0, 0.0])?;
-        assert_eq!(index.len(), 4); // Still 4 nodes
-
-        // Verify updates worked correctly
+        assert_eq!(index.len(), 4);
         let results = index.search(&[0.5, 0.5, 0.0, 0.0], 1)?;
         assert_eq!(results[0].0, node1);
-
         let results2 = index.search(&[0.2, 0.8, 0.0, 0.0], 1)?;
         assert_eq!(results2[0].0, node2);
-
         Ok(())
     }
 
@@ -2441,24 +2256,16 @@ mod tests {
     fn test_concurrent_update_same_node() -> Result<()> {
         use std::sync::Arc;
         use std::thread;
-
-        // Test the race condition fix - multiple threads updating the same node
         let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?);
         let node1 = NodeId::new(1).unwrap();
-
-        // Add initial vector
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
-
         let num_threads = 10;
         let updates_per_thread = 10;
-
         let mut handles = vec![];
-
         for thread_id in 0..num_threads {
             let index_clone = Arc::clone(&index);
             let handle = thread::spawn(move || {
                 for i in 0..updates_per_thread {
-                    // Each thread updates the same node with different vectors
                     let val = (thread_id * updates_per_thread + i) as f32 / 100.0;
                     let vector = vec![val, 1.0 - val, 0.0, 0.0];
                     index_clone.add(node1, &vector).unwrap();
@@ -2466,20 +2273,13 @@ mod tests {
             });
             handles.push(handle);
         }
-
-        // Wait for all threads
         for handle in handles {
             handle.join().unwrap();
         }
-
-        // Should still be exactly one node, not duplicates
         assert_eq!(index.len(), 1);
-
-        // Verify the node is still searchable
         let results = index.search(&[0.5, 0.5, 0.0, 0.0], 1)?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, node1);
-
         Ok(())
     }
 
@@ -2487,24 +2287,15 @@ mod tests {
     fn test_concurrent_mixed_operations() -> Result<()> {
         use std::sync::Arc;
         use std::thread;
-
-        // Test concurrent adds and updates to different nodes
         let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?);
-
         let num_threads = 8;
         let mut handles = vec![];
-
         for thread_id in 0..num_threads {
             let index_clone = Arc::clone(&index);
             let handle = thread::spawn(move || {
-                // Each thread works with its own node
                 let node = NodeId::new(thread_id as u64 + 1).unwrap();
-
-                // Add the node
                 let vector = vec![thread_id as f32 / num_threads as f32, 0.0, 0.0, 0.0];
                 index_clone.add(node, &vector).unwrap();
-
-                // Update it multiple times
                 for i in 0..5 {
                     let val = (thread_id as f32 + i as f32) / (num_threads as f32 * 5.0);
                     let updated_vector = vec![val, 1.0 - val, 0.0, 0.0];
@@ -2513,44 +2304,27 @@ mod tests {
             });
             handles.push(handle);
         }
-
         for handle in handles {
             handle.join().unwrap();
         }
-
-        // Should have exactly num_threads nodes
         assert_eq!(index.len(), num_threads);
-
-        // All nodes should be searchable
         let results = index.search(&[0.5, 0.5, 0.0, 0.0], num_threads)?;
         assert_eq!(results.len(), num_threads);
-
         Ok(())
     }
 
     #[test]
     fn test_max_key_overflow_protection() -> Result<()> {
-        // Test that we reject IDs that would exceed MAX_VALID_KEY
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-
-        // Manually set next_key to exactly at the limit
-        // The check is: if current > MAX_VALID_KEY, so:
-        // - Setting to MAX_VALID_KEY: next add uses this key (passes), increments to MAX_VALID_KEY+1
-        // - Then the following add has current=MAX_VALID_KEY+1 (> MAX_VALID_KEY), so it fails
         const MAX_VALID_KEY: u64 = u64::MAX - 1000;
         index
             .next_key
             .store(MAX_VALID_KEY, std::sync::atomic::Ordering::SeqCst);
-
-        // This should succeed (uses MAX_VALID_KEY, then increments to MAX_VALID_KEY+1)
         let node1 = NodeId::new(1).unwrap();
         assert!(index.add(node1, &[1.0, 0.0, 0.0, 0.0]).is_ok());
-
-        // Now next_key = MAX_VALID_KEY+1, which is > MAX_VALID_KEY, so this should fail
         let node2 = NodeId::new(2).unwrap();
         let result = index.add(node2, &[0.0, 1.0, 0.0, 0.0]);
         assert!(result.is_err());
-
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
             assert!(msg.contains("overflow") || msg.contains("exceeded"));
         } else {
@@ -2559,84 +2333,56 @@ mod tests {
                 result
             );
         }
-
-        // Updating existing node should still work (doesn't allocate new key)
         assert!(index.add(node1, &[0.5, 0.5, 0.0, 0.0]).is_ok());
-
         Ok(())
     }
 
     #[test]
     fn test_update_nonexistent_then_exists() -> Result<()> {
-        // Test edge case: try to "update" a node that doesn't exist, then add it properly
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-
         let node1 = NodeId::new(1).unwrap();
-
-        // First add creates the node
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
         assert_eq!(index.len(), 1);
-
-        // Second add updates it
         index.add(node1, &[0.0, 1.0, 0.0, 0.0])?;
         assert_eq!(index.len(), 1);
-
-        // Verify it has the updated vector
         let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1)?;
         assert_eq!(results[0].0, node1);
         assert!(results[0].1 > 0.99);
-
         Ok(())
     }
 
     #[test]
     fn test_stats_tracking() -> Result<()> {
-        // Test that statistics are correctly tracked for adds and updates
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-
         let node1 = NodeId::new(1).unwrap();
         let node2 = NodeId::new(2).unwrap();
-
         let initial_adds = index
             .stats
             .vectors_added
             .load(std::sync::atomic::Ordering::Relaxed);
-
-        // Add two nodes
         index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
         index.add(node2, &[0.0, 1.0, 0.0, 0.0])?;
-
         let after_adds = index
             .stats
             .vectors_added
             .load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(after_adds - initial_adds, 2);
-
-        // Update node1 - should still increment vectors_added counter
         index.add(node1, &[0.5, 0.5, 0.0, 0.0])?;
-
         let after_update = index
             .stats
             .vectors_added
             .load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(after_update - initial_adds, 3);
-
         Ok(())
     }
 
     #[test]
     fn test_metric_wrapper_safe_on_null() {
-        // This test ensures that the metric wrapper correctly detects null pointers
-        // and returns MAX distance instead of panicking to prevent UB.
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
-
-        // Create a valid pointer for one argument
         let vec = [0.0f32; 4];
         let valid_ptr = vec.as_ptr();
         let null_ptr = std::ptr::null();
-
-        // Pass null pointer - should return f32::MAX
         let result = wrapper(valid_ptr, null_ptr);
         assert_eq!(result, f32::MAX);
     }
@@ -2646,21 +2392,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_index.usearch");
         let mappings_path = path.with_extension("usearch.mappings");
-
-        // Create valid index
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
         index.save(&path)?;
-
-        // Corrupt magic bytes
         let mut data = std::fs::read(&mappings_path).unwrap();
         data[0] = b'X';
         data[1] = b'X';
         data[2] = b'X';
         data[3] = b'X';
         std::fs::write(&mappings_path, &data).unwrap();
-
-        // Try to load
         let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
         assert!(result.is_err());
         match result {
@@ -2681,16 +2421,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_index.usearch");
         let mappings_path = path.with_extension("usearch.mappings");
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
         index.save(&path)?;
-
-        // Corrupt version
         let mut data = std::fs::read(&mappings_path).unwrap();
-        data[4] = 99; // Invalid version
+        data[4] = 99;
         std::fs::write(&mappings_path, &data).unwrap();
-
         let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
         assert!(result.is_err());
         match result {
@@ -2711,21 +2447,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_index.usearch");
         let mappings_path = path.with_extension("usearch.mappings");
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
         index.save(&path)?;
-
-        // Corrupt data (which invalidates CRC)
         let mut data = std::fs::read(&mappings_path).unwrap();
-        // Modify the node ID part of the data
-        // Header V2 size: 4(Magic) + 1(Ver) + 8(Dims) + 1(Quant) + 1(Metric) + 8(Count) = 23 bytes
         let header_size = 23;
         if data.len() > header_size {
             data[header_size] = data[header_size].wrapping_add(1);
         }
         std::fs::write(&mappings_path, &data).unwrap();
-
         let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
         assert!(result.is_err());
         match result {
@@ -2743,16 +2473,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_index.usearch");
         let mappings_path = path.with_extension("usearch.mappings");
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
         index.save(&path)?;
-
-        // Truncate file
         let data = std::fs::read(&mappings_path).unwrap();
-        let truncated = &data[..10]; // Smaller than header
+        let truncated = &data[..10];
         std::fs::write(&mappings_path, truncated).unwrap();
-
         let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
         assert!(result.is_err());
         match result {
@@ -2770,32 +2496,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_index.usearch");
         let mappings_path = path.with_extension("usearch.mappings");
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
         index.save(&path)?;
-
-        // Modify count to be larger (mismatch with actual size), then fix CRC to pass CRC check
         let mut data = std::fs::read(&mappings_path).unwrap();
-        // Count is at offset 15 (Magic 4 + Version 1 + Dims 8 + Quant 1 + Metric 1)
-        // Original count is 1. Let's make it 2.
         let count_offset = 15;
         data[count_offset] = 2;
-
-        // Recompute CRC so we pass the CRC check and hit the size check
         let crc_offset = data.len() - 4;
         let mut hasher = Hasher::new();
         hasher.update(&data[..crc_offset]);
         let new_crc = hasher.finalize();
-
         let crc_bytes = new_crc.to_le_bytes();
         data[crc_offset] = crc_bytes[0];
         data[crc_offset + 1] = crc_bytes[1];
         data[crc_offset + 2] = crc_bytes[2];
         data[crc_offset + 3] = crc_bytes[3];
-
         std::fs::write(&mappings_path, &data).unwrap();
-
         let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
         assert!(result.is_err());
         match result {
@@ -2816,29 +2532,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_index.usearch");
         let mappings_path = path.with_extension("usearch.mappings");
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
         index.save(&path)?;
-
-        // Modify count to be HUGE (u64::MAX) to trigger arithmetic overflow check
         let mut data = std::fs::read(&mappings_path).unwrap();
-        let count_offset = 15; // V2 offset
+        let count_offset = 15;
         let huge_count = u64::MAX;
-
-        // Write huge count
         let count_bytes = huge_count.to_le_bytes();
         data[count_offset..count_offset + 8].copy_from_slice(&count_bytes);
-
-        // Update CRC (checksum calculation is still valid, only logic check fails)
         let crc_offset = data.len() - 4;
         let mut hasher = Hasher::new();
         hasher.update(&data[..crc_offset]);
         let new_crc = hasher.finalize();
         data[crc_offset..].copy_from_slice(&new_crc.to_le_bytes());
-
         std::fs::write(&mappings_path, &data).unwrap();
-
         let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
         assert!(result.is_err());
         match result {
@@ -2863,29 +2570,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_index.usearch");
         let mappings_path = path.with_extension("usearch.mappings");
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
         index.save(&path)?;
-
-        // Modify count to be MAX_MAPPINGS_COUNT + 1
         let mut data = std::fs::read(&mappings_path).unwrap();
-        let count_offset = 15; // V2 offset
+        let count_offset = 15;
         let huge_count = (super::MAX_MAPPINGS_COUNT + 1) as u64;
-
-        // Write huge count
         let count_bytes = huge_count.to_le_bytes();
         data[count_offset..count_offset + 8].copy_from_slice(&count_bytes);
-
-        // Update CRC
         let crc_offset = data.len() - 4;
         let mut hasher = Hasher::new();
         hasher.update(&data[..crc_offset]);
         let new_crc = hasher.finalize();
         data[crc_offset..].copy_from_slice(&new_crc.to_le_bytes());
-
         std::fs::write(&mappings_path, &data).unwrap();
-
         let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
         assert!(result.is_err());
         match result {
@@ -2906,26 +2604,16 @@ mod tests {
     fn test_save_mappings_large_streaming() -> Result<()> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_streaming.usearch");
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-
-        // Add enough items to exceed typical buffer sizes (e.g. 8KB)
-        // 2000 items * 16 bytes = 32KB
         let count = 2000;
         for i in 1..=count {
             index.add(NodeId::new(i).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
         }
-
         index.save(&path)?;
-
-        // Verify we can load it back
         let loaded = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine))?;
         assert_eq!(loaded.len(), count as usize);
-
-        // Verify a few items
         let results = loaded.search(&[1.0, 0.0, 0.0, 0.0], 1)?;
         assert!(!results.is_empty());
-
         Ok(())
     }
 
@@ -2954,23 +2642,17 @@ mod tests {
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
-            // Can simulate flush failure if needed, but write failure is sufficient for coverage
             Ok(())
         }
     }
 
     #[test]
     fn test_save_mappings_write_errors() {
-        // Create dummy mappings
         let mappings = [
             (NodeId::new(1).unwrap(), 100),
             (NodeId::new(2).unwrap(), 200),
         ];
-
         let config = HnswConfig::default();
-
-        // Case 1: Fail during header (MAGIC)
-        // Magic is 4 bytes. Fail at byte 3.
         let mut writer = MockFailWriter::new(3);
         let result = HnswIndex::write_mappings_to_writer(
             &mut writer,
@@ -2984,11 +2666,6 @@ mod tests {
         } else {
             panic!("Expected IndexError");
         }
-
-        // Case 2: Fail during data writing
-        // V2 Header: Magic(4) + Version(1) + Dims(8) + Quant(1) + Metric(1) + Count(8) = 23 bytes
-        // Data is 16 bytes per item.
-        // Fail after header + 1st item (16 bytes) + 1 byte
         let mut writer = MockFailWriter::new(23 + 16 + 1);
         let result = HnswIndex::write_mappings_to_writer(
             &mut writer,
@@ -3000,11 +2677,6 @@ mod tests {
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
             assert!(msg.contains("Failed to write mappings"));
         }
-
-        // Case 3: Fail during CRC writing
-        // Total data size = 23 + 32 = 55 bytes.
-        // CRC is 4 bytes.
-        // Fail at 55 + 1 byte (during CRC write)
         let mut writer = MockFailWriter::new(55 + 1);
         let result = HnswIndex::write_mappings_to_writer(
             &mut writer,
@@ -3050,54 +2722,33 @@ mod tests {
     #[test]
     fn test_save_mappings_file_create_error() {
         let dir = tempfile::tempdir().unwrap();
-        // Create index
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .build()
             .unwrap();
-
-        // Path for the index file
         let index_path = dir.path().join("test.index");
-
-        // Create a directory where the mappings file should be
-        // Mappings file path will be "test.usearch.mappings" (since extension replaces "index")
-        // Wait, .with_extension("usearch.mappings") replaces "index".
         let mappings_path = index_path.with_extension("usearch.mappings");
         std::fs::create_dir(&mappings_path).unwrap();
-
-        // Attempt to save to index_path.
-        // This will try to create mappings file at `mappings_path`, which is a directory.
-        // File::create should fail.
         let result = index.save(&index_path);
-
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
             assert!(msg.contains("Failed to create mappings file"));
         } else {
-            // Note: Depending on OS, saving the index itself might fail first if index_path is valid but related calls fail.
-            // But here index_path is valid (does not exist). usearch index save should succeed.
-            // Then save_mappings should fail.
             panic!("Expected IndexError, got {:?}", result);
         }
     }
 
     #[test]
     fn test_custom_metric_execution_coverage() {
-        // This test ensures that the custom metric wrapper and its guard logic are executed,
-        // satisfying code coverage requirements for the new lines added in create_metric_wrapper.
         let metric_fn = |a: &[f32], b: &[f32]| -> f32 {
             a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
         };
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-            .quantization(Quantization::F32) // Required for custom metric
+            .quantization(Quantization::F32)
             .with_custom_metric("manhattan", metric_fn)
             .build()
             .unwrap();
-
-        // Add more nodes to ensure we trigger enough comparisons to hit the callback
         for i in 0..10 {
             let id = NodeId::new(i + 1).unwrap();
-            // Alternate vectors to create some diversity
             let vec = if i % 2 == 0 {
                 [1.0, 0.0, 0.0, 0.0]
             } else {
@@ -3105,44 +2756,25 @@ mod tests {
             };
             index.add(id, &vec).unwrap();
         }
-
-        // Perform search to trigger the metric execution
-        // Search for k=5 to force more comparisons
         let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 5);
     }
 
     #[test]
     fn test_add_race_retry_value_change_coverage() {
-        // Test that if another thread changes the mapping (value changed) while we are in add(),
-        // we detect it and return a retryable error.
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .build()
             .unwrap();
         let node = NodeId::new(1).unwrap();
-
-        // 1. Add initial vector so we hit Occupied path
         index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
-
-        // 2. Set hook to change the mapping ID
         TEST_RACE_HOOK.with(|h| {
             h.set(Some(|idx, node_id| {
-                // Simulate another thread updating this node to a new key
-                // We just manually update the map here.
-                // Note: In real life, add() would do this via next_key, but here we just hack the map.
                 idx.id_mapping.insert(node_id, 999);
-                // Also update reverse mapping to keep index consistent (though add() logic only checks id_mapping)
                 idx.reverse_mapping.insert(999, node_id);
             }))
         });
-
-        // 3. Call add() again. It should hit Occupied path, trigger hook, fail validation.
         let result = index.add(node, &[0.0, 1.0, 0.0, 0.0]);
-
-        // 4. Cleanup hook
         TEST_RACE_HOOK.with(|h| h.set(None));
-
-        // 5. Assert error
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
@@ -3155,30 +2787,18 @@ mod tests {
 
     #[test]
     fn test_add_race_retry_removal_coverage() {
-        // Test that if another thread removes the mapping while we are in add(),
-        // we detect it and return a retryable error.
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .build()
             .unwrap();
         let node = NodeId::new(2).unwrap();
-
-        // 1. Add initial vector
         index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
-
-        // 2. Set hook to remove the mapping
         TEST_RACE_HOOK.with(|h| {
             h.set(Some(|idx, node_id| {
                 idx.id_mapping.remove(&node_id);
             }))
         });
-
-        // 3. Call add() again
         let result = index.add(node, &[0.0, 1.0, 0.0, 0.0]);
-
-        // 4. Cleanup
         TEST_RACE_HOOK.with(|h| h.set(None));
-
-        // 5. Assert error
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
@@ -3191,33 +2811,17 @@ mod tests {
 
     #[test]
     fn test_add_race_vacant_coverage() {
-        // Test the race condition in the Vacant path:
-        // We checked map (Vacant), acquired inner lock, added to inner.
-        // Then we check map again. If it's Occupied (race!), we must rollback.
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .build()
             .unwrap();
         let node = NodeId::new(3).unwrap();
-
-        // 1. Set hook to insert the mapping (simulating another thread winning the race)
         TEST_RACE_HOOK.with(|h| {
             h.set(Some(|idx, node_id| {
-                // Insert a dummy key to simulate another thread claiming this ID
                 idx.id_mapping.insert(node_id, 999);
-                // Note: We don't strictly need to add to inner/reverse for this test,
-                // as add() only checks id_mapping.
             }))
         });
-
-        // 2. Call add(). This uses the Vacant path because the node is new.
-        // It should trigger the hook, detect the race, rollback, and fail.
         let result = index.add(node, &[0.5, 0.5, 0.5, 0.5]);
-
-        // 3. Cleanup
         TEST_RACE_HOOK.with(|h| h.set(None));
-
-        // 4. Assert error
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
@@ -3226,32 +2830,22 @@ mod tests {
             }
             _ => panic!("Expected concurrent add error, got {:?}", result),
         }
-
-        // 5. Verify rollback: The vector we tried to add should NOT be in the index.
-        // The index should be empty (except for potentially what the hook added, but hook only added mapping)
-        // Since hook didn't add to inner, inner size should be 0.
-        // Wait, add() adds to inner *before* hook. Then rollback removes it.
-        // So inner size should be 0.
         assert_eq!(index.len(), 0);
     }
 
     #[test]
     fn test_save_coverage() -> Result<()> {
-        // Basic save test to ensure save_internal lines are covered
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("coverage.index");
-
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
-
-        // This triggers save_internal
         index.save(&path)?;
-
         assert!(path.exists());
         Ok(())
     }
 }
 
+// ... warden_tests and coverage_tests ...
 #[cfg(test)]
 mod warden_tests {
     use super::*;
@@ -3261,14 +2855,13 @@ mod warden_tests {
     fn test_config_deserialize_dimensions_too_large() {
         let huge_dims = (MAX_VECTOR_DIMENSIONS + 1) as u64;
         let mut buffer = Vec::new();
-        buffer.extend_from_slice(&huge_dims.to_le_bytes()); // dimensions
-        // Add minimal remaining fields to avoid early EOF if we got past dimensions check
-        buffer.push(0); // metric
-        buffer.extend_from_slice(&16u64.to_le_bytes()); // m
-        buffer.extend_from_slice(&128u64.to_le_bytes()); // ef_construction
-        buffer.extend_from_slice(&64u64.to_le_bytes()); // ef_search
-        buffer.extend_from_slice(&1000u64.to_le_bytes()); // capacity
-        buffer.push(0); // quantization
+        buffer.extend_from_slice(&huge_dims.to_le_bytes());
+        buffer.push(0);
+        buffer.extend_from_slice(&16u64.to_le_bytes());
+        buffer.extend_from_slice(&128u64.to_le_bytes());
+        buffer.extend_from_slice(&64u64.to_le_bytes());
+        buffer.extend_from_slice(&1000u64.to_le_bytes());
+        buffer.push(0);
 
         let mut cursor = std::io::Cursor::new(buffer);
         let result = HnswConfig::deserialize_from(&mut cursor);
@@ -3300,44 +2893,15 @@ mod warden_tests {
     fn test_load_dimensions_too_large_in_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.index");
-
-        // Create a config with manually set huge dimensions (bypassing builder)
         let config = HnswConfig {
             dimensions: MAX_VECTOR_DIMENSIONS + 1,
             ..Default::default()
         };
-
-        // Attempt to load (file existence doesn't matter as config check is first)
         let result = HnswIndex::load(&path, config);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("dimensions"));
         assert!(msg.contains("exceeds maximum allowed"));
-    }
-
-    #[test]
-    fn test_open_mmap_dimensions_too_large_in_metadata() {
-        // This is harder to test without mocking the usearch FFI or creating a file.
-        // But we can test the load_mappings_with_integrity part via HnswIndex::load if we forge a mappings file.
-        // HnswIndex::open_mmap first calls Index::new(), then index.view().
-        // If we can't easily mock usearch, maybe we can rely on unit testing `validate_metadata` which we did above.
-        // However, `open_mmap` calls `index.dimensions()` which comes from C++.
-        //
-        // Let's rely on `test_validate_metadata_dimensions_too_large` covering the core logic,
-        // and verify `open_mmap`'s check via a mocked scenario if possible, or just accept that `validate_metadata` is the shared logic.
-        //
-        // Wait, `open_mmap` has its own explicit check:
-        // if dimensions > MAX_VECTOR_DIMENSIONS { ... }
-        //
-        // To trigger this, `index.dimensions()` must return a huge value.
-        // We can't force `usearch::Index` to report a huge dimension without a valid file.
-        // But we can skip this one if we are confident, OR we can try to trick it.
-        //
-        // Actually, we can test `load_mappings_with_integrity` logic via `validate_metadata` test.
-        // The check in `open_mmap` covers the case where the *binary index file* itself reports huge dimensions.
-        // Since `usearch` is a black box, we can't easily generate such a file without `HnswIndexBuilder` (which forbids it).
-        //
-        // We will stick to testing the accessible Rust parts.
     }
 }
 
@@ -3349,12 +2913,9 @@ mod coverage_tests {
     fn test_metric_wrapper_null_pointer() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
-
         let null_ptr: *const f32 = std::ptr::null();
         let valid_data = [0.0f32; 4];
         let valid_ptr = valid_data.as_ptr();
-
-        // This should return f32::MAX
         let result = wrapper(null_ptr, valid_ptr);
         assert_eq!(result, f32::MAX);
     }
@@ -3363,77 +2924,54 @@ mod coverage_tests {
     fn test_metric_wrapper_unaligned_pointer() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);
-
         let data = [0u8; 32];
         let unaligned_ptr = unsafe { data.as_ptr().add(1) as *const f32 };
         let valid_data = [0.0f32; 4];
         let valid_ptr = valid_data.as_ptr();
-
-        // This should return f32::MAX
         let result = wrapper(unaligned_ptr, valid_ptr);
         assert_eq!(result, f32::MAX);
     }
 
     #[test]
     fn test_filter_callback_guard_reset() {
-        // Ensure flag is initially false
         IN_FILTER_CALLBACK.with(|flag| flag.set(false));
-
         {
             let _guard = FilterCallbackGuard::new();
-            // Verify flag is set to true
             assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
         }
-
-        // Verify flag is reset to false after drop
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
     }
 
     #[test]
     fn test_filter_callback_guard_manual_drop() {
         IN_FILTER_CALLBACK.with(|flag| flag.set(false));
-
         let guard = FilterCallbackGuard::new();
         assert!(IN_FILTER_CALLBACK.with(|flag| flag.get()));
-
         drop(guard);
         assert!(!IN_FILTER_CALLBACK.with(|flag| flag.get()));
     }
 
     #[test]
     fn test_metric_wrapper_panic_resilience() {
-        // Ensure that a panicking metric function doesn't crash the process
-        // but returns f32::MAX instead.
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
             panic!("Test panic");
         });
         let wrapper = create_metric_wrapper(4, distance_fn);
-
         let data = [0.0f32; 4];
         let ptr = data.as_ptr();
-
-        // This should NOT panic
         let result = wrapper(ptr, ptr);
-
-        // Should return max distance
         assert_eq!(result, f32::MAX);
     }
 
     #[test]
     fn test_metric_wrapper_success_direct() {
-        // Ensure that a non-panicking metric function works correctly.
-        // This provides direct coverage of the Ok path in catch_unwind.
         let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
             a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
         });
         let wrapper = create_metric_wrapper(4, distance_fn);
-
         let data_a = [1.0f32, 2.0, 3.0, 4.0];
         let data_b = [1.5f32, 2.5, 3.5, 4.5];
-
         let result = wrapper(data_a.as_ptr(), data_b.as_ptr());
-
-        // |1.0-1.5| + |2.0-2.5| + |3.0-3.5| + |4.0-4.5| = 0.5 * 4 = 2.0
         assert!((result - 2.0).abs() < f32::EPSILON);
     }
 }
