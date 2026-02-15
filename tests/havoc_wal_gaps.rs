@@ -62,19 +62,20 @@ fn test_havoc_wal_batch_gaps() {
     let wal = ConcurrentWal::new(config).unwrap();
 
     // 1. Create a batch: [Valid, Huge (Invalid), Valid]
-    let ops = vec![
-        test_operation(1),
-        huge_operation(2),
-        test_operation(3),
-    ];
+    let ops = vec![test_operation(1), huge_operation(2), test_operation(3)];
 
     // 2. Append batch - should fail
     let result = wal.append_batch(ops);
-    assert!(result.is_err(), "Batch append should fail due to size limit");
+    assert!(
+        result.is_err(),
+        "Batch append should fail due to size limit"
+    );
 
     let err = result.unwrap_err();
     println!("Append batch error (expected): {}", err);
-    assert!(err.to_string().contains("CapacityExceeded") || err.to_string().contains("WAL entry size"));
+    assert!(
+        err.to_string().contains("CapacityExceeded") || err.to_string().contains("WAL entry size")
+    );
 
     // 3. Append another valid operation successfully
     let lsn_after = wal.append_async(test_operation(4)).unwrap();
@@ -102,15 +103,24 @@ fn test_havoc_wal_batch_gaps() {
     // So we expect LSNs: [1, 4]
     // Gap: 2, 3 are missing.
 
-    assert!(lsns.contains(&1), "LSN 1 should be present (written before failure)");
-    assert!(!lsns.contains(&2), "LSN 2 should be missing (failed serialization)");
+    assert!(
+        lsns.contains(&1),
+        "LSN 1 should be present (written before failure)"
+    );
+    assert!(
+        !lsns.contains(&2),
+        "LSN 2 should be missing (failed serialization)"
+    );
     assert!(!lsns.contains(&3), "LSN 3 should be missing (aborted loop)");
-    assert!(lsns.contains(&lsn_after.0), "LSN after batch should be present");
+    assert!(
+        lsns.contains(&lsn_after.0),
+        "LSN after batch should be present"
+    );
 
     // Prove non-contiguity
     let mut contiguous = true;
-    for i in 0..lsns.len()-1 {
-        if lsns[i+1] != lsns[i] + 1 {
+    for i in 0..lsns.len() - 1 {
+        if lsns[i + 1] != lsns[i] + 1 {
             contiguous = false;
             break;
         }
