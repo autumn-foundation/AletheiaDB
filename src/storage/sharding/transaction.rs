@@ -4,6 +4,7 @@
 //! shards, ensuring ACID properties across shard boundaries.
 
 use super::types::ShardId;
+use crate::core::hlc::HybridTimestamp;
 use crate::core::id::TxId;
 use std::collections::HashMap;
 use std::fmt;
@@ -186,6 +187,8 @@ pub struct DistributedTransaction {
     pub retries_remaining: u32,
     /// Whether the commit decision has been logged.
     pub commit_decision_logged: bool,
+    /// Commit timestamp assigned to this distributed transaction.
+    pub commit_timestamp: Option<HybridTimestamp>,
 }
 
 impl DistributedTransaction {
@@ -204,6 +207,7 @@ impl DistributedTransaction {
             timeout,
             retries_remaining: 3,
             commit_decision_logged: false,
+            commit_timestamp: None,
         }
     }
 
@@ -417,6 +421,8 @@ pub struct CommitDecision {
     pub decision: bool,
     /// When the decision was made.
     pub timestamp: Instant,
+    /// HLC timestamp used for distributed ordering.
+    pub commit_timestamp: Option<HybridTimestamp>,
 }
 
 impl TwoPhaseCommitLog {
@@ -431,7 +437,12 @@ impl TwoPhaseCommitLog {
     /// Log a commit decision.
     ///
     /// This MUST be called before sending commit messages to participants.
-    pub fn log_commit(&mut self, tx_id: TxId, participants: Vec<ShardId>) -> u64 {
+    pub fn log_commit(
+        &mut self,
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+        commit_timestamp: Option<HybridTimestamp>,
+    ) -> u64 {
         let lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
         let decision = CommitDecision {
             tx_id,
@@ -439,6 +450,7 @@ impl TwoPhaseCommitLog {
             participants,
             decision: true,
             timestamp: Instant::now(),
+            commit_timestamp,
         };
         self.pending_decisions.insert(tx_id, decision);
         lsn
@@ -453,6 +465,7 @@ impl TwoPhaseCommitLog {
             participants,
             decision: false,
             timestamp: Instant::now(),
+            commit_timestamp: None,
         };
         self.pending_decisions.insert(tx_id, decision);
         lsn
@@ -725,7 +738,7 @@ mod tests {
         let shards = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
 
         // Log a commit decision
-        let lsn = log.log_commit(tx_id, shards.clone());
+        let lsn = log.log_commit(tx_id, shards.clone(), None);
         assert_eq!(lsn, 0);
         assert!(log.has_pending_decision(tx_id));
 
@@ -770,9 +783,9 @@ mod tests {
         let tx3 = make_tx_id(3);
         let shards = vec![ShardId::new(0).unwrap()];
 
-        log.log_commit(tx1, shards.clone());
+        log.log_commit(tx1, shards.clone(), None);
         log.log_abort(tx2, shards.clone());
-        log.log_commit(tx3, shards.clone());
+        log.log_commit(tx3, shards.clone(), None);
 
         // Check pending decisions
         let pending = log.pending_decisions();
@@ -792,9 +805,9 @@ mod tests {
         let mut log = TwoPhaseCommitLog::new();
         let shards = vec![ShardId::new(0).unwrap()];
 
-        let lsn1 = log.log_commit(make_tx_id(1), shards.clone());
-        let lsn2 = log.log_commit(make_tx_id(2), shards.clone());
-        let lsn3 = log.log_commit(make_tx_id(3), shards.clone());
+        let lsn1 = log.log_commit(make_tx_id(1), shards.clone(), None);
+        let lsn2 = log.log_commit(make_tx_id(2), shards.clone(), None);
+        let lsn3 = log.log_commit(make_tx_id(3), shards.clone(), None);
 
         assert!(lsn1 < lsn2);
         assert!(lsn2 < lsn3);

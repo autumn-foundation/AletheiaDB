@@ -36,12 +36,12 @@ pub enum ConnectionType {
     Start,
     /// Explicit edge traversal.
     Edge {
-        /// The traversed edge label.
+        /// Label of the traversed edge.
         label: String,
     },
     /// Implicit semantic jump via vector similarity.
     SemanticJump {
-        /// Similarity score in `[0.0, 1.0]` used for this jump.
+        /// Similarity score (higher means more semantically similar).
         similarity: f32,
     },
 }

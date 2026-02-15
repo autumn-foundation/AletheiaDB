@@ -18,6 +18,57 @@ use crate::utils::error::Result;
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
+fn bootstrap_timestamp(
+    current: &CurrentStorage,
+    historical: &RwLock<HistoricalStorage>,
+) -> crate::core::temporal::Timestamp {
+    let mut max_timestamp = time::now();
+
+    for node in current.all_nodes() {
+        if let Some(commit_ts) = node.metadata.commit_timestamp
+            && commit_ts > max_timestamp
+        {
+            max_timestamp = commit_ts;
+        }
+    }
+
+    for edge in current.all_edges() {
+        if let Some(commit_ts) = edge.metadata.commit_timestamp
+            && commit_ts > max_timestamp
+        {
+            max_timestamp = commit_ts;
+        }
+    }
+
+    let historical = historical.read();
+    for node_version in historical.get_node_versions().values() {
+        let commit_ts = node_version.temporal.transaction_time().start();
+        if commit_ts > max_timestamp {
+            max_timestamp = commit_ts;
+        }
+    }
+
+    for edge_version in historical.get_edge_versions().values() {
+        let commit_ts = edge_version.temporal.transaction_time().start();
+        if commit_ts > max_timestamp {
+            max_timestamp = commit_ts;
+        }
+    }
+
+    max_timestamp
+}
+
+fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
+    let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
+    let mut current_timestamp = db.current_timestamp.lock().map_err(|_| {
+        crate::utils::error::Error::other(
+            "failed to seed startup current_timestamp due to lock poisoning",
+        )
+    })?;
+    *current_timestamp = startup_timestamp;
+    Ok(())
+}
+
 impl AletheiaDB {
     /// Create a new empty database with default configuration.
     ///
@@ -228,6 +279,8 @@ impl AletheiaDB {
                 .set_tiered_storage(Arc::new(tiered_storage));
         }
 
+        seed_startup_current_timestamp(&db)?;
+
         Ok(db)
     }
 
@@ -284,6 +337,7 @@ impl AletheiaDB {
             persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistence_thread_handle: None,
         };
+        seed_startup_current_timestamp(&db)?;
 
         // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
         db.historical

@@ -33,6 +33,7 @@ use super::network::{
     PrepareResponse, ShardClient,
 };
 use super::types::{ShardId, ShardState};
+use crate::core::hlc::HybridTimestamp;
 use crate::core::id::TxId;
 use std::fmt;
 use std::sync::RwLock;
@@ -354,11 +355,23 @@ impl ShardClient for HttpShardClient {
     }
 
     #[cfg(feature = "sharding-rpc")]
-    fn prepare(&self, tx_id: TxId, operations: &[u8]) -> NetworkResult<PrepareResponse> {
+    fn prepare(
+        &self,
+        tx_id: TxId,
+        operations: &[u8],
+        timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<PrepareResponse> {
         #[derive(serde::Serialize)]
         struct PrepareRequest {
             tx_id: u64,
             operations: Vec<u8>,
+            timestamp: Option<HybridTimestampDto>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct HybridTimestampDto {
+            wallclock: i64,
+            logical: u32,
         }
 
         #[derive(serde::Deserialize)]
@@ -368,9 +381,14 @@ impl ShardClient for HttpShardClient {
         }
 
         self.execute_with_retry("prepare", || {
+            let timestamp = timestamp.map(|ts| HybridTimestampDto {
+                wallclock: ts.wallclock(),
+                logical: ts.logical(),
+            });
             let req = PrepareRequest {
                 tx_id: tx_id.as_u64(),
                 operations: operations.to_vec(),
+                timestamp,
             };
 
             let resp: PrepareResponseDto = self.post_json("/api/v1/2pc/prepare", &req)?;
@@ -383,7 +401,12 @@ impl ShardClient for HttpShardClient {
     }
 
     #[cfg(not(feature = "sharding-rpc"))]
-    fn prepare(&self, _tx_id: TxId, _operations: &[u8]) -> NetworkResult<PrepareResponse> {
+    fn prepare(
+        &self,
+        _tx_id: TxId,
+        _operations: &[u8],
+        _timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<PrepareResponse> {
         Err(NetworkError::ConnectionFailed {
             shard_id: self.shard_id,
             reason: "RPC not available: enable 'sharding-rpc' feature".to_string(),
@@ -391,10 +414,21 @@ impl ShardClient for HttpShardClient {
     }
 
     #[cfg(feature = "sharding-rpc")]
-    fn commit(&self, tx_id: TxId) -> NetworkResult<CommitResponse> {
+    fn commit(
+        &self,
+        tx_id: TxId,
+        timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<CommitResponse> {
         #[derive(serde::Serialize)]
         struct CommitRequest {
             tx_id: u64,
+            timestamp: Option<HybridTimestampDto>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct HybridTimestampDto {
+            wallclock: i64,
+            logical: u32,
         }
 
         #[derive(serde::Deserialize)]
@@ -403,8 +437,13 @@ impl ShardClient for HttpShardClient {
         }
 
         self.execute_with_retry("commit", || {
+            let timestamp = timestamp.map(|ts| HybridTimestampDto {
+                wallclock: ts.wallclock(),
+                logical: ts.logical(),
+            });
             let req = CommitRequest {
                 tx_id: tx_id.as_u64(),
+                timestamp,
             };
 
             let resp: CommitResponseDto = self.post_json("/api/v1/2pc/commit", &req)?;
@@ -416,7 +455,11 @@ impl ShardClient for HttpShardClient {
     }
 
     #[cfg(not(feature = "sharding-rpc"))]
-    fn commit(&self, _tx_id: TxId) -> NetworkResult<CommitResponse> {
+    fn commit(
+        &self,
+        _tx_id: TxId,
+        _timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<CommitResponse> {
         Err(NetworkError::ConnectionFailed {
             shard_id: self.shard_id,
             reason: "RPC not available: enable 'sharding-rpc' feature".to_string(),
@@ -754,8 +797,8 @@ mod tests {
         let client = HttpShardClient::new(shard_id, config).unwrap();
 
         // All operations should return errors when feature is disabled
-        assert!(client.prepare(TxId::new(1), &[]).is_err());
-        assert!(client.commit(TxId::new(1)).is_err());
+        assert!(client.prepare(TxId::new(1), &[], None).is_err());
+        assert!(client.commit(TxId::new(1), None).is_err());
         assert!(client.abort(TxId::new(1)).is_err());
         assert!(client.query(1, &[]).is_err());
         assert!(client.get_state().is_err());
