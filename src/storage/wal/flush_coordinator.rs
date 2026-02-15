@@ -1457,4 +1457,79 @@ mod tests {
             err_msg
         );
     }
+
+    #[test]
+    fn test_truncate_safe_defaults_on_missing_metadata() {
+        // 💣 Risk: If .meta file is missing, truncation logic should be conservative
+        // and NOT delete the segment, to prevent accidental data loss.
+
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 50; // Small size to force rotation
+        config.segments_to_retain = 100; // Don't auto-cleanup
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 1. Create a segment with LSN 1-10
+        // Entries: 10 * ~20 bytes = 200 bytes > 50 bytes, so it will rotate
+        let entries: Vec<_> = (1..=10)
+            .map(|i| create_test_entry(i, &[i as u8; 10]))
+            .collect();
+
+        coordinator.flush(entries, true).unwrap();
+
+        // Force rotation by writing more entries
+        let entries2: Vec<_> = (11..=20)
+            .map(|i| create_test_entry(i, &[i as u8; 10]))
+            .collect();
+        coordinator.flush(entries2, true).unwrap();
+
+        // 2. Identify the first segment
+        let segments = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+            .collect::<Vec<_>>();
+
+        // Should have at least 2 segments (one closed, one active)
+        assert!(segments.len() >= 2, "Expected at least 2 segments");
+
+        // Find the oldest segment (lowest number)
+        let oldest_segment_path = segments.iter().min_by_key(|e| e.path()).unwrap().path();
+
+        // Find its metadata file
+        // Note: FlushCoordinator naming is {:06}.log and {:06}.log.meta
+        // We handle path extension carefully
+        let mut meta_path = oldest_segment_path.clone();
+        if let Some(name) = meta_path.file_name() {
+            let mut name = name.to_os_string();
+            name.push(".meta");
+            meta_path.set_file_name(name);
+        }
+
+        assert!(
+            meta_path.exists(),
+            "Metadata file should exist: {:?}",
+            meta_path
+        );
+
+        // 3. Delete the metadata file
+        std::fs::remove_file(&meta_path).unwrap();
+        assert!(!meta_path.exists());
+
+        // 4. Try to truncate up to LSN 100 (which is > max LSN of 10)
+        // If metadata were present, this would delete the segment.
+        // Without metadata, it should be CONSERVATIVE and keep it.
+        let removed = coordinator.truncate_to_lsn(LSN(100)).unwrap();
+
+        // 5. Verify conservative behavior
+        assert_eq!(
+            removed, 0,
+            "Should not remove segment if metadata is missing"
+        );
+        assert!(
+            oldest_segment_path.exists(),
+            "Segment log file should still exist"
+        );
+    }
 }
