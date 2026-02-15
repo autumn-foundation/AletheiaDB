@@ -1138,7 +1138,9 @@ impl VectorIndex for HnswIndex {
             if let Some(node_id_ref) = reverse_mapping.get(&key) {
                 // Set flag to prevent modifications during callback
                 let _guard = CallbackGuard::new();
-                predicate(node_id_ref.value())
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    predicate(node_id_ref.value())
+                })).unwrap_or(false)
             } else {
                 false
             }
