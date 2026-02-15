@@ -1434,7 +1434,16 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            *observed_at = Instant::now() - Duration::from_micros(idle_gap_us as u64);
+            // Sentry: Safely simulate past timestamp, skipping if system uptime is insufficient (e.g. CI)
+            match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
+                Some(past_instant) => *observed_at = past_instant,
+                None => {
+                    println!(
+                        "Skipping test_next_commit_timestamp_allows_idle_forward_drift due to insufficient uptime"
+                    );
+                    return;
+                }
+            }
         }
 
         let result = coordinator.next_commit_timestamp();

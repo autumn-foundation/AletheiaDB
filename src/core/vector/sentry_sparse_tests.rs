@@ -97,5 +97,8 @@ fn test_sparse_cosine_similarity_threshold_behavior() {
     // Current implementation fails this because it compares magnitude vs threshold
     let sim = sparse_cosine_similarity(&a, &a).unwrap();
 
-    assert_eq!(sim, 0.0, "Vector with squared magnitude < threshold should be treated as zero");
+    assert_eq!(
+        sim, 0.0,
+        "Vector with squared magnitude < threshold should be treated as zero"
+    );
 }
