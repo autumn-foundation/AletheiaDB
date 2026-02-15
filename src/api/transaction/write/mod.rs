@@ -61,11 +61,19 @@ pub(crate) const MAX_VALID_TIME_FUTURE_OFFSET_US: i64 = 365 * 24 * 60 * 60 * 1_0
 ///
 /// # Example
 ///
-/// ```ignore
-/// let mut tx = db.write_transaction();
+/// ```rust,no_run
+/// # use aletheiadb::{AletheiaDB, properties, api::transaction::WriteOps};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let db = AletheiaDB::new()?;
+/// # let other = aletheiadb::core::NodeId::new(1)?;
+/// # let props = properties! { "name" => "Alice" };
+/// # let edge_props = properties! { "since" => 2024 };
+/// let mut tx = db.write_transaction()?;
 /// let node_id = tx.create_node("Person", props)?;
 /// tx.create_edge(node_id, other, "KNOWS", edge_props)?;
 /// tx.commit()?;  // or tx.rollback()
+/// # Ok(())
+/// # }
 /// ```
 pub struct WriteTransaction {
     pub(crate) tx_id: TxId,
@@ -201,13 +209,19 @@ impl WriteTransaction {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, api::transaction::WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let properties = properties! { "name" => "Alice" };
     /// let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node("Person", properties)?;
     /// let commit_ts = tx.commit_with_timestamp()?;
     ///
     /// // Query at exact commit timestamp
     /// let node = db.get_node_at_time(node_id, commit_ts, commit_ts)?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Durability Modes

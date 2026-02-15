@@ -94,7 +94,12 @@ impl Node {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::core::{Node, NodeId, VersionId, PropertyMap};
+    /// # use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let label = GLOBAL_INTERNER.intern("Person")?;
+    /// # let node = Node::new(NodeId::new(1)?, label, PropertyMap::new(), VersionId::new(1)?);
     /// // Convenient for one-off checks
     /// if node.has_label_str("Person") {
     ///     // ...
@@ -102,11 +107,13 @@ impl Node {
     ///
     /// // For performance-critical loops, pre-intern:
     /// let person_label = GLOBAL_INTERNER.intern("Person")?;
-    /// for node in many_nodes {
+    /// // for node in many_nodes {
     ///     if node.has_label(person_label) {  // Faster!
     ///         // ...
     ///     }
-    /// }
+    /// // }
+    /// # Ok(())
+    /// # }
     /// ```
     #[inline]
     pub fn has_label_str(&self, label: &str) -> bool {
@@ -219,7 +226,12 @@ impl Edge {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMap};
+    /// # use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// # let edge = Edge::new(EdgeId::new(1)?, label, NodeId::new(1)?, NodeId::new(2)?, PropertyMap::new(), VersionId::new(1)?);
     /// // Convenient for one-off checks
     /// if edge.has_label_str("KNOWS") {
     ///     // ...
@@ -227,11 +239,13 @@ impl Edge {
     ///
     /// // For performance-critical loops, pre-intern:
     /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
-    /// for edge in many_edges {
+    /// // for edge in many_edges {
     ///     if edge.has_label(knows_label) {  // Faster!
     ///         // ...
     ///     }
-    /// }
+    /// // }
+    /// # Ok(())
+    /// # }
     /// ```
     #[inline]
     pub fn has_label_str(&self, label: &str) -> bool {
