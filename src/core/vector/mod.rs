@@ -98,6 +98,9 @@ mod sentry_tests;
 mod sentry_sparse_consistency_tests;
 
 #[cfg(test)]
+mod sentry_sparse_tests;
+
+#[cfg(test)]
 mod tests;
 
 pub use constants::*;
