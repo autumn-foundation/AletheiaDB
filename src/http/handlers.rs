@@ -249,6 +249,15 @@ pub async fn handle_query(
                     let limit_val = limit.unwrap_or(100).min(max_limit);
                     let offset_val = offset.unwrap_or(0);
 
+                    // Prevent deep pagination attacks (CPU DoS)
+                    let max_deep_pagination = 10_000;
+                    if offset_val.saturating_add(limit_val) > max_deep_pagination {
+                        return HttpResponse::BadRequest().json(ApiResponse::error(format!(
+                            "Pagination limit exceeded: offset + limit must be <= {}",
+                            max_deep_pagination
+                        )));
+                    }
+
                     // Deduplication
                     let mut seen_ids = HashSet::new();
                     let mut neighbors = Vec::with_capacity(limit_val);
@@ -398,6 +407,49 @@ mod tests {
         let payload = json!({
             "operation": "find_node",
             "label": "Person",
+            "offset": 100_000,
+            "limit": 10
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+
+        // SECURE: Should return 400 Bad Request
+        assert!(
+            resp.status().is_client_error(),
+            "Should reject deep pagination"
+        );
+        let body = test::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let error = json["error"].as_str().unwrap();
+        assert!(
+            error.contains("Pagination limit exceeded"),
+            "Error: {}",
+            error
+        );
+    }
+
+    // Warden: Check if FindNeighbors allows deep pagination (DoS vector)
+    #[actix_rt::test]
+    async fn test_warden_find_neighbors_deep_pagination() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+        let state = web::Data::new(AppState::new(db));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
+
+        // Deep pagination request
+        let payload = json!({
+            "operation": "find_neighbors",
+            "node_id": 1,
             "offset": 100_000,
             "limit": 10
         });
