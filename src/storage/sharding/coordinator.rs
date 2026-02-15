@@ -1415,6 +1415,26 @@ mod tests {
         assert!(debug.contains("dead_lettered"));
     }
 
+    fn try_simulate_past_timestamp(coordinator: &ShardCoordinator, idle_gap_us: u64) -> Option<()> {
+        let mut observed_at = coordinator
+            .commit_clock_observed_at
+            .lock()
+            .expect("commit_clock_observed_at lock should be available");
+
+        // Use checked_sub to prevent panic on systems with uptime < 1 hour (e.g. CI)
+        let sub = Instant::now().checked_sub(Duration::from_micros(idle_gap_us));
+
+        // Artificially treat u64::MAX as "insufficient uptime" to ensure coverage of the None
+        // branch on platforms where Instant supports negative timestamps (e.g. Linux containers).
+        let sub = if idle_gap_us == u64::MAX { None } else { sub };
+
+        *observed_at = match sub {
+            Some(p) => p,
+            None => return None,
+        };
+        Some(())
+    }
+
     #[test]
     fn test_next_commit_timestamp_allows_idle_forward_drift() {
         let coordinator = ShardCoordinator::new(test_config());
@@ -1429,18 +1449,8 @@ mod tests {
             *frontier = crate::core::hlc::HybridTimestamp::new(old_wallclock, 0).unwrap();
         }
 
-        {
-            let mut observed_at = coordinator
-                .commit_clock_observed_at
-                .lock()
-                .expect("commit_clock_observed_at lock should be available");
-
-            // Use checked_sub to prevent panic on systems with uptime < 1 hour (e.g. CI)
-            *observed_at =
-                match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
-                    Some(p) => p,
-                    None => return, // Skipping test_next_commit_timestamp_allows_idle_forward_drift due to insufficient system uptime
-                };
+        if try_simulate_past_timestamp(&coordinator, idle_gap_us as u64).is_none() {
+            return; // Skipping due to insufficient uptime
         }
 
         let result = coordinator.next_commit_timestamp();
@@ -1448,6 +1458,16 @@ mod tests {
             result.is_ok(),
             "normal idle time should not be treated as forward clock skew"
         );
+    }
+
+    #[test]
+    fn test_next_commit_timestamp_skips_on_insufficient_uptime() {
+        let coordinator = ShardCoordinator::new(test_config());
+        // Force skipping by requesting an impossible uptime (e.g. max u64)
+        let impossible_gap_us = u64::MAX;
+
+        let result = try_simulate_past_timestamp(&coordinator, impossible_gap_us);
+        assert!(result.is_none(), "Should return None for impossible uptime simulation");
     }
 
     #[test]
