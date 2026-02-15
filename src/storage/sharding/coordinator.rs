@@ -1436,12 +1436,11 @@ mod tests {
                 .expect("commit_clock_observed_at lock should be available");
 
             // Use checked_sub to prevent panic on systems with uptime < 1 hour (e.g. CI)
-            if let Some(past_instant) = Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
-                *observed_at = past_instant;
-            } else {
-                println!("Skipping test_next_commit_timestamp_allows_idle_forward_drift due to insufficient system uptime");
-                return;
-            }
+            *observed_at =
+                match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
+                    Some(p) => p,
+                    None => return, // Skipping test_next_commit_timestamp_allows_idle_forward_drift due to insufficient system uptime
+                };
         }
 
         let result = coordinator.next_commit_timestamp();
