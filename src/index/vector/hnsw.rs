@@ -344,8 +344,7 @@ impl HnswConfig {
                     "dimensions {} exceeds maximum allowed {}",
                     dimensions, MAX_VECTOR_DIMENSIONS
                 ),
-            })
-            .into());
+            }));
         }
 
         reader.read_exact(&mut buf_u8)?;
