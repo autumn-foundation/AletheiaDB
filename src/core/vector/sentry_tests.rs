@@ -308,7 +308,22 @@ fn test_simd_dot_and_magnitudes_large_vector() {
     // Allow small epsilon for floating point accumulation differences
     // 0.1 is safe for sum around 30,000 (machine epsilon approx 0.0036 at this magnitude)
     let epsilon = 0.1;
-    assert!((dot - expected_dot).abs() < epsilon, "Dot product mismatch: {} vs {}", dot, expected_dot);
-    assert!((mag_a - expected_mag_a).abs() < epsilon, "Mag A mismatch: {} vs {}", mag_a, expected_mag_a);
-    assert!((mag_b - expected_mag_b).abs() < epsilon, "Mag B mismatch: {} vs {}", mag_b, expected_mag_b);
+    assert!(
+        (dot - expected_dot).abs() < epsilon,
+        "Dot product mismatch: {} vs {}",
+        dot,
+        expected_dot
+    );
+    assert!(
+        (mag_a - expected_mag_a).abs() < epsilon,
+        "Mag A mismatch: {} vs {}",
+        mag_a,
+        expected_mag_a
+    );
+    assert!(
+        (mag_b - expected_mag_b).abs() < epsilon,
+        "Mag B mismatch: {} vs {}",
+        mag_b,
+        expected_mag_b
+    );
 }
