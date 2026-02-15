@@ -55,3 +55,7 @@ pub mod temporal_narrative;
 #[cfg(feature = "nova")]
 /// Sentinel: Semantic Firewall for validating data insertion.
 pub mod sentinel;
+
+#[cfg(feature = "nova")]
+/// Thermos: Semantic Temperature and Volatility.
+pub mod thermos;
