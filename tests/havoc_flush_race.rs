@@ -1,6 +1,6 @@
+use aletheiadb::storage::wal::LSN;
 use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
 use aletheiadb::storage::wal::ring_buffer::PendingEntry;
-use aletheiadb::storage::wal::LSN;
 use std::sync::Arc;
 use std::thread;
 
@@ -83,15 +83,25 @@ fn test_flush_race_condition() {
         );
 
         if meta.min_lsn.0 > actual_min {
-            println!("VIOLATION: Meta min {} > Actual min {}", meta.min_lsn.0, actual_min);
+            println!(
+                "VIOLATION: Meta min {} > Actual min {}",
+                meta.min_lsn.0, actual_min
+            );
             violations += 1;
         }
 
         if meta.max_lsn.0 < actual_max {
-             println!("VIOLATION: Meta max {} < Actual max {}", meta.max_lsn.0, actual_max);
-             violations += 1;
+            println!(
+                "VIOLATION: Meta max {} < Actual max {}",
+                meta.max_lsn.0, actual_max
+            );
+            violations += 1;
         }
     }
 
-    assert_eq!(violations, 0, "Found {} metadata consistency violations due to race condition", violations);
+    assert_eq!(
+        violations, 0,
+        "Found {} metadata consistency violations due to race condition",
+        violations
+    );
 }
