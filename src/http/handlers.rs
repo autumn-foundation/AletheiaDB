@@ -35,6 +35,20 @@ pub fn configure_health_routes(cfg: &mut web::ServiceConfig) {
 // Query Endpoint
 // ============================================================================
 
+/// Maximum allowable sum of offset and limit for pagination.
+pub(crate) const MAX_PAGINATION_LIMIT: usize = 10_000;
+
+/// Validate pagination parameters to prevent deep pagination DoS.
+pub(crate) fn validate_pagination(offset: usize, limit: usize) -> Result<(), String> {
+    if offset.saturating_add(limit) > MAX_PAGINATION_LIMIT {
+        return Err(format!(
+            "Pagination limit exceeded: offset + limit must be <= {}",
+            MAX_PAGINATION_LIMIT
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum QueryRequest {
@@ -196,14 +210,8 @@ pub async fn handle_query(
             let limit_val = limit.unwrap_or(100);
             let offset_val = offset.unwrap_or(0);
 
-            // Prevent deep pagination attacks (CPU DoS)
-            // Use saturating_add to prevent integer overflow bypass
-            let max_deep_pagination = 10_000;
-            if offset_val.saturating_add(limit_val) > max_deep_pagination {
-                return HttpResponse::BadRequest().json(ApiResponse::error(format!(
-                    "Pagination limit exceeded: offset + limit must be <= {}",
-                    max_deep_pagination
-                )));
+            if let Err(e) = validate_pagination(offset_val, limit_val) {
+                return HttpResponse::BadRequest().json(ApiResponse::error(e));
             }
 
             if let Some(skip) = offset {
@@ -248,6 +256,10 @@ pub async fn handle_query(
 
                     let limit_val = limit.unwrap_or(100).min(max_limit);
                     let offset_val = offset.unwrap_or(0);
+
+                    if let Err(e) = validate_pagination(offset_val, limit_val) {
+                        return HttpResponse::BadRequest().json(ApiResponse::error(e));
+                    }
 
                     // Deduplication
                     let mut seen_ids = HashSet::new();
@@ -422,5 +434,23 @@ mod tests {
             "Error: {}",
             error
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_validate_pagination() {
+        // Valid cases
+        assert!(super::validate_pagination(0, 10).is_ok());
+        assert!(super::validate_pagination(0, super::MAX_PAGINATION_LIMIT).is_ok());
+        assert!(super::validate_pagination(super::MAX_PAGINATION_LIMIT, 0).is_ok());
+        assert!(super::validate_pagination(5000, 5000).is_ok());
+
+        // Invalid cases
+        assert!(super::validate_pagination(0, super::MAX_PAGINATION_LIMIT + 1).is_err());
+        assert!(super::validate_pagination(super::MAX_PAGINATION_LIMIT + 1, 0).is_err());
+        assert!(super::validate_pagination(5000, 5001).is_err());
+
+        // Overflow protection
+        assert!(super::validate_pagination(usize::MAX, 1).is_err());
+        assert!(super::validate_pagination(1, usize::MAX).is_err());
     }
 }
