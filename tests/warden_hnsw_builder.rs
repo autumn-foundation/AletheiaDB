@@ -15,7 +15,11 @@ fn test_hnsw_builder_huge_dimensions() {
         Err(e) => {
             let msg = e.to_string();
             // We now expect a specific validation error
-            assert!(msg.contains("dimensions 1000000000 exceeds maximum allowed"), "Unexpected error message: {}", msg);
+            assert!(
+                msg.contains("dimensions 1000000000 exceeds maximum allowed"),
+                "Unexpected error message: {}",
+                msg
+            );
         }
     }
 }
