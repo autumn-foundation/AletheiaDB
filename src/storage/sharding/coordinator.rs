@@ -1442,7 +1442,9 @@ mod tests {
             if let Some(past_time) = now.checked_sub(duration) {
                 *observed_at = past_time;
             } else {
-                println!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime insufficient for simulation");
+                println!(
+                    "Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime insufficient for simulation"
+                );
                 return;
             }
         }
