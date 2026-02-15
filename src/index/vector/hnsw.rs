@@ -86,6 +86,7 @@
 //! - Searches can run concurrently with additions
 
 use crate::core::id::NodeId;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
@@ -559,6 +560,15 @@ impl HnswIndexBuilder {
         if self.config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+
+        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} too large (max {})",
+                    self.config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
             }));
         }
 
@@ -1786,6 +1796,16 @@ impl HnswIndex {
 
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        // Security Check: Validate dimensions to prevent DoS
+        if config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} too large (max {})",
+                    config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         // Security Check: Custom metrics require F32 quantization
         if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -1882,6 +1902,17 @@ impl HnswIndex {
             })?;
 
         let dimensions = index.dimensions();
+
+        // Security Check: Validate dimensions from file to prevent DoS
+        if dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} too large (max {})",
+                    dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         let connectivity = index.connectivity();
 
         // Load mappings from companion file with integrity verification
