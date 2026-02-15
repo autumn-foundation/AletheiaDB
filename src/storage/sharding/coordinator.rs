@@ -1434,7 +1434,14 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            *observed_at = Instant::now() - Duration::from_micros(idle_gap_us as u64);
+            // Fix for CI runners with short uptime where Instant::now() < idle_gap_us
+            let past_instant =
+                Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64));
+            if past_instant.is_none() {
+                // Cannot simulate this past instant safely on this machine
+                return;
+            }
+            *observed_at = past_instant.unwrap();
         }
 
         let result = coordinator.next_commit_timestamp();
