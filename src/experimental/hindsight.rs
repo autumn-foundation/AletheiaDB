@@ -14,7 +14,7 @@
 
 use crate::AletheiaDB;
 use crate::core::graph::{Edge, Node};
-use crate::core::id::{EdgeId, EntityId, NodeId, VersionId, MAX_VALID_ID};
+use crate::core::id::{EdgeId, EntityId, MAX_VALID_ID, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 use crate::utils::error::{Result, StorageError};
@@ -136,7 +136,11 @@ impl<'a> Hindsight<'a> {
         );
 
         self.scenario.added_edges.insert(id, edge);
-        self.scenario.added_outgoing.entry(source).or_default().push(id);
+        self.scenario
+            .added_outgoing
+            .entry(source)
+            .or_default()
+            .push(id);
 
         Ok(id)
     }
@@ -175,7 +179,7 @@ impl<'a> Hindsight<'a> {
             let mut builder = PropertyMapBuilder::new();
             for (k, v) in node.properties.iter() {
                 if let Some(key_str) = GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()) {
-                     builder = builder.insert(&key_str, v.clone());
+                    builder = builder.insert(&key_str, v.clone());
                 }
             }
 
@@ -191,20 +195,20 @@ impl<'a> Hindsight<'a> {
             // Record patch for existing node
             // If there's already a patch, we need to merge it.
             if let Some(existing_patch) = self.scenario.modified_nodes.get_mut(&id) {
-                 let mut builder = PropertyMapBuilder::new();
-                 // Rebuild from existing patch
-                 for (k, v) in existing_patch.iter() {
-                     if let Some(key_str) = GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()) {
-                         builder = builder.insert(&key_str, v.clone());
-                     }
-                 }
-                 // Apply new updates
-                 for (k, v) in properties.iter() {
-                     if let Some(key_str) = GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()) {
-                         builder = builder.insert(&key_str, v.clone());
-                     }
-                 }
-                 *existing_patch = builder.build();
+                let mut builder = PropertyMapBuilder::new();
+                // Rebuild from existing patch
+                for (k, v) in existing_patch.iter() {
+                    if let Some(key_str) = GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()) {
+                        builder = builder.insert(&key_str, v.clone());
+                    }
+                }
+                // Apply new updates
+                for (k, v) in properties.iter() {
+                    if let Some(key_str) = GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()) {
+                        builder = builder.insert(&key_str, v.clone());
+                    }
+                }
+                *existing_patch = builder.build();
             } else {
                 self.scenario.modified_nodes.insert(id, properties);
             }
@@ -270,8 +274,10 @@ impl<'a> Hindsight<'a> {
         let edge = self.db.get_edge(id)?;
 
         // Check if endpoints are removed (implicitly removes edge)
-        if self.scenario.removed_nodes.contains(&edge.source) || self.scenario.removed_nodes.contains(&edge.target) {
-             return Err(crate::utils::Error::Storage(StorageError::EdgeNotFound(id)));
+        if self.scenario.removed_nodes.contains(&edge.source)
+            || self.scenario.removed_nodes.contains(&edge.target)
+        {
+            return Err(crate::utils::Error::Storage(StorageError::EdgeNotFound(id)));
         }
 
         Ok(edge)
@@ -324,7 +330,9 @@ impl<'a> Hindsight<'a> {
     /// Find a path between two nodes using Breadth-First Search on the virtual graph.
     pub fn find_path_bfs(&self, start: NodeId, end: NodeId) -> Option<Vec<EdgeId>> {
         // Check if start or end are removed
-        if self.scenario.removed_nodes.contains(&start) || self.scenario.removed_nodes.contains(&end) {
+        if self.scenario.removed_nodes.contains(&start)
+            || self.scenario.removed_nodes.contains(&end)
+        {
             return None;
         }
 
@@ -424,9 +432,8 @@ impl<'a> Hindsight<'a> {
         }
 
         let db_results = if self.db.has_vector_index(property) {
-            self.db.find_similar_with_predicate(property, vector, k, |id| {
-                !exclude_ids.contains(id)
-            })?
+            self.db
+                .find_similar_with_predicate(property, vector, k, |id| !exclude_ids.contains(id))?
         } else {
             Vec::new() // Or error? Let's be robust and just return virtual results if no index.
         };
@@ -464,15 +471,24 @@ mod tests {
         // Get Node
         let node = hindsight.get_node(id).unwrap();
         assert!(node.has_label_str("Spirit"));
-        assert_eq!(node.get_property("name").unwrap().as_str().unwrap(), "Ghost");
+        assert_eq!(
+            node.get_property("name").unwrap().as_str().unwrap(),
+            "Ghost"
+        );
 
         // Update Node
         let update_props = PropertyMapBuilder::new().insert("age", 100).build();
         hindsight.update_node(id, update_props).unwrap();
 
         let node_updated = hindsight.get_node(id).unwrap();
-        assert_eq!(node_updated.get_property("age").unwrap().as_int().unwrap(), 100);
-        assert_eq!(node_updated.get_property("name").unwrap().as_str().unwrap(), "Ghost");
+        assert_eq!(
+            node_updated.get_property("age").unwrap().as_int().unwrap(),
+            100
+        );
+        assert_eq!(
+            node_updated.get_property("name").unwrap().as_str().unwrap(),
+            "Ghost"
+        );
 
         // Remove Node
         hindsight.remove_node(id);
