@@ -1,4 +1,36 @@
 //! Shard coordinator for managing distributed operations.
+//!
+//! The `ShardCoordinator` is the central component responsible for orchestrating distributed
+//! transactions across multiple database shards. It implements the Two-Phase Commit (2PC) protocol
+//! to ensure Atomicity and Durability (ACID properties) in a distributed environment.
+//!
+//! # Responsibilities
+//!
+//! *   **Transaction Coordination**: Manages the lifecycle of distributed transactions (Begin, Prepare, Commit/Abort).
+//! *   **Query Routing**: Directs read and write operations to the appropriate shard(s) based on data partitioning rules.
+//! *   **Failure Recovery**: Handles coordinator crashes by replaying the commit log and recovering pending transactions.
+//! *   **Dead Letter Queue**: Manages transactions that fail automatic recovery, requiring manual intervention.
+//! *   **Cluster Health**: Monitors shard availability and health status.
+//! *   **Load Balancing**: Tracks data distribution and triggers rebalancing when shards become uneven.
+//!
+//! # Two-Phase Commit (2PC) Protocol
+//!
+//! The coordinator ensures atomic commits across shards using 2PC:
+//!
+//! 1.  **Prepare Phase**: The coordinator asks all participating shards if they can commit the transaction.
+//!     Shards lock resources and persist a "prepared" record.
+//! 2.  **Commit Decision**: If all shards vote "Yes", the coordinator logs a `Commit` decision to its local WAL.
+//!     This is the point of no return.
+//! 3.  **Commit Phase**: The coordinator instructs all shards to commit. If any shard fails to acknowledge,
+//!     the coordinator retries until successful or until max retries (then recovery takes over).
+//!
+//! # Failure Handling
+//!
+//! *   **Coordinator Crash**: On restart, the coordinator reads its WAL to find pending commit decisions and replays them.
+//! *   **Shard Failure**: If a shard is unreachable during Prepare, the transaction is aborted. If it fails during Commit,
+//!     the coordinator retries indefinitely (via recovery) to ensure consistency.
+//! *   **Dead Letters**: Transactions that fail recovery repeatedly (e.g., due to data corruption) are moved to a
+//!     Dead Letter Queue (DLQ) for manual inspection.
 
 use super::config::{RebalanceConfig, ShardConfig};
 use super::router::{ShardRouter, TraversalPlan};
@@ -152,6 +184,12 @@ impl ShardConnection {
 }
 
 /// Coordinator for managing shards and distributed operations.
+///
+/// The coordinator maintains the global view of the cluster state, manages the lifecycle of
+/// distributed transactions, and ensures consistency across shards.
+///
+/// It uses a local Write-Ahead Log (WAL) to persist commit decisions, allowing it to recover
+/// from crashes and complete pending transactions.
 pub struct ShardCoordinator {
     /// Router for query routing decisions.
     router: ShardRouter,
@@ -354,6 +392,17 @@ impl ShardCoordinator {
     }
 
     /// Start a new distributed transaction.
+    ///
+    /// This initializes the transaction state and assigns a unique `TxId`.
+    /// The transaction starts in the `Pending` state.
+    ///
+    /// # Arguments
+    ///
+    /// * `participants` - List of shard IDs that will participate in this transaction.
+    ///
+    /// # Returns
+    ///
+    /// Returns the new `TxId` or an error if ID generation fails.
     pub fn begin_distributed_transaction(
         &self,
         participants: Vec<ShardId>,
@@ -378,6 +427,18 @@ impl ShardCoordinator {
     }
 
     /// Execute the prepare phase of 2PC.
+    ///
+    /// In this phase, the coordinator sends a "Prepare" request to all participating shards.
+    /// Each shard validates the transaction (e.g., checks constraints, acquires locks) and
+    /// persists a prepared record.
+    ///
+    /// If all shards respond successfully, the transaction moves to the `Prepared` state.
+    /// If any shard fails or is unreachable, the transaction is aborted.
+    ///
+    /// # Timestamp Assignment
+    ///
+    /// A single commit timestamp is allocated during this phase. This ensures that all
+    /// participants commit at the exact same logical time, preserving causal consistency.
     pub fn prepare_distributed_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
@@ -485,10 +546,18 @@ impl ShardCoordinator {
 
     /// Execute the commit phase of 2PC.
     ///
-    /// This method follows the critical 2PC protocol:
-    /// 1. Log the commit decision BEFORE sending commits
-    /// 2. Send commit to all participants
-    /// 3. Clear the decision after all acknowledge
+    /// This is the final phase of the transaction. The coordinator:
+    /// 1.  **Logs the Commit Decision**: A record is written to the coordinator's WAL stating that
+    ///     the transaction *must* commit. This is the point of no return.
+    /// 2.  **Sends Commit Requests**: The coordinator instructs all participants to commit.
+    /// 3.  **Clears Decision**: Once all participants acknowledge, the decision log is cleared.
+    ///
+    /// # Failure Handling
+    ///
+    /// If a participant fails to acknowledge the commit, the coordinator will retry (with backoff).
+    /// If retries are exhausted, the transaction remains in the `Committing` state and will be
+    /// picked up by the recovery process. The commit decision log ensures that even if the coordinator
+    /// crashes, it will remember to retry the commit upon restart.
     pub fn commit_distributed_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
@@ -725,12 +794,22 @@ impl ShardCoordinator {
 
     /// Recovery: replay pending commit decisions.
     ///
-    /// This should be called on coordinator startup to handle
-    /// transactions that were in-flight when the coordinator crashed.
+    /// This method scans the coordinator's WAL for any commit decisions that were not fully
+    /// acknowledged before a crash. It attempts to re-drive these transactions to completion.
     ///
-    /// Returns a tuple of (successfully recovered, dead-lettered transactions).
-    /// Dead-lettered transactions are those that exceeded max recovery attempts
-    /// and require manual intervention.
+    /// This must be called on coordinator startup to ensure cluster consistency.
+    ///
+    /// # Dead Letter Queue
+    ///
+    /// If a transaction fails to recover after `max_recovery_attempts` (default: 5), it is
+    /// moved to the `DeadLetteredTransaction` queue. This prevents the coordinator from
+    /// getting stuck in an infinite retry loop for permanently broken transactions.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `RecoveryResult` containing:
+    /// *   `recovered`: List of transaction IDs that were successfully completed.
+    /// *   `dead_lettered`: List of transactions that failed and need manual intervention.
     pub fn recover_pending_transactions(&self) -> Result<RecoveryResult, DistributedTxError> {
         let decisions = {
             let log = self

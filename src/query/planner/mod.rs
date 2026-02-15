@@ -1,8 +1,24 @@
 //! Query Planner
 //!
-//! Transforms logical plans into optimized physical plans for execution.
-//! The planner applies optimization rules and uses a cost model to choose
-//! the best execution strategy.
+//! The Query Planner is responsible for transforming a high-level `Query` into an executable `PhysicalPlan`.
+//! It acts as the bridge between the declarative query API and the low-level storage engine.
+//!
+//! # Planning Pipeline
+//!
+//! 1.  **Logical Planning**: The input `Query` (AST-like) is converted into a `LogicalPlan` tree.
+//!     This representation describes *what* to compute, not *how*.
+//! 2.  **Optimization**: A set of `OptimizationRule`s are applied iteratively to the logical plan.
+//!     Rules include filter pushdown, limit pushdown, and join reordering.
+//! 3.  **Physical Planning**: The optimized logical plan is converted into a `PhysicalPlan`.
+//!     This step involves selecting concrete access methods (e.g., Index Scan vs. Seq Scan)
+//!     and determining execution strategies (e.g., Parallel vs. Serial).
+//!
+//! # Key Components
+//!
+//! *   [`QueryPlanner`]: The main entry point.
+//! *   [`OptimizationRule`]: Traits for rewrite rules.
+//! *   [`CostModel`]: Estimates the execution cost of operators.
+//! *   [`Statistics`]: Provides data statistics (cardinality, selectivity) for cost estimation.
 
 pub mod cost;
 pub mod physical;
@@ -27,14 +43,24 @@ pub use rules::OptimizationRule;
 pub use stats::Statistics;
 
 /// Query planner that transforms queries into executable physical plans.
+///
+/// The planner holds references to database statistics and storage to make informed
+/// decisions about index usage and execution strategies.
+///
+/// # Example
+///
+/// ```ignore
+/// let planner = QueryPlanner::new(stats, storage);
+/// let plan = planner.plan(query)?;
+/// ```
 pub struct QueryPlanner {
-    /// Statistics for cardinality estimation
+    /// Statistics for cardinality estimation.
     stats: Arc<Statistics>,
-    /// Cost model for plan comparison
+    /// Cost model for plan comparison.
     cost_model: CostModel,
-    /// Optimization rules to apply
+    /// Optimization rules to apply (executed in order).
     rules: Vec<Box<dyn OptimizationRule>>,
-    /// Reference to current storage for index validation
+    /// Reference to current storage for index validation.
     storage: Arc<CurrentStorage>,
 }
 
@@ -128,6 +154,9 @@ impl QueryPlanner {
 
     /// Try to apply a source operation. Returns Ok(Some(op)) if successful,
     /// Ok(None) if it's not a source operation.
+    ///
+    /// Source operations start a new query pipeline (e.g., `StartNode`, `ScanNodes`, `VectorSearch`).
+    /// They do not consume input from a previous operator.
     fn apply_source_op(&self, op: &QueryOp) -> Result<Option<LogicalOp>> {
         match op {
             QueryOp::StartNode(id) => Ok(Some(LogicalOp::Scan(ScanOp::NodeLookup(vec![*id])))),
@@ -385,7 +414,12 @@ impl QueryPlanner {
         Ok(effective_property)
     }
 
-    /// Convert a scan operation to physical
+    /// Convert a scan operation to physical.
+    ///
+    /// This method selects the best access path for a scan. It handles:
+    /// *   **Index Selection**: Verifies if required indexes (like Vector HNSW) exist.
+    /// *   **Temporal Switching**: Chooses between current-state and temporal lookups based on `as_of`.
+    /// *   **Batch Optimization**: Decides whether to use batch lookup for multiple IDs based on cost model.
     ///
     /// # Index Validation
     ///
