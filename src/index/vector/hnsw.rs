@@ -1464,13 +1464,11 @@ impl HnswIndex {
                     config.metric, meta.metric
                 ))));
             }
-        } else {
-            if config.custom_metric.is_some() {
-                return Err(Error::Vector(VectorError::IndexError(
-                    "Cannot use custom metric with legacy index (missing metadata validation)"
-                        .to_string(),
-                )));
-            }
+        } else if config.custom_metric.is_some() {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot use custom metric with legacy index (missing metadata validation)"
+                    .to_string(),
+            )));
         }
         Ok(())
     }
