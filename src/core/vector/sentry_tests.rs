@@ -332,8 +332,8 @@ fn test_simd_dot_and_magnitudes_large_vector() {
     let expected_mag_b: f32 = b.iter().map(|x| x * x).sum();
 
     // Allow small epsilon for floating point accumulation differences
-    // 0.1 is safe for sum around 30,000 (machine epsilon approx 0.0036 at this magnitude)
-    let epsilon = 0.1;
+    // 0.01 is stricter but should still pass if SIMD implementation is reasonably precise
+    let epsilon = 0.01;
     assert!(
         (dot - expected_dot).abs() < epsilon,
         "Dot product mismatch: {} vs {}",
@@ -351,6 +351,41 @@ fn test_simd_dot_and_magnitudes_large_vector() {
         "Mag B mismatch: {} vs {}",
         mag_b,
         expected_mag_b
+    );
+}
+
+#[test]
+fn test_simd_dot_product_associativity() {
+    // 🧪 Strategy: Check if SIMD (chunked sum) produces significantly different results
+    // from Scalar (sequential sum) for a sensitive dataset.
+    // Floating point addition is non-associative.
+
+    let len = 1000;
+    // Use values with alternating magnitudes to exacerbate rounding errors
+    let a: Vec<f32> = (0..len).map(|i| if i % 2 == 0 { 1.0e5 } else { 1.0 }).collect();
+    let b: Vec<f32> = (0..len).map(|i| if i % 2 == 0 { 1.0 } else { -1.0e5 }).collect();
+
+    // Scalar sum: (1e5 * 1) + (1 * -1e5) + ... = 1e5 - 1e5 = 0
+    // But sequential sum might drift.
+    let scalar_dot = super::simd::dot_product_scalar(&a, &b);
+
+    // SIMD sum: sums 8 lanes independently.
+    // Lane 0: 1e5, 1e5, ... -> Sum(1e5)
+    // Lane 1: -1e5, -1e5, ... -> Sum(-1e5)
+    // Then horizontal sum.
+    let simd_dot = super::simd::dot_product_sum(&a, &b);
+
+    // We expect them to be close, but maybe not identical.
+    // This test documents the behavior.
+    let diff = (scalar_dot - simd_dot).abs();
+
+    // They should be reasonably close for this balanced dataset
+    assert!(
+        diff < 1.0,
+        "SIMD vs Scalar divergence: scalar {}, simd {}, diff {}",
+        scalar_dot,
+        simd_dot,
+        diff
     );
 }
 
