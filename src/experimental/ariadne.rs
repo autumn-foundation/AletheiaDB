@@ -35,9 +35,15 @@ pub enum ConnectionType {
     /// Start of the thread.
     Start,
     /// Explicit edge traversal.
-    Edge { label: String },
+    Edge {
+        /// The traversed edge label.
+        label: String,
+    },
     /// Implicit semantic jump via vector similarity.
-    SemanticJump { similarity: f32 },
+    SemanticJump {
+        /// Similarity score in `[0.0, 1.0]` used for this jump.
+        similarity: f32,
+    },
 }
 
 /// Internal state for the priority queue.
@@ -149,10 +155,10 @@ impl<'a> Ariadne<'a> {
             }
 
             // Check if we reached goal
-            if let Some(goal) = goal_node {
-                if state.node_id == goal {
-                    return Ok(state.path);
-                }
+            if let Some(goal) = goal_node
+                && state.node_id == goal
+            {
+                return Ok(state.path);
             }
 
             // Keep track of the longest valid path found so far
@@ -175,22 +181,93 @@ impl<'a> Ariadne<'a> {
                         continue;
                     }
 
-                    if let Ok(target_time) = self.get_time(target, time_property) {
-                        if target_time >= state.timestamp {
-                            // Valid explicit step
-                            let label = self.resolve_label(edge.label);
+                    if let Ok(target_time) = self.get_time(target, time_property)
+                        && target_time >= state.timestamp
+                    {
+                        // Valid explicit step
+                        let label = self.resolve_label(edge.label);
+                        let mut new_path = state.path.clone();
+                        new_path.push(ThreadStep {
+                            node_id: target,
+                            timestamp: target_time,
+                            connection_type: ConnectionType::Edge { label },
+                        });
+
+                        let heuristic =
+                            self.calculate_heuristic(target, vector_property, &goal_vector);
+
+                        // Edges are cheap (cost += 1.0)
+                        let new_g = state.g_cost + 1.0;
+                        let f_cost = new_g + heuristic;
+                        pq.push(SearchState {
+                            node_id: target,
+                            timestamp: target_time,
+                            g_cost: new_g,
+                            f_cost,
+                            path: new_path,
+                        });
+                    }
+                }
+            }
+
+            // 2. Gather candidates from semantic jumps
+            // Only if we haven't found enough explicit edges, or to explore alternatives.
+            // We search for vectors similar to the CURRENT node's vector.
+            if let Ok(current_node) = self.db.get_node(state.node_id)
+                && let Some(current_vector) = current_node
+                    .properties
+                    .get(vector_property)
+                    .and_then(|v| v.as_vector())
+            {
+                let min_time = state.timestamp;
+
+                // Use the custom predicate to filter by time!
+                let candidates = self.db.find_similar_with_predicate(
+                    vector_property,
+                    current_vector,
+                    beam_width, // Get top-k candidates
+                    |candidate_id| {
+                        // Filter: Candidate must be after current time
+                        if *candidate_id == state.node_id {
+                            return false;
+                        } // Exclude self
+
+                        // Check time property
+                        if let Ok(node) = self.db.get_node(*candidate_id)
+                            && let Some(val) = node.properties.get(time_property)
+                        {
+                            let time = val.as_int().unwrap_or(0);
+                            return time >= min_time;
+                        }
+                        false
+                    },
+                );
+
+                if let Ok(results) = candidates {
+                    for (target, score) in results {
+                        if visited.contains(&target) {
+                            continue;
+                        }
+
+                        // Calculate timestamp again (or we could have returned it from predicate if signature allowed)
+                        if let Ok(target_time) = self.get_time(target, time_property) {
                             let mut new_path = state.path.clone();
                             new_path.push(ThreadStep {
                                 node_id: target,
                                 timestamp: target_time,
-                                connection_type: ConnectionType::Edge { label },
+                                connection_type: ConnectionType::SemanticJump { similarity: score },
                             });
 
                             let heuristic =
                                 self.calculate_heuristic(target, vector_property, &goal_vector);
 
-                            // Edges are cheap (cost += 1.0)
-                            let new_g = state.g_cost + 1.0;
+                            // Jumps are more expensive than edges.
+                            // Cost based on dissimilarity (1.0 - score).
+                            // Multiplier to discourage jumps if edges exist.
+                            // Base cost of 1.5 ensures edges (cost 1.0) are preferred even for identical vectors.
+                            let jump_cost = 1.5 + (1.0 - score) * 5.0;
+
+                            let new_g = state.g_cost + jump_cost;
                             let f_cost = new_g + heuristic;
                             pq.push(SearchState {
                                 node_id: target,
@@ -199,80 +276,6 @@ impl<'a> Ariadne<'a> {
                                 f_cost,
                                 path: new_path,
                             });
-                        }
-                    }
-                }
-            }
-
-            // 2. Gather candidates from semantic jumps
-            // Only if we haven't found enough explicit edges, or to explore alternatives.
-            // We search for vectors similar to the CURRENT node's vector.
-            if let Ok(current_node) = self.db.get_node(state.node_id) {
-                if let Some(current_vector) = current_node
-                    .properties
-                    .get(vector_property)
-                    .and_then(|v| v.as_vector())
-                {
-                    let min_time = state.timestamp;
-
-                    // Use the custom predicate to filter by time!
-                    let candidates = self.db.find_similar_with_predicate(
-                        vector_property,
-                        current_vector,
-                        beam_width, // Get top-k candidates
-                        |candidate_id| {
-                            // Filter: Candidate must be after current time
-                            if *candidate_id == state.node_id {
-                                return false;
-                            } // Exclude self
-
-                            // Check time property
-                            if let Ok(node) = self.db.get_node(*candidate_id) {
-                                if let Some(val) = node.properties.get(time_property) {
-                                    let time = val.as_int().unwrap_or(0);
-                                    return time >= min_time;
-                                }
-                            }
-                            false
-                        },
-                    );
-
-                    if let Ok(results) = candidates {
-                        for (target, score) in results {
-                            if visited.contains(&target) {
-                                continue;
-                            }
-
-                            // Calculate timestamp again (or we could have returned it from predicate if signature allowed)
-                            if let Ok(target_time) = self.get_time(target, time_property) {
-                                let mut new_path = state.path.clone();
-                                new_path.push(ThreadStep {
-                                    node_id: target,
-                                    timestamp: target_time,
-                                    connection_type: ConnectionType::SemanticJump {
-                                        similarity: score,
-                                    },
-                                });
-
-                                let heuristic =
-                                    self.calculate_heuristic(target, vector_property, &goal_vector);
-
-                                // Jumps are more expensive than edges.
-                                // Cost based on dissimilarity (1.0 - score).
-                                // Multiplier to discourage jumps if edges exist.
-                                // Base cost of 1.5 ensures edges (cost 1.0) are preferred even for identical vectors.
-                                let jump_cost = 1.5 + (1.0 - score) * 5.0;
-
-                                let new_g = state.g_cost + jump_cost;
-                                let f_cost = new_g + heuristic;
-                                pq.push(SearchState {
-                                    node_id: target,
-                                    timestamp: target_time,
-                                    g_cost: new_g,
-                                    f_cost,
-                                    path: new_path,
-                                });
-                            }
                         }
                     }
                 }
@@ -310,20 +313,19 @@ impl<'a> Ariadne<'a> {
         vector_prop: &str,
         goal_vector: &Option<Vec<f32>>,
     ) -> f32 {
-        if let Some(goal) = goal_vector {
-            if let Ok(node) = self.db.get_node(node_id) {
-                if let Some(vec) = node.properties.get(vector_prop).and_then(|v| v.as_vector()) {
-                    // Simple Euclidean distance or 1-Cosine
-                    // Let's assume Cosine for now (normalized vectors)
-                    // HNSW usually returns similarity.
-                    // We need a cost.
-                    // Let's calculate manual cosine distance.
-                    // AletheiaDB doesn't expose a raw math util easily here, so implement basic dot product
-                    let dot: f32 = vec.iter().zip(goal.iter()).map(|(a, b)| a * b).sum();
-                    // Assuming normalized vectors, cosine dist = 1 - dot
-                    return (1.0 - dot).max(0.0);
-                }
-            }
+        if let Some(goal) = goal_vector
+            && let Ok(node) = self.db.get_node(node_id)
+            && let Some(vec) = node.properties.get(vector_prop).and_then(|v| v.as_vector())
+        {
+            // Simple Euclidean distance or 1-Cosine
+            // Let's assume Cosine for now (normalized vectors)
+            // HNSW usually returns similarity.
+            // We need a cost.
+            // Let's calculate manual cosine distance.
+            // AletheiaDB doesn't expose a raw math util easily here, so implement basic dot product
+            let dot: f32 = vec.iter().zip(goal.iter()).map(|(a, b)| a * b).sum();
+            // Assuming normalized vectors, cosine dist = 1 - dot
+            return (1.0 - dot).max(0.0);
         }
         0.0
     }
@@ -332,7 +334,6 @@ impl<'a> Ariadne<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
