@@ -1434,7 +1434,16 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            *observed_at = Instant::now() - Duration::from_micros(idle_gap_us as u64);
+
+            // On Windows CI, uptime might be less than the idle gap we want to simulate.
+            // Check if we can safely subtract the duration.
+            match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
+                Some(ts) => *observed_at = ts,
+                None => {
+                    println!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: System uptime too short");
+                    return;
+                }
+            }
         }
 
         let result = coordinator.next_commit_timestamp();
