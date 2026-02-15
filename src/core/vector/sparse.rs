@@ -557,12 +557,47 @@ pub fn sparse_squared_euclidean_distance(a: &SparseVec, b: &SparseVec) -> Result
         .into());
     }
 
-    // ||a - b||² = ||a||² + ||b||² - 2*dot(a,b)
-    let dot = sparse_dot_product(a, b)?;
-    let mag_a_sq = a.squared_magnitude();
-    let mag_b_sq = b.squared_magnitude();
+    // Stable algorithm: sum((a_i - b_i)^2)
+    // Avoids catastrophic cancellation from ||a||^2 + ||b||^2 - 2<a,b>
+    // when a and b are very close.
+    // Also faster (O(N) single pass vs O(N) triple pass).
 
-    Ok(mag_a_sq + mag_b_sq - 2.0 * dot)
+    let mut sum_sq_diff = 0.0f32;
+    let mut i = 0;
+    let mut j = 0;
+
+    let a_indices = a.indices();
+    let a_values = a.values();
+    let b_indices = b.indices();
+    let b_values = b.values();
+
+    while i < a_indices.len() && j < b_indices.len() {
+        if a_indices[i] == b_indices[j] {
+            let diff = a_values[i] - b_values[j];
+            sum_sq_diff += diff * diff;
+            i += 1;
+            j += 1;
+        } else if a_indices[i] < b_indices[j] {
+            sum_sq_diff += a_values[i] * a_values[i];
+            i += 1;
+        } else {
+            sum_sq_diff += b_values[j] * b_values[j];
+            j += 1;
+        }
+    }
+
+    // Process remaining elements
+    while i < a_indices.len() {
+        sum_sq_diff += a_values[i] * a_values[i];
+        i += 1;
+    }
+
+    while j < b_indices.len() {
+        sum_sq_diff += b_values[j] * b_values[j];
+        j += 1;
+    }
+
+    Ok(sum_sq_diff)
 }
 
 /// Computes Euclidean distance between two sparse vectors.
