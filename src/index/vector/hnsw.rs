@@ -2149,6 +2149,40 @@ mod sentry_tests {
                 .contains("only supported with F32")
         );
     }
+
+    #[test]
+    fn test_builder_max_dimensions_check() {
+        // Test that the builder rejects excessive dimensions (DoS protection)
+        let huge_dims = MAX_VECTOR_DIMENSIONS + 1;
+        let result = HnswIndexBuilder::new(huge_dims, DistanceMetric::Cosine).build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("dimensions") && err.to_string().contains("too large"),
+            "Expected 'too large' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_load_max_dimensions_check() {
+        // Test that load rejects excessive dimensions in config (DoS protection)
+        let huge_dims = MAX_VECTOR_DIMENSIONS + 1;
+        let config = HnswConfig::new(huge_dims, DistanceMetric::Cosine);
+        let path = Path::new("dummy_path");
+
+        // Should fail BEFORE touching filesystem
+        let result = HnswIndex::load(path, config);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("dimensions") && err.to_string().contains("too large"),
+            "Expected 'too large' error, got: {}",
+            err
+        );
+    }
 }
 
 #[cfg(test)]

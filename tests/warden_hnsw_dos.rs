@@ -1,4 +1,4 @@
-use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, HnswConfig, HnswIndex};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder};
 use aletheiadb::utils::Error;
 use std::path::Path;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
@@ -18,7 +18,10 @@ fn check_error<T>(result: Result<T, Error>, context: &str) {
                     return;
                 }
                 if msg.contains("failed to reserve memory") {
-                    panic!("{}: Vulnerability: Attempted massive allocation (caught by OOM, but should be caught by validation)", context);
+                    panic!(
+                        "{}: Vulnerability: Attempted massive allocation (caught by OOM, but should be caught by validation)",
+                        context
+                    );
                 }
 
                 panic!("{}: Rejected but with unexpected error: {}", context, msg);
@@ -35,8 +38,7 @@ fn test_hnsw_build_excessive_dimensions_dos() {
     // This covers HnswIndexBuilder::build validation
     let massive_dims = 1_000_000_000;
 
-    let result = HnswIndexBuilder::new(massive_dims, DistanceMetric::Cosine)
-        .build();
+    let result = HnswIndexBuilder::new(massive_dims, DistanceMetric::Cosine).build();
 
     check_error(result, "build");
 }
@@ -81,7 +83,10 @@ fn test_hnsw_mmap_excessive_dimensions_dos() {
     let index = match Index::new(&options) {
         Ok(idx) => idx,
         Err(e) => {
-            println!("Skipping mmap test: usearch refused to create {} dim index: {}", high_dims, e);
+            println!(
+                "Skipping mmap test: usearch refused to create {} dim index: {}",
+                high_dims, e
+            );
             return;
         }
     };
