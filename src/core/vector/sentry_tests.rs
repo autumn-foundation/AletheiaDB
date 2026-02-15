@@ -1,4 +1,5 @@
 use super::ops::*;
+use super::simd::*;
 
 // ============================================================================
 // Unaligned Memory Access Tests
@@ -56,6 +57,31 @@ where
         for j in 0..4 {
             buffer[offset + i * 4 + j] = bytes[j];
         }
+    }
+
+    f(slice);
+}
+
+/// Helper to create a byte-aligned mutable f32 slice.
+///
+/// Identical logic to `with_unaligned_f32_slice` but yields `&mut [f32]`.
+fn with_unaligned_f32_slice_mut<F>(len: usize, f: F)
+where
+    F: FnOnce(&mut [f32]),
+{
+    let mut buffer = vec![0u8; 64 + len * 4];
+    let ptr = buffer.as_ptr() as usize;
+    let mut offset = 0;
+    while (ptr + offset) & 3 != 0 || (ptr + offset) & 31 == 0 {
+        offset += 1;
+    }
+    assert!(offset + len * 4 <= buffer.len());
+
+    let slice_ptr = unsafe { buffer.as_mut_ptr().add(offset) as *mut f32 };
+    let slice = unsafe { std::slice::from_raw_parts_mut(slice_ptr, len) };
+
+    for (i, val) in slice.iter_mut().enumerate() {
+        *val = (i as f32) * 1.0;
     }
 
     f(slice);
@@ -326,4 +352,93 @@ fn test_simd_dot_and_magnitudes_large_vector() {
         mag_b,
         expected_mag_b
     );
+}
+
+// ============================================================================
+// Scale In Place Tests (Added via Sentry consolidation)
+// ============================================================================
+
+#[test]
+fn test_scale_in_place_basic() {
+    let mut v = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    scale_in_place(&mut v, 2.0);
+    assert_eq!(v, vec![2.0, 4.0, 6.0, 8.0, 10.0]);
+}
+
+#[test]
+fn test_scale_in_place_zero_length() {
+    // Should not panic
+    let mut v: Vec<f32> = vec![];
+    scale_in_place(&mut v, 2.0);
+    assert!(v.is_empty());
+}
+
+#[test]
+fn test_scale_in_place_unaligned() {
+    // 💣 Risk: SIMD operations using aligned instructions on unaligned memory cause SIGSEGV.
+    // 🧪 Strategy: Force unaligned memory access using helper.
+    with_unaligned_f32_slice_mut(100, |v| {
+        // Capture original values for verification
+        let original: Vec<f32> = v.to_vec();
+        scale_in_place(&mut *v, 2.0);
+
+        for (i, &val) in v.iter().enumerate() {
+            assert!(
+                (val - original[i] * 2.0).abs() < 1e-6,
+                "Index {}: {} vs {}",
+                i,
+                val,
+                original[i] * 2.0
+            );
+        }
+    });
+}
+
+#[test]
+fn test_scale_in_place_large_vector() {
+    // 🧪 Strategy: Use prime length to test SIMD loop unrolling + remainder handling
+    let len = 1023;
+    let mut v: Vec<f32> = (0..len).map(|i| i as f32).collect();
+    let original = v.clone();
+
+    scale_in_place(&mut v, 0.5);
+
+    for (i, &val) in v.iter().enumerate() {
+        assert!((val - original[i] * 0.5).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn test_scale_in_place_nan_scalar() {
+    // 💣 Risk: NaN should propagate to all elements.
+    let mut v = vec![1.0, 2.0, 3.0];
+    scale_in_place(&mut v, f32::NAN);
+
+    for val in v {
+        assert!(val.is_nan());
+    }
+}
+
+#[test]
+fn test_scale_in_place_inf_scalar() {
+    // 💣 Risk: Infinity should propagate.
+    let mut v = vec![1.0, -2.0, 0.0];
+    scale_in_place(&mut v, f32::INFINITY);
+
+    assert_eq!(v[0], f32::INFINITY);
+    assert_eq!(v[1], f32::NEG_INFINITY);
+    assert!(v[2].is_nan()); // 0 * Inf = NaN
+}
+
+#[test]
+fn test_scale_in_place_zero_scalar() {
+    // 💣 Risk: Zero scalar should zero out the vector.
+    // Note: Inf * 0 is NaN, so we test that too.
+    let mut v = vec![1.0, 2.0, f32::INFINITY, f32::NAN];
+    scale_in_place(&mut v, 0.0);
+
+    assert_eq!(v[0], 0.0);
+    assert_eq!(v[1], 0.0);
+    assert!(v[2].is_nan()); // Inf * 0 = NaN
+    assert!(v[3].is_nan()); // NaN * 0 = NaN
 }
