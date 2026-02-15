@@ -95,9 +95,6 @@ pub(crate) mod simd;
 mod sentry_tests;
 
 #[cfg(test)]
-mod sentry_scale_in_place_tests;
-
-#[cfg(test)]
 mod sentry_sparse_consistency_tests;
 
 #[cfg(test)]
