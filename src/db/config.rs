@@ -58,6 +58,17 @@ fn bootstrap_timestamp(
     max_timestamp
 }
 
+fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
+    let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
+    let mut current_timestamp = db.current_timestamp.lock().map_err(|_| {
+        crate::utils::error::Error::other(
+            "failed to seed startup current_timestamp due to lock poisoning",
+        )
+    })?;
+    *current_timestamp = startup_timestamp;
+    Ok(())
+}
+
 impl AletheiaDB {
     /// Create a new empty database with default configuration.
     ///
@@ -268,15 +279,7 @@ impl AletheiaDB {
                 .set_tiered_storage(Arc::new(tiered_storage));
         }
 
-        let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
-        let mut current_timestamp = db
-            .current_timestamp
-            .lock()
-            .map_err(|_| crate::utils::error::Error::other(
-                "failed to seed startup current_timestamp due to lock poisoning",
-            ))?;
-        *current_timestamp = startup_timestamp;
-        drop(current_timestamp);
+        seed_startup_current_timestamp(&db)?;
 
         Ok(db)
     }
@@ -334,15 +337,7 @@ impl AletheiaDB {
             persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistence_thread_handle: None,
         };
-        let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
-        let mut current_timestamp = db
-            .current_timestamp
-            .lock()
-            .map_err(|_| crate::utils::error::Error::other(
-                "failed to seed startup current_timestamp due to lock poisoning",
-            ))?;
-        *current_timestamp = startup_timestamp;
-        drop(current_timestamp);
+        seed_startup_current_timestamp(&db)?;
 
         // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
         db.historical

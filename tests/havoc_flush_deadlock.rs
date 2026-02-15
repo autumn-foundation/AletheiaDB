@@ -1,13 +1,12 @@
-use aletheiadb::storage::wal::entry::LSN;
-use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
-use aletheiadb::storage::wal::ring_buffer::PendingEntry;
-use std::sync::Arc;
-use std::thread;
-
 #[test]
 #[cfg(unix)]
 fn test_flush_deadlock_on_io_error() {
+    use aletheiadb::storage::wal::entry::LSN;
+    use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
+    use aletheiadb::storage::wal::ring_buffer::PendingEntry;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::thread;
 
     // 1. Create temp dir
     let dir = tempfile::tempdir().unwrap();

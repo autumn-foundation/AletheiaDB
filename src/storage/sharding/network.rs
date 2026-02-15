@@ -208,8 +208,11 @@ pub trait ShardClient: Send + Sync + fmt::Debug {
     ) -> NetworkResult<PrepareResponse>;
 
     /// Send a commit request for 2PC.
-    fn commit(&self, tx_id: TxId, timestamp: Option<HybridTimestamp>)
-        -> NetworkResult<CommitResponse>;
+    fn commit(
+        &self,
+        tx_id: TxId,
+        timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<CommitResponse>;
 
     /// Send an abort request for 2PC.
     fn abort(&self, tx_id: TxId) -> NetworkResult<AbortResponse>;

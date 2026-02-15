@@ -7,6 +7,7 @@
 
 use crate::core::temporal::MAX_VALID_TIMESTAMP;
 use crate::utils::error::{StorageError, TemporalError};
+use std::sync::OnceLock;
 
 /// Hybrid Logical Clock timestamp combining wallclock and logical components.
 ///
@@ -22,6 +23,173 @@ pub struct HybridTimestamp {
     wallclock: i64,
     /// Logical counter for ordering events with identical wallclock.
     logical: u32,
+}
+
+/// Maximum allowed backward clock drift in microseconds (5 minutes).
+///
+/// Backward drift indicates local wallclock moved behind the last committed HLC wallclock.
+/// Beyond this threshold we either reject the write or self-heal by clamping to the frontier.
+pub const MAX_BACKWARD_DRIFT_US: i64 = 5 * 60 * 1_000_000;
+
+/// Maximum allowed forward clock jump in microseconds (1 hour).
+///
+/// Callers may choose to disable this check (for example when idle time is expected and
+/// forward drift is measured against the last commit timestamp).
+pub const MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000;
+
+/// Whether clock-skew self-healing is enabled via environment variable.
+///
+/// Enabled values: `1`, `true`, `on`, `yes`, `enabled` (case-insensitive).
+pub fn is_clock_skew_self_heal_enabled() -> bool {
+    static CLOCK_SKEW_AUTO_HEAL: OnceLock<Option<bool>> = OnceLock::new();
+    CLOCK_SKEW_AUTO_HEAL
+        .get_or_init(|| {
+            std::env::var("ALETHEIADB_AUTO_HEAL_CLOCK_SKEW")
+                .ok()
+                .map(|value| {
+                    matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "1" | "true" | "on" | "yes" | "enabled"
+                    )
+                })
+        })
+        .unwrap_or(false)
+}
+
+/// Direction of wallclock drift relative to the HLC frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockSkewDirection {
+    /// Current wallclock is behind frontier by more than allowed.
+    Backward,
+    /// Current wallclock is ahead of frontier by more than allowed.
+    Forward,
+}
+
+impl ClockSkewDirection {
+    /// Human-readable direction label for logs and error messages.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Backward => "backward",
+            Self::Forward => "forward",
+        }
+    }
+}
+
+/// Result of evaluating wallclock drift against configured skew policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockSkewDecision {
+    /// Signed drift in microseconds (`current_wallclock - frontier_wallclock`).
+    pub drift_us: i64,
+    /// Wallclock to pass into `HybridTimestamp::send`.
+    pub effective_wallclock: i64,
+    /// Drift direction that was self-healed (if any).
+    pub healed_direction: Option<ClockSkewDirection>,
+}
+
+/// Drift exceeded configured threshold and self-healing was disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockSkewViolation {
+    /// Signed drift in microseconds (`current_wallclock - frontier_wallclock`).
+    pub drift_us: i64,
+    /// Threshold used for this direction (signed to preserve caller semantics).
+    pub max_allowed: i64,
+    /// Direction of the violation.
+    pub direction: ClockSkewDirection,
+}
+
+/// Evaluate clock skew and derive the effective wallclock for `send()`.
+///
+/// When self-healing is enabled and drift exceeds threshold, this clamps to the frontier
+/// wallclock so HLC remains monotonic without aborting.
+pub fn evaluate_clock_skew(
+    current_wallclock: i64,
+    frontier_wallclock: i64,
+    max_forward_jump_us: Option<i64>,
+    self_heal_clock_skew: bool,
+) -> Result<ClockSkewDecision, ClockSkewViolation> {
+    let drift = current_wallclock - frontier_wallclock;
+    let mut effective_wallclock = current_wallclock;
+    let mut healed_direction = None;
+
+    if drift < -MAX_BACKWARD_DRIFT_US {
+        if !self_heal_clock_skew {
+            return Err(ClockSkewViolation {
+                drift_us: drift,
+                max_allowed: -MAX_BACKWARD_DRIFT_US,
+                direction: ClockSkewDirection::Backward,
+            });
+        }
+
+        effective_wallclock = frontier_wallclock;
+        healed_direction = Some(ClockSkewDirection::Backward);
+    }
+
+    if let Some(max_forward_jump_us) = max_forward_jump_us
+        && drift > max_forward_jump_us
+    {
+        if !self_heal_clock_skew {
+            return Err(ClockSkewViolation {
+                drift_us: drift,
+                max_allowed: max_forward_jump_us,
+                direction: ClockSkewDirection::Forward,
+            });
+        }
+
+        effective_wallclock = frontier_wallclock;
+        healed_direction = Some(ClockSkewDirection::Forward);
+    }
+
+    Ok(ClockSkewDecision {
+        drift_us: drift,
+        effective_wallclock,
+        healed_direction,
+    })
+}
+
+/// Error stage from `send_with_overflow_self_heal`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendWithSelfHealError {
+    /// Initial call to `send()` failed.
+    InitialSend(TemporalError),
+    /// Logical overflow was detected but `wallclock + 1` overflowed i64.
+    FallbackWallclockOverflow {
+        /// Wallclock from the original overflow error.
+        wallclock: i64,
+        /// Logical counter from the original overflow error.
+        current_logical: u32,
+    },
+    /// Fallback call to `send(wallclock + 1)` failed.
+    FallbackSend(TemporalError),
+}
+
+/// Call `send()` with optional logical-overflow self-healing.
+///
+/// If self-heal is enabled and logical overflow occurs, this retries at `wallclock + 1`
+/// to preserve monotonicity under repeated clamping.
+pub fn send_with_overflow_self_heal<E>(
+    frontier: &HybridTimestamp,
+    effective_wallclock: i64,
+    self_heal_clock_skew: bool,
+    map_error: impl Fn(SendWithSelfHealError) -> E,
+) -> Result<HybridTimestamp, E> {
+    match frontier.send(effective_wallclock) {
+        Ok(next) => Ok(next),
+        Err(TemporalError::LogicalCounterOverflow {
+            wallclock,
+            current_logical,
+        }) if self_heal_clock_skew => {
+            let fallback_wallclock = wallclock.checked_add(1).ok_or_else(|| {
+                map_error(SendWithSelfHealError::FallbackWallclockOverflow {
+                    wallclock,
+                    current_logical,
+                })
+            })?;
+            frontier
+                .send(fallback_wallclock)
+                .map_err(|error| map_error(SendWithSelfHealError::FallbackSend(error)))
+        }
+        Err(error) => Err(map_error(SendWithSelfHealError::InitialSend(error))),
+    }
 }
 
 impl HybridTimestamp {
@@ -380,6 +548,79 @@ mod tests {
         let result = ts.send(1001);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().logical(), 0);
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_backward_violation_without_self_heal() {
+        let current_wallclock = 1_000_000;
+        let frontier_wallclock = current_wallclock + MAX_BACKWARD_DRIFT_US + 1;
+
+        let result = evaluate_clock_skew(
+            current_wallclock,
+            frontier_wallclock,
+            Some(MAX_FORWARD_JUMP_US),
+            false,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ClockSkewViolation {
+                direction: ClockSkewDirection::Backward,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_allows_unbounded_forward_drift() {
+        let current_wallclock = 10_000_000;
+        let frontier_wallclock = 1_000;
+
+        let result = evaluate_clock_skew(current_wallclock, frontier_wallclock, None, false)
+            .expect("forward drift should be ignored when no forward bound is provided");
+
+        assert_eq!(result.effective_wallclock, current_wallclock);
+        assert!(result.healed_direction.is_none());
+    }
+
+    #[test]
+    fn test_send_with_overflow_self_heal_uses_fallback_wallclock() {
+        let ts = HybridTimestamp::new(1000, u32::MAX).unwrap();
+
+        let next = send_with_overflow_self_heal(&ts, 1000, true, |error| error)
+            .expect("self-heal should bump wallclock and recover from logical overflow");
+
+        assert_eq!(next.wallclock(), 1001);
+        assert_eq!(next.logical(), 0);
+    }
+
+    #[test]
+    fn test_send_with_overflow_self_heal_reports_initial_error_when_disabled() {
+        let ts = HybridTimestamp::new(1000, u32::MAX).unwrap();
+
+        let err = send_with_overflow_self_heal(&ts, 1000, false, |error| error)
+            .expect_err("overflow should fail when self-heal is disabled");
+
+        assert!(matches!(
+            err,
+            SendWithSelfHealError::InitialSend(TemporalError::LogicalCounterOverflow { .. })
+        ));
+    }
+
+    #[test]
+    fn test_send_with_overflow_self_heal_reports_fallback_wallclock_overflow() {
+        let ts = HybridTimestamp::new_unchecked(i64::MAX, u32::MAX);
+
+        let err = send_with_overflow_self_heal(&ts, MAX_VALID_TIMESTAMP, true, |error| error)
+            .expect_err("fallback wallclock increment should fail at i64::MAX");
+
+        assert!(matches!(
+            err,
+            SendWithSelfHealError::FallbackWallclockOverflow {
+                wallclock: i64::MAX,
+                current_logical: u32::MAX
+            }
+        ));
     }
 
     #[test]

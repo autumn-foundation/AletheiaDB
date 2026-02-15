@@ -14,6 +14,10 @@ use super::{
     WriteOps,
 };
 use crate::core::graph::{Edge, Node};
+use crate::core::hlc::{
+    SendWithSelfHealError, evaluate_clock_skew, is_clock_skew_self_heal_enabled,
+    send_with_overflow_self_heal,
+};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder};
@@ -27,26 +31,15 @@ use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use crate::utils::error::{Result, StorageError, TransactionError};
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
-use std::sync::OnceLock;
 
 mod apply;
 mod conflict;
 mod validation;
 mod wal;
 
-/// Maximum allowed backward clock drift in microseconds (5 minutes).
-///
-/// If wallclock time goes backward by more than this (e.g., severe NTP adjustment),
-/// we reject the transaction to avoid timestamps jumping far into the future.
-/// 5 minutes allows for typical NTP corrections while preventing pathological cases.
-pub(crate) const MAX_BACKWARD_DRIFT_US: i64 = 5 * 60 * 1_000_000; // 5 minutes
-
-/// Maximum allowed forward clock jump in microseconds (1 hour).
-///
-/// If wallclock time jumps forward by more than this (e.g., system clock set manually),
-/// we reject the transaction to avoid creating timestamps in the far future that would
-/// break temporal query semantics.
-pub(crate) const MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000; // 1 hour
+#[cfg(test)]
+pub(crate) const MAX_BACKWARD_DRIFT_US: i64 = crate::core::hlc::MAX_BACKWARD_DRIFT_US;
+pub(crate) const MAX_FORWARD_JUMP_US: i64 = crate::core::hlc::MAX_FORWARD_JUMP_US;
 
 /// Maximum offset for valid_from timestamps in the future.
 ///
@@ -54,20 +47,6 @@ pub(crate) const MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000; // 1 hour
 /// but we limit how far into the future they can set valid_from to prevent abuse and
 /// maintain query semantics.
 pub(crate) const MAX_VALID_TIME_FUTURE_OFFSET_US: i64 = 365 * 24 * 60 * 60 * 1_000_000; // 1 year
-
-fn is_clock_skew_self_heal_enabled() -> bool {
-    static CLOCK_SKEW_AUTO_HEAL: OnceLock<Option<bool>> = OnceLock::new();
-    CLOCK_SKEW_AUTO_HEAL
-        .get_or_init(|| {
-            std::env::var("ALETHEIADB_AUTO_HEAL_CLOCK_SKEW").ok().map(|value| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "on" | "yes" | "enabled"
-                )
-            })
-        })
-        .unwrap_or(false)
-}
 
 /// Write transaction with full ACID guarantees.
 ///
@@ -281,8 +260,8 @@ impl WriteTransaction {
         // - Async: Appends go to ring buffers, background thread syncs
         // - GroupCommit: Appends go to ring buffers, wait for epoch completion
         let commit_timestamp = {
-        #[cfg(feature = "observability")]
-        let ts_lock_start = std::time::Instant::now();
+            #[cfg(feature = "observability")]
+            let ts_lock_start = std::time::Instant::now();
 
             let mut ts =
                 self.current_timestamp
@@ -298,105 +277,60 @@ impl WriteTransaction {
             // Get current physical wallclock
             let current_wallclock = crate::core::temporal::time::now();
 
-            // Check for pathological clock skew using wallclock components
-            let drift = current_wallclock.wallclock() - ts.wallclock();
             let self_heal_clock_skew = is_clock_skew_self_heal_enabled();
-            let mut effective_wallclock = current_wallclock.wallclock();
-            let mut healed = false;
-            let mut _self_heal_reason: Option<&'static str> = None;
+            let skew_decision = evaluate_clock_skew(
+                current_wallclock.wallclock(),
+                ts.wallclock(),
+                Some(MAX_FORWARD_JUMP_US),
+                self_heal_clock_skew,
+            )
+            .map_err(|violation| TransactionError::ClockSkew {
+                wallclock: current_wallclock.wallclock(),
+                previous: ts.wallclock(),
+                drift_us: violation.drift_us,
+                max_allowed: violation.max_allowed,
+            })?;
 
-            // Backward drift check: prevent timestamps jumping far into future
-            if drift < -MAX_BACKWARD_DRIFT_US {
-                if !self_heal_clock_skew {
-                    return Err(TransactionError::ClockSkew {
-                        wallclock: current_wallclock.wallclock(),
-                        previous: ts.wallclock(),
-                        drift_us: drift,
-                        max_allowed: -MAX_BACKWARD_DRIFT_US,
-                    }
-                    .into());
-                }
-
-                healed = true;
-                // Keep ordering by continuing from the local HLC frontier when
-                // wallclock goes backward beyond threshold.
-                effective_wallclock = ts.wallclock();
-                _self_heal_reason = Some("backward");
-            }
-
-            // Forward jump check: prevent timestamps in far future
-            if drift > MAX_FORWARD_JUMP_US {
-                if !self_heal_clock_skew {
-                    return Err(TransactionError::ClockSkew {
-                        wallclock: current_wallclock.wallclock(),
-                        previous: ts.wallclock(),
-                        drift_us: drift,
-                        max_allowed: MAX_FORWARD_JUMP_US,
-                    }
-                    .into());
-                }
-
-                healed = true;
-                // Keep ordering by clamping excessive forward jumps to local state.
-                effective_wallclock = ts.wallclock();
-                _self_heal_reason = Some("forward");
-            }
-
-            if self_heal_clock_skew && healed {
+            if self_heal_clock_skew && let Some(_direction) = skew_decision.healed_direction {
                 #[cfg(feature = "observability")]
                 tracing::warn!(
                     wallclock_ts = %current_wallclock,
                     prev_ts = %ts,
-                    drift_us = drift,
-                    reason = _self_heal_reason.unwrap_or("unknown"),
+                    drift_us = skew_decision.drift_us,
+                    reason = _direction.as_str(),
                     "Self-healing clock skew by clamping to local HLC frontier"
                 );
             }
 
             // Phase 2: Use HLC .send() method for monotonic timestamp generation
             // This ensures: if wallclock advances, reset logical; otherwise increment logical
-            let commit = ts
-                .send(effective_wallclock)
-                .or_else(|error| {
-                    if self_heal_clock_skew {
-                        if let crate::utils::error::TemporalError::LogicalCounterOverflow {
-                            current_logical,
-                            wallclock,
-                        } = error
-                        {
-                            // If we are clamping repeatedly and exhausted logical space,
-                            // move wallclock forward one microsecond to preserve monotonicity.
-                            let fallback_wallclock =
-                                wallclock.checked_add(1).ok_or_else(|| {
-                                    TransactionError::CommitFailed {
-                                        reason: format!(
-                                            "HLC logical counter overflow at wallclock={}: {}",
-                                            wallclock, current_logical
-                                        ),
-                                    }
-                                })?;
-                            ts.send(fallback_wallclock).map_err(|fallback_error| {
-                                TransactionError::CommitFailed {
-                                    reason: format!(
-                                        "HLC timestamp generation failed while self-healing: {}",
-                                        fallback_error
-                                    ),
-                                }
-                            })
-                        } else {
-                            Err(TransactionError::CommitFailed {
-                                reason: format!(
-                                    "HLC timestamp generation failed: {}",
-                                    error
-                                ),
-                            })
+            let commit = send_with_overflow_self_heal(
+                &ts,
+                skew_decision.effective_wallclock,
+                self_heal_clock_skew,
+                |error| match error {
+                    SendWithSelfHealError::InitialSend(error) => TransactionError::CommitFailed {
+                        reason: format!("HLC timestamp generation failed: {}", error),
+                    },
+                    SendWithSelfHealError::FallbackWallclockOverflow {
+                        wallclock,
+                        current_logical,
+                    } => TransactionError::CommitFailed {
+                        reason: format!(
+                            "HLC logical counter overflow at wallclock={}: {}",
+                            wallclock, current_logical
+                        ),
+                    },
+                    SendWithSelfHealError::FallbackSend(fallback_error) => {
+                        TransactionError::CommitFailed {
+                            reason: format!(
+                                "HLC timestamp generation failed while self-healing: {}",
+                                fallback_error
+                            ),
                         }
-                    } else {
-                        Err(TransactionError::CommitFailed {
-                            reason: format!("HLC timestamp generation failed: {}", error),
-                        })
                     }
-                })?;
+                },
+            )?;
 
             // Observability: Warn about clock skew issues
             #[cfg(feature = "observability")]

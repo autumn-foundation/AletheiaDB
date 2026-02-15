@@ -414,7 +414,11 @@ impl ShardClient for HttpShardClient {
     }
 
     #[cfg(feature = "sharding-rpc")]
-    fn commit(&self, tx_id: TxId, timestamp: Option<HybridTimestamp>) -> NetworkResult<CommitResponse> {
+    fn commit(
+        &self,
+        tx_id: TxId,
+        timestamp: Option<HybridTimestamp>,
+    ) -> NetworkResult<CommitResponse> {
         #[derive(serde::Serialize)]
         struct CommitRequest {
             tx_id: u64,

@@ -4,8 +4,8 @@
 //! shards, ensuring ACID properties across shard boundaries.
 
 use super::types::ShardId;
-use crate::core::id::TxId;
 use crate::core::hlc::HybridTimestamp;
+use crate::core::id::TxId;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
