@@ -162,3 +162,24 @@
 **Finding:** `test_truncate_to_lsn_removes_old_segments` used an assertion `removed > 0 || count_before == count_after`, which allows "doing nothing" to be considered a success.
 **Evidence:** Reproduction test confirmed that a broken implementation (returning 0 removed) would pass.
 **Resolution:** Modified the test to setup a scenario where exactly 1 segment *must* be removed and asserted `removed == 1`.
+
+**[HLC Monotonicity Assertion Weakness]**
+**Module:** `src/core/hlc.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `prop_send_monotonicity` silently swallows errors unless they are explicitly `LogicalCounterOverflow`. If `send` returned an unexpected error (e.g., due to a bug in validation logic), the test would pass silently.
+**Evidence:** Code inspection: `if let Ok(next) = current.send(new_wallclock) { ... }`.
+**Recommendation:** Modify the test to explicitly match `Err` variants and fail on unexpected ones.
+
+**[HLC Collision Tautology]**
+**Module:** `src/core/hlc.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `prop_receive_causality_collision` mirrors the implementation logic (`max(l1, l2) + 1`) to verify the result. This proves only that the implementation matches the test's reimplementation, not that the logic is correct according to spec.
+**Evidence:** `let expected_logical = local_logical.max(msg_logical).checked_add(1);`.
+**Recommendation:** Add an Oracle-style test with hardcoded values to anchor the behavior to specific expected outcomes.
+
+**[Loose SIMD Precision Check]**
+**Module:** `src/core/vector/sentry_tests.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `test_simd_dot_and_magnitudes_large_vector` uses a very loose epsilon (`0.1`) for comparing SIMD vs Scalar results. This could mask significant precision loss or subtle logic errors in remainder handling.
+**Evidence:** `let epsilon = 0.1;` for a sum around 30,000.
+**Recommendation:** Tighten the epsilon to `0.01` or `0.005` to enforce stricter adherence to scalar precision.
