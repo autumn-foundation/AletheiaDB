@@ -86,6 +86,7 @@
 //! - Searches can run concurrently with additions
 
 use crate::core::id::NodeId;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
@@ -337,6 +338,16 @@ impl HnswConfig {
         reader.read_exact(&mut buf_u64)?;
         let dimensions = u64::from_le_bytes(buf_u64) as usize;
 
+        if dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            })
+            .into());
+        }
+
         reader.read_exact(&mut buf_u8)?;
         let metric = DistanceMetric::from_u8(buf_u8[0])?;
 
@@ -559,6 +570,14 @@ impl HnswIndexBuilder {
         if self.config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    self.config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
             }));
         }
 
@@ -1416,6 +1435,14 @@ impl HnswIndex {
     /// Validate loaded index metadata against configuration.
     fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswConfig) -> Result<()> {
         if let Some(meta) = metadata {
+            if meta.dimensions > MAX_VECTOR_DIMENSIONS {
+                return Err(Error::Vector(VectorError::InvalidVector {
+                    reason: format!(
+                        "Stored index dimensions {} exceeds maximum allowed {}",
+                        meta.dimensions, MAX_VECTOR_DIMENSIONS
+                    ),
+                }));
+            }
             if meta.dimensions != config.dimensions {
                 return Err(Error::Vector(VectorError::IndexError(format!(
                     "Index dimension mismatch: expected {}, found {}",
@@ -1786,6 +1813,15 @@ impl HnswIndex {
 
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        if config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    config.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
         // Security Check: Custom metrics require F32 quantization
         if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -1883,6 +1919,15 @@ impl HnswIndex {
 
         let dimensions = index.dimensions();
         let connectivity = index.connectivity();
+
+        if dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "Memory-mapped index dimensions {} exceeds maximum allowed {}",
+                    dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
 
         // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
