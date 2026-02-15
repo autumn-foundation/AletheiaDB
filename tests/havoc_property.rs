@@ -1,5 +1,6 @@
 use aletheiadb::core::PropertyValue;
 use aletheiadb::core::property::MAX_VECTOR_DIMENSIONS;
+use aletheiadb::core::vector::SparseVec;
 use proptest::prelude::*;
 
 const TAG_VECTOR: u8 = 7;
@@ -124,6 +125,32 @@ proptest! {
     }
 }
 
+fn arb_sparse_vector() -> impl Strategy<Value = PropertyValue> {
+    (1..1000u32).prop_flat_map(|dim| {
+        let max_nnz = (dim as usize).min(50);
+        // Generate random (index, value) pairs.
+        // Value must not be 0.0 (sparse invariant) or NaN (for equality check stability).
+        let val_strat =
+            any::<f32>().prop_filter("Valid sparse value", |&v| v != 0.0 && !v.is_nan());
+        let idx_strat = 0..dim;
+
+        prop::collection::vec((idx_strat, val_strat), 0..max_nnz)
+            .prop_map(move |pairs| {
+                // Deduplicate indices (using BTreeMap sorts by index automatically)
+                let mut map = std::collections::BTreeMap::new();
+                for (idx, val) in pairs {
+                    map.insert(idx, val);
+                }
+
+                let (indices, values): (Vec<u32>, Vec<f32>) = map.into_iter().unzip();
+
+                // Construct SparseVec
+                SparseVec::new(indices, values, dim).expect("Invalid sparse vector generated")
+            })
+            .prop_map(PropertyValue::sparse_vector)
+    })
+}
+
 fn arb_property_value() -> impl Strategy<Value = PropertyValue> {
     let leaf = prop_oneof![
         Just(PropertyValue::Null),
@@ -137,6 +164,7 @@ fn arb_property_value() -> impl Strategy<Value = PropertyValue> {
         prop::collection::vec(any::<u8>(), 0..100).prop_map(PropertyValue::bytes),
         prop::collection::vec(any::<f32>().prop_filter("No NaN", |f| !f.is_nan()), 0..100)
             .prop_map(PropertyValue::vector),
+        arb_sparse_vector(),
     ];
 
     leaf.prop_recursive(3, 64, 5, |inner| {
