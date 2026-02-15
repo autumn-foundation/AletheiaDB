@@ -127,7 +127,10 @@ mod sentry_tests {
                 frontier: 1000 + MAX_BACKWARD_DRIFT_US + 1,
                 max_forward: Some(500),
                 self_heal: true,
-                expected_decision: Some((1000 + MAX_BACKWARD_DRIFT_US + 1, Some(ClockSkewDirection::Backward))),
+                expected_decision: Some((
+                    1000 + MAX_BACKWARD_DRIFT_US + 1,
+                    Some(ClockSkewDirection::Backward),
+                )),
                 description: "Backward drift self-healed",
             },
             // Case 5: Minor forward drift (within limit)
@@ -187,26 +190,47 @@ mod sentry_tests {
 
             match (result, case.expected_decision) {
                 (Ok(decision), Some((expected_wc, expected_dir))) => {
-                    assert_eq!(decision.effective_wallclock, expected_wc, "{} (wallclock)", case.description);
-                    assert_eq!(decision.healed_direction, expected_dir, "{} (direction)", case.description);
+                    assert_eq!(
+                        decision.effective_wallclock, expected_wc,
+                        "{} (wallclock)",
+                        case.description
+                    );
+                    assert_eq!(
+                        decision.healed_direction, expected_dir,
+                        "{} (direction)",
+                        case.description
+                    );
                 }
                 (Err(violation), None) => {
                     // Violation expected and received
                     // Check if direction is correct based on drift
                     let drift = case.current - case.frontier;
-                    let expected_dir = if drift < 0 { ClockSkewDirection::Backward } else { ClockSkewDirection::Forward };
-                    assert_eq!(violation.direction, expected_dir, "{} (violation direction)", case.description);
+                    let expected_dir = if drift < 0 {
+                        ClockSkewDirection::Backward
+                    } else {
+                        ClockSkewDirection::Forward
+                    };
+                    assert_eq!(
+                        violation.direction, expected_dir,
+                        "{} (violation direction)",
+                        case.description
+                    );
                 }
                 (Ok(decision), None) => {
-                    panic!("{}: Expected violation, but got success: {:?}", case.description, decision);
+                    panic!(
+                        "{}: Expected violation, but got success: {:?}",
+                        case.description, decision
+                    );
                 }
                 (Err(violation), Some(_)) => {
-                    panic!("{}: Expected success, but got violation: {:?}", case.description, violation);
+                    panic!(
+                        "{}: Expected success, but got violation: {:?}",
+                        case.description, violation
+                    );
                 }
             }
         }
     }
-
 }
 
 /// Result of evaluating wallclock drift against configured skew policy.

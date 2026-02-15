@@ -481,3 +481,19 @@ fn test_scale_in_place_zero_scalar() {
     assert!(v[2].is_nan()); // Inf * 0 = NaN
     assert!(v[3].is_nan()); // NaN * 0 = NaN
 }
+
+#[test]
+fn test_cosine_similarity_precision_repro() {
+    // 🛡️ Sentry: Regression test for precision issues with subnormal inputs.
+    // Fuzzing found inputs where result was 1.008 (before clamping), triggering debug assertion.
+    // Inputs: vec1 = [-1.770892e-22], vec2 = [-98.640274]
+
+    let vec1 = vec![-1.770892e-22];
+    let vec2 = vec![-98.640274];
+
+    // This should succeed and return 1.0 (clamped) without panicking
+    let result = cosine_similarity(&vec1, &vec2).unwrap();
+
+    // Check that it's close to 1.0 (since they are parallel)
+    assert!((result - 1.0).abs() < 1e-6);
+}
