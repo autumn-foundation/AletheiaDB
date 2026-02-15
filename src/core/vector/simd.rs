@@ -270,21 +270,18 @@ pub(crate) mod x86_ops {
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
-            let len = a.len();
-            let chunks = len / 8;
-            let remainder = len % 8;
+            let a_chunks = a.chunks_exact(8);
+            let b_chunks = b.chunks_exact(8);
+            let a_rem = a_chunks.remainder();
+            let b_rem = b_chunks.remainder();
 
             // Accumulator for 8 floats at a time
             let mut acc = _mm256_setzero_ps();
 
-            let a_ptr = a.as_ptr();
-            let b_ptr = b.as_ptr();
-
             // Process 8 floats at a time
-            for i in 0..chunks {
-                let offset = i * 8;
-                let va = _mm256_loadu_ps(a_ptr.add(offset));
-                let vb = _mm256_loadu_ps(b_ptr.add(offset));
+            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
+                let va = _mm256_loadu_ps(va_chunk.as_ptr());
+                let vb = _mm256_loadu_ps(vb_chunk.as_ptr());
 
                 // Compute difference
                 let diff = _mm256_sub_ps(va, vb);
@@ -297,9 +294,8 @@ pub(crate) mod x86_ops {
             let mut sum = horizontal_sum_avx(acc);
 
             // Handle remainder with scalar operations
-            let start = chunks * 8;
-            for i in 0..remainder {
-                let diff = a[start + i] - b[start + i];
+            for (&va, &vb) in a_rem.iter().zip(b_rem) {
+                let diff = va - vb;
                 sum += diff * diff;
             }
 
@@ -322,21 +318,18 @@ pub(crate) mod x86_ops {
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
-            let len = a.len();
-            let chunks = len / 4;
-            let remainder = len % 4;
+            let a_chunks = a.chunks_exact(4);
+            let b_chunks = b.chunks_exact(4);
+            let a_rem = a_chunks.remainder();
+            let b_rem = b_chunks.remainder();
 
             // Accumulator for 4 floats at a time
             let mut acc = _mm_setzero_ps();
 
-            let a_ptr = a.as_ptr();
-            let b_ptr = b.as_ptr();
-
             // Process 4 floats at a time
-            for i in 0..chunks {
-                let offset = i * 4;
-                let va = _mm_loadu_ps(a_ptr.add(offset));
-                let vb = _mm_loadu_ps(b_ptr.add(offset));
+            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
+                let va = _mm_loadu_ps(va_chunk.as_ptr());
+                let vb = _mm_loadu_ps(vb_chunk.as_ptr());
 
                 // Compute difference
                 let diff = _mm_sub_ps(va, vb);
@@ -349,9 +342,8 @@ pub(crate) mod x86_ops {
             let mut sum = horizontal_sum_sse(acc);
 
             // Handle remainder with scalar operations
-            let start = chunks * 4;
-            for i in 0..remainder {
-                let diff = a[start + i] - b[start + i];
+            for (&va, &vb) in a_rem.iter().zip(b_rem) {
+                let diff = va - vb;
                 sum += diff * diff;
             }
 

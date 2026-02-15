@@ -393,6 +393,48 @@ fn test_simd_dot_product_associativity() {
     );
 }
 
+#[test]
+fn test_simd_squared_diff_sum_large_vector() {
+    // 🧪 Strategy: Test with large vectors to exercise SIMD loop unrolling and remainder handling.
+    // Use a length that ensures we have both SIMD chunks and a scalar remainder loop.
+    let len = 1023; // Prime number
+    let a: Vec<f32> = (0..len).map(|i| (i % 10) as f32).collect();
+    let b: Vec<f32> = (0..len).map(|i| ((i + 1) % 10) as f32).collect();
+
+    let diff_sum = super::simd::squared_diff_sum(&a, &b);
+
+    // Calculate expected scalar values
+    let expected: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum();
+
+    // Allow small epsilon for floating point accumulation differences
+    let epsilon = 0.01;
+    assert!(
+        (diff_sum - expected).abs() < epsilon,
+        "Squared diff sum mismatch: {} vs {}",
+        diff_sum,
+        expected
+    );
+}
+
+#[test]
+fn test_simd_squared_diff_sum_unaligned() {
+    // 💣 Risk: SIMD operations using aligned instructions on unaligned memory cause SIGSEGV.
+    // 🧪 Strategy: Force unaligned memory access using helper.
+    let len = 100;
+    with_unaligned_f32_slice(len, |a| {
+        with_unaligned_f32_slice(len, |b| {
+            let result = super::simd::squared_diff_sum(a, b);
+            let expected: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum();
+            assert!(
+                (result - expected).abs() < 1e-4,
+                "Unaligned squared diff sum failed: {} vs {}",
+                result,
+                expected
+            );
+        });
+    });
+}
+
 // ============================================================================
 // Scale In Place Tests (Added via Sentry consolidation)
 // ============================================================================
