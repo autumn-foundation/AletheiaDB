@@ -91,7 +91,7 @@ use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMo
 use crate::utils::{Error, Result, error::VectorError};
 use crc32fast::Hasher;
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
@@ -694,6 +694,8 @@ impl HnswIndexBuilder {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: false,
+            save_lock: Arc::new(RwLock::new(())),
+            entry_locks: (0..64).map(|_| Mutex::new(())).collect(),
         })
     }
 }
@@ -729,6 +731,17 @@ pub struct HnswIndex {
     max_k: usize,
     /// Whether this index is memory-mapped (read-only)
     is_mmap: bool,
+    /// Lock to ensure consistency between index and mapping for saving.
+    /// - add/remove: acquires read lock (shared)
+    /// - save: acquires write lock (exclusive)
+    ///
+    /// This allows concurrent adds and searches (resolving deadlock in PR #870),
+    /// while preventing concurrent add/save (which causes Zombie Vectors).
+    save_lock: Arc<RwLock<()>>,
+    /// Sharded locks to serialize updates to the same key/node.
+    /// This prevents race conditions during the `remove` -> `add` sequence for updates,
+    /// where multiple threads updating the same node could confuse `usearch`.
+    entry_locks: Vec<Mutex<()>>,
 }
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -781,6 +794,11 @@ impl VectorIndex for HnswIndex {
             }));
         }
 
+        // Acquire entry lock to serialize updates to same key
+        // This prevents race conditions in usearch when multiple threads update the same key concurrently
+        let lock_idx = (id.as_u64() as usize) % self.entry_locks.len();
+        let _key_guard = self.entry_locks[lock_idx].lock();
+
         // Get or create key for this NodeId
         // Use entry API for atomic check-and-update to prevent race conditions
         match self.id_mapping.entry(id) {
@@ -804,8 +822,13 @@ impl VectorIndex for HnswIndex {
                     }
                 }
 
-                // Acquire inner write lock
-                let index = self.inner.write();
+                // Acquire save_lock (shared) to prevent concurrent saves (Zombie Vectors).
+                // This allows concurrent adds and searches.
+                let _save_guard = self.save_lock.read();
+
+                // Acquire inner read lock (shared).
+                // usearch handles concurrent adds internally.
+                let index = self.inner.read();
 
                 // Re-verify mapping under Inner lock
                 // We need to lock the map again to check if the ID still maps to existing_key.
@@ -832,12 +855,10 @@ impl VectorIndex for HnswIndex {
                 if index.contains(existing_key) {
                     // Key exists in usearch - remove it before re-adding
                     // (usearch requires explicit remove before add with same key)
-                    index.remove(existing_key).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to remove existing vector: {}",
-                            e
-                        )))
-                    })?;
+                    self.retry_usearch(
+                        || index.remove(existing_key),
+                        "Failed to remove existing vector",
+                    )?;
                 }
                 // Note: If key doesn't exist, we skip remove() and proceed directly to add()
                 // This is safe because add() with a non-existent key will succeed
@@ -846,21 +867,17 @@ impl VectorIndex for HnswIndex {
                 if index.size() >= index.capacity() {
                     // Double capacity, minimum 1024
                     let new_capacity = (index.capacity() * 2).max(1024);
-                    index.reserve(new_capacity).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to expand capacity: {}",
-                            e
-                        )))
-                    })?;
+                    self.retry_usearch(
+                        || index.reserve(new_capacity),
+                        "Failed to expand capacity",
+                    )?;
                 }
 
                 // Add the new vector while still holding the lock
-                index.add(existing_key, vector).map_err(|e| {
-                    Error::Vector(VectorError::IndexError(format!(
-                        "Failed to add vector: {}",
-                        e
-                    )))
-                })?;
+                self.retry_usearch(
+                    || index.add(existing_key, vector),
+                    "Failed to add vector",
+                )?;
 
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -895,29 +912,28 @@ impl VectorIndex for HnswIndex {
                     }
                 };
 
-                // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant)
+                // Acquire save_lock (shared) to prevent concurrent saves.
+                let _save_guard = self.save_lock.read();
+
+                // Step 2: Acquire inner read lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
-                let index = self.inner.write();
+                let index = self.inner.read();
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
                     // Double capacity, minimum 1024
                     let new_capacity = (index.capacity() * 2).max(1024);
-                    index.reserve(new_capacity).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to expand capacity: {}",
-                            e
-                        )))
-                    })?;
+                    self.retry_usearch(
+                        || index.reserve(new_capacity),
+                        "Failed to expand capacity",
+                    )?;
                 }
 
                 // Step 3: Add to inner usearch index while holding write lock
-                index.add(key, vector).map_err(|e| {
-                    Error::Vector(VectorError::IndexError(format!(
-                        "Failed to add vector: {}",
-                        e
-                    )))
-                })?;
+                self.retry_usearch(
+                    || index.add(key, vector),
+                    "Failed to add vector",
+                )?;
 
                 #[cfg(test)]
                 {
@@ -950,12 +966,10 @@ impl VectorIndex for HnswIndex {
                     // We must rollback our addition to avoid phantom vectors.
 
                     // We already hold the inner write lock, so we can remove directly.
-                    index.remove(key).map_err(|e| {
-                        Error::Vector(VectorError::IndexError(format!(
-                            "Failed to rollback vector after concurrent add: {}",
-                            e
-                        )))
-                    })?;
+                    self.retry_usearch(
+                        || index.remove(key),
+                        "Failed to rollback vector after concurrent add",
+                    )?;
 
                     // The existing mapping wins; return error to indicate retry needed
                     return Err(Error::Vector(VectorError::IndexError(
@@ -995,18 +1009,24 @@ impl VectorIndex for HnswIndex {
             )));
         }
 
+        // Acquire entry lock to serialize updates to same key
+        let lock_idx = (id.as_u64() as usize) % self.entry_locks.len();
+        let _key_guard = self.entry_locks[lock_idx].lock();
+
+        // Acquire save_lock (shared) to prevent concurrent saves (Zombie Vectors).
+        // Must be acquired BEFORE modifying id_mapping to ensure atomicity with save().
+        let _save_guard = self.save_lock.read();
+
         // Find the key for this NodeId
         if let Some((_, key)) = self.id_mapping.remove(&id) {
             self.reverse_mapping.remove(&key);
 
-            // Native delete in usearch
-            let index = self.inner.write();
-            index.remove(key).map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Failed to remove vector: {}",
-                    e
-                )))
-            })?;
+            // Native delete in usearch (thread-safe, takes &self)
+            let index = self.inner.read();
+            self.retry_usearch(
+                || index.remove(key),
+                "Failed to remove vector",
+            )?;
 
             self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
         }
@@ -1266,27 +1286,52 @@ impl VectorIndex for HnswIndex {
 
 // Private helper methods for HnswIndex
 impl HnswIndex {
+    /// Helper to retry usearch operations on transient errors (like thread pool exhaustion).
+    fn retry_usearch<F, T, E>(&self, mut op: F, context: &str) -> Result<T>
+    where
+        F: FnMut() -> std::result::Result<T, E>,
+        E: std::fmt::Display,
+    {
+        for attempt in 0..MAX_SEARCH_ATTEMPTS {
+            match op() {
+                Ok(val) => return Ok(val),
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
+                        self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
+                        let delay_ms = 1u64 << attempt;
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        continue;
+                    }
+                    if attempt > 0 {
+                        self.stats
+                            .search_retry_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Err(Error::Vector(VectorError::IndexError(format!(
+                        "{}: {}",
+                        context, e
+                    ))));
+                }
+            }
+        }
+        unreachable!("Retry loop should always return")
+    }
+
     /// Internal implementation of index saving.
     ///
     /// This method performs the actual blocking I/O operations for saving the index
     /// and its mappings. It is separated from `save()` to allow the latter to use
     /// `tokio::task::block_in_place` when running within a Tokio runtime.
     fn save_internal(&self, path: &Path) -> Result<()> {
-        // Acquire inner read lock first to ensure consistency between index and mappings.
-        // This prevents "Zombie Vectors" where a vector is added to the index but missed in the mappings snapshot.
+        // Acquire save_lock (exclusive) to prevent concurrent adds/removes.
+        // This ensures consistency between the index snapshot and the ID mappings.
+        let _save_guard = self.save_lock.write();
+
+        // Acquire inner read lock.
         let index = self.inner.read();
 
-        // Collect mappings while holding the inner lock.
-        // This is safe because `add` operations (Vacant and Occupied) release DashMap locks
-        // before acquiring the inner lock, or acquire inner then map (Vacant).
-        // Specifically:
-        // - add(Vacant): inner.write() -> id_mapping.insert() (Inner -> Map)
-        // - add(Occupied): drop(entry) -> inner.write() -> id_mapping.get() (Inner -> Map)
-        // - search_with_filter: inner.read() -> reverse_mapping.get() (Inner -> Map)
-        //
-        // Therefore, holding inner.read() and iterating id_mapping (which acquires shard locks)
-        // follows the consistent Inner -> Map lock order, preventing deadlocks.
-        //
+        // Collect mappings while holding the locks.
         // Memory cost: O(N) allocation (~16MB for 1M nodes), acceptable for infrequent save operation.
         let mappings: Vec<(NodeId, u64)> = self
             .id_mapping
@@ -1309,6 +1354,7 @@ impl HnswIndex {
             })?;
         // Explicit drop to release lock before I/O
         drop(index);
+        drop(_save_guard);
 
         // Save mappings to companion file with integrity checks
         // Format: [MAGIC:4][VERSION:2][DIMS:8][QUANT:1][METRIC:1][COUNT:8][DATA:16*count][CRC32:4]
@@ -1856,6 +1902,8 @@ impl HnswIndex {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: false,
+            save_lock: Arc::new(RwLock::new(())),
+            entry_locks: (0..64).map(|_| Mutex::new(())).collect(),
         })
     }
 
@@ -1922,6 +1970,8 @@ impl HnswIndex {
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
             is_mmap: true,
+            save_lock: Arc::new(RwLock::new(())),
+            entry_locks: (0..64).map(|_| Mutex::new(())).collect(),
         })
     }
 }
