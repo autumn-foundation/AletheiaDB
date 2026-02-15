@@ -316,9 +316,7 @@ impl FlushCoordinator {
     }
 
     /// Open or create the current segment file.
-    fn ensure_segment_open(&self) -> Result<()> {
-        let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-
+    fn ensure_segment_open(&self, writer_guard: &mut Option<BufWriter<File>>) -> Result<()> {
         if writer_guard.is_some() {
             return Ok(());
         }
@@ -379,31 +377,28 @@ impl FlushCoordinator {
 
     /// Rotate to a new segment if current exceeds size limit.
     ///
-    /// # Safety Invariant
+    /// # Thread Safety
     ///
-    /// This method assumes single-threaded access from the flush coordinator.
-    /// Multiple threads should not call `flush()` concurrently, which is the
-    /// only caller of this method. The FlushCoordinator is designed for use
-    /// with a single background flush thread.
-    fn maybe_rotate_segment(&self) -> Result<bool> {
+    /// This method is called while holding the `writer` lock from `flush()`.
+    /// This ensures that segment rotation is atomic with respect to other
+    /// flush operations.
+    fn maybe_rotate_segment(&self, writer_guard: &mut Option<BufWriter<File>>) -> Result<bool> {
         let current_size = self.current_segment_size.load(Ordering::Relaxed);
 
         if current_size >= self.config.segment_size as u64 {
             let closing_segment_id = self.current_segment_id.load(Ordering::Relaxed);
 
-            // Flush and sync current segment
-            {
-                let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref mut writer) = *writer_guard {
-                    writer.flush().map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!(
-                            "Failed to flush WAL segment: {}",
-                            e
-                        )))
-                    })?;
-                }
-                *writer_guard = None;
+            // Flush current segment
+            if let Some(writer) = writer_guard {
+                writer.flush().map_err(|e| {
+                    Error::Storage(StorageError::IoError(format!(
+                        "Failed to flush WAL segment: {}",
+                        e
+                    )))
+                })?;
             }
+            // Close writer (drops BufWriter)
+            *writer_guard = None;
 
             // Sync before closing
             if self.config.sync_on_flush {
@@ -602,8 +597,11 @@ impl FlushCoordinator {
         // Inner function to perform I/O operations.
         // This allows us to catch errors and notify pending entries before returning.
         let do_flush = || -> Result<FlushStats> {
+            // Acquire lock once for the entire operation to ensure thread safety
+            let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+
             // Ensure segment is open
-            self.ensure_segment_open()?;
+            self.ensure_segment_open(&mut writer_guard)?;
 
             let mut bytes_written = 0usize;
 
@@ -613,7 +611,6 @@ impl FlushCoordinator {
 
             // Write all entries
             {
-                let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
                 let writer = writer_guard.as_mut().ok_or_else(|| {
                     Error::Storage(StorageError::WalError {
                         reason: "WAL writer not initialized".to_string(),
@@ -667,7 +664,7 @@ impl FlushCoordinator {
                 .fetch_add(bytes_written as u64, Ordering::Relaxed);
 
             // Check for rotation
-            let segment_rotated = self.maybe_rotate_segment()?;
+            let segment_rotated = self.maybe_rotate_segment(&mut writer_guard)?;
 
             // Update metrics
             self.total_entries_flushed
@@ -1416,7 +1413,12 @@ mod tests {
         let coordinator = FlushCoordinator::new(config).unwrap();
 
         // 2. Open segment to get sync handle
-        coordinator.ensure_segment_open().unwrap();
+        {
+            let mut writer_guard = coordinator.writer.lock().unwrap();
+            coordinator
+                .ensure_segment_open(&mut writer_guard)
+                .unwrap();
+        }
 
         // 3. Replace sync_handle with a File opening /dev/null
         // fsync on /dev/null returns EINVAL on Linux, which causes sync_data to fail.
