@@ -1415,9 +1415,7 @@ mod tests {
         // 2. Open segment to get sync handle
         {
             let mut writer_guard = coordinator.writer.lock().unwrap();
-            coordinator
-                .ensure_segment_open(&mut writer_guard)
-                .unwrap();
+            coordinator.ensure_segment_open(&mut writer_guard).unwrap();
         }
 
         // 3. Replace sync_handle with a File opening /dev/null

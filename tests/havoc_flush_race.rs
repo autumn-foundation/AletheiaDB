@@ -39,7 +39,8 @@ fn test_flush_coordinator_race_condition() {
                 for i in 0..entries_per_thread {
                     // LSN is unique across threads to allow checking later
                     // We use a large multiplier to avoid collisions between iterations
-                    let lsn = (t * entries_per_thread + i) as u64 + (coordinator.total_flushes() * 1000);
+                    let lsn =
+                        (t * entries_per_thread + i) as u64 + (coordinator.total_flushes() * 1000);
                     // Store LSN in data for verification (little endian)
                     let data = lsn.to_le_bytes().to_vec();
                     let entry = PendingEntry::new_async(LSN(lsn), data);
@@ -142,5 +143,9 @@ fn test_flush_coordinator_race_condition() {
         }
     }
 
-    assert_eq!(failures, 0, "Found {} segments with inconsistent metadata", failures);
+    assert_eq!(
+        failures, 0,
+        "Found {} segments with inconsistent metadata",
+        failures
+    );
 }
