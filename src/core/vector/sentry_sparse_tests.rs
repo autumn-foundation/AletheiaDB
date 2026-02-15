@@ -1,5 +1,4 @@
 use super::*;
-use crate::utils::error::{Error, VectorError};
 
 #[test]
 fn test_negative_distance_regression() {
@@ -12,7 +11,7 @@ fn test_negative_distance_regression() {
     // Deterministic generation that caused the issue
     let values: Vec<f32> = (0..size)
         .map(|i| {
-            let mut x = (i as f32 * (seed as f32 + 1.0));
+            let mut x = i as f32 * (seed as f32 + 1.0);
             x = x % 1000.0 + 0.1;
             x
         })
@@ -46,7 +45,7 @@ fn test_sparse_euclidean_distance_nan_regression() {
     let indices: Vec<u32> = (0..size).map(|i| i as u32).collect();
     let values: Vec<f32> = (0..size)
         .map(|i| {
-            let mut x = (i as f32 * (seed as f32 + 1.0));
+            let mut x = i as f32 * (seed as f32 + 1.0);
             x = x % 1000.0 + 0.1;
             x
         })
