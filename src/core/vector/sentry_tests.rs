@@ -80,8 +80,8 @@ where
     let slice_ptr = unsafe { buffer.as_mut_ptr().add(offset) as *mut f32 };
     let slice = unsafe { std::slice::from_raw_parts_mut(slice_ptr, len) };
 
-    for i in 0..len {
-        slice[i] = (i as f32) * 1.0;
+    for (i, val) in slice.iter_mut().enumerate() {
+        *val = (i as f32) * 1.0;
     }
 
     f(slice);
@@ -380,7 +380,7 @@ fn test_scale_in_place_unaligned() {
     with_unaligned_f32_slice_mut(100, |v| {
         // Capture original values for verification
         let original: Vec<f32> = v.to_vec();
-        scale_in_place(v, 2.0);
+        scale_in_place(&mut *v, 2.0);
 
         for (i, &val) in v.iter().enumerate() {
             assert!(
