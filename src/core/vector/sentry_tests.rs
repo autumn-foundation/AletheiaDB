@@ -362,8 +362,12 @@ fn test_simd_dot_product_associativity() {
 
     let len = 1000;
     // Use values with alternating magnitudes to exacerbate rounding errors
-    let a: Vec<f32> = (0..len).map(|i| if i % 2 == 0 { 1.0e5 } else { 1.0 }).collect();
-    let b: Vec<f32> = (0..len).map(|i| if i % 2 == 0 { 1.0 } else { -1.0e5 }).collect();
+    let a: Vec<f32> = (0..len)
+        .map(|i| if i % 2 == 0 { 1.0e5 } else { 1.0 })
+        .collect();
+    let b: Vec<f32> = (0..len)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0e5 })
+        .collect();
 
     // Scalar sum: (1e5 * 1) + (1 * -1e5) + ... = 1e5 - 1e5 = 0
     // But sequential sum might drift.
