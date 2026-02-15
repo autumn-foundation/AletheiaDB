@@ -1448,7 +1448,9 @@ mod tests {
             if let Some(past_time) = Instant::now().checked_sub(idle_gap) {
                 *observed_at = past_time;
             } else {
-                println!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime insufficient to simulate past timestamp");
+                println!(
+                    "Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime insufficient to simulate past timestamp"
+                );
                 return;
             }
         }
