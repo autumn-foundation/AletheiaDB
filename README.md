@@ -326,30 +326,28 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 ### Basic Graph Operations
 
 ```rust
-use aletheiadb::{AletheiaDB, PropertyMap, PropertyMapBuilder, WriteOps};
+use aletheiadb::{AletheiaDB, properties, WriteOps};
 
 // Create a new database
 let db = AletheiaDB::new().unwrap();
 
 // Create nodes using write transactions
 let alice_id = db.write(|tx| {
-    tx.create_node("Person", PropertyMapBuilder::new()
-        .insert("name", "Alice")
-        .insert("age", 30)
-        .build()
-    )
+    tx.create_node("Person", properties! {
+        "name" => "Alice",
+        "age" => 30,
+    })
 })?;
 
 let bob_id = db.write(|tx| {
-    tx.create_node("Person", PropertyMapBuilder::new()
-        .insert("name", "Bob")
-        .build()
-    )
+    tx.create_node("Person", properties! {
+        "name" => "Bob",
+    })
 })?;
 
 // Create relationships
 db.write(|tx| {
-    tx.create_edge(alice_id, bob_id, "KNOWS", PropertyMap::new())
+    tx.create_edge(alice_id, bob_id, "KNOWS", properties! {})
 })?;
 
 // Read current state
@@ -379,8 +377,7 @@ println!("Alice's age was: {:?}", historical_alice.properties.get("age"));
 ### Vector Search with HNSW
 
 ```rust
-use aletheiadb::{AletheiaDB, PropertyMapBuilder};
-use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, properties, HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
 let db = AletheiaDB::new().unwrap();
@@ -394,11 +391,12 @@ db.vector_index("embedding")
 let embedding = vec![0.1f32; 384];
 
 // Store node with embedding - automatically indexed!
+// Note: We convert the vector to a slice for the properties! macro
 let doc_id = db.create_node("Document",
-    PropertyMapBuilder::new()
-        .insert("title", "Introduction to Rust")
-        .insert_vector("embedding", &embedding)
-        .build()
+    properties! {
+        "title" => "Introduction to Rust",
+        "embedding" => &embedding[..],
+    }
 )?;
 
 // Find similar nodes
@@ -671,10 +669,11 @@ db.write(|tx| {
 AletheiaDB includes an optional embedding generation system for semantic search:
 
 ```rust
-use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::{AletheiaDB, properties};
 use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 use std::sync::Arc;
 
+// Note: Requires `tokio` dependency in Cargo.toml
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
@@ -696,10 +695,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (text, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(
             "Document",
-            PropertyMapBuilder::new()
-                .insert("content", *text)
-                .insert_vector("embedding", embedding)
-                .build(),
+            properties! {
+                "content" => *text,
+                "embedding" => &embedding[..],
+            }
         )?;
     }
 
