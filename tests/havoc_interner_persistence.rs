@@ -1,5 +1,8 @@
-use aletheiadb::core::interning::{StringInterner, InternedString};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use aletheiadb::core::interning::{InternedString, StringInterner};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -67,8 +70,10 @@ fn test_interner_persistence_truncation_race() {
                 let id = InternedString::from_raw(gap_idx as u32);
                 if let Some(actual) = interner_c.resolve_with(id, |s| s.to_string()) {
                     if !actual.is_empty() {
-                         panic!("DATA CORRUPTION DETECTED! Snapshot index {} is empty, but actual string is '{}'",
-                             gap_idx, actual);
+                        panic!(
+                            "DATA CORRUPTION DETECTED! Snapshot index {} is empty, but actual string is '{}'",
+                            gap_idx, actual
+                        );
                     }
                 }
             }
