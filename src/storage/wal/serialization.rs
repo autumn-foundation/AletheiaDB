@@ -3,14 +3,40 @@
 #[cfg(test)]
 use super::entry::WalEntry;
 use super::entry::{LSN, WalOperation};
-use crate::core::interning::InternedString;
+use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::temporal::Timestamp;
-use crate::utils::error::Result;
+use crate::utils::error::{Error, Result, StorageError};
 
-/// Helper to serialize an InternedString into the buffer (4-byte ID)
+/// Helper to serialize an InternedString into the buffer.
+///
+/// # Format
+/// - Length (4 bytes, u32, little-endian)
+/// - UTF-8 bytes
+///
+/// This ensures durability by persisting the string content in the WAL,
+/// rather than just an ephemeral in-memory ID.
 #[inline(always)]
-fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
-    buffer.extend_from_slice(&s.as_u32().to_le_bytes());
+fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) -> Result<()> {
+    // Resolve string from global interner
+    // This is necessary because IDs are ephemeral and reset on restart (unless checkpointed).
+    // To ensure WAL entries are replayable even if they contain strings interned
+    // AFTER the last checkpoint, we must persist the string content.
+    GLOBAL_INTERNER
+        .resolve_with(s, |str_val| {
+            let bytes = str_val.as_bytes();
+            buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(bytes);
+        })
+        .ok_or_else(|| {
+            // This implies a logic error: we are trying to serialize a WAL operation
+            // containing an InternedString that doesn't exist in the interner.
+            Error::Storage(StorageError::InconsistentState {
+                reason: format!(
+                    "InternedString {} not found during WAL serialization",
+                    s.as_u32()
+                ),
+            })
+        })
 }
 
 /// Estimate the required buffer capacity for serializing a WAL entry.
@@ -28,13 +54,13 @@ fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
 /// - Total fixed: 24 bytes
 ///
 /// Variable sizes by operation:
-/// - `CreateNode`: 1 (op type) + 8 (node_id) + 4 (label ID) +
+/// - `CreateNode`: 1 (op type) + 8 (node_id) + label size +
 ///   properties size + 12 (Timestamp)
 /// - `CreateEdge`: 1 (op type) + 8 (edge_id) + 8 (source) + 8 (target) +
-///   4 (label ID) + properties size + 12 (Timestamp)
-/// - `UpdateNode`: 1 (op type) + 8 (node_id) + 8 (version_id) + 4 (label ID) +
+///   label size + properties size + 12 (Timestamp)
+/// - `UpdateNode`: 1 (op type) + 8 (node_id) + 8 (version_id) + label size +
 ///   properties size + 12 (Timestamp)
-/// - `UpdateEdge`: 1 (op type) + 8 (edge_id) + 8 (version_id) + 4 (label ID) +
+/// - `UpdateEdge`: 1 (op type) + 8 (edge_id) + 8 (version_id) + label size +
 ///   properties size + 12 (Timestamp)
 /// - `DeleteNode`: 1 (op type) + 8 (node_id) + 12 (Timestamp) = 21 bytes
 /// - `DeleteEdge`: 1 (op type) + 8 (edge_id) + 12 (Timestamp) = 21 bytes
@@ -56,25 +82,41 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
     // Timestamp (HybridTimestamp) is always 12 bytes (wallclock + logical)
     const TIMESTAMP_SIZE: usize = 12;
 
+    // Helper to get serialized size of an InternedString (len + bytes)
+    let get_label_size = |label: InternedString| -> usize {
+        // 4 bytes for length prefix + string bytes
+        4 + GLOBAL_INTERNER
+            .resolve_with(label, |s| s.len())
+            .unwrap_or(0) // If missing, assume 0 (will be caught during serialization)
+    };
+
     let variable_size = match operation {
-        WalOperation::CreateNode { properties, .. } => {
-            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
-            let base = 1 + 8 + 4 + TIMESTAMP_SIZE;
+        WalOperation::CreateNode {
+            label, properties, ..
+        } => {
+            // op type (1) + node_id (8) + label + properties + valid_from (12)
+            let base = 1 + 8 + get_label_size(*label) + TIMESTAMP_SIZE;
             base + properties.serialized_size()
         }
-        WalOperation::CreateEdge { properties, .. } => {
-            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + valid_from (12)
-            let base = 1 + 8 + 8 + 8 + 4 + TIMESTAMP_SIZE;
+        WalOperation::CreateEdge {
+            label, properties, ..
+        } => {
+            // op type (1) + edge_id (8) + source (8) + target (8) + label + properties + valid_from (12)
+            let base = 1 + 8 + 8 + 8 + get_label_size(*label) + TIMESTAMP_SIZE;
             base + properties.serialized_size()
         }
-        WalOperation::UpdateNode { properties, .. } => {
-            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
-            let base = 1 + 8 + 8 + 4 + TIMESTAMP_SIZE;
+        WalOperation::UpdateNode {
+            label, properties, ..
+        } => {
+            // op type (1) + node_id (8) + version_id (8) + label + properties + valid_from (12)
+            let base = 1 + 8 + 8 + get_label_size(*label) + TIMESTAMP_SIZE;
             base + properties.serialized_size()
         }
-        WalOperation::UpdateEdge { properties, .. } => {
-            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
-            let base = 1 + 8 + 8 + 4 + TIMESTAMP_SIZE;
+        WalOperation::UpdateEdge {
+            label, properties, ..
+        } => {
+            // op type (1) + edge_id (8) + version_id (8) + label + properties + valid_from (12)
+            let base = 1 + 8 + 8 + get_label_size(*label) + TIMESTAMP_SIZE;
             base + properties.serialized_size()
         }
         WalOperation::DeleteNode { .. } => {
@@ -123,7 +165,7 @@ pub(crate) fn serialize_operation_into(
         } => {
             buffer.push(1); // operation type
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
-            serialize_interned_string(*label, buffer);
+            serialize_interned_string(*label, buffer)?;
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
         }
@@ -139,7 +181,7 @@ pub(crate) fn serialize_operation_into(
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&source.as_u64().to_le_bytes());
             buffer.extend_from_slice(&target.as_u64().to_le_bytes());
-            serialize_interned_string(*label, buffer);
+            serialize_interned_string(*label, buffer)?;
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
         }
@@ -153,7 +195,7 @@ pub(crate) fn serialize_operation_into(
             buffer.push(3); // operation type
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
-            serialize_interned_string(*label, buffer);
+            serialize_interned_string(*label, buffer)?;
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
         }
@@ -167,7 +209,7 @@ pub(crate) fn serialize_operation_into(
             buffer.push(4); // operation type
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
-            serialize_interned_string(*label, buffer);
+            serialize_interned_string(*label, buffer)?;
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
         }
@@ -311,8 +353,9 @@ mod tests {
     fn test_estimate_capacity_create_node_empty_properties() {
         // CreateNode with empty properties:
         // Fixed: 24 bytes (LSN + Timestamp + Checksum)
-        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count) + valid_from (12)
-        // = 24 + 1 + 8 + 4 + 4 + 12 = 53 bytes
+        // op type (1) + node_id (8) + label (len+4) + properties (4 for empty count) + valid_from (12)
+        // label "test" len=4 -> 4+4=8 bytes
+        // = 24 + 1 + 8 + 8 + 4 + 12 = 57 bytes
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("test").unwrap(),
@@ -322,8 +365,8 @@ mod tests {
 
         let estimated = estimate_entry_capacity(&op);
         assert_eq!(
-            estimated, 53,
-            "CreateNode with empty properties should be 53 bytes"
+            estimated, 57,
+            "CreateNode with empty properties should be 57 bytes"
         );
 
         // Verify by actually serializing
@@ -607,5 +650,49 @@ mod prop_tests {
                 prop_assert!(estimated <= actual * 2, "Estimate {} > 2x Actual {}", estimated, actual);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod warden_tests {
+    use super::*;
+    use crate::core::id::NodeId;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
+
+    #[test]
+    fn test_repro_wal_interning_vulnerability() {
+        // 1. Intern "Secret"
+        let secret = "TopSecretDATA_XYZ_WARDEN_TEST";
+        let secret_id = GLOBAL_INTERNER.intern(secret).unwrap();
+
+        // 2. Create a WAL entry
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: secret_id,
+            properties: PropertyMapBuilder::new().build(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(100), op);
+
+        // 3. Serialize
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // 4. "Crash and Restart" simulation
+        // The buffer MUST contain the string "TopSecretDATA_XYZ_WARDEN_TEST"
+        // to ensure durability.
+
+        let secret_bytes = secret.as_bytes();
+        let found_secret = buffer
+            .windows(secret_bytes.len())
+            .any(|window| window == secret_bytes);
+
+        // ASSERT: This assertion should PASS with the fix.
+        assert!(
+            found_secret,
+            "WAL entry MUST contain the string literal to prevent data corruption"
+        );
     }
 }

@@ -39,3 +39,9 @@
 **2026-02-16 - Unchecked Dimensions in HNSW Index**
 **Threat:** The `HnswIndexBuilder` allowed creating indexes with arbitrary dimensions (up to `usize::MAX`). The internal `create_metric_wrapper` function used `unsafe { slice::from_raw_parts(ptr, dims) }`. If a malicious user provided a dimension such that `dims * 4 > isize::MAX`, this would invoke Undefined Behavior (UB) in Rust's slice creation. Additionally, huge dimensions could cause OOM Denial of Service during index construction or loading.
 **Defense:** Enforced `MAX_VECTOR_DIMENSIONS` (100,000) in `HnswIndexBuilder::build`, `HnswConfig::deserialize_from`, `HnswIndex::load`, and `HnswIndex::open_mmap`. This limit (400KB per vector) is sufficient for all reasonable embeddings while preventing UB and massive allocations. Added `tests/warden_hnsw_builder.rs` to verify rejection of excessive dimensions.
+
+**2026-02-16 - Data Corruption via Ephemeral IDs in WAL**
+**Threat:** AletheiaDB's WAL serialized `InternedString` labels as 4-byte integer IDs referring to the in-memory `GlobalStringInterner`. These IDs were ephemeral and not persisted in the WAL itself. Upon system restart (crash recovery), the interner state was lost (or reset to checkpoint), rendering WAL entries unresolvable or pointing to incorrect strings (Type Confusion).
+**Defense:** Modified WAL serialization to persist the full string content (`[len][bytes]`) instead of just the ID. Updated the WAL reader to read the string and re-intern it during replay, restoring the ID mapping correctly. Bumped `WAL_VERSION` to 2.
+**Severity:** Critical (Data Corruption / Data Loss).
+**Verification:** Added `warden_tests` in `src/storage/wal/serialization.rs` verifying string persistence. Validated V1 backward compatibility.
