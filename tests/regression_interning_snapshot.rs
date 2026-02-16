@@ -1,7 +1,7 @@
+use aletheiadb::core::interning::StringInterner;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use aletheiadb::core::interning::StringInterner;
 
 #[test]
 fn test_havoc_interner_snapshot_consistency() {
@@ -49,7 +49,7 @@ fn test_havoc_interner_snapshot_consistency() {
                 let content_count = snapshot.iter().filter(|s| !s.is_empty()).count();
                 // We might have holes, but we shouldn't have ONLY holes if we are writing.
                 if content_count == 0 {
-                     // This might happen at very start, but unlikely later.
+                    // This might happen at very start, but unlikely later.
                 }
             }
         }
