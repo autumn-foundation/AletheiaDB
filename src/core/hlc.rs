@@ -107,7 +107,18 @@ pub fn evaluate_clock_skew(
     max_forward_jump_us: Option<i64>,
     self_heal_clock_skew: bool,
 ) -> Result<ClockSkewDecision, ClockSkewViolation> {
-    let drift = current_wallclock - frontier_wallclock;
+    // Sentry: Use checked subtraction to handle extreme drift (e.g., during startup/recovery)
+    // If subtraction overflows, it indicates massive drift beyond any reasonable threshold.
+    let drift = current_wallclock
+        .checked_sub(frontier_wallclock)
+        .unwrap_or_else(|| {
+            if current_wallclock < frontier_wallclock {
+                i64::MIN // Massive backward drift
+            } else {
+                i64::MAX // Massive forward drift
+            }
+        });
+
     let mut effective_wallclock = current_wallclock;
     let mut healed_direction = None;
 

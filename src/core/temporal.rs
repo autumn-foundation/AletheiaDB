@@ -194,13 +194,19 @@ impl TimeRange {
     ///
     /// Returns None if the range is open-ended (current).
     /// Duration is calculated using wallclock components only.
+    ///
+    /// # Return Type Change
+    /// Returns `Option<u64>` (previously `Option<i64>`) to safely represent durations spanning
+    /// negative-to-positive timestamps (e.g. `i64::MIN` to `MAX_VALID_TIMESTAMP`) which exceed `i64::MAX`.
+    ///
     /// Note: Phase 2 - removed const due to is_current() needing HybridTimestamp comparison.
     #[inline]
-    pub fn duration_micros(&self) -> Option<i64> {
+    pub fn duration_micros(&self) -> Option<u64> {
         if self.is_current() {
             None
         } else {
-            Some(self.end.wallclock() - self.start.wallclock())
+            // Sentry: use abs_diff to handle full range without overflow
+            Some(self.end.wallclock().abs_diff(self.start.wallclock()))
         }
     }
 
@@ -636,7 +642,7 @@ mod tests {
     #[test]
     fn test_time_range_duration() {
         let range = TimeRange::new(100.into(), 500.into()).unwrap();
-        assert_eq!(range.duration_micros(), Some(400.into()));
+        assert_eq!(range.duration_micros(), Some(400));
 
         let open = TimeRange::from(100.into());
         assert_eq!(open.duration_micros(), None);
@@ -1354,9 +1360,9 @@ mod proptests {
             prop_assert_eq!(closed.transaction_time().end(), close);
         }
 
-        /// Property: TimeRange duration is non-negative for valid ranges.
+        /// Property: TimeRange duration is calculated correctly.
         #[test]
-        fn prop_time_range_duration_non_negative(
+        fn prop_time_range_duration_correctness(
             wc_start in valid_wallclock(),
             wc_end in valid_wallclock(),
         ) {
@@ -1366,8 +1372,7 @@ mod proptests {
             let range = TimeRange::new(start, end).unwrap();
 
             if let Some(duration) = range.duration_micros() {
-                prop_assert!(duration >= 0,
-                    "Duration should be non-negative, got {}", duration);
+                prop_assert_eq!(duration, s.abs_diff(e));
             }
         }
 
