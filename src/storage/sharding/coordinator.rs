@@ -1434,7 +1434,23 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            *observed_at = Instant::now() - Duration::from_micros(idle_gap_us as u64);
+
+            // On platforms with monotonic clocks starting from boot (e.g., Windows),
+            // subtracting a large duration from Instant::now() might underflow if uptime is short.
+            // We use checked_sub to handle this gracefully.
+            if let Some(past_instant) =
+                Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64))
+            {
+                *observed_at = past_instant;
+            } else {
+                // If we can't simulate a past instant due to insufficient uptime,
+                // we skip the specific assertion that depends on it.
+                // This prevents CI failures on fresh Windows runners.
+                eprintln!(
+                    "Skipping test_next_commit_timestamp_allows_idle_forward_drift logic due to insufficient system uptime."
+                );
+                return;
+            }
         }
 
         let result = coordinator.next_commit_timestamp();
