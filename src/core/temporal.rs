@@ -1333,12 +1333,9 @@ mod proptests {
             let end = HybridTimestamp::new_unchecked(e, 0);
             let range = TimeRange::new(start, end).unwrap();
 
-            if let Some(duration) = range.duration_micros() {
-                // With u64 return type, duration is always non-negative by definition
-                // We just verify it's a valid value
-                prop_assert!(duration <= u64::MAX,
-                    "Duration should be representable, got {}", duration);
-            }
+            // duration_micros() returns Option<u64>, so the value is always valid if present.
+            // We just call it to ensure it doesn't panic.
+            let _ = range.duration_micros();
         }
 
         /// Property: time::from_secs roundtrips through to_secs.

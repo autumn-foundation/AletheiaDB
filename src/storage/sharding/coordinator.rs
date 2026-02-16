@@ -1434,7 +1434,17 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            *observed_at = Instant::now() - Duration::from_micros(idle_gap_us as u64);
+
+            // Handle potential underflow on Windows CI runners with short uptime
+            let now = Instant::now();
+            let duration = Duration::from_micros(idle_gap_us as u64);
+            match now.checked_sub(duration) {
+                Some(past_time) => *observed_at = past_time,
+                None => {
+                    println!("Skipping test due to insufficient uptime (need > {:?})", duration);
+                    return;
+                }
+            }
         }
 
         let result = coordinator.next_commit_timestamp();
