@@ -22,20 +22,26 @@ fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) -> Result<
     // To ensure WAL entries are replayable even if they contain strings interned
     // AFTER the last checkpoint, we must persist the string content.
     GLOBAL_INTERNER
-        .resolve_with(s, |str_val| {
+        .resolve_with(s, |str_val| -> Result<()> {
             let bytes = str_val.as_bytes();
+            if bytes.len() > u32::MAX as usize {
+                return Err(Error::Storage(StorageError::WalError {
+                    reason: "String too large for WAL format (exceeds u32::MAX bytes)".to_string(),
+                }));
+            }
             buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             buffer.extend_from_slice(bytes);
+            Ok(())
         })
-        .ok_or_else(|| {
+        .unwrap_or_else(|| {
             // This implies a logic error: we are trying to serialize a WAL operation
             // containing an InternedString that doesn't exist in the interner.
-            Error::Storage(StorageError::InconsistentState {
+            Err(Error::Storage(StorageError::InconsistentState {
                 reason: format!(
                     "InternedString {} not found during WAL serialization",
                     s.as_u32()
                 ),
-            })
+            }))
         })
 }
 
