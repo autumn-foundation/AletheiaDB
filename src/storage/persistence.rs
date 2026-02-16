@@ -1341,11 +1341,11 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_v2_binary_format_size() -> Result<()> {
+    fn test_checkpoint_v3_binary_format_size() -> Result<()> {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
         let temp_dir = TempDir::new().unwrap();
-        let checkpoint_path = temp_dir.path().join("test_size.dat");
+        let checkpoint_path = temp_dir.path().join("test_size_v3.dat");
 
         let current = CurrentStorage::new();
         let config = HnswConfig::new(384, DistanceMetric::Cosine);
@@ -1358,14 +1358,52 @@ mod tests {
         // Verify file exists and has expected structure
         let metadata = std::fs::metadata(&checkpoint_path)?;
 
-        // Expected size:
+        // Calculate expected size:
         // - Magic (4) + Version (4) = 8
         // - LSN (8) + Timestamp (12) + NodeCount (8) + EdgeCount (8) + VersionCount (8) = 44
         //   (Phase 2: Timestamp is now HybridTimestamp: 8-byte wallclock + 4-byte logical = 12 bytes)
         // - Vector config: enabled (1) + name_len (4) + "test_property" (13) + HnswConfig (42) = 60
-        //   (HnswConfig grew from 41 to 42 bytes due to quantization field)
-        // Total = 112 bytes
-        assert_eq!(metadata.len(), 112);
+        // - Interned strings: Count (4) + sum(4 + len(s) for s in strings)
+        // Total fixed = 112 bytes + Interner data
+
+        let strings = GLOBAL_INTERNER.get_all_strings();
+        let interner_size: usize = 4 + strings.iter().map(|s| 4 + s.len()).sum::<usize>();
+
+        assert_eq!(metadata.len(), (112 + interner_size) as u64);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_v3_interner_persistence() -> Result<()> {
+        use rand::RngCore;
+
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_path = temp_dir.path().join("test_interner.dat");
+
+        // 1. Intern a unique string
+        let random_id = rand::thread_rng().next_u64();
+        let unique_string = format!("unique_string_{}", random_id);
+        let id = GLOBAL_INTERNER.intern(&unique_string).expect("Failed to intern");
+
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        // 2. Save checkpoint
+        let checkpoint = Checkpoint::new(LSN(100), &current, &historical);
+        checkpoint.save(&checkpoint_path)?;
+
+        // 3. Verify file content manually
+        let data = std::fs::read(&checkpoint_path)?;
+        let content = String::from_utf8_lossy(&data);
+        assert!(content.contains(&unique_string), "Checkpoint file should contain interned string");
+
+        // 4. Load checkpoint (should succeed)
+        let _loaded = Checkpoint::load(&checkpoint_path)?;
+
+        // Verify ID is still resolvable
+        let resolved = GLOBAL_INTERNER.resolve_with(id, |s| s.to_string());
+        assert_eq!(resolved, Some(unique_string));
 
         Ok(())
     }

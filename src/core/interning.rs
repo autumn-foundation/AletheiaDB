@@ -406,7 +406,10 @@ impl StringInterner {
             let mut bytes = vec![0u8; len];
             reader.read_exact(&mut bytes)?;
             let s = String::from_utf8(bytes).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Invalid UTF-8: {}", e))
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid UTF-8: {}", e),
+                )
             })?;
             strings.push(s);
         }
@@ -450,7 +453,9 @@ impl StringInterner {
                 return Err(format!(
                     "Interner mismatch at index {}: expected ID {}, got {}. \
                      This implies the checkpoint is incompatible with the current interner state.",
-                    i, expected_id, id.as_u32()
+                    i,
+                    expected_id,
+                    id.as_u32()
                 ));
             }
         }
