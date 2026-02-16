@@ -365,6 +365,98 @@ impl StringInterner {
         strings
     }
 
+    /// Serialize all interned strings to a writer.
+    ///
+    /// Format:
+    /// - Count: u32 (Little Endian)
+    /// - For each string:
+    ///   - Length: u32 (Little Endian)
+    ///   - Bytes: UTF-8 bytes
+    ///
+    /// The strings are written in ID order (0, 1, 2...), so the ID is implicit
+    /// from the position in the file.
+    pub fn serialize_into<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        let strings = self.get_all_strings();
+        let count = strings.len() as u32;
+        writer.write_all(&count.to_le_bytes())?;
+
+        for s in strings {
+            let bytes = s.as_bytes();
+            writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
+            writer.write_all(bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Deserialize strings from a reader.
+    ///
+    /// Returns a vector of strings in ID order.
+    pub fn deserialize_from<R: std::io::Read>(reader: &mut R) -> std::io::Result<Vec<String>> {
+        let mut count_buf = [0u8; 4];
+        reader.read_exact(&mut count_buf)?;
+        let count = u32::from_le_bytes(count_buf) as usize;
+
+        let mut strings = Vec::with_capacity(count);
+        let mut len_buf = [0u8; 4];
+
+        for _ in 0..count {
+            reader.read_exact(&mut len_buf)?;
+            let len = u32::from_le_bytes(len_buf) as usize;
+
+            let mut bytes = vec![0u8; len];
+            reader.read_exact(&mut bytes)?;
+            let s = String::from_utf8(bytes).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Invalid UTF-8: {}", e))
+            })?;
+            strings.push(s);
+        }
+
+        Ok(strings)
+    }
+
+    /// Restore the interner state from a list of strings.
+    ///
+    /// This assumes the strings are provided in ID order (0, 1, 2...).
+    /// It verifies that the common strings (which are always pre-interned at fixed IDs)
+    /// match the restored strings.
+    ///
+    /// # Safety
+    ///
+    /// This method modifies the global interner state. It should only be called
+    /// during single-threaded recovery/startup.
+    pub fn restore_from_strings(&self, strings: Vec<String>) -> Result<(), String> {
+        // Clear existing state (except common strings which are re-added below?)
+        // Actually, if we just use intern_unchecked sequentially, we can overwrite/fill.
+        // But we must ensure the IDs match.
+        // Since we can't easily clear the static without unsafe, we'll try to just
+        // intern them. Since they are in order, they should get the right IDs if we
+        // start from 0. But we might already have IDs assigned (common strings).
+
+        // If common strings are already interned, we just verify them.
+        // If we have new strings, we intern them.
+
+        for (i, s) in strings.into_iter().enumerate() {
+            let expected_id = i as u32;
+
+            // Check if ID is already assigned
+            // Note: We can't lookup by ID directly in O(1) in this implementation
+            // without access to id_to_string private map, but we can intern and check ID.
+
+            // If we are restoring, we essentially want to force: string -> expected_id.
+            // intern_unchecked returns an ID.
+
+            let id = self.intern_unchecked(&s);
+            if id.as_u32() != expected_id {
+                return Err(format!(
+                    "Interner mismatch at index {}: expected ID {}, got {}. \
+                     This implies the checkpoint is incompatible with the current interner state.",
+                    i, expected_id, id.as_u32()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Pre-intern common strings at startup to avoid initial allocation overhead.
     ///
     /// This method interns frequently used property keys and labels that are

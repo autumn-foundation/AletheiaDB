@@ -236,8 +236,8 @@ impl Checkpoint {
             StorageError::IoError(format!("Failed to write checkpoint magic: {}", e))
         })?;
 
-        // Write version 2 (adds vector index config)
-        writer.write_all(&2u32.to_le_bytes()).map_err(|e| {
+        // Write version 3 (adds interned strings persistence)
+        writer.write_all(&3u32.to_le_bytes()).map_err(|e| {
             StorageError::IoError(format!("Failed to write checkpoint version: {}", e))
         })?;
 
@@ -279,6 +279,11 @@ impl Checkpoint {
                 })?;
         }
 
+        // Write interned strings (V3 format)
+        GLOBAL_INTERNER.serialize_into(writer).map_err(|e| {
+            StorageError::IoError(format!("Failed to write interned strings: {}", e))
+        })?;
+
         Ok(())
     }
 
@@ -308,7 +313,7 @@ impl Checkpoint {
         })?;
         let version = u32::from_le_bytes(version_bytes);
 
-        if version != 1 && version != 2 {
+        if version != 1 && version != 2 && version != 3 {
             return Err(StorageError::CorruptedData(format!(
                 "Unsupported checkpoint version: {}",
                 version
@@ -370,6 +375,17 @@ impl Checkpoint {
         } else {
             None
         };
+
+        // Read and restore interned strings if V3
+        if version >= 3 {
+            use crate::core::interning::StringInterner;
+            let strings = StringInterner::deserialize_from(reader).map_err(|e| {
+                StorageError::IoError(format!("Failed to read interned strings: {}", e))
+            })?;
+            GLOBAL_INTERNER.restore_from_strings(strings).map_err(|e| {
+                StorageError::CorruptedData(format!("Failed to restore interned strings: {}", e))
+            })?;
+        }
 
         Ok(CheckpointMetadata {
             lsn,
