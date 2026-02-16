@@ -945,6 +945,52 @@ mod tests {
         assert_eq!(TIMESTAMP_MAX.logical(), 0);
     }
 
+    #[test]
+    fn test_contains_or_after_behavior() {
+        use crate::core::hlc::HybridTimestamp;
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let end = HybridTimestamp::new(200, 0).unwrap();
+        let range = TimeRange::new(start, end).unwrap();
+
+        // Verify contains_or_after works as expected
+        assert!(range.contains_or_after(start));
+        assert!(range.contains_or_after(HybridTimestamp::new(150, 0).unwrap()));
+        assert!(range.contains_or_after(end)); // Should be true (after start)
+        assert!(range.contains_or_after(HybridTimestamp::new(300, 0).unwrap())); // Should be true
+        assert!(!range.contains_or_after(HybridTimestamp::new(99, 0).unwrap())); // Should be false
+    }
+
+    #[test]
+    fn test_close_at_start_time() {
+        use crate::core::hlc::HybridTimestamp;
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let range = TimeRange::from(start);
+
+        // Should be able to close at start time (creating empty range)
+        let closed = range.close_at(start).unwrap();
+        assert_eq!(closed.start(), start);
+        assert_eq!(closed.end(), start);
+        assert!(closed.is_closed());
+    }
+
+    #[test]
+    fn test_max_valid_timestamp_boundary() {
+        use crate::core::hlc::HybridTimestamp;
+        let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+
+        // Should be able to create range with MAX_VALID_TIMESTAMP as start and end
+        let range = TimeRange::new(max_valid, max_valid).unwrap();
+        assert_eq!(range.start(), max_valid);
+
+        let range2 = TimeRange::from(max_valid);
+        assert_eq!(range2.start(), max_valid);
+
+        // Should be able to create range ending at MAX_VALID_TIMESTAMP
+        let almost_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP - 100, 0).unwrap();
+        let range3 = TimeRange::new(almost_max, max_valid).unwrap();
+        assert_eq!(range3.end(), max_valid);
+    }
+
     // =========================================================================
     // Phase 1: True Bi-Temporal Support Tests (with_valid_time)
     // =========================================================================
