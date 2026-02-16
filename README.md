@@ -463,7 +463,7 @@ for (node_id, drift_score) in drifted_nodes {
 
 ### Narrative Generation (Experimental)
 
-> **Requires `nova` feature**
+> **REQUIRES FEATURE NOVA**
 >
 > Run the demo:
 > ```bash
@@ -472,9 +472,8 @@ for (node_id, drift_score) in drifted_nodes {
 
 ```rust
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
+// Requires features = ["nova"] in Cargo.toml
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
-
-// Ensure you have features = ["nova"] enabled in Cargo.toml
 
 // 1. Setup database and node (for self-contained example)
 let db = AletheiaDB::new().unwrap();
