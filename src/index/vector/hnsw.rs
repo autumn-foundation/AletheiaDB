@@ -1015,12 +1015,15 @@ impl VectorIndex for HnswIndex {
             )));
         }
 
+        // Acquire inner write lock FIRST to ensure atomicity with save() operations.
+        // This follows the lock ordering invariant: Inner -> Map.
+        let index = self.inner.write();
+
         // Find the key for this NodeId
         if let Some((_, key)) = self.id_mapping.remove(&id) {
             self.reverse_mapping.remove(&key);
 
-            // Native delete in usearch
-            let index = self.inner.write();
+            // Native delete in usearch (we already hold the write lock)
             index.remove(key).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to remove vector: {}",
