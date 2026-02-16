@@ -352,25 +352,36 @@ impl StringInterner {
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
     pub fn get_all_strings(&self) -> Vec<String> {
-        // Use next_id to determine size, as it's the authority on allocated IDs.
-        // self.len() (from string_to_id map) might lag behind during concurrent inserts.
-        // We use Acquire ordering to ensure we see updates from other threads that have
-        // completed their insertions.
-        let estimated_count = self.next_id.load(Ordering::Acquire) as usize;
-        let mut strings = vec![String::new(); estimated_count];
+        // Collect all entries first. We cannot rely on next_id for sizing because
+        // it may be incremented BEFORE the string is inserted into the map (race condition),
+        // leading to phantom empty strings at the end of the vector.
+        //
+        // Instead, we scan the map to find the actual maximum committed ID.
+        let mut max_id = 0;
+        let mut committed_entries = Vec::with_capacity(self.len());
 
-        // Collect all (id, string) pairs
         for entry in self.id_to_string.iter() {
             let id = entry.key().as_u32() as usize;
-
-            // If we encounter an ID that exceeds our initial estimate (due to race),
-            // resize the vector to accommodate it. This ensures no data is lost
-            // even if the interner is being modified concurrently.
-            if id >= strings.len() {
-                strings.resize(id + 1, String::new());
+            if id > max_id {
+                max_id = id;
             }
+            // Store as (id, string) tuple to avoid re-locking/re-reading
+            committed_entries.push((id, entry.value().to_string()));
+        }
 
-            strings[id] = entry.value().to_string();
+        // If map is empty, return empty vec
+        if committed_entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Initialize vector up to max_id + 1.
+        // Any gaps (IDs reserved but not yet committed) will be empty strings.
+        // However, since we only use max_id from *committed* entries, we won't
+        // have trailing phantom entries from in-flight reservations.
+        let mut strings = vec![String::new(); max_id + 1];
+
+        for (id, s) in committed_entries {
+            strings[id] = s;
         }
 
         strings
