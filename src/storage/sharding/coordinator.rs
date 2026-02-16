@@ -1440,7 +1440,9 @@ mod tests {
             match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
                 Some(ts) => *observed_at = ts,
                 None => {
-                    println!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: System uptime too short");
+                    println!(
+                        "Skipping test_next_commit_timestamp_allows_idle_forward_drift: System uptime too short"
+                    );
                     return;
                 }
             }
