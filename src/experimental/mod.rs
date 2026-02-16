@@ -53,5 +53,9 @@ pub mod temporal_diff;
 pub mod temporal_narrative;
 
 #[cfg(feature = "nova")]
+/// Thermos: Semantic Temperature & Volatility Gauge.
+pub mod thermos;
+
+#[cfg(feature = "nova")]
 /// Sentinel: Semantic Firewall for validating data insertion.
 pub mod sentinel;
