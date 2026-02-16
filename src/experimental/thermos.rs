@@ -298,9 +298,7 @@ mod tests {
         .unwrap();
 
         let thermos = Thermos::new(&db);
-        let reading = thermos
-            .measure_temperature(node, "vec", window)
-            .unwrap();
+        let reading = thermos.measure_temperature(node, "vec", window).unwrap();
 
         // Logic check:
         // v1: start(t_base) < window_end(t_window_end) [True]
@@ -339,11 +337,13 @@ mod tests {
         let ts0 = t0.wallclock();
         // Use manual transaction to control creation timestamp exactly
         let mut tx = db.write_transaction().unwrap();
-        let node = tx.create_node_with_valid_time(
-            "MathNode",
-            props,
-            Some(crate::core::hlc::HybridTimestamp::new(ts0, 0).unwrap())
-        ).unwrap();
+        let node = tx
+            .create_node_with_valid_time(
+                "MathNode",
+                props,
+                Some(crate::core::hlc::HybridTimestamp::new(ts0, 0).unwrap()),
+            )
+            .unwrap();
         tx.commit().unwrap();
 
         // v1: [0.0] at t0
@@ -387,9 +387,7 @@ mod tests {
         .unwrap();
 
         let thermos = Thermos::new(&db);
-        let reading = thermos
-            .measure_temperature(node, "vec", window)
-            .unwrap();
+        let reading = thermos.measure_temperature(node, "vec", window).unwrap();
 
         // Volatility = |3-0| + |7-3| = 3 + 4 = 7.0
         // Duration = ts2 - ts0 (wait, first snapshot effective time might be clamped)
@@ -402,11 +400,17 @@ mod tests {
         // Temperature = 7.0 / 2.0 = 3.5.
 
         assert_eq!(reading.update_count, 3);
-        assert!((reading.volatility - 7.0).abs() < 1e-5, "Volatility math failed");
+        assert!(
+            (reading.volatility - 7.0).abs() < 1e-5,
+            "Volatility math failed"
+        );
 
         // Check temperature math
         // If duration calculation mutated (- to +), temp would be tiny
         // If dist calc mutated, temp would be wrong
-        assert!((reading.temperature - 3.5).abs() < 1e-5, "Temperature math failed");
+        assert!(
+            (reading.temperature - 3.5).abs() < 1e-5,
+            "Temperature math failed"
+        );
     }
 }
