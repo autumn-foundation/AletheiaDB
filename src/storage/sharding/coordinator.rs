@@ -1440,11 +1440,14 @@ mod tests {
 
             // On Windows/CI, Instant is monotonic from boot. If system uptime < idle_gap_us,
             // subtraction would underflow. We can't simulate the test scenario in that case.
-            if let Some(past_instant) = Instant::now().checked_sub(Duration::from_micros(idle_gap_us))
+            if let Some(past_instant) =
+                Instant::now().checked_sub(Duration::from_micros(idle_gap_us))
             {
                 *observed_at = past_instant;
             } else {
-                eprintln!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: insufficient system uptime");
+                eprintln!(
+                    "Skipping test_next_commit_timestamp_allows_idle_forward_drift: insufficient system uptime"
+                );
                 return;
             }
         }
@@ -1464,10 +1467,14 @@ mod tests {
 
     #[test]
     fn test_next_commit_timestamp_skip_branch_coverage() {
-        // Force the skip path by using a huge duration (u64::MAX).
-        // This ensures the `else` branch (insufficient uptime) is executed on all platforms,
-        // satisfying coverage requirements.
-        do_test_next_commit_timestamp_idle_drift(u64::MAX);
+        // Force the skip path by using a huge duration.
+        // We can't use u64::MAX because it causes overflow in HLC drift calculation.
+        // We use 10 years of microseconds, which is huge enough to exceed any CI uptime
+        // but small enough to fit safely in i64 math relative to epoch.
+        // 10 years * 365 days * 24h * 3600s * 1_000_000us ~= 3.15e14
+        // i64::MAX ~= 9e18, so this is safe.
+        let ten_years_us = 10 * 365 * 24 * 3600 * 1_000_000;
+        do_test_next_commit_timestamp_idle_drift(ten_years_us);
     }
 
     #[test]
