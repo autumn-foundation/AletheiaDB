@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
+const MAX_QUERY_LIMIT: usize = 1000;
+
 /// Health check response structure.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -193,7 +195,7 @@ pub async fn handle_query(
             }
 
             // Issue 4: Pagination
-            let limit_val = limit.unwrap_or(100);
+            let limit_val = limit.unwrap_or(100).min(MAX_QUERY_LIMIT);
             let offset_val = offset.unwrap_or(0);
 
             // Prevent deep pagination attacks (CPU DoS)
@@ -244,10 +246,9 @@ pub async fn handle_query(
             match NodeId::new(node_id) {
                 Ok(nid) => {
                     // Safety limits to prevent DoS
-                    let max_limit = 1000;
                     let max_deep_pagination = 10_000;
 
-                    let limit_val = limit.unwrap_or(100).min(max_limit);
+                    let limit_val = limit.unwrap_or(100).min(MAX_QUERY_LIMIT);
                     let offset_val = offset.unwrap_or(0);
 
                     // Prevent deep-pagination and overflow bypasses.

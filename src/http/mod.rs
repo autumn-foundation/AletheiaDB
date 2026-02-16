@@ -32,6 +32,8 @@ pub(crate) mod converters;
 mod handlers;
 mod server;
 mod state;
+#[cfg(test)]
+mod warden_tests;
 
 pub use config::{CorsConfig, ServerConfig, ServerConfigBuilder};
 pub use handlers::health_check;
