@@ -242,7 +242,7 @@ See [ADR-0022](docs/adr/0022-multi-property-vector-index.md) for complete archit
 - `src/index/vector.rs` - VectorIndex trait + HnswIndex implementation
 - `src/index/vector/hnsw.rs` - HNSW wrapper with serialization
 - `src/storage/current.rs` - VectorIndexState integration + query methods
-- `src/storage/persistence.rs` - V2 checkpoint format with vector index config
+- `src/storage/checkpoint.rs` - Checkpoint-based recovery with vector index config restoration
 - `src/db.rs` - Public API exposure
 - `src/utils/error.rs` - Added PropertyNotFound error
 - `benches/hnsw_index.rs` - NEW: Comprehensive HNSW benchmarks

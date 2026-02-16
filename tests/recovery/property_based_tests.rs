@@ -35,9 +35,9 @@ use aletheiadb::{
         temporal::{Timestamp, time},
     },
     storage::{
+        checkpoint::{CheckpointConfig, CheckpointManager},
         current::CurrentStorage,
         historical::HistoricalStorage,
-        persistence::{CheckpointConfig, PersistenceManager},
         wal::{
             LSN, WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -314,11 +314,8 @@ impl RecoveryTestHarness {
         &self,
         wal: &ConcurrentWalSystem,
     ) -> Result<(CurrentStorage, HistoricalStorage, LSN)> {
-        let config = CheckpointConfig {
-            checkpoint_dir: self.checkpoint_dir.clone(),
-            ..Default::default()
-        };
-        let mut manager = PersistenceManager::new(config)?;
+        let config = CheckpointConfig::with_data_dir(self.checkpoint_dir.clone());
+        let mut manager = CheckpointManager::new(config)?;
         manager.recover(wal)
     }
 }

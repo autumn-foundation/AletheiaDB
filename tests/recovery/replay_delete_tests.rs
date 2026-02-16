@@ -15,7 +15,7 @@ use aletheiadb::{
         temporal::time,
     },
     storage::{
-        persistence::{CheckpointConfig, PersistenceManager},
+        checkpoint::{CheckpointConfig, CheckpointManager},
         wal::{
             WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -54,11 +54,8 @@ fn test_replay_delete_node_basic() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Node should NOT exist in current storage (it's deleted)
@@ -111,11 +108,8 @@ fn test_replay_delete_node_after_update() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Node should NOT exist in current storage
@@ -174,11 +168,8 @@ fn test_replay_delete_edge_basic() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Edge should NOT exist in current storage
@@ -228,11 +219,8 @@ fn test_replay_multiple_deletes() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Only 3 nodes should exist in current storage (1, 3, 5)
@@ -280,11 +268,8 @@ fn test_replay_delete_with_vector() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Node should NOT exist in current storage
@@ -348,11 +333,8 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Only nodes 1 and 3 should exist in current storage

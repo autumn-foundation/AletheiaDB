@@ -16,7 +16,7 @@ use aletheiadb::{
         temporal::time,
     },
     storage::{
-        persistence::{CheckpointConfig, PersistenceManager},
+        checkpoint::{CheckpointConfig, CheckpointManager},
         wal::{
             WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -74,10 +74,7 @@ fn test_large_dataset_recovery_10k_nodes() -> Result<()> {
     );
 
     // When: Recover from WAL
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
 
     let wal_config2 = ConcurrentWalSystemConfig::new(wal_dir);
     let wal2 = ConcurrentWalSystem::new(wal_config2)?;
@@ -85,7 +82,7 @@ fn test_large_dataset_recovery_10k_nodes() -> Result<()> {
     println!("Starting recovery...");
     let recovery_start = Instant::now();
 
-    let mut manager = PersistenceManager::new(config)?;
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal2)?;
 
     let recovery_duration = recovery_start.elapsed();
@@ -181,10 +178,7 @@ fn test_large_dataset_recovery_50k_edges() -> Result<()> {
     );
 
     // When: Recover
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
 
     let wal_config2 = ConcurrentWalSystemConfig::new(wal_dir);
     let wal2 = ConcurrentWalSystem::new(wal_config2)?;
@@ -192,7 +186,7 @@ fn test_large_dataset_recovery_50k_edges() -> Result<()> {
     println!("Starting recovery...");
     let recovery_start = Instant::now();
 
-    let mut manager = PersistenceManager::new(config)?;
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal2)?;
 
     let recovery_duration = recovery_start.elapsed();
@@ -310,17 +304,14 @@ fn test_large_dataset_full_recovery() -> Result<()> {
 
     // Recovery phase
     println!("Phase 3: Recovery...");
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
 
     let wal_config2 = ConcurrentWalSystemConfig::new(wal_dir);
     let wal2 = ConcurrentWalSystem::new(wal_config2)?;
 
     let recovery_start = Instant::now();
 
-    let mut manager = PersistenceManager::new(config)?;
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, final_lsn) = manager.recover(&wal2)?;
 
     let recovery_duration = recovery_start.elapsed();
@@ -435,10 +426,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
     println!("Data creation: {:.2}s", start.elapsed().as_secs_f64());
 
     // Recovery
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
 
     let wal_config2 = ConcurrentWalSystemConfig::new(wal_dir);
     let wal2 = ConcurrentWalSystem::new(wal_config2)?;
@@ -446,7 +434,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
     println!("Starting recovery...");
     let recovery_start = Instant::now();
 
-    let mut manager = PersistenceManager::new(config)?;
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal2)?;
 
     let recovery_duration = recovery_start.elapsed();
@@ -526,10 +514,7 @@ fn test_large_dataset_with_deletions() -> Result<()> {
     println!("Data creation: {:.2}s", start.elapsed().as_secs_f64());
 
     // Recovery
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
 
     let wal_config2 = ConcurrentWalSystemConfig::new(wal_dir);
     let wal2 = ConcurrentWalSystem::new(wal_config2)?;
@@ -537,7 +522,7 @@ fn test_large_dataset_with_deletions() -> Result<()> {
     println!("Starting recovery...");
     let recovery_start = Instant::now();
 
-    let mut manager = PersistenceManager::new(config)?;
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal2)?;
 
     let recovery_duration = recovery_start.elapsed();
@@ -616,16 +601,13 @@ fn bench_recovery_throughput() -> Result<()> {
         wal.flush()?;
 
         // Measure recovery
-        let config = CheckpointConfig {
-            checkpoint_dir: temp_dir.path().join("checkpoints"),
-            ..Default::default()
-        };
+        let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
 
         let wal_config2 = ConcurrentWalSystemConfig::new(wal_dir);
         let wal2 = ConcurrentWalSystem::new(wal_config2)?;
 
         let start = Instant::now();
-        let mut manager = PersistenceManager::new(config)?;
+        let mut manager = CheckpointManager::new(config)?;
         let (current, _, _) = manager.recover(&wal2)?;
         let duration = start.elapsed();
 

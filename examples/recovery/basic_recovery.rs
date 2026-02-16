@@ -8,7 +8,7 @@
 //! - Automatic recovery on next startup
 //! - Verification that all data is preserved
 //!
-//! **Note:** This example uses internal recovery APIs (`PersistenceManager`, `ConcurrentWalSystem`)
+//! **Note:** This example uses internal recovery APIs (`CheckpointManager`, `ConcurrentWalSystem`)
 //! for demonstration purposes. In future versions, AletheiaDB will provide a high-level API like:
 //! ```ignore
 //! let db = AletheiaDB::open_with_recovery("/data/mydb")?;
@@ -65,7 +65,7 @@ use aletheiadb::core::{
     temporal::time,
 };
 use aletheiadb::storage::{
-    persistence::{CheckpointConfig, PersistenceManager},
+    checkpoint::{CheckpointConfig, CheckpointManager},
     wal::{
         WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -165,20 +165,17 @@ fn main() -> Result<()> {
     println!("Phase 2: Recovery on Restart");
     println!("─────────────────────────────");
 
-    // Create new WAL and PersistenceManager instances
+    // Create new WAL and CheckpointManager instances
     let wal_config_recovery = ConcurrentWalSystemConfig::new(wal_dir);
     let wal_recovery = ConcurrentWalSystem::new(wal_config_recovery)?;
 
-    let checkpoint_config = CheckpointConfig {
-        checkpoint_dir,
-        ..Default::default()
-    };
-    let mut persistence_manager = PersistenceManager::new(checkpoint_config)?;
+    let checkpoint_config = CheckpointConfig::with_data_dir(checkpoint_dir);
+    let mut checkpoint_manager = CheckpointManager::new(checkpoint_config)?;
 
     println!("✓ Recovering database from WAL...");
 
     // Perform recovery
-    let (current, historical, final_lsn) = persistence_manager.recover(&wal_recovery)?;
+    let (current, historical, final_lsn) = checkpoint_manager.recover(&wal_recovery)?;
 
     println!("✓ Recovery complete!");
     println!("✓ Recovered LSN: {}", final_lsn.0);

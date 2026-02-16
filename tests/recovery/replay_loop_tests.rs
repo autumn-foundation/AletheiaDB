@@ -14,9 +14,9 @@ use aletheiadb::{
         temporal::time,
     },
     storage::{
+        checkpoint::{CheckpointConfig, CheckpointManager},
         current::CurrentStorage,
         historical::HistoricalStorage,
-        persistence::{Checkpoint, CheckpointConfig, PersistenceManager},
         wal::{
             LSN, WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -40,17 +40,9 @@ fn test_recover_with_empty_wal() -> Result<()> {
     // Create checkpoint
     let current = CurrentStorage::new();
     let historical = HistoricalStorage::new();
-    std::fs::create_dir_all(&checkpoint_dir)?;
-    let checkpoint_path = checkpoint_dir.join("checkpoint_0.dat");
-    let checkpoint = Checkpoint::new(LSN(0), &current, &historical);
-    checkpoint.save(&checkpoint_path)?;
-
-    // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir,
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(&checkpoint_dir);
+    let mut manager = CheckpointManager::new(config)?;
+    manager.create_checkpoint(LSN(0), &current, &historical)?;
 
     // When: recover()
     let (recovered_current, recovered_historical, final_lsn) = manager.recover(&wal)?;
@@ -87,11 +79,8 @@ fn test_recover_tracks_max_node_id() -> Result<()> {
     wal.flush()?;
 
     // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
 
     // When: recover()
     let (current, _historical, _lsn) = manager.recover(&wal)?;
@@ -140,11 +129,8 @@ fn test_recover_tracks_max_edge_id() -> Result<()> {
     wal.flush()?;
 
     // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
 
     // When: recover()
     let (current, _historical, _lsn) = manager.recover(&wal)?;
@@ -197,11 +183,8 @@ fn test_recover_tracks_max_version_id() -> Result<()> {
     wal.flush()?;
 
     // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
 
     // When: recover()
     let (current, _historical, _lsn) = manager.recover(&wal)?;
@@ -266,11 +249,8 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
     wal.flush()?;
 
     // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
 
     // When: recover()
     let (current, _historical, _lsn) = manager.recover(&wal)?;
@@ -332,11 +312,8 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
     wal.flush()?;
 
     // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
 
     // When: recover()
     let (_current, _historical, _lsn) = manager.recover(&wal)?;
@@ -371,17 +348,9 @@ fn test_recover_from_checkpoint_lsn() -> Result<()> {
     // Create checkpoint at LSN 50
     let current = CurrentStorage::new();
     let historical = HistoricalStorage::new();
-    std::fs::create_dir_all(&checkpoint_dir)?;
-    let checkpoint_path = checkpoint_dir.join("checkpoint_50.dat");
-    let checkpoint = Checkpoint::new(LSN(50), &current, &historical);
-    checkpoint.save(&checkpoint_path)?;
-
-    // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir,
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(&checkpoint_dir);
+    let mut manager = CheckpointManager::new(config)?;
+    manager.create_checkpoint(LSN(50), &current, &historical)?;
 
     // When: recover()
     let (_current, _historical, _lsn) = manager.recover(&wal)?;
@@ -449,11 +418,8 @@ fn test_recover_handles_checkpoint_marker() -> Result<()> {
     wal.flush()?;
 
     // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
 
     // When: recover()
     let (_current, _historical, _lsn) = manager.recover(&wal)?;
@@ -474,11 +440,8 @@ fn test_recover_empty_wal_returns_initial_lsn() -> Result<()> {
     let wal = ConcurrentWalSystem::new(wal_config)?;
 
     // Create persistence manager
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
 
     // When: recover()
     let (_current, _historical, final_lsn) = manager.recover(&wal)?;

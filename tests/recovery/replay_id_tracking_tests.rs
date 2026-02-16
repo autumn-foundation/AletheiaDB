@@ -14,7 +14,7 @@ use aletheiadb::{
         temporal::time,
     },
     storage::{
-        persistence::{CheckpointConfig, PersistenceManager},
+        checkpoint::{CheckpointConfig, CheckpointManager},
         wal::{
             WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -45,11 +45,8 @@ fn test_recover_initializes_node_id_generator() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Next node ID generated should be 6 (max_id + 1)
@@ -98,11 +95,8 @@ fn test_recover_initializes_edge_id_generator() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Next edge ID should be 4 (max_id + 1)
@@ -154,11 +148,8 @@ fn test_recover_initializes_version_id_generator() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Next version ID should be 6 (max_id + 1)
@@ -198,11 +189,8 @@ fn test_recover_handles_gaps_in_ids() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Next node ID should be 11 (max_id + 1), not 2 or 6
@@ -244,11 +232,8 @@ fn test_recover_with_deletes_tracks_max_ids() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Next node ID should be 4 (not 2, even though 2 is deleted)
@@ -264,7 +249,7 @@ fn test_recover_with_deletes_tracks_max_ids() -> Result<()> {
 }
 
 #[test]
-fn test_recover_empty_wal_starts_from_one() -> Result<()> {
+fn test_recover_empty_wal_starts_from_zero() -> Result<()> {
     // Given: Empty WAL (no operations)
     let temp_dir = TempDir::new().unwrap();
     let wal_dir = temp_dir.path().join("wal");
@@ -274,20 +259,50 @@ fn test_recover_empty_wal_starts_from_one() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
-    // Then: First node ID should be 1 (default start)
+    // Then: First node ID should be 0 (default start)
     let new_node_id = current.create_node("FirstNode", PropertyMap::new())?;
 
     assert_eq!(
         new_node_id.as_u64(),
+        0,
+        "With empty WAL, node ID should start from 0"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_recover_single_zero_node_id_advances_generator() -> Result<()> {
+    // Given: WAL with exactly one node using ID 0
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    wal.append(WalOperation::CreateNode {
+        node_id: NodeId::new(0).unwrap(),
+        label: GLOBAL_INTERNER.intern("Node")?,
+        properties: PropertyMap::new(),
+        valid_from: time::now(),
+    })?;
+    wal.flush()?;
+
+    // When: recover()
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (current, _historical, _lsn) = manager.recover(&wal)?;
+
+    // Then: next generated ID must advance to 1 (not reuse 0)
+    let new_node_id = current.create_node("AfterRecovery", PropertyMap::new())?;
+    assert_eq!(
+        new_node_id.as_u64(),
         1,
-        "With empty WAL, node ID should start from 1"
+        "Recovery must advance generator after replaying NodeId(0)"
     );
 
     Ok(())
@@ -335,11 +350,8 @@ fn test_recover_all_generators_independent() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Each generator should have independent state

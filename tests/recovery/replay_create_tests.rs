@@ -16,7 +16,7 @@ use aletheiadb::{
         temporal::time,
     },
     storage::{
-        persistence::{CheckpointConfig, PersistenceManager},
+        checkpoint::{CheckpointConfig, CheckpointManager},
         wal::{
             WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -47,11 +47,8 @@ fn test_replay_create_node_basic() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Node exists in current storage
@@ -92,11 +89,8 @@ fn test_replay_create_node_with_properties() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Node has correct properties
@@ -142,11 +136,8 @@ fn test_replay_create_node_with_vector() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Node has correct vector property
@@ -202,11 +193,8 @@ fn test_replay_create_edge_basic() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Edge exists in current storage
@@ -268,11 +256,8 @@ fn test_replay_create_edge_with_properties() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Edge has correct properties
@@ -322,11 +307,8 @@ fn test_replay_multiple_creates() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: All nodes and edges recovered
@@ -361,11 +343,8 @@ fn test_replay_create_node_tracks_max_id() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: All nodes recovered
@@ -403,11 +382,8 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (_current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Historical version has correct temporal interval

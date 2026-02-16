@@ -14,7 +14,16 @@ AletheiaDB provides **three complementary persistence systems** for different us
 | **Index Persistence** | Fast cold starts | Current state indexes | 6-30x faster startup |
 | **Cold Storage (Redb)** | Unlimited history | Historical versions (bi-temporal) | Enables unlimited depth |
 
-**⚠️ Common Mistake:** There is **NO `AletheiaDB::open()` method**. Use `with_unified_config()` instead.
+**⚠️ Common Mistake:** Trying to call `AletheiaDB::open()`. That API does not exist. For restart, use `with_unified_config()` with persistence enabled.
+
+## Current Reality (Important)
+
+As of 2026-02, persistence and recovery behave as follows:
+
+- `StringInterner` is persisted to `indexes/strings/interner.idx` and restored on startup.
+- Recovery is driven by `storage::checkpoint::CheckpointManager` (not legacy `storage::persistence`).
+- Checkpoints are active and meaningful after LSN work: recovery starts replay at `manifest.lsn + 1`, not from WAL start.
+- Old PR text claiming the interner is "memory-only" is stale for the current code path.
 
 ## Quick Decision Guide
 
@@ -454,23 +463,34 @@ db.persist_indexes()?;
 
 ## Troubleshooting
 
-### "Failed to open checkpoint file"
+### "Failed to load persisted indexes"
 
 **Error:**
 ```
-Storage error: I/O error: Failed to open checkpoint file:
+Storage error: Index file missing or unreadable:
 The system cannot find the file specified. (os error 2)
 ```
 
-**Cause:** No `AletheiaDB::open()` method exists.
+**Cause:** Persistence files are missing/corrupted, or startup path is misconfigured.
 
-**Solution:** Use `with_unified_config()` - it creates directories automatically.
+**Solution:** Use `with_unified_config()` with `PersistenceConfig { enabled: true, load_on_startup: true, .. }` and verify `data_dir` points to the directory that contains `indexes/`.
+
+### "Interned IDs became invalid after restart"
+
+**Symptom:** A review or old note claims interned labels/keys are memory-only.
+
+**Current behavior:** Interned strings are persisted in `indexes/strings/interner.idx` and restored during startup.
+
+**What to verify:**
+- Persistence is enabled and points to the same `data_dir` on restart.
+- `load_on_startup` is `true`.
+- Recovery path is `CheckpointManager` (`storage::checkpoint`), not legacy `storage::persistence`.
 
 ### "Access is denied" (Windows)
 
 **Error:**
 ```
-Storage error: I/O error: Failed to open checkpoint file:
+Storage error: I/O error while reading persisted index file:
 Access is denied. (os error 5)
 ```
 
