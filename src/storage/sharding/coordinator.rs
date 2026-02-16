@@ -1441,7 +1441,10 @@ mod tests {
             match now.checked_sub(duration) {
                 Some(past_time) => *observed_at = past_time,
                 None => {
-                    println!("Skipping test due to insufficient uptime (need > {:?})", duration);
+                    println!(
+                        "Skipping test due to insufficient uptime (need > {:?})",
+                        duration
+                    );
                     return;
                 }
             }
