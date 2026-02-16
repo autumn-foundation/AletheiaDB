@@ -1352,10 +1352,7 @@ impl HnswIndex {
         let new_capacity = (index.capacity() * 2).max(1024);
 
         // Use retry logic for reserve as well, just in case
-        self.retry_usearch(
-            || index.reserve(new_capacity),
-            "Failed to expand capacity"
-        )?;
+        self.retry_usearch(|| index.reserve(new_capacity), "Failed to expand capacity")?;
 
         Ok(())
     }
