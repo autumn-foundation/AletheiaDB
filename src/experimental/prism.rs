@@ -35,9 +35,19 @@
 
 use crate::AletheiaDB;
 use crate::core::id::NodeId;
+use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::ops::{dot_product, magnitude, normalize};
 use crate::utils::{Error, Result, VectorError};
 use std::collections::HashMap;
+
+/// A point in the semantic evolution of a node.
+#[derive(Debug, Clone)]
+pub struct EvolutionPoint {
+    /// The timestamp when this state became valid.
+    pub timestamp: Timestamp,
+    /// The semantic scores at this time.
+    pub scores: HashMap<String, f32>,
+}
 
 /// A named axis in the semantic space.
 #[derive(Debug, Clone)]
@@ -260,6 +270,42 @@ impl<'a> Prism<'a> {
         self.analyze(vector)
     }
 
+    /// Analyze the semantic evolution of a node over a time range.
+    ///
+    /// This method retrieves the node's history and projects the vector at each version
+    /// onto the defined axes.
+    pub fn analyze_evolution(
+        &self,
+        node_id: NodeId,
+        time_range: TimeRange,
+    ) -> Result<Vec<EvolutionPoint>> {
+        let history = self.db.get_node_history(node_id)?;
+        let mut points = Vec::new();
+
+        for version in history.versions {
+            // Check if the version is relevant to the time range
+            if version.temporal.valid_time().overlaps(&time_range) {
+                // Try to extract the vector
+                // We ignore errors here (e.g. missing vector property in old versions)
+                // because we want to return points for versions that DO have vectors.
+                if let Ok(vector) = self.resolve_node_vector(
+                    node_id,
+                    &version.properties,
+                    None,
+                    "analyze evolution",
+                ) {
+                    let scores = self.analyze(vector)?;
+                    points.push(EvolutionPoint {
+                        timestamp: version.temporal.valid_time().start(),
+                        scores,
+                    });
+                }
+            }
+        }
+
+        Ok(points)
+    }
+
     /// Calculate the "Residual" energy.
     ///
     /// Returns the magnitude of the part of the vector *not* explained by the current axes.
@@ -430,5 +476,58 @@ mod tests {
             .analyze_node_with_property(target_node, "image_vec")
             .unwrap();
         assert!((image_spectrum.get("ImageAxis").unwrap() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_prism_analyze_evolution() {
+        use crate::api::transaction::WriteOps;
+        use crate::core::temporal::{TimeRange, time};
+
+        let db = AletheiaDB::new().unwrap();
+        // Enable vector index so vectors are allowed
+        let config = HnswConfig::new(2, DistanceMetric::Cosine);
+        db.enable_vector_index("vec", config).unwrap();
+
+        let t1 = time::from_millis(1000);
+        let t2 = time::from_millis(2000);
+
+        // 1. Create Node at T1: [1.0, 0.0] (Pure Logic)
+        let props1 = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let node_id = db
+            .write(|tx| tx.create_node_with_valid_time("Concept", props1, Some(t1)))
+            .unwrap();
+
+        // 2. Update Node at T2: [0.0, 1.0] (Pure Emotion)
+        let props2 = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 1.0])
+            .build();
+        db.write(|tx| tx.update_node_with_valid_time(node_id, props2, Some(t2)))
+            .unwrap();
+
+        // 3. Setup Prism
+        let mut prism = Prism::new(&db).with_vector_property("vec");
+        prism.add_axis("Logic", vec![1.0, 0.0]);
+        prism.add_axis("Emotion", vec![0.0, 1.0]);
+
+        // 4. Analyze
+        let range = TimeRange::new(time::from_millis(0), time::from_millis(3000)).unwrap();
+        let points = prism.analyze_evolution(node_id, range).unwrap();
+
+        // 5. Verify
+        assert_eq!(points.len(), 2);
+
+        // Point 1: T1, Logic=1, Emotion=0
+        let p1 = &points[0];
+        assert_eq!(p1.timestamp, t1);
+        assert!((p1.scores.get("Logic").unwrap() - 1.0).abs() < 1e-5);
+        assert!((p1.scores.get("Emotion").unwrap() - 0.0).abs() < 1e-5);
+
+        // Point 2: T2, Logic=0, Emotion=1
+        let p2 = &points[1];
+        assert_eq!(p2.timestamp, t2);
+        assert!((p2.scores.get("Logic").unwrap() - 0.0).abs() < 1e-5);
+        assert!((p2.scores.get("Emotion").unwrap() - 1.0).abs() < 1e-5);
     }
 }
