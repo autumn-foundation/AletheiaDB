@@ -231,28 +231,19 @@ mod tests {
 
         let props = PropertyMapBuilder::new().insert("val", 0).build();
 
-        // Helper to populate history.
-        // Each version is committed before the next update so the update path can
-        // resolve the node from current storage.
+        // Helper to populate history
         let create_node_with_history = |timestamps: Vec<Timestamp>| -> NodeId {
+            let mut tx = db.write_transaction().unwrap();
             // Create at first timestamp
-            let id = {
-                let mut tx = db.write_transaction().unwrap();
-                let node_id = tx
-                    .create_node_with_valid_time("Node", props.clone(), Some(timestamps[0]))
-                    .unwrap();
-                tx.commit().unwrap();
-                node_id
-            };
-
+            let id = tx
+                .create_node_with_valid_time("Node", props.clone(), Some(timestamps[0]))
+                .unwrap();
             // Update at subsequent timestamps
             for &ts in &timestamps[1..] {
-                let mut tx = db.write_transaction().unwrap();
                 tx.update_node_with_valid_time(id, props.clone(), Some(ts))
                     .unwrap();
-                tx.commit().unwrap();
             }
-
+            tx.commit().unwrap();
             id
         };
 

@@ -798,6 +798,9 @@ impl VectorIndex for HnswIndex {
             }));
         }
 
+        // Ensure capacity before acquiring any locks that might cause contention
+        self.check_and_expand_capacity(1)?;
+
         // Acquire entry lock to serialize updates to same key
         // This prevents race conditions in usearch when multiple threads update the same key concurrently
         let lock_idx = (id.as_u64() as usize) % self.entry_locks.len();
@@ -868,16 +871,6 @@ impl VectorIndex for HnswIndex {
                 // Note: If key doesn't exist, we skip remove() and proceed directly to add()
                 // This is safe because add() with a non-existent key will succeed
 
-                // Keep lock held - check if we need to expand capacity
-                if index.size() >= index.capacity() {
-                    // Double capacity, minimum 1024
-                    let new_capacity = (index.capacity() * 2).max(1024);
-                    self.retry_usearch(
-                        || index.reserve(new_capacity),
-                        "Failed to expand capacity",
-                    )?;
-                }
-
                 // Add the new vector while still holding the lock
                 if let Err(e) =
                     self.retry_usearch(|| index.add(existing_key, vector), "Failed to add vector")
@@ -936,16 +929,6 @@ impl VectorIndex for HnswIndex {
                 // Step 2: Acquire inner read lock FIRST (follows lock ordering invariant)
                 // This prevents deadlock with search_with_filter which holds inner -> dashmap.
                 let index = self.inner.read();
-
-                // Check if we need to expand capacity
-                if index.size() >= index.capacity() {
-                    // Double capacity, minimum 1024
-                    let new_capacity = (index.capacity() * 2).max(1024);
-                    self.retry_usearch(
-                        || index.reserve(new_capacity),
-                        "Failed to expand capacity",
-                    )?;
-                }
 
                 // Step 3: Add to inner usearch index while holding write lock
                 self.retry_usearch(|| index.add(key, vector), "Failed to add vector")?;
@@ -1335,6 +1318,48 @@ impl HnswIndex {
     /// This method performs the actual blocking I/O operations for saving the index
     /// and its mappings. It is separated from `save()` to allow the latter to use
     /// `tokio::task::block_in_place` when running within a Tokio runtime.
+    /// Check and expand capacity if needed.
+    ///
+    /// This method ensures that the index has enough capacity to accommodate new vectors.
+    /// It handles the lock upgrading dance (read -> write -> read) to minimize contention.
+    ///
+    /// # Arguments
+    ///
+    /// * `vectors_to_add` - Number of vectors expected to be added (usually 1)
+    fn check_and_expand_capacity(&self, vectors_to_add: usize) -> Result<()> {
+        // Padding to account for concurrent additions between check and actual add.
+        // This prevents a race condition where multiple threads pass the capacity check
+        // but then collectively overflow the capacity, causing a crash in usearch.
+        const CAPACITY_PADDING: usize = 128;
+
+        // Optimistic check with read lock
+        let index = self.inner.read();
+        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
+            return Ok(());
+        }
+        drop(index);
+
+        // Acquire write lock to expand capacity
+        let index = self.inner.write();
+
+        // Double check capacity under write lock (race condition check)
+        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
+            return Ok(());
+        }
+
+        // Expand capacity
+        // Double capacity, minimum 1024
+        let new_capacity = (index.capacity() * 2).max(1024);
+
+        // Use retry logic for reserve as well, just in case
+        self.retry_usearch(
+            || index.reserve(new_capacity),
+            "Failed to expand capacity"
+        )?;
+
+        Ok(())
+    }
+
     fn save_internal(&self, path: &Path) -> Result<()> {
         // Acquire save_lock (exclusive) to prevent concurrent adds/removes.
         // This ensures consistency between the index snapshot and the ID mappings.
