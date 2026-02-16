@@ -92,19 +92,19 @@ impl<'a> Thermos<'a> {
             });
         }
 
-        let mut total_distance = 0.0;
         let start_time = snapshots.first().unwrap().0;
         let end_time = snapshots.last().unwrap().0;
         let duration = end_time - start_time;
 
-        for i in 0..snapshots.len() - 1 {
-            let (_, v1) = &snapshots[i];
-            let (_, v2) = &snapshots[i + 1];
+        let total_distance: f32 = snapshots
+            .windows(2)
+            .map(|w| {
+                let (_, v1) = &w[0];
+                let (_, v2) = &w[1];
+                euclidean_distance(v1, v2)
+            })
+            .sum::<Result<f32>>()?;
 
-            // Calculate distance
-            let dist = euclidean_distance(v1, v2)?;
-            total_distance += dist;
-        }
 
         // Calculate Temperature (Velocity)
         // Avoid division by zero if updates happened in the same microsecond (unlikely but possible with logical clocks)
