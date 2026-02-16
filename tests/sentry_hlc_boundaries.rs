@@ -18,7 +18,7 @@ fn test_evaluate_clock_skew_overflow() {
         Err(violation) => {
             assert_eq!(violation.direction, ClockSkewDirection::Backward);
             // The drift should be saturated to i64::MIN because current << frontier
-            assert!(violation.drift_us < -1_000_000_000);
+            assert_eq!(violation.drift_us, i64::MIN);
         }
     }
 }
