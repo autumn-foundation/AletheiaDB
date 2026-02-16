@@ -31,6 +31,7 @@ use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use crate::utils::error::{Result, StorageError, TransactionError};
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 mod apply;
 mod conflict;
@@ -86,6 +87,7 @@ pub struct WriteTransaction {
     pub(crate) temporal_indexes: Arc<TemporalIndexes>,
     pub(crate) wal: Arc<ConcurrentWalSystem>,
     pub(crate) current_timestamp: Arc<Mutex<Timestamp>>,
+    pub(crate) commit_clock_observed_at: Arc<Mutex<Instant>>,
     pub(crate) visibility_manager: Arc<TxVisibilityManager>,
 
     // ID generators (needed for creating new entities)
@@ -100,6 +102,7 @@ pub struct WriteTransaction {
 
 impl WriteTransaction {
     /// Create a new write transaction with default durability mode (Synchronous).
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tx_id: TxId,
@@ -130,7 +133,41 @@ impl WriteTransaction {
         )
     }
 
+    /// Create a new write transaction with explicit commit clock observation state.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_clock_observed_at(
+        tx_id: TxId,
+        snapshot: TransactionSnapshot,
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<TemporalIndexes>,
+        wal: Arc<ConcurrentWalSystem>,
+        current_timestamp: Arc<Mutex<Timestamp>>,
+        commit_clock_observed_at: Arc<Mutex<Instant>>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        node_id_gen: Arc<IdGenerator>,
+        edge_id_gen: Arc<IdGenerator>,
+        version_id_gen: Arc<IdGenerator>,
+    ) -> Self {
+        Self::new_with_durability_and_clock_observed_at(
+            tx_id,
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            commit_clock_observed_at,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            DurabilityMode::Synchronous,
+        )
+    }
+
     /// Create a new write transaction with a specific durability mode.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_durability(
         tx_id: TxId,
@@ -140,6 +177,40 @@ impl WriteTransaction {
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        node_id_gen: Arc<IdGenerator>,
+        edge_id_gen: Arc<IdGenerator>,
+        version_id_gen: Arc<IdGenerator>,
+        durability_mode: DurabilityMode,
+    ) -> Self {
+        Self::new_with_durability_and_clock_observed_at(
+            tx_id,
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            Arc::new(Mutex::new(Instant::now())),
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            durability_mode,
+        )
+    }
+
+    /// Create a new write transaction with specific durability and clock observation state.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_durability_and_clock_observed_at(
+        tx_id: TxId,
+        snapshot: TransactionSnapshot,
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<TemporalIndexes>,
+        wal: Arc<ConcurrentWalSystem>,
+        current_timestamp: Arc<Mutex<Timestamp>>,
+        commit_clock_observed_at: Arc<Mutex<Instant>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -157,6 +228,7 @@ impl WriteTransaction {
             temporal_indexes,
             wal,
             current_timestamp,
+            commit_clock_observed_at,
             visibility_manager,
             node_id_gen,
             edge_id_gen,
@@ -179,6 +251,20 @@ impl WriteTransaction {
     /// Get transaction ID.
     pub fn tx_id(&self) -> TxId {
         self.tx_id
+    }
+
+    fn adaptive_forward_jump_limit_us(&self, observed_at: Instant) -> Result<i64> {
+        let mut previous_observed_at =
+            self.commit_clock_observed_at
+                .lock()
+                .map_err(|_| TransactionError::LockPoisoned {
+                    resource: "commit_clock_observed_at".to_string(),
+                })?;
+        let elapsed = observed_at.duration_since(*previous_observed_at);
+        *previous_observed_at = observed_at;
+
+        let elapsed_us = i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX);
+        Ok(MAX_FORWARD_JUMP_US.saturating_add(elapsed_us))
     }
 
     /// Commit the transaction.
@@ -290,12 +376,14 @@ impl WriteTransaction {
             // Phase 2: Use HLC for distributed temporal consistency
             // Get current physical wallclock
             let current_wallclock = crate::core::temporal::time::now();
+            let observed_at = Instant::now();
+            let adaptive_forward_limit_us = self.adaptive_forward_jump_limit_us(observed_at)?;
 
             let self_heal_clock_skew = is_clock_skew_self_heal_enabled();
             let skew_decision = evaluate_clock_skew(
                 current_wallclock.wallclock(),
                 ts.wallclock(),
-                Some(MAX_FORWARD_JUMP_US),
+                Some(adaptive_forward_limit_us),
                 self_heal_clock_skew,
             )
             .map_err(|violation| TransactionError::ClockSkew {
