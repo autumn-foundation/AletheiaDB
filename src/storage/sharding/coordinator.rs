@@ -1438,7 +1438,9 @@ mod tests {
             match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
                 Some(past_instant) => *observed_at = past_instant,
                 None => {
-                    eprintln!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime insufficient for simulated drift");
+                    eprintln!(
+                        "Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime insufficient for simulated drift"
+                    );
                     return;
                 }
             }
