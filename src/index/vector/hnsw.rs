@@ -834,8 +834,9 @@ impl VectorIndex for HnswIndex {
                     }
                 }
 
-                // Acquire inner write lock to serialize structural mutations in usearch.
-                let index = self.inner.write();
+                // Acquire inner read lock (shared).
+                // usearch handles concurrent adds internally.
+                let index = self.inner.read();
 
                 // Re-verify mapping under Inner lock
                 // We need to lock the map again to check if the ID still maps to existing_key.
@@ -925,9 +926,9 @@ impl VectorIndex for HnswIndex {
 
                 // Note: save_lock is already held at start of function.
 
-                // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant).
-                // Vacant path updates the index before claiming the map entry (Inner -> Map).
-                let index = self.inner.write();
+                // Step 2: Acquire inner read lock FIRST (follows lock ordering invariant)
+                // This prevents deadlock with search_with_filter which holds inner -> dashmap.
+                let index = self.inner.read();
 
                 // Step 3: Add to inner usearch index while holding write lock
                 self.retry_usearch(|| index.add(key, vector), "Failed to add vector")?;
@@ -1018,8 +1019,8 @@ impl VectorIndex for HnswIndex {
         if let Some((_, key)) = self.id_mapping.remove(&id) {
             self.reverse_mapping.remove(&key);
 
-            // Native delete in usearch (serialize with other structural mutations)
-            let index = self.inner.write();
+            // Native delete in usearch (thread-safe, takes &self)
+            let index = self.inner.read();
             self.retry_usearch(|| index.remove(key), "Failed to remove vector")?;
 
             self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
@@ -1128,90 +1129,76 @@ impl VectorIndex for HnswIndex {
 
         let k_capped = k.min(self.max_k);
 
-        if k_capped == 0 {
-            return Ok(Vec::new());
-        }
+        // Use usearch's native filtered search with retry logic for thread contention
+        let index = self.inner.read();
 
-        let max_candidates = self.len().min(self.max_k);
-        if max_candidates == 0 {
-            return Ok(Vec::new());
-        }
-
-        // Avoid running user callbacks while holding the inner index lock.
-        // This prevents callback-induced deadlocks when writers run concurrently.
-        let mut candidate_k = k_capped.min(max_candidates);
-
-        loop {
-            // Retry with exponential backoff to handle thread pool exhaustion.
-            // Under heavy concurrent load, usearch may fail with
-            // "No available threads to lock".
-            let matches = {
-                let index = self.inner.read();
-                let mut maybe_matches = None;
-
-                for attempt in 0..MAX_SEARCH_ATTEMPTS {
-                    match index.search(query, candidate_k) {
-                        Ok(found) => {
-                            maybe_matches = Some(found);
-                            break;
-                        }
-                        Err(e) => {
-                            let error_msg = e.to_string();
-                            if is_retryable_usearch_error(&error_msg)
-                                && attempt + 1 < MAX_SEARCH_ATTEMPTS
-                            {
-                                self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
-                                let delay_ms = 1u64 << attempt;
-                                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                                continue;
-                            }
-
-                            if attempt > 0 {
-                                self.stats
-                                    .search_retry_failures
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-
-                            return Err(Error::Vector(VectorError::IndexError(format!(
-                                "Filtered search failed: {}",
-                                e
-                            ))));
-                        }
-                    }
-                }
-
-                maybe_matches
-                    .expect("filtered search retry loop should have returned or produced matches")
-            };
-
-            let mut filtered = Vec::with_capacity(k_capped.min(candidate_k));
-            for (node_id, similarity) in self.convert_and_sort_matches(matches) {
+        // Create a filter that maps usearch keys to our predicate.
+        //
+        // PERFORMANCE OPTIMIZATION (Issue #206):
+        // We retrieve NodeIds from reverse_mapping without validation.
+        // This is safe because all NodeIds in reverse_mapping were validated
+        // when inserted via add(). The usearch keys come from our own insertions,
+        // so we can trust they map to valid NodeIds.
+        //
+        // This avoids ~1-2ns of validation overhead per candidate node examined.
+        // For searches examining 1,000 nodes, this saves ~1-2μs total.
+        //
+        // DEADLOCK PREVENTION (PR #870):
+        // We set IN_FILTER_CALLBACK flag when calling the user's predicate to detect
+        // and prevent re-entrant modification attempts that would cause deadlock.
+        let reverse_mapping = &self.reverse_mapping;
+        let filter = |key: u64| -> bool {
+            if let Some(node_id_ref) = reverse_mapping.get(&key) {
+                // Set flag to prevent modifications during callback
                 let _guard = FilterCallbackGuard::new();
-                if predicate(&node_id) {
-                    filtered.push((node_id, similarity));
-                    if filtered.len() == k_capped {
-                        break;
+                predicate(node_id_ref.value())
+            } else {
+                false
+            }
+        };
+
+        // Retry with exponential backoff to handle thread pool exhaustion
+        // Under heavy concurrent load, usearch may fail with "No available threads to lock"
+        for attempt in 0..MAX_SEARCH_ATTEMPTS {
+            match index.filtered_search(query, k_capped, filter) {
+                Ok(matches) => {
+                    self.stats
+                        .searches_performed
+                        .fetch_add(1, Ordering::Relaxed);
+
+                    // Convert and sort results using helper function
+                    let results = self.convert_and_sort_matches(matches);
+                    return Ok(results);
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    // Check if this is a transient thread pool exhaustion error
+                    if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
+                        // Track retry for observability
+                        self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
+
+                        // Exponential backoff: 1ms, 2ms, 4ms
+                        let delay_ms = 1u64 << attempt;
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        continue;
                     }
+                    // Non-retryable error or exhausted retries
+                    if attempt > 0 {
+                        // Track that we failed even after retries
+                        self.stats
+                            .search_retry_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Err(Error::Vector(VectorError::IndexError(format!(
+                        "Filtered search failed: {}",
+                        e
+                    ))));
                 }
             }
-
-            if filtered.len() >= k_capped || candidate_k == max_candidates {
-                self.stats
-                    .searches_performed
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok(filtered);
-            }
-
-            let next_candidate_k = (candidate_k.saturating_mul(2)).min(max_candidates);
-            if next_candidate_k == candidate_k {
-                self.stats
-                    .searches_performed
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok(filtered);
-            }
-
-            candidate_k = next_candidate_k;
         }
+
+        // Unreachable: loop always returns from inside
+        unreachable!("Filtered search retry loop should always return from within the loop body")
     }
 
     fn len(&self) -> usize {
@@ -1378,8 +1365,8 @@ impl HnswIndex {
         // This ensures consistency between the index snapshot and the ID mappings.
         let _save_guard = self.save_lock.write();
 
-        // Acquire inner write lock to serialize `save` with concurrent searches.
-        let index = self.inner.write();
+        // Acquire inner read lock.
+        let index = self.inner.read();
 
         // Collect mappings while holding the locks.
         // Memory cost: O(N) allocation (~16MB for 1M nodes), acceptable for infrequent save operation.
@@ -3400,5 +3387,37 @@ mod coverage_tests {
 
         // |1.0-1.5| + |2.0-2.5| + |3.0-3.5| + |4.0-4.5| = 0.5 * 4 = 2.0
         assert!((result - 2.0).abs() < f32::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn test_capacity_check_and_expand() {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .initial_capacity(10)
+            .build()
+            .unwrap();
+
+        // Initially size 0, capacity 10
+        assert_eq!(index.len(), 0);
+
+        // This should pass without expanding
+        index.check_and_expand_capacity(1).unwrap();
+
+        // Fill to capacity
+        for i in 0..10 {
+            let id = NodeId::new(i + 1).unwrap();
+            index.add(id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        }
+
+        assert_eq!(index.len(), 10);
+
+        // This should trigger expansion
+        // Note: we can't easily assert on capacity here without exposing internal usearch state
+        // but we can verify it doesn't error
+        index.check_and_expand_capacity(1).unwrap();
     }
 }

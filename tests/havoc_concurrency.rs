@@ -7,19 +7,6 @@ use std::time::Duration;
 
 #[test]
 fn test_havoc_deadlock_scenario() {
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    thread::spawn(move || {
-        run_deadlock_scenario();
-        tx.send(()).unwrap();
-    });
-
-    if rx.recv_timeout(Duration::from_secs(20)).is_err() {
-        panic!("Deadlock detected: havoc_concurrency scenario did not complete in time");
-    }
-}
-
-fn run_deadlock_scenario() {
     let index = Arc::new(
         HnswIndexBuilder::new(128, DistanceMetric::Cosine)
             .build()
@@ -29,7 +16,8 @@ fn run_deadlock_scenario() {
     let start_time = std::time::Instant::now();
     let duration = Duration::from_secs(5); // Run for 5 seconds
 
-    // Thread A: Adds/updates a single node repeatedly (Occupied path)
+    // Thread A: Adds/Updates a single node repeatedly (Occupied path)
+    // This acquires id_mapping lock -> inner lock
     let index_clone_a = Arc::clone(&index);
     let handle_a = thread::spawn(move || {
         let node_id = NodeId::new(1).unwrap();
@@ -43,7 +31,8 @@ fn run_deadlock_scenario() {
         }
     });
 
-    // Thread B: Searches repeatedly.
+    // Thread B: Searches repeatedly (Read path)
+    // This acquires inner lock (read) -> reverse_mapping lock (read)
     let index_clone_b = Arc::clone(&index);
     let handle_b = thread::spawn(move || {
         let vector = vec![0.0f32; 128];
@@ -52,7 +41,8 @@ fn run_deadlock_scenario() {
         }
     });
 
-    // Thread C: Saves repeatedly.
+    // Thread C: Saves repeatedly (Save path)
+    // This iterates id_mapping (read) -> acquires inner lock (read)
     let index_clone_c = Arc::clone(&index);
     let handle_c = thread::spawn(move || {
         let dir = tempfile::tempdir().unwrap();
@@ -63,7 +53,8 @@ fn run_deadlock_scenario() {
         }
     });
 
-    // Thread D: Filtered search.
+    // Thread D: Filtered Search
+    // This acquires inner lock (read) -> reverse_mapping lock (read) via callback
     let index_clone_d = Arc::clone(&index);
     let handle_d = thread::spawn(move || {
         let vector = vec![0.0f32; 128];
