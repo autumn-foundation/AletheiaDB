@@ -3726,52 +3726,50 @@ mod tests {
 
     #[test]
     fn test_property_map_estimated_heap_size_with_values() {
-        let map = PropertyMapBuilder::new()
-            .insert("name", "Alice") // string with 5 chars
-            .insert("age", 30i64) // primitive, no heap
-            .insert("active", true) // primitive, no heap
+        // Create a map with sufficient capacity to ensure no resizing
+        let map_empty = PropertyMap::with_capacity(100);
+        let empty_size = map_empty.estimated_heap_size();
+
+        let large_string = "x".repeat(10000); // 10KB
+        // builder() consumes the map, potentially reusing the HashMap if distinct
+        let map_with_string = map_empty
+            .builder()
+            .insert("large", large_string.as_str())
             .build();
+        let string_size = map_with_string.estimated_heap_size();
 
-        let size = map.estimated_heap_size();
-
-        // Calculation:
-        // Capacity >= 3 (likely 4 or more)
-        // Per entry overhead: sizeof(PropertyKey) + sizeof(PropertyValue) + 8
-        // Value heap size: "Alice".len() = 5
-
-        let min_overhead_per_entry =
-            std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8;
-        let expected_min_overhead = 3 * min_overhead_per_entry + 5;
-
-        assert!(
-            size >= expected_min_overhead,
-            "Map heap size {} too small (expected at least {})",
-            size,
-            expected_min_overhead
+        // The size difference should be exactly the string length.
+        // Explanation:
+        // 1. We pre-allocated capacity, so the "HashMap overhead" term (capacity * fixed_size)
+        //    should remain constant (assuming no resize).
+        // 2. The new entry's fixed overhead is covered by the pre-allocated capacity term.
+        // 3. The only *additional* heap usage is the dynamic size of the value itself (the string).
+        let delta = string_size - empty_size;
+        assert_eq!(
+            delta,
+            large_string.len(),
+            "Heap size delta should be exactly string length (assuming no resize)"
         );
     }
 
     #[test]
     fn test_property_map_estimated_heap_size_with_vector() {
+        let map_empty = PropertyMap::with_capacity(100);
+        let empty_size = map_empty.estimated_heap_size();
+
         let embedding = vec![0.1f32; 384];
-        let map = PropertyMapBuilder::new()
-            .insert("embedding", PropertyValue::vector(&embedding))
+        let map_with_vector = map_empty
+            .builder()
+            .insert_vector("embedding", &embedding)
             .build();
+        let vector_size = map_with_vector.estimated_heap_size();
 
-        let size = map.estimated_heap_size();
+        let delta = vector_size - empty_size;
+        let expected_delta = embedding.len() * std::mem::size_of::<f32>();
 
-        let vector_data_size = 384 * std::mem::size_of::<f32>(); // 1536
-        let min_overhead_per_entry =
-            std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8;
-
-        // Map has 1 entry
-        let expected_min = vector_data_size + min_overhead_per_entry;
-
-        assert!(
-            size >= expected_min,
-            "Map heap size {} too small (expected at least {})",
-            size,
-            expected_min
+        assert_eq!(
+            delta, expected_delta,
+            "Heap size delta should be exactly vector data size"
         );
     }
 
@@ -4667,5 +4665,70 @@ mod sentry_tests {
         // Mixed types (just to be safe)
         let other = PropertyValue::Int(42);
         assert!(!nan_float.semantically_equal(&other));
+    }
+
+    /// 🎯 Target: GLOBAL_INTERNER concurrency
+    /// 💣 Risk: Race conditions when interning the same new keys from multiple threads.
+    /// 🧪 Strategy: Spawn threads that all insert the SAME set of new keys.
+    /// 🔬 Verification: All threads succeed and see correct data.
+    #[test]
+    fn test_concurrent_interning_stress() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Number of threads and keys
+        const NUM_THREADS: usize = 10;
+        const NUM_KEYS: usize = 100;
+
+        // Barrier to synchronize start
+        let barrier = Arc::new(std::sync::Barrier::new(NUM_THREADS));
+
+        let handles: Vec<_> = (0..NUM_THREADS)
+            .map(|t_id| {
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    // Each thread inserts the same set of keys, forcing contention on interning
+                    let mut builder = PropertyMapBuilder::new();
+                    for i in 0..NUM_KEYS {
+                        let key = format!("concurrent_stress_key_{}", i);
+                        // Also mix in some thread-specific values to ensure no data corruption
+                        builder = builder.insert(&key, (t_id * 1000 + i) as i64);
+                    }
+                    let map = builder.build();
+
+                    // Verify the map
+                    assert_eq!(map.len(), NUM_KEYS);
+                    for i in 0..NUM_KEYS {
+                        let key = format!("concurrent_stress_key_{}", i);
+                        assert_eq!(
+                            map.get(&key).and_then(|v| v.as_int()),
+                            Some((t_id * 1000 + i) as i64)
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    /// 🎯 Target: MAX_VECTOR_DIMENSIONS boundary
+    /// 💣 Risk: Off-by-one errors might cause rejection of valid vectors exactly at the limit.
+    /// 🧪 Strategy: Serialize a vector with exactly MAX_VECTOR_DIMENSIONS.
+    /// 🔬 Verification: Succeeds without panic.
+    #[test]
+    fn test_serialize_vector_into_at_limit() {
+        let max_vector = vec![0.0f32; MAX_VECTOR_DIMENSIONS];
+        let mut buffer = Vec::new();
+        // Should NOT panic
+        serialize_vector_into(&max_vector, &mut buffer);
+
+        // Verify it was serialized correctly
+        let (deserialized, _) = deserialize_vector(&buffer).unwrap();
+        assert_eq!(deserialized.len(), MAX_VECTOR_DIMENSIONS);
     }
 }
