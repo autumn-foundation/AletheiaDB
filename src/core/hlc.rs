@@ -735,6 +735,28 @@ mod tests {
     }
 
     #[test]
+    fn test_evaluate_clock_skew_overflow_coverage() {
+        // This test duplicates integration logic to ensure unit test coverage reports capture the checked_sub branches.
+        // Branch 1: Backward overflow (i64::MIN)
+        let result = evaluate_clock_skew(i64::MIN, MAX_VALID_TIMESTAMP, None, false);
+        if let Err(violation) = result {
+            assert_eq!(violation.direction, ClockSkewDirection::Backward);
+            assert!(violation.drift_us < -1_000_000_000);
+        } else {
+            panic!("Expected violation for backward overflow");
+        }
+
+        // Branch 2: Forward overflow (i64::MAX)
+        let result = evaluate_clock_skew(MAX_VALID_TIMESTAMP, i64::MIN, Some(1000), false);
+        if let Err(violation) = result {
+            assert_eq!(violation.direction, ClockSkewDirection::Forward);
+            assert!(violation.drift_us > 1_000_000_000);
+        } else {
+            panic!("Expected violation for forward overflow");
+        }
+    }
+
+    #[test]
     fn test_as_secs_and_millis() {
         // Test basic conversion
         let secs = 1234567890;
