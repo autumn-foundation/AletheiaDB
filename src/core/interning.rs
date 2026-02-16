@@ -167,12 +167,13 @@ impl StringInterner {
             .entry(arc_str.clone())
             .or_try_insert_with(|| {
                 // Atomically reserve an ID first to prevent capacity check race
-                let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
+                // Use Acquire to ensure we see the latest count, Release to publish our reservation
+                let id_value = self.next_id.fetch_add(1, Ordering::AcqRel);
 
                 // Check if we exceeded capacity AFTER reserving ID
                 if id_value >= self.max_capacity as u32 {
                     // Best effort: undo the reservation
-                    self.next_id.fetch_sub(1, Ordering::Relaxed);
+                    self.next_id.fetch_sub(1, Ordering::AcqRel);
 
                     return Err(crate::utils::error::Error::Storage(
                         crate::utils::error::StorageError::CapacityExceeded {
@@ -215,7 +216,7 @@ impl StringInterner {
         let arc_str: Arc<str> = Arc::from(string);
 
         *self.string_to_id.entry(arc_str.clone()).or_insert_with(|| {
-            let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let id_value = self.next_id.fetch_add(1, Ordering::AcqRel);
             let id = InternedString(id_value);
             self.id_to_string.insert(id, arc_str.clone());
             id
@@ -342,7 +343,7 @@ impl StringInterner {
     pub fn clear(&self) {
         self.string_to_id.clear();
         self.id_to_string.clear();
-        self.next_id.store(0, Ordering::Relaxed);
+        self.next_id.store(0, Ordering::Release);
     }
 
     /// Get all interned strings in ID order.
@@ -351,15 +352,25 @@ impl StringInterner {
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
     pub fn get_all_strings(&self) -> Vec<String> {
-        let count = self.len();
-        let mut strings = vec![String::new(); count];
+        // Use next_id to determine size, as it's the authority on allocated IDs.
+        // self.len() (from string_to_id map) might lag behind during concurrent inserts.
+        // We use Acquire ordering to ensure we see updates from other threads that have
+        // completed their insertions.
+        let estimated_count = self.next_id.load(Ordering::Acquire) as usize;
+        let mut strings = vec![String::new(); estimated_count];
 
         // Collect all (id, string) pairs
         for entry in self.id_to_string.iter() {
             let id = entry.key().as_u32() as usize;
-            if id < count {
-                strings[id] = entry.value().to_string();
+
+            // If we encounter an ID that exceeds our initial estimate (due to race),
+            // resize the vector to accommodate it. This ensures no data is lost
+            // even if the interner is being modified concurrently.
+            if id >= strings.len() {
+                strings.resize(id + 1, String::new());
             }
+
+            strings[id] = entry.value().to_string();
         }
 
         strings

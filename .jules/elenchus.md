@@ -183,3 +183,17 @@
 **Finding:** `test_simd_dot_and_magnitudes_large_vector` uses a very loose epsilon (`0.1`) for comparing SIMD vs Scalar results. This could mask significant precision loss or subtle logic errors in remainder handling.
 **Evidence:** `let epsilon = 0.1;` for a sum around 30,000.
 **Recommendation:** Tighten the epsilon to `0.01` or `0.005` to enforce stricter adherence to scalar precision.
+
+**[Snapshot Truncation via Stale Length]**
+**Module:** `src/core/interning.rs`
+**Severity:** 🔴 Critical
+**Finding:** `StringInterner::get_all_strings` used `self.len()` (from `string_to_id` map) to size the output vector, but iterated `id_to_string` map. Due to race conditions, `id_to_string` could contain entries (inserted first) that were not yet counted in `string_to_id.len()`. This resulted in the last added strings being silently dropped from the snapshot if the vector was sized too small.
+**Evidence:** Created `tests/regression_interning_snapshot.rs` which reliably reproduced the race condition (snapshot length < allocated IDs).
+**Resolution:** Updated `get_all_strings` to use `next_id` (AtomicU32) as the initial size estimate and dynamically resize the vector if larger IDs are encountered during iteration. Upgraded `next_id` operations to `AcqRel`/`Acquire` ordering for better synchronization.
+
+**[HLC Boundary Verification]**
+**Module:** `src/core/hlc.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** Audit of `MAX_VALID_TIMESTAMP` boundaries, logical overflow at `u32::MAX`, and clock skew edge cases confirmed robust implementation.
+**Evidence:** `tests/sentry_hlc_boundaries.rs` (formerly `elenchus_hlc_audit.rs`) passed all strict boundary checks.
+**Recommendation:** Keep `tests/sentry_hlc_boundaries.rs` as a permanent regression suite.
