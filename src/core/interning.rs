@@ -351,12 +351,17 @@ impl StringInterner {
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
     pub fn get_all_strings(&self) -> Vec<String> {
-        let count = self.len();
+        // Use next_id to ensure we capture all allocated IDs, even if string_to_id
+        // (used by len()) hasn't been updated yet. This prevents snapshot truncation
+        // where valid, resolvable IDs are missed because len() lags behind.
+        let count = self.next_id.load(Ordering::Relaxed) as usize;
         let mut strings = vec![String::new(); count];
 
         // Collect all (id, string) pairs
         for entry in self.id_to_string.iter() {
             let id = entry.key().as_u32() as usize;
+            // Note: id < count should always be true since next_id is incremented before insertion,
+            // but we keep the check for safety.
             if id < count {
                 strings[id] = entry.value().to_string();
             }

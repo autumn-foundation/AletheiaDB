@@ -102,9 +102,16 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
+    // Treat vectors with negligible magnitude as zero
+    // This prevents numerical instability from denormal numbers and avoids
+    // assertion failures when dot product slightly exceeds magnitude product
+    if mag_a_sq < SQUARED_MAGNITUDE_THRESHOLD || mag_b_sq < SQUARED_MAGNITUDE_THRESHOLD {
+        return Ok(0.0);
+    }
+
     let magnitude = (mag_a_sq * mag_b_sq).sqrt();
 
-    // Handle zero vectors
+    // Handle zero vectors (redundant but safe)
     if magnitude == 0.0 {
         return Ok(0.0);
     }
