@@ -1434,12 +1434,15 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            // On Windows/CI, Instant is monotonic from boot and may panic if we subtract more than uptime.
-            // We use checked_sub and fallback to a safe past instant if underflow occurs.
-            let now = Instant::now();
-            *observed_at = now
-                .checked_sub(Duration::from_micros(idle_gap_us as u64))
-                .unwrap_or(now);
+
+            // On Windows/CI, Instant is monotonic from boot. If system uptime < idle_gap_us,
+            // subtraction would underflow. We can't simulate the test scenario in that case.
+            if let Some(past_instant) = Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
+                *observed_at = past_instant;
+            } else {
+                eprintln!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: insufficient system uptime");
+                return;
+            }
         }
 
         let result = coordinator.next_commit_timestamp();
