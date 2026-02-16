@@ -1,4 +1,4 @@
-use crate::core::property::MAX_VECTOR_DIMENSIONS;
+use super::constants::MAX_VECTOR_DIMENSIONS;
 use std::fmt;
 
 // ============================================================================
