@@ -622,7 +622,8 @@ pub fn normalize_in_place(v: &mut [f32]) {
     // Use squared magnitude threshold to avoid denormal number issues.
     // See SQUARED_MAGNITUDE_THRESHOLD for details.
     if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {
-        // Leave zero/near-zero vector unchanged
+        // Zero out the vector to match normalize() behavior
+        v.fill(0.0);
         return;
     }
     // Compute 1/sqrt(sq_mag) directly to avoid intermediate variable
@@ -691,4 +692,29 @@ pub fn is_normalized_default(v: &[f32]) -> bool {
     // We can't import NORMALIZATION_TOLERANCE from constants because of visibility/import loops?
     // Actually constants.rs is a sibling.
     is_normalized(v, super::constants::NORMALIZATION_TOLERANCE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::vector::constants::SQUARED_MAGNITUDE_THRESHOLD;
+
+    #[test]
+    fn test_normalize_inconsistency() {
+        // Create a vector with squared magnitude slightly less than threshold (1e-14)
+        // Vector [1e-8, 0.0] has squared magnitude 1e-16
+        let small_val = (SQUARED_MAGNITUDE_THRESHOLD * 0.1).sqrt();
+        let v_orig = vec![small_val];
+
+        // normalize() should return zero vector (it allocates a new one)
+        let v_norm = normalize(&v_orig);
+        assert_eq!(v_norm[0], 0.0, "normalize() should zero out small vectors");
+
+        // normalize_in_place() should also zero out, but based on code reading it returns early
+        let mut v_inplace = v_orig.clone();
+        normalize_in_place(&mut v_inplace);
+
+        // This assertion should now pass
+        assert_eq!(v_inplace[0], 0.0, "normalize_in_place() should zero out small vectors to match normalize()");
+    }
 }
