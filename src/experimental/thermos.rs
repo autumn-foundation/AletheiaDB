@@ -56,7 +56,7 @@ impl<'a> Thermos<'a> {
         let history = self.db.get_node_history(node_id)?;
 
         // Extract vector snapshots: (timestamp_micros, vector)
-        let mut snapshots: Vec<(i64, Vec<f32>)> = Vec::new();
+        let mut snapshots: Vec<(i64, std::sync::Arc<[f32]>)> = Vec::new();
 
         for version in &history.versions {
             let valid_time = version.temporal.valid_time();
@@ -65,7 +65,7 @@ impl<'a> Thermos<'a> {
             if valid_time.start() < window.end() && valid_time.end() > window.start() {
                 // Get the property value from this version
                 if let Some(prop_val) = version.properties.get(property) {
-                    if let Some(vec) = prop_val.as_vector() {
+                    if let Some(arc_vec) = prop_val.as_arc_vector() {
                         let effective_time = valid_time
                             .start()
                             .wallclock()
@@ -73,7 +73,7 @@ impl<'a> Thermos<'a> {
 
                         // We only care about versions strictly inside or starting after window start
                         // to calculate movement *within* the window.
-                        snapshots.push((effective_time, vec.to_vec()));
+                        snapshots.push((effective_time, arc_vec));
                     }
                 }
             }
