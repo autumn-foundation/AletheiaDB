@@ -47,7 +47,7 @@ use crate::utils::error::{Error, Result, StorageError};
 const WAL_MAGIC: [u8; 4] = *b"GWAL";
 
 /// Current WAL format version.
-const WAL_VERSION: u8 = 1;
+const WAL_VERSION: u8 = 2;
 
 /// Size of the WAL segment header (magic + version).
 const WAL_HEADER_SIZE: usize = 5;

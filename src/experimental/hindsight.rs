@@ -301,9 +301,10 @@ impl<'a> Hindsight<'a> {
                 if !self.scenario.removed_edges.contains(&edge_id) {
                     // Also check if target is removed.
                     if let Ok(target) = self.db.current.get_edge_target(edge_id)
-                        && !self.scenario.removed_nodes.contains(&target) {
-                            edges.push(edge_id);
-                        }
+                        && !self.scenario.removed_nodes.contains(&target)
+                    {
+                        edges.push(edge_id);
+                    }
                 }
             }
         }
@@ -314,9 +315,10 @@ impl<'a> Hindsight<'a> {
                 // Check if target is removed (if target was existing node)
                 // For added edges, we have them in memory
                 if let Some(edge) = self.scenario.added_edges.get(&edge_id)
-                    && !self.scenario.removed_nodes.contains(&edge.target) {
-                        edges.push(edge_id);
-                    }
+                    && !self.scenario.removed_nodes.contains(&edge.target)
+                {
+                    edges.push(edge_id);
+                }
             }
         }
 
@@ -366,12 +368,13 @@ impl<'a> Hindsight<'a> {
                 };
 
                 if let Some(target) = target_opt
-                    && !visited.contains(&target) {
-                        visited.insert(target);
-                        let mut new_path = path.clone();
-                        new_path.push(edge_id);
-                        queue.push_back((target, new_path));
-                    }
+                    && !visited.contains(&target)
+                {
+                    visited.insert(target);
+                    let mut new_path = path.clone();
+                    new_path.push(edge_id);
+                    queue.push_back((target, new_path));
+                }
             }
         }
 
@@ -396,19 +399,21 @@ impl<'a> Hindsight<'a> {
         // Scan added nodes
         for (id, node) in &self.scenario.added_nodes {
             if let Some(val) = node.properties.get(property)
-                && let Some(vec) = val.as_vector() {
-                    let score = crate::core::vector::cosine_similarity(vector, vec)?;
-                    candidates.push((*id, score));
-                }
+                && let Some(vec) = val.as_vector()
+            {
+                let score = crate::core::vector::cosine_similarity(vector, vec)?;
+                candidates.push((*id, score));
+            }
         }
 
         // Scan modified nodes (if they have the vector property, they override DB)
         for (id, patch) in &self.scenario.modified_nodes {
             if let Some(val) = patch.get(property)
-                && let Some(vec) = val.as_vector() {
-                    let score = crate::core::vector::cosine_similarity(vector, vec)?;
-                    candidates.push((*id, score));
-                }
+                && let Some(vec) = val.as_vector()
+            {
+                let score = crate::core::vector::cosine_similarity(vector, vec)?;
+                candidates.push((*id, score));
+            }
         }
 
         // 2. Search DB with predicate
