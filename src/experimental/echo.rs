@@ -233,17 +233,29 @@ mod tests {
 
         // Helper to populate history
         let create_node_with_history = |timestamps: Vec<Timestamp>| -> NodeId {
-            let mut tx = db.write_transaction().unwrap();
-            // Create at first timestamp
-            let id = tx
-                .create_node_with_valid_time("Node", props.clone(), Some(timestamps[0]))
-                .unwrap();
-            // Update at subsequent timestamps
+            assert!(
+                !timestamps.is_empty(),
+                "history requires at least one timestamp"
+            );
+
+            // Create and commit the base version first.
+            let id = {
+                let mut tx = db.write_transaction().unwrap();
+                let id = tx
+                    .create_node_with_valid_time("Node", props.clone(), Some(timestamps[0]))
+                    .unwrap();
+                tx.commit().unwrap();
+                id
+            };
+
+            // Apply subsequent versions as committed updates.
             for &ts in &timestamps[1..] {
+                let mut tx = db.write_transaction().unwrap();
                 tx.update_node_with_valid_time(id, props.clone(), Some(ts))
                     .unwrap();
+                tx.commit().unwrap();
             }
-            tx.commit().unwrap();
+
             id
         };
 
