@@ -79,7 +79,7 @@ impl fmt::Display for InternedString {
 /// Used for the ID -> String map where keys are already unique integers.
 /// This avoids the overhead of hashing (SipHash) for lookups.
 #[derive(Default)]
-struct IdentityHasher(u64);
+pub struct IdentityHasher(u64);
 
 impl Hasher for IdentityHasher {
     fn write(&mut self, bytes: &[u8]) {

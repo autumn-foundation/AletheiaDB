@@ -8,9 +8,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
-use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::core::interning::{GLOBAL_INTERNER, IdentityHasher, InternedString};
 use crate::core::vector::SparseVec;
 use crate::utils::error::{Error, Result, StorageError, VectorError};
 
@@ -1445,7 +1446,7 @@ impl From<SparseVec> for PropertyValue {
 /// of unchanged properties across versions.
 #[derive(Clone, PartialEq)]
 pub struct PropertyMap {
-    inner: Arc<HashMap<PropertyKey, PropertyValue>>,
+    inner: Arc<HashMap<PropertyKey, PropertyValue, BuildHasherDefault<IdentityHasher>>>,
     /// Cached serialized size in bytes.
     ///
     /// # Invariants
@@ -1471,7 +1472,7 @@ impl PropertyMap {
     /// Create a new empty property map.
     pub fn new() -> Self {
         PropertyMap {
-            inner: Arc::new(HashMap::new()),
+            inner: Arc::new(HashMap::with_hasher(BuildHasherDefault::default())),
             cached_size: 4, // 4 bytes for the count field (0)
         }
     }
@@ -1479,7 +1480,10 @@ impl PropertyMap {
     /// Create a property map with the specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         PropertyMap {
-            inner: Arc::new(HashMap::with_capacity(capacity)),
+            inner: Arc::new(HashMap::with_capacity_and_hasher(
+                capacity,
+                BuildHasherDefault::default(),
+            )),
             cached_size: 4, // 4 bytes for the count field (0)
         }
     }
@@ -1678,7 +1682,7 @@ impl PropertyMap {
             .into());
         }
 
-        let mut map = HashMap::with_capacity(count);
+        let mut map = HashMap::with_capacity_and_hasher(count, BuildHasherDefault::default());
         // Track the actual logical size of the map to validate against consumed bytes
         let mut calculated_size: usize = 4;
 
@@ -1834,7 +1838,7 @@ impl Default for PropertyMap {
 
 impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
     fn from_iter<I: IntoIterator<Item = (PropertyKey, PropertyValue)>>(iter: I) -> Self {
-        let mut map = HashMap::new();
+        let mut map = HashMap::with_hasher(BuildHasherDefault::default());
         let mut size: usize = 4; // Count field
 
         for (key, value) in iter {
@@ -1870,7 +1874,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
 
 /// Builder for creating or modifying property maps with copy-on-write semantics.
 pub struct PropertyMapBuilder {
-    map: HashMap<PropertyKey, PropertyValue>,
+    map: HashMap<PropertyKey, PropertyValue, BuildHasherDefault<IdentityHasher>>,
     current_size: usize,
 }
 
@@ -1878,7 +1882,7 @@ impl PropertyMapBuilder {
     /// Create a new builder with an empty map.
     pub fn new() -> Self {
         PropertyMapBuilder {
-            map: HashMap::new(),
+            map: HashMap::with_hasher(BuildHasherDefault::default()),
             current_size: 4, // Count field
         }
     }
@@ -3150,7 +3154,7 @@ mod tests {
         let invalid_key = InternedString::from_raw(999999);
 
         // Create a property map and manually insert with invalid key
-        let mut inner_map = HashMap::new();
+        let mut inner_map = HashMap::with_hasher(BuildHasherDefault::default());
         inner_map.insert(invalid_key, PropertyValue::Int(42));
         let map = PropertyMap {
             inner: Arc::new(inner_map),
@@ -3184,7 +3188,7 @@ mod tests {
         // ensures the new `ok_or_else` path is hit correctly.
 
         let invalid_key = InternedString::from_raw(888888);
-        let mut inner_map = HashMap::new();
+        let mut inner_map = HashMap::with_hasher(BuildHasherDefault::default());
         inner_map.insert(invalid_key, PropertyValue::Bool(true));
         let map = PropertyMap {
             inner: Arc::new(inner_map),
@@ -4070,7 +4074,7 @@ mod tests {
     fn test_property_map_debug_fallback() {
         // Create a PropertyMap with a raw unresolved key
         // We must bypass PropertyMapBuilder because it validates keys against the interner
-        let mut map = HashMap::new();
+        let mut map = HashMap::with_hasher(BuildHasherDefault::default());
         let raw_key = InternedString::from_raw(u32::MAX);
         map.insert(raw_key, PropertyValue::Int(42));
 

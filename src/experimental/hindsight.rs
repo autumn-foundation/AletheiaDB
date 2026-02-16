@@ -12,6 +12,8 @@
 //! - **Impact Analysis**: "If I delete this edge, is the graph disconnected?"
 //! - **Planning**: "If I add these 5 steps, does it create a valid plan?"
 
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, MAX_VALID_ID, NodeId, VersionId};
