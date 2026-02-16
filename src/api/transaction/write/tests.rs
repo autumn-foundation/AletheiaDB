@@ -2566,9 +2566,8 @@ mod clock_skew_tests {
 
         let old_observed_at = {
             let mut observed_at = harness.commit_clock_observed_at.lock().unwrap();
-            let old_observed = Instant::now()
-                .checked_sub(Duration::from_secs(2 * 60 * 60))
-                .expect("uptime should support two-hour rollback");
+            let now = Instant::now();
+            let old_observed = now.checked_sub(Duration::from_secs(5)).unwrap_or(now);
             *observed_at = old_observed;
             old_observed
         };
