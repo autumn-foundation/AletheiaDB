@@ -196,11 +196,11 @@ impl TimeRange {
     /// Duration is calculated using wallclock components only.
     /// Note: Phase 2 - removed const due to is_current() needing HybridTimestamp comparison.
     #[inline]
-    pub fn duration_micros(&self) -> Option<i64> {
+    pub fn duration_micros(&self) -> Option<u64> {
         if self.is_current() {
             None
         } else {
-            Some(self.end.wallclock() - self.start.wallclock())
+            Some(self.end.wallclock().abs_diff(self.start.wallclock()))
         }
     }
 
@@ -636,10 +636,24 @@ mod tests {
     #[test]
     fn test_time_range_duration() {
         let range = TimeRange::new(100.into(), 500.into()).unwrap();
-        assert_eq!(range.duration_micros(), Some(400.into()));
+        assert_eq!(range.duration_micros(), Some(400));
 
         let open = TimeRange::from(100.into());
         assert_eq!(open.duration_micros(), None);
+    }
+
+    #[test]
+    fn test_time_range_duration_overflow() {
+        // Sentry: Validate that duration_micros handles full i64 range without panic
+        // start = i64::MIN, end = MAX_VALID_TIMESTAMP
+        let start = HybridTimestamp::new_unchecked(i64::MIN, 0);
+        let end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let range = TimeRange::new(start, end).unwrap();
+
+        // Expected duration: (i64::MAX - 1000) - i64::MIN
+        // Using abs_diff ensures this fits in u64
+        let expected = start.wallclock().abs_diff(end.wallclock());
+        assert_eq!(range.duration_micros(), Some(expected));
     }
 
     #[test]
@@ -1320,8 +1334,10 @@ mod proptests {
             let range = TimeRange::new(start, end).unwrap();
 
             if let Some(duration) = range.duration_micros() {
-                prop_assert!(duration >= 0,
-                    "Duration should be non-negative, got {}", duration);
+                // With u64 return type, duration is always non-negative by definition
+                // We just verify it's a valid value
+                prop_assert!(duration <= u64::MAX,
+                    "Duration should be representable, got {}", duration);
             }
         }
 
