@@ -2551,6 +2551,44 @@ mod clock_skew_tests {
     }
 
     #[test]
+    fn test_clock_skew_failure_does_not_advance_observation_timestamp() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx_with_shared_observation_clock();
+
+        let props = PropertyMapBuilder::new().insert("test", true).build();
+        tx.create_node("Test", props).unwrap();
+
+        {
+            let mut ts = harness.current_timestamp.lock().unwrap();
+            let old_frontier = time::now().wallclock() - (6 * 60 * 60 * 1_000_000);
+            *ts = crate::core::hlc::HybridTimestamp::new(old_frontier, 0).unwrap();
+        }
+
+        let old_observed_at = {
+            let mut observed_at = harness.commit_clock_observed_at.lock().unwrap();
+            let old_observed = Instant::now()
+                .checked_sub(Duration::from_secs(2 * 60 * 60))
+                .expect("uptime should support two-hour rollback");
+            *observed_at = old_observed;
+            old_observed
+        };
+
+        let result = tx.commit();
+        assert!(matches!(
+            result,
+            Err(crate::utils::error::Error::Transaction(
+                TransactionError::ClockSkew { .. }
+            ))
+        ));
+
+        let observed_after_failure = *harness.commit_clock_observed_at.lock().unwrap();
+        assert_eq!(
+            observed_after_failure, old_observed_at,
+            "failed skew validation must not consume idle-time budget"
+        );
+    }
+
+    #[test]
     fn test_clock_skew_allows_idle_forward_drift_with_shared_observation_clock() {
         let harness = TestHarness::new();
         let mut tx = harness.create_tx_with_shared_observation_clock();

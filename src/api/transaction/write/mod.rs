@@ -253,18 +253,22 @@ impl WriteTransaction {
         self.tx_id
     }
 
-    fn adaptive_forward_jump_limit_us(&self, observed_at: Instant) -> Result<i64> {
-        let mut previous_observed_at =
+    fn lock_adaptive_forward_jump_limit(
+        &self,
+        observed_at: Instant,
+    ) -> Result<(std::sync::MutexGuard<'_, Instant>, i64)> {
+        let previous_observed_at =
             self.commit_clock_observed_at
                 .lock()
                 .map_err(|_| TransactionError::LockPoisoned {
                     resource: "commit_clock_observed_at".to_string(),
                 })?;
         let elapsed = observed_at.duration_since(*previous_observed_at);
-        *previous_observed_at = observed_at;
-
         let elapsed_us = i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX);
-        Ok(MAX_FORWARD_JUMP_US.saturating_add(elapsed_us))
+        Ok((
+            previous_observed_at,
+            MAX_FORWARD_JUMP_US.saturating_add(elapsed_us),
+        ))
     }
 
     /// Commit the transaction.
@@ -377,7 +381,8 @@ impl WriteTransaction {
             // Get current physical wallclock
             let current_wallclock = crate::core::temporal::time::now();
             let observed_at = Instant::now();
-            let adaptive_forward_limit_us = self.adaptive_forward_jump_limit_us(observed_at)?;
+            let (mut previous_observed_at, adaptive_forward_limit_us) =
+                self.lock_adaptive_forward_jump_limit(observed_at)?;
 
             let self_heal_clock_skew = is_clock_skew_self_heal_enabled();
             let skew_decision = evaluate_clock_skew(
@@ -459,6 +464,9 @@ impl WriteTransaction {
 
             // Update current_timestamp for next transaction's snapshot
             *ts = commit;
+            // Persist observation only after we successfully advanced the frontier.
+            *previous_observed_at = observed_at;
+            drop(previous_observed_at);
 
             #[cfg(feature = "observability")]
             let wal_start = std::time::Instant::now();
