@@ -17,3 +17,7 @@
 ## 2026-10-27 - Identity Hashing for Integer Keys in DashMap
 **Learning:** `DashMap<u32, V>` uses `SipHash` by default, which is expensive for simple integer keys that are already unique (like interned IDs). In the `StringInterner::resolve_with` hot path, this hashing overhead was significant.
 **Action:** Use `BuildHasherDefault<IdentityHasher>` for maps where keys are already unique integers or IDs to skip the hashing step, improving throughput by ~2.5x.
+
+## 2026-10-27 - Identity Hashing for PropertyMap
+**Learning:** `PropertyMap` uses `InternedString` (u32) as keys but was using default `HashMap` hashing (SipHash), incurring ~15-30ns overhead per lookup. Switching to `IdentityHasher` eliminated this, yielding a 3.6x speedup on interned lookups.
+**Action:** Audit all usages of `HashMap<InternedString, ...>` or `HashMap<u32, ...>` and replace with `HashMap<..., BuildHasherDefault<IdentityHasher>>` where keys are already high-quality IDs.

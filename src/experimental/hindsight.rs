@@ -12,11 +12,13 @@
 //! - **Impact Analysis**: "If I delete this edge, is the graph disconnected?"
 //! - **Planning**: "If I add these 5 steps, does it create a valid plan?"
 
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::graph::{Edge, Node};
-use crate::core::id::{EdgeId, EntityId, MAX_VALID_ID, NodeId, VersionId};
+use crate::core::id::{EdgeId, MAX_VALID_ID, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+use crate::core::property::{PropertyMap, PropertyMapBuilder};
 use crate::utils::error::{Result, StorageError};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -453,7 +455,6 @@ impl<'a> Hindsight<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
