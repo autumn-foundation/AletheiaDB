@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn test_prism_analyze_evolution() {
         use crate::api::transaction::WriteOps;
-        use crate::core::temporal::{time, TimeRange};
+        use crate::core::temporal::{TimeRange, time};
 
         let db = AletheiaDB::new().unwrap();
         // Enable vector index so vectors are allowed
