@@ -69,6 +69,7 @@ fn test_interner_persistence_truncation_race() {
             if let Some(gap_idx) = snapshot.iter().position(|s| s.is_empty()) {
                 let id = InternedString::from_raw(gap_idx as u32);
                 if let Some(actual) = interner_c.resolve_with(id, |s| s.to_string()) {
+                    // Clippy suggestion: collapse nested if
                     if !actual.is_empty() {
                         panic!(
                             "DATA CORRUPTION DETECTED! Snapshot index {} is empty, but actual string is '{}'",

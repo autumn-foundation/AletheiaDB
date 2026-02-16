@@ -387,14 +387,14 @@ impl StringInterner {
         // Second pass: Attempt to fill any gaps (transient race condition)
         // If an ID was allocated but not yet visible during iteration, it might be visible now.
         // We check for empty strings which indicate a gap.
-        for id in 0..len {
-            if strings[id].is_empty() {
+        for (id, s) in strings.iter_mut().enumerate() {
+            if s.is_empty() {
                 // Try to resolve explicitly
                 // We use InternedString::from_raw(id as u32) which is safe here
                 // because we are within the bounds of known allocated IDs (0..=max_id)
                 let intern_id = InternedString::from_raw(id as u32);
-                if let Some(s) = self.resolve_with(intern_id, |s| s.to_string()) {
-                    strings[id] = s;
+                if let Some(resolved) = self.resolve_with(intern_id, |s| s.to_string()) {
+                    *s = resolved;
                 }
             }
         }
