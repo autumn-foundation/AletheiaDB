@@ -804,12 +804,22 @@ mod proptests {
             msg in valid_timestamp(),
             physical in valid_wallclock()
         ) {
-            if let Ok(next) = local.receive(msg, physical) {
-                prop_assert!(next > local, "next > local");
-                prop_assert!(next > msg, "next > msg");
-                prop_assert!(next.wallclock() >= local.wallclock());
-                prop_assert!(next.wallclock() >= msg.wallclock());
-                prop_assert!(next.wallclock() >= physical);
+            match local.receive(msg, physical) {
+                Ok(next) => {
+                    prop_assert!(next > local, "next > local");
+                    prop_assert!(next > msg, "next > msg");
+                    prop_assert!(next.wallclock() >= local.wallclock());
+                    prop_assert!(next.wallclock() >= msg.wallclock());
+                    prop_assert!(next.wallclock() >= physical);
+                }
+                Err(e) => {
+                    // Only overflow errors are expected for valid inputs
+                    prop_assert!(
+                        matches!(e, TemporalError::LogicalCounterOverflow { .. }),
+                        "Unexpected error: {:?}",
+                        e
+                    );
+                }
             }
         }
 
@@ -858,15 +868,27 @@ mod proptests {
             let msg = HybridTimestamp::new(wallclock, msg_logical).unwrap();
 
             // Force physical clock to match, triggering the collision path
-            if let Ok(next) = local.receive(msg, wallclock) {
-                prop_assert!(next > local, "next > local (collision)");
-                prop_assert!(next > msg, "next > msg (collision)");
-                prop_assert_eq!(next.wallclock(), wallclock);
+            match local.receive(msg, wallclock) {
+                Ok(next) => {
+                    prop_assert!(next > local, "next > local (collision)");
+                    prop_assert!(next > msg, "next > msg (collision)");
+                    prop_assert_eq!(next.wallclock(), wallclock);
 
-                // Specifically verify the logical counter logic: max(l1, l2) + 1
-                let expected_logical = local_logical.max(msg_logical).checked_add(1);
-                if let Some(expected) = expected_logical {
-                    prop_assert_eq!(next.logical(), expected);
+                    // Specifically verify the logical counter logic: max(l1, l2) + 1
+                    let expected_logical = local_logical.max(msg_logical).checked_add(1);
+                    if let Some(expected) = expected_logical {
+                        prop_assert_eq!(next.logical(), expected);
+                    } else {
+                        prop_assert!(false, "Expected overflow error, but got Ok");
+                    }
+                }
+                Err(e) => {
+                    // Only overflow errors are expected
+                    prop_assert!(
+                        matches!(e, TemporalError::LogicalCounterOverflow { .. }),
+                        "Unexpected error: {:?}",
+                        e
+                    );
                 }
             }
         }

@@ -3800,12 +3800,66 @@ mod tests {
     fn test_property_map_serialized_size() {
         let map = PropertyMapBuilder::new()
             .insert("name", "Alice")
-            .insert("age", 30)
+            .insert("age", 30i64)
             .build();
 
-        let predicted = map.serialized_size();
+        // Manual calculation:
+        // Count: 4 bytes
+        // Entry 1: "name" -> "Alice"
+        // Key: 4 (len) + 4 ("name") = 8 bytes
+        // Value (String): 1 (tag) + 4 (len) + 5 ("Alice") = 10 bytes
+        // Total entry 1: 18 bytes
+        // Entry 2: "age" -> 30 (Int)
+        // Key: 4 (len) + 3 ("age") = 7 bytes
+        // Value (Int): 1 (tag) + 8 (i64) = 9 bytes
+        // Total entry 2: 16 bytes
+        // Total map: 4 + 18 + 16 = 38 bytes
+
+        let expected_size = 4 + 18 + 16;
+        assert_eq!(
+            map.serialized_size(),
+            expected_size,
+            "Serialized size should match manual calculation"
+        );
+
+        // Also verify it matches actual serialization
         let actual = map.serialize().unwrap().len();
-        assert_eq!(predicted, actual);
+        assert_eq!(expected_size, actual);
+    }
+
+    #[test]
+    fn test_concurrent_property_map_creation() {
+        use std::thread;
+
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                thread::spawn(move || {
+                    let mut builder = PropertyMapBuilder::new();
+                    // Insert shared keys (stress concurrent reads on interner)
+                    builder = builder.insert("shared_key_1", "value1");
+                    builder = builder.insert("shared_key_2", 42i64);
+
+                    // Insert unique keys (stress concurrent writes/interning)
+                    let unique_key = format!("unique_key_{}", i);
+                    builder = builder.insert(&unique_key, i as i64);
+
+                    let map = builder.build();
+                    assert_eq!(map.len(), 3);
+                    assert_eq!(
+                        map.get("shared_key_1").and_then(|v| v.as_str()),
+                        Some("value1")
+                    );
+                    assert_eq!(
+                        map.get(&unique_key).and_then(|v| v.as_int()),
+                        Some(i as i64)
+                    );
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 
     #[test]
