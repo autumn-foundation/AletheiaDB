@@ -1012,6 +1012,28 @@ mod tests {
         ])
     }
 
+    fn try_set_past_observation(coordinator: &ShardCoordinator, duration_us: u64) -> bool {
+        let mut observed_at = coordinator
+            .commit_clock_observed_at
+            .lock()
+            .expect("commit_clock_observed_at lock should be available");
+
+        // On Windows CI, Instant is monotonic from boot. If uptime < duration_us,
+        // strict subtraction panics. We use checked_sub to handle this gracefully.
+        if let Some(past_instant) = Instant::now().checked_sub(Duration::from_micros(duration_us)) {
+            *observed_at = past_instant;
+            true
+        } else {
+            // LCOV_EXCL_START
+            eprintln!(
+                "Skipping test part: system uptime insufficient to simulate idle gap of {}us",
+                duration_us
+            );
+            false
+            // LCOV_EXCL_STOP
+        }
+    }
+
     fn run_distributed_tx(
         coordinator: &ShardCoordinator,
         shards: &[ShardId],
@@ -1429,20 +1451,8 @@ mod tests {
             *frontier = crate::core::hlc::HybridTimestamp::new(old_wallclock, 0).unwrap();
         }
 
-        {
-            let mut observed_at = coordinator
-                .commit_clock_observed_at
-                .lock()
-                .expect("commit_clock_observed_at lock should be available");
-
-            // On Windows CI, Instant is monotonic from boot. If uptime < idle_gap_us,
-            // strict subtraction panics. We use checked_sub to handle this gracefully.
-            if let Some(past_instant) = Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
-                *observed_at = past_instant;
-            } else {
-                eprintln!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime insufficient to simulate idle gap of {}us", idle_gap_us);
-                return;
-            }
+        if !try_set_past_observation(&coordinator, idle_gap_us as u64) {
+            return;
         }
 
         let result = coordinator.next_commit_timestamp();
