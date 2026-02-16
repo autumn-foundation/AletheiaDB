@@ -351,14 +351,51 @@ impl StringInterner {
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
     pub fn get_all_strings(&self) -> Vec<String> {
-        let count = self.len();
-        let mut strings = vec![String::new(); count];
+        // Collect all entries first to determine the actual maximum ID.
+        // We cannot rely on self.len() because it tracks string_to_id size,
+        // which lags behind id_to_string population during concurrent interns.
+        //
+        // This prevents race conditions where valid high IDs are truncated
+        // because lower IDs (gaps) haven't finished inserting yet.
+        let mut entries = Vec::with_capacity(self.len());
+        let mut max_id = 0;
+        let mut has_entries = false;
 
-        // Collect all (id, string) pairs
         for entry in self.id_to_string.iter() {
-            let id = entry.key().as_u32() as usize;
-            if id < count {
-                strings[id] = entry.value().to_string();
+            let id = entry.key().as_u32();
+            let s = entry.value().to_string();
+
+            if id > max_id {
+                max_id = id;
+            }
+            has_entries = true;
+            entries.push((id, s));
+        }
+
+        if !has_entries {
+            return Vec::new();
+        }
+
+        // Create vector sized to fit the largest ID found + 1
+        let len = (max_id as usize) + 1;
+        let mut strings = vec![String::new(); len];
+
+        for (id, s) in entries {
+            strings[id as usize] = s;
+        }
+
+        // Second pass: Attempt to fill any gaps (transient race condition)
+        // If an ID was allocated but not yet visible during iteration, it might be visible now.
+        // We check for empty strings which indicate a gap.
+        for id in 0..len {
+            if strings[id].is_empty() {
+                // Try to resolve explicitly
+                // We use InternedString::from_raw(id as u32) which is safe here
+                // because we are within the bounds of known allocated IDs (0..=max_id)
+                let intern_id = InternedString::from_raw(id as u32);
+                if let Some(s) = self.resolve_with(intern_id, |s| s.to_string()) {
+                    strings[id] = s;
+                }
             }
         }
 
