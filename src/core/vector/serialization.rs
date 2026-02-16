@@ -8,9 +8,9 @@
 
 use std::sync::Arc;
 
-use crate::utils::error::{Error, Result, StorageError, VectorError};
-use super::constants::{MAX_VECTOR_DIMENSIONS, TAG_VECTOR, TAG_SPARSE_VECTOR};
+use super::constants::{MAX_VECTOR_DIMENSIONS, TAG_SPARSE_VECTOR, TAG_VECTOR};
 use super::sparse::SparseVec;
+use crate::utils::error::{Error, Result, StorageError, VectorError};
 
 /// Validates that a vector dimension does not exceed the maximum allowed.
 /// Returns Ok(()) if valid, Err(VectorError::DimensionTooLarge) otherwise.
@@ -821,9 +821,7 @@ mod tests {
         let result = deserialize_sparse_vector(&buffer);
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(
-                VectorError::InvalidSparseVector { reason },
-            )) => {
+            Err(Error::Vector(VectorError::InvalidSparseVector { reason })) => {
                 assert!(reason.contains("Duplicate index"));
             }
             _ => panic!("Expected InvalidSparseVector error, got {:?}", result),
@@ -850,9 +848,7 @@ mod tests {
         let result = deserialize_sparse_vector(&buffer);
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(
-                VectorError::InvalidSparseVector { reason },
-            )) => {
+            Err(Error::Vector(VectorError::InvalidSparseVector { reason })) => {
                 assert!(reason.contains("zero value"));
             }
             _ => panic!("Expected InvalidSparseVector error, got {:?}", result),

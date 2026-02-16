@@ -36,12 +36,12 @@ pub const TAG_BYTES: u8 = 5;
 pub const TAG_ARRAY: u8 = 6;
 // Re-export vector constants from core::vector
 pub use crate::core::vector::constants::{MAX_VECTOR_DIMENSIONS, TAG_SPARSE_VECTOR, TAG_VECTOR};
+use crate::core::vector::serialization::validate_vector_dimensions;
 pub use crate::core::vector::serialization::{
     deserialize_sparse_vector, deserialize_vector, serialize_sparse_vector,
     serialize_sparse_vector_into, serialize_vector, serialize_vector_into,
     try_serialize_vector_into,
 };
-use crate::core::vector::serialization::validate_vector_dimensions;
 
 // ============================================================================
 // Serialization Limits
@@ -886,8 +886,6 @@ impl PropertyValue {
         }
     }
 }
-
-
 
 impl fmt::Display for PropertyValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
