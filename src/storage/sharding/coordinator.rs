@@ -1434,7 +1434,16 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            *observed_at = Instant::now() - Duration::from_micros(idle_gap_us as u64);
+            // Use checked_sub to handle potential underflow on systems with short uptime (e.g. Windows CI)
+            match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
+                Some(past) => *observed_at = past,
+                None => {
+                    println!(
+                        "Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime insufficient to simulate idle gap"
+                    );
+                    return;
+                }
+            }
         }
 
         let result = coordinator.next_commit_timestamp();

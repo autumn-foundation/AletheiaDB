@@ -1,5 +1,7 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, VectorIndex};
+use aletheiadb::index::vector::{
+    DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, VectorIndex,
+};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -91,7 +93,10 @@ fn test_havoc_zombie_remove_race() {
                         let mappings_len = loaded.len_mappings();
 
                         if inner_len > mappings_len {
-                            println!("ZOMBIE DETECTED! Inner: {}, Mappings: {}", inner_len, mappings_len);
+                            println!(
+                                "ZOMBIE DETECTED! Inner: {}, Mappings: {}",
+                                inner_len, mappings_len
+                            );
                             zombie_detected = true;
                             // Don't break immediately, let's see if it persists or happens often
                             // Actually, finding one is enough to fail the test.
