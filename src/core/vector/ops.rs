@@ -715,6 +715,9 @@ mod tests {
         normalize_in_place(&mut v_inplace);
 
         // This assertion should now pass
-        assert_eq!(v_inplace[0], 0.0, "normalize_in_place() should zero out small vectors to match normalize()");
+        assert_eq!(
+            v_inplace[0], 0.0,
+            "normalize_in_place() should zero out small vectors to match normalize()"
+        );
     }
 }
