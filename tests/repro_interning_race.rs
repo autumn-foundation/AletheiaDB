@@ -39,16 +39,14 @@ mod tests {
 
                 // If the snapshot ends with an empty string, it's likely a phantom entry
                 // from a reserved but not yet inserted ID.
-                if let Some(last) = snapshot.last() {
-                    if last.is_empty() && snapshot.len() > 0 {
-                        // Double check: if the last element is empty, but we've interned actual strings,
-                        // it's corrupted unless we actually interned empty string (which we didn't).
-                        // Note: We only intern "s{i}", none are empty.
-                        return Err(format!(
-                            "Phantom empty string detected at end of snapshot! Len: {}, last element is empty.",
-                            snapshot.len()
-                        ));
-                    }
+                if snapshot.last().is_some_and(|s| s.is_empty()) {
+                    // Double check: if the last element is empty, but we've interned actual strings,
+                    // it's corrupted unless we actually interned empty string (which we didn't).
+                    // Note: We only intern "s{i}", none are empty.
+                    return Err(format!(
+                        "Phantom empty string detected at end of snapshot! Len: {}, last element is empty.",
+                        snapshot.len()
+                    ));
                 }
 
                 // Also check for internal gaps if possible, though less likely with monotonic ID
