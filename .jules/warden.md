@@ -39,3 +39,11 @@
 **2026-02-16 - Unchecked Dimensions in HNSW Index**
 **Threat:** The `HnswIndexBuilder` allowed creating indexes with arbitrary dimensions (up to `usize::MAX`). The internal `create_metric_wrapper` function used `unsafe { slice::from_raw_parts(ptr, dims) }`. If a malicious user provided a dimension such that `dims * 4 > isize::MAX`, this would invoke Undefined Behavior (UB) in Rust's slice creation. Additionally, huge dimensions could cause OOM Denial of Service during index construction or loading.
 **Defense:** Enforced `MAX_VECTOR_DIMENSIONS` (100,000) in `HnswIndexBuilder::build`, `HnswConfig::deserialize_from`, `HnswIndex::load`, and `HnswIndex::open_mmap`. This limit (400KB per vector) is sufficient for all reasonable embeddings while preventing UB and massive allocations. Added `tests/warden_hnsw_builder.rs` to verify rejection of excessive dimensions.
+
+**2026-02-16 - Integer Truncation in HNSW Config Deserialization**
+**Threat:** On 32-bit systems, deserializing a `u64` dimension from an index config file into a `usize` could silently truncate a large value (e.g. `2^32 + 10` becomes `10`), bypassing the `MAX_VECTOR_DIMENSIONS` check. This would allow an attacker to bypass dimension limits, potentially leading to buffer overflows or unexpected behavior in the underlying C++ `usearch` library which might use the original file data.
+**Defense:** Hardened `HnswConfig::deserialize_from` in `src/index/vector/hnsw.rs` to validate `u64` values against limits *before* casting to `usize`. Added `test_config_deserialize_integer_truncation_exploit` to verify the fix.
+
+**2026-02-16 - Panic Risk in WAL Segment Reader**
+**Threat:** The `deserialize_node_id` and related helpers in `src/storage/wal/segment_reader.rs` used manual slice indexing (`buffer[offset]`) based on an `offset` parameter. While callers performed bounds checks, any logic error in offset calculation could lead to a panic (index out of bounds), crashing the recovery process.
+**Defense:** Refactored these helpers to accept a byte slice (`&[u8]`) instead of a buffer and offset. The helpers now use `TryInto` to safely parse fixed-size arrays, returning `Result::Err` on failure. Callers in `parse_entry_at` now use `.get(..).ok_or(...)` to safely extract slices, adopting a "Parse, don't validate" pattern that eliminates potential panics.

@@ -317,7 +317,16 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let node_id = deserialize_node_id(buffer, current_offset, "CreateNode")?;
+            let node_id = deserialize_node_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for NodeId".to_string(),
+                        ))
+                    })?,
+                "CreateNode",
+            )?;
             add_offset!(8);
 
             // Read 4-byte InternedString ID
@@ -376,13 +385,40 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let edge_id = deserialize_edge_id(buffer, current_offset, "CreateEdge")?;
+            let edge_id = deserialize_edge_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for EdgeId".to_string(),
+                        ))
+                    })?,
+                "CreateEdge",
+            )?;
             add_offset!(8);
 
-            let source = deserialize_node_id(buffer, current_offset, "CreateEdge source")?;
+            let source = deserialize_node_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for source NodeId".to_string(),
+                        ))
+                    })?,
+                "CreateEdge source",
+            )?;
             add_offset!(8);
 
-            let target = deserialize_node_id(buffer, current_offset, "CreateEdge target")?;
+            let target = deserialize_node_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for target NodeId".to_string(),
+                        ))
+                    })?,
+                "CreateEdge target",
+            )?;
             add_offset!(8);
 
             // Read 4-byte InternedString ID
@@ -440,10 +476,28 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let node_id = deserialize_node_id(buffer, current_offset, "UpdateNode")?;
+            let node_id = deserialize_node_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for NodeId".to_string(),
+                        ))
+                    })?,
+                "UpdateNode",
+            )?;
             add_offset!(8);
 
-            let version_id = deserialize_version_id(buffer, current_offset, "UpdateNode")?;
+            let version_id = deserialize_version_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for VersionId".to_string(),
+                        ))
+                    })?,
+                "UpdateNode",
+            )?;
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
@@ -509,10 +563,28 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let edge_id = deserialize_edge_id(buffer, current_offset, "UpdateEdge")?;
+            let edge_id = deserialize_edge_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for EdgeId".to_string(),
+                        ))
+                    })?,
+                "UpdateEdge",
+            )?;
             add_offset!(8);
 
-            let version_id = deserialize_version_id(buffer, current_offset, "UpdateEdge")?;
+            let version_id = deserialize_version_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for VersionId".to_string(),
+                        ))
+                    })?,
+                "UpdateEdge",
+            )?;
             add_offset!(8);
 
             let (label, properties, valid_from) = if version >= WAL_VERSION {
@@ -604,7 +676,16 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let node_id = deserialize_node_id(buffer, current_offset, "DeleteNode")?;
+            let node_id = deserialize_node_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for NodeId".to_string(),
+                        ))
+                    })?,
+                "DeleteNode",
+            )?;
             add_offset!(8);
 
             let valid_from = if version >= WAL_VERSION {
@@ -634,7 +715,16 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let edge_id = deserialize_edge_id(buffer, current_offset, "DeleteEdge")?;
+            let edge_id = deserialize_edge_id(
+                buffer
+                    .get(current_offset..current_offset + 8)
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::CorruptedData(
+                            "Insufficient buffer for EdgeId".to_string(),
+                        ))
+                    })?,
+                "DeleteEdge",
+            )?;
             add_offset!(8);
 
             let valid_from = if version >= WAL_VERSION {
@@ -688,19 +778,17 @@ pub(crate) fn parse_entry_at(
     Ok((entry, bytes_consumed))
 }
 
-/// Helper to deserialize and validate a NodeId from WAL buffer
+/// Helper to deserialize and validate a NodeId from WAL buffer slice
 #[inline]
-fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<NodeId> {
-    let raw_id = u64::from_le_bytes([
-        buffer[offset],
-        buffer[offset + 1],
-        buffer[offset + 2],
-        buffer[offset + 3],
-        buffer[offset + 4],
-        buffer[offset + 5],
-        buffer[offset + 6],
-        buffer[offset + 7],
-    ]);
+fn deserialize_node_id(data: &[u8], context: &str) -> Result<NodeId> {
+    // Parse, don't validate: Accept a slice and verify length via TryInto
+    let bytes: [u8; 8] = data.try_into().map_err(|_| {
+        Error::Storage(StorageError::CorruptedData(format!(
+            "Invalid buffer length for NodeId in {}",
+            context
+        )))
+    })?;
+    let raw_id = u64::from_le_bytes(bytes);
     NodeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid node ID in WAL {}: {}",
@@ -709,19 +797,16 @@ fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<No
     })
 }
 
-/// Helper to deserialize and validate an EdgeId from WAL buffer
+/// Helper to deserialize and validate an EdgeId from WAL buffer slice
 #[inline]
-fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<EdgeId> {
-    let raw_id = u64::from_le_bytes([
-        buffer[offset],
-        buffer[offset + 1],
-        buffer[offset + 2],
-        buffer[offset + 3],
-        buffer[offset + 4],
-        buffer[offset + 5],
-        buffer[offset + 6],
-        buffer[offset + 7],
-    ]);
+fn deserialize_edge_id(data: &[u8], context: &str) -> Result<EdgeId> {
+    let bytes: [u8; 8] = data.try_into().map_err(|_| {
+        Error::Storage(StorageError::CorruptedData(format!(
+            "Invalid buffer length for EdgeId in {}",
+            context
+        )))
+    })?;
+    let raw_id = u64::from_le_bytes(bytes);
     EdgeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid edge ID in WAL {}: {}",
@@ -730,19 +815,16 @@ fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<Ed
     })
 }
 
-/// Helper to deserialize and validate a VersionId from WAL buffer
+/// Helper to deserialize and validate a VersionId from WAL buffer slice
 #[inline]
-fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result<VersionId> {
-    let raw_id = u64::from_le_bytes([
-        buffer[offset],
-        buffer[offset + 1],
-        buffer[offset + 2],
-        buffer[offset + 3],
-        buffer[offset + 4],
-        buffer[offset + 5],
-        buffer[offset + 6],
-        buffer[offset + 7],
-    ]);
+fn deserialize_version_id(data: &[u8], context: &str) -> Result<VersionId> {
+    let bytes: [u8; 8] = data.try_into().map_err(|_| {
+        Error::Storage(StorageError::CorruptedData(format!(
+            "Invalid buffer length for VersionId in {}",
+            context
+        )))
+    })?;
+    let raw_id = u64::from_le_bytes(bytes);
     VersionId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid version ID in WAL {}: {}",

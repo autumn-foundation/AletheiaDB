@@ -336,31 +336,69 @@ impl HnswConfig {
         let mut buf_u8 = [0u8; 1];
 
         reader.read_exact(&mut buf_u64)?;
-        let dimensions = u64::from_le_bytes(buf_u64) as usize;
+        let dimensions_u64 = u64::from_le_bytes(buf_u64);
 
-        if dimensions > MAX_VECTOR_DIMENSIONS {
+        // Security Check: Validate dimensions against u64 limit BEFORE casting to usize.
+        // This prevents integer truncation exploits on 32-bit systems where a large u64
+        // (e.g. u32::MAX + 10) could wrap to a small valid usize (10).
+        if dimensions_u64 > MAX_VECTOR_DIMENSIONS as u64 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: format!(
                     "dimensions {} exceeds maximum allowed {}",
-                    dimensions, MAX_VECTOR_DIMENSIONS
+                    dimensions_u64, MAX_VECTOR_DIMENSIONS
                 ),
             }));
         }
+        let dimensions = dimensions_u64 as usize;
 
         reader.read_exact(&mut buf_u8)?;
         let metric = DistanceMetric::from_u8(buf_u8[0])?;
 
         reader.read_exact(&mut buf_u64)?;
-        let m = u64::from_le_bytes(buf_u64) as usize;
+        let m_u64 = u64::from_le_bytes(buf_u64);
+        // M limit is small (64), so standard usize cast is fine, but for consistency and safety:
+        if m_u64 > 64 {
+            // Check matches builder limit
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!("M must be in range [1, 64], got {}", m_u64),
+            }));
+        }
+        let m = m_u64 as usize;
 
         reader.read_exact(&mut buf_u64)?;
-        let ef_construction = u64::from_le_bytes(buf_u64) as usize;
+        let ef_construction_u64 = u64::from_le_bytes(buf_u64);
+        if ef_construction_u64 > 4096 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "ef_construction must be in range [10, 4096], got {}",
+                    ef_construction_u64
+                ),
+            }));
+        }
+        let ef_construction = ef_construction_u64 as usize;
 
         reader.read_exact(&mut buf_u64)?;
-        let ef_search = u64::from_le_bytes(buf_u64) as usize;
+        let ef_search_u64 = u64::from_le_bytes(buf_u64);
+        if ef_search_u64 > 4096 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "ef_search must be in range [1, 4096], got {}",
+                    ef_search_u64
+                ),
+            }));
+        }
+        let ef_search = ef_search_u64 as usize;
 
         reader.read_exact(&mut buf_u64)?;
-        let capacity = u64::from_le_bytes(buf_u64) as usize;
+        // Capacity can be large, but must fit in usize
+        let capacity_u64 = u64::from_le_bytes(buf_u64);
+        if capacity_u64 > usize::MAX as u64 {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Capacity {} exceeds architecture limit",
+                capacity_u64
+            ))));
+        }
+        let capacity = capacity_u64 as usize;
 
         // Try read quantization (for backward compatibility)
         let quantization = match reader.read_exact(&mut buf_u8) {
@@ -3338,6 +3376,35 @@ mod warden_tests {
         // Since `usearch` is a black box, we can't easily generate such a file without `HnswIndexBuilder` (which forbids it).
         //
         // We will stick to testing the accessible Rust parts.
+    }
+
+    #[test]
+    fn test_config_deserialize_integer_truncation_exploit() {
+        // Construct dimensions that would wrap to a small value on 32-bit systems
+        // e.g., 2^32 + 10 = 4294967306
+        // On 32-bit: as usize -> 10 (valid)
+        // On 64-bit: as usize -> 4294967306 (invalid > MAX_VECTOR_DIMENSIONS)
+        //
+        // Our fix ensures we check against MAX_VECTOR_DIMENSIONS as u64 BEFORE casting.
+        // So even if we are on 32-bit, it should fail.
+        let huge_dims = (u32::MAX as u64) + 10;
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&huge_dims.to_le_bytes()); // dimensions
+        // Add minimal remaining fields
+        buffer.push(0); // metric
+        buffer.extend_from_slice(&16u64.to_le_bytes()); // m
+        buffer.extend_from_slice(&128u64.to_le_bytes()); // ef_construction
+        buffer.extend_from_slice(&64u64.to_le_bytes()); // ef_search
+        buffer.extend_from_slice(&1000u64.to_le_bytes()); // capacity
+        buffer.push(0); // quantization
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let result = HnswConfig::deserialize_from(&mut cursor);
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("dimensions"));
+        assert!(msg.contains("exceeds maximum allowed"));
     }
 }
 

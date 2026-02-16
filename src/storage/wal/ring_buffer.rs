@@ -1399,4 +1399,28 @@ mod tests {
         };
         let _ = WalRingBuffer::with_config(1024, config);
     }
+
+    #[test]
+    fn test_wraparound_exact_boundary() {
+        // Explicitly test the u64::MAX -> 0 transition
+        let capacity = 4;
+        let mut buf = WalRingBuffer::new(capacity);
+
+        // Start exactly at u64::MAX
+        let start_pos = u64::MAX;
+        buf.set_state_for_wraparound_test(start_pos, start_pos);
+
+        // 1. Append 1 item. write_pos wraps to 0.
+        // pos=u64::MAX. idx=3 (MAX % 4). seq=u64::MAX.
+        // success. seq becomes 0 (MAX + 1). write_pos becomes 0.
+        let entry = PendingEntry::new_async(LSN(1), vec![]);
+        assert!(buf.try_append(entry).is_ok());
+        assert_eq!(buf.write_pos.load(Ordering::Relaxed), 0);
+
+        // 2. Append next. pos=0. idx=0. seq=0.
+        // success. seq becomes 1. write_pos becomes 1.
+        let entry = PendingEntry::new_async(LSN(2), vec![]);
+        assert!(buf.try_append(entry).is_ok());
+        assert_eq!(buf.write_pos.load(Ordering::Relaxed), 1);
+    }
 }
