@@ -367,7 +367,9 @@ impl<'a> Hindsight<'a> {
                     self.db.current.get_edge_target(edge_id).ok()
                 };
 
-                if let Some(target) = target_opt && !visited.contains(&target) {
+                if let Some(target) = target_opt
+                    && !visited.contains(&target)
+                {
                     visited.insert(target);
                     let mut new_path = path.clone();
                     new_path.push(edge_id);

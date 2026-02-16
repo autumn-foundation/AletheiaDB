@@ -1437,12 +1437,16 @@ mod tests {
 
             // Use checked_sub to prevent panic on systems with short uptime (e.g. fresh CI runners)
             // where Instant::now() < idle_gap_us.
-            if let Some(past_instant) = Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
+            if let Some(past_instant) =
+                Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64))
+            {
                 *observed_at = past_instant;
             } else {
                 // If we can't simulate the past instant, we can't perform this test meaningfully on this machine.
                 // Log and return early to avoid panic.
-                eprintln!("Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime too short for drift simulation");
+                eprintln!(
+                    "Skipping test_next_commit_timestamp_allows_idle_forward_drift: system uptime too short for drift simulation"
+                );
                 return;
             }
         }
