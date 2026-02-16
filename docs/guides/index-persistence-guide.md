@@ -20,9 +20,22 @@ AletheiaDB's index persistence layer enables **fast cold starts** by saving all 
 - ✅ Temporal indexes (bi-temporal version chains)
 - ✅ String interner (label/property key deduplication)
 
+## Current Reality (Important)
+
+As of 2026-02, the active restart/recovery path is:
+
+1. Load persisted indexes (including `strings/interner.idx`) via `IndexPersistenceManager`.
+2. Recover using `storage::checkpoint::CheckpointManager`.
+3. Replay WAL entries starting at `manifest.lsn + 1`.
+
+Notes:
+- `StringInterner` is persisted and restored; interned IDs survive restart.
+- Legacy references to `storage::persistence` / `PersistenceManager` are obsolete.
+- `AletheiaDB::open()` is not an API in this codebase.
+
 ## File-Based Persistence Quickstart
 
-**⚠️ Common Mistake:** There is **NO `AletheiaDB::open()` method**. Use `with_unified_config()` instead.
+**⚠️ Common Mistake:** Trying to use `AletheiaDB::open()` for startup. That API does not exist. Use `with_unified_config()` for full index/interner restore.
 
 ### The Right Way (File-Based Persistence)
 
@@ -656,6 +669,14 @@ manager.save_all_indexes(&db)?;
 ### Q: What happens if I delete index files?
 
 **A:** Database falls back to WAL replay on next startup. No data is lost, but startup will be slower.
+
+### Q: Do interned IDs survive restart?
+
+**A:** Yes. `StringInterner` state is persisted in `indexes/strings/interner.idx` and restored before WAL replay. Persisted interned IDs remain resolvable after restart.
+
+### Q: Do checkpoints still matter after LSN changes?
+
+**A:** Yes. Checkpoints are the recovery anchor. Startup loads persisted indexes and then replays WAL beginning at `manifest.lsn + 1`.
 
 ### Q: Can I move index files between machines?
 

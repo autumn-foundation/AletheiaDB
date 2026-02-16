@@ -15,7 +15,7 @@ use aletheiadb::{
         temporal::time,
     },
     storage::{
-        persistence::{CheckpointConfig, PersistenceManager},
+        checkpoint::{CheckpointConfig, CheckpointManager},
         wal::{
             WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -60,11 +60,8 @@ fn test_replay_update_node_basic() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Current storage has updated node
@@ -117,11 +114,8 @@ fn test_replay_update_node_label_change() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Current storage has updated label
@@ -167,11 +161,8 @@ fn test_replay_update_node_with_vector() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Node has updated vector
@@ -219,11 +210,8 @@ fn test_replay_multiple_updates_same_node() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Current storage has final value
@@ -293,11 +281,8 @@ fn test_replay_update_edge_basic() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Current storage has updated edge
@@ -367,11 +352,8 @@ fn test_replay_update_edge_label_change() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, _historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Current storage has updated label
@@ -420,11 +402,8 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
     wal.flush()?;
 
     // When: recover()
-    let config = CheckpointConfig {
-        checkpoint_dir: temp_dir.path().join("checkpoints"),
-        ..Default::default()
-    };
-    let mut manager = PersistenceManager::new(config)?;
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
     let (current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Current storage has 3 nodes with correct values

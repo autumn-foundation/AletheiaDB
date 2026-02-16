@@ -7,7 +7,6 @@
 //! - Tiered storage: Transparent hot/warm/cold data access
 //! - Version management: Version chain structures and compression
 //! - WAL: Write-ahead log for durability and crash recovery
-//! - Persistence: Memory-mapped file storage and checkpointing
 //! - Checkpoint: Full state snapshots via index persistence
 //! - Sharding: Horizontal scaling via domain-based partitioning (ADR-0014)
 
@@ -17,7 +16,6 @@ pub mod current;
 pub mod historical;
 pub mod index_persistence;
 pub mod migration;
-pub mod persistence;
 pub mod redb_cold_storage;
 pub mod sharding;
 pub mod snapshot;
@@ -39,7 +37,6 @@ pub use migration::{
     MigrationCallback, MigrationCandidate, MigrationPolicy, MigrationProgress, MigrationService,
     MigrationStats,
 };
-pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
 pub use redb_cold_storage::{
     AtomicColdStorageStats, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
     RedbColdStorage, RedbConfig, decode_edge_version, decode_node_version, encode_edge_version,

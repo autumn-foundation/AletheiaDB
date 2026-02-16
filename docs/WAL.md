@@ -114,6 +114,13 @@ The WAL uses a versioned binary format to enable future evolution.
 
 This section describes the comprehensive recovery process for AletheiaDB, including checkpoint-based recovery, WAL replay, crash scenarios, and performance characteristics.
 
+### Current Recovery Path (Important)
+
+- Recovery is implemented in `src/storage/checkpoint.rs` via `CheckpointManager`.
+- `StringInterner` is loaded from persisted indexes (`strings/interner.idx`) before WAL replay.
+- WAL replay begins at `manifest.lsn + 1` when persisted state exists.
+- Legacy mentions of `storage::persistence` / `PersistenceManager` are obsolete.
+
 ### Recovery Algorithm
 
 The recovery process follows a **checkpoint-then-replay** strategy to minimize recovery time:
@@ -181,68 +188,34 @@ The recovery process follows a **checkpoint-then-replay** strategy to minimize r
 
 #### Phase 1: Checkpoint Loading
 
-**File Location:** `src/storage/persistence.rs:426-455`
+**File Location:** `src/storage/checkpoint.rs` (`recover`)
 
-The persistence manager scans the checkpoint directory for files matching `checkpoint_*.dat`:
+Recovery loads the persisted index manifest when available and uses its LSN
+as the WAL replay starting point.
 
-```rust
-pub fn find_latest_checkpoint(&self) -> Result<Option<Checkpoint>> {
-    // Scan checkpoint directory
-    let mut checkpoints = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && name.starts_with("checkpoint_")
-                && name.ends_with(".dat")
-            {
-                checkpoints.push(entry.path());
-            }
-        }
-    }
-
-    // Sort by filename (LSN encoded in name) and load latest
-    checkpoints.sort();
-    if let Some(latest) = checkpoints.last() {
-        return Ok(Some(Checkpoint::load(latest)?));
-    }
-    Ok(None)
-}
+**Checkpoint Files (Current):**
+```
+indexes/
+├── manifest.idx          # LSN and index registry
+├── strings/interner.idx  # Interned string table
+├── graph/adjacency.idx   # Current graph state
+├── temporal/versions.idx # Historical versions
+└── vector/*              # Vector index files
 ```
 
-**Checkpoint Format (V2):**
-```
-[Magic: 4 bytes "GFRY"][Version: 4 bytes u32]
-[LSN: 8 bytes u64][Timestamp: 12 bytes HybridTimestamp]
-[NodeCount: 8 bytes u64][EdgeCount: 8 bytes u64][VersionCount: 8 bytes u64]
-[VectorConfig: variable bytes]
-  ├─ enabled: 1 byte
-  ├─ property_name_len: 4 bytes
-  ├─ property_name: variable UTF-8
-  └─ HnswConfig: 41 bytes (dimensions, metric, parameters)
-```
-
-**Version Compatibility:**
-- V1 checkpoints (no vector config) are supported for backward compatibility
-- V2 checkpoints include vector index configuration
-- Future versions will serialize full storage state (currently metadata only)
+**Recovery Point:**
+- `CheckpointManager::recover()` loads persisted indexes
+- WAL replay starts at `manifest.lsn + 1`
 
 #### Phase 2: Vector Index Restoration
 
-**File Location:** `src/storage/persistence.rs:470-479`
+**File Location:** `src/storage/checkpoint.rs`
 
 **CRITICAL:** Vector index configuration MUST be restored BEFORE WAL replay. This ensures that vectors are automatically indexed during node creation, maintaining index consistency.
 
 ```rust
-// Restore vector index configuration BEFORE WAL replay (Issue #292)
-if let Some(cp) = &checkpoint
-    && let Some(vector_config) = &cp.metadata.vector_index_config
-    && vector_config.enabled
-{
-    current.enable_vector_index(
-        &vector_config.property_name,
-        vector_config.config.clone()
-    )?;
-}
+// Recovery loads indexes first, then replays WAL from manifest LSN + 1.
+let (current, historical, lsn) = manager.recover(&wal)?;
 ```
 
 **Why This Matters:**
@@ -252,42 +225,28 @@ if let Some(cp) = &checkpoint
 
 #### Phase 3: WAL Replay
 
-**File Location:** `src/storage/persistence.rs:481-649`
+**File Location:** `src/storage/checkpoint.rs` (`replay_wal`)
 
 The recovery process replays all WAL entries since the checkpoint LSN:
 
 ```rust
-let start_lsn = if let Some(cp) = checkpoint {
-    cp.metadata.lsn.next()  // Start after checkpoint
-} else {
-    LSN::initial()  // No checkpoint, replay from beginning
-};
+let start_lsn = persisted_lsn.map_or(LSN::initial(), |lsn| lsn.next());
 
-// Track max IDs during replay for ID generator initialization
-let mut max_node_id: u64 = 0;
-let mut max_edge_id: u64 = 0;
-let mut max_version_id: u64 = 0;
+// Track max IDs seen in replayed WAL entries
+let mut max_node_id: Option<u64> = None;
+let mut max_edge_id: Option<u64> = None;
+let mut max_version_id: Option<u64> = None;
 let mut next_version_id: u64 = 1;
 
 // Replay WAL entries
 let wal_entries = wal.read_from(start_lsn)?;
 for entry in wal_entries {
     match entry.operation {
-        WalOperation::CreateNode { node_id, label, properties, temporal } => {
-            max_node_id = max_node_id.max(node_id.as_u64());
-            replay_create_node(current, historical, node_id, label, properties, temporal, &mut next_version_id)?;
-            max_version_id = max_version_id.max(next_version_id - 1);
+        WalOperation::CreateNode { node_id, .. } => {
+            max_node_id = Some(max_node_id.map_or(node_id.as_u64(), |m| m.max(node_id.as_u64())));
+            // ... apply operation to current + historical ...
         }
-        WalOperation::UpdateNode { node_id, version_id, label, properties, temporal } => {
-            max_version_id = max_version_id.max(version_id.as_u64());
-            next_version_id = next_version_id.max(version_id.as_u64() + 1);
-            replay_update_node(current, historical, node_id, version_id, label, properties, temporal)?;
-        }
-        WalOperation::DeleteNode { node_id, temporal } => {
-            replay_delete_node(current, historical, node_id, temporal, &mut next_version_id)?;
-            max_version_id = max_version_id.max(next_version_id - 1);
-        }
-        // Similar handling for edges...
+        // Similar handling for update/delete and edge operations...
     }
 }
 ```
@@ -317,16 +276,22 @@ for entry in wal_entries {
 
 #### Phase 4: ID Generator Initialization
 
-**File Location:** `src/storage/persistence.rs:652-658`
+**File Location:** `src/storage/checkpoint.rs` (`replay_wal`)
 
 After WAL replay completes, ID generators are initialized to prevent ID conflicts:
 
 ```rust
 // Initialize ID generators with max_id + 1 (Issue #291)
-// If max_id is 0 (empty WAL), generators start from 1 (default behavior)
-current.init_node_id_generator(max_node_id + 1);
-current.init_edge_id_generator(max_edge_id + 1);
-current.init_version_id_generator(max_version_id + 1);
+// If no IDs were replayed for a type, keep existing generator state.
+if let Some(max_node_id) = max_node_id {
+    current.init_node_id_generator(max_node_id + 1);
+}
+if let Some(max_edge_id) = max_edge_id {
+    current.init_edge_id_generator(max_edge_id + 1);
+}
+if let Some(max_version_id) = max_version_id {
+    current.init_version_id_generator(max_version_id + 1);
+}
 ```
 
 **Why This Matters:**
@@ -443,11 +408,11 @@ match read_segment(path) {
 
 ### API Reference
 
-#### PersistenceManager::recover()
+#### CheckpointManager::recover()
 
-**File Location:** `src/storage/persistence.rs:458-661`
+**File Location:** `src/storage/checkpoint.rs`
 
-Recovers database state from checkpoint and WAL.
+Recovers database state from persisted indexes plus WAL replay.
 
 ```rust
 pub fn recover(
@@ -456,98 +421,23 @@ pub fn recover(
 ) -> Result<(CurrentStorage, HistoricalStorage, LSN)>
 ```
 
-**Parameters:**
-- `wal`: Reference to the WAL system for reading entries
-
-**Returns:**
-- `CurrentStorage`: Recovered current state (includes vector indexes if enabled)
-- `HistoricalStorage`: Recovered historical versions with bi-temporal intervals
-- `LSN`: Final LSN after replay (for continuing WAL operations)
-
-**Errors:**
-- `StorageError::CheckpointError`: Checkpoint loading or parsing failed
-- `StorageError::WalError`: WAL replay failed (corrupted entry, invalid operation)
-- `StorageError::CorruptedData`: Invalid checkpoint format or vector config
-- `StorageError::VectorIndexError`: Vector index restoration failed
-
 **Example:**
 
 ```rust
-use aletheiadb::storage::persistence::{PersistenceManager, CheckpointConfig};
+use aletheiadb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
 use aletheiadb::storage::wal::concurrent_system::ConcurrentWalSystem;
 
-// Initialize WAL and persistence manager
 let wal = ConcurrentWalSystem::new(wal_config)?;
-let mut persistence = PersistenceManager::new(CheckpointConfig::default())?;
-
-// Recover database state
-let (current, historical, recovered_lsn) = persistence.recover(&wal)?;
-
-println!("Recovered to LSN {}", recovered_lsn.0);
-println!("Nodes: {}, Edges: {}", current.node_count(), current.edge_count());
-
-// Set WAL to continue from recovered LSN
-wal.set_next_lsn(recovered_lsn.next());
+let mut manager = CheckpointManager::new(CheckpointConfig::with_data_dir("data/mydb"))?;
+let (current, historical, recovered_lsn) = manager.recover(&wal)?;
 ```
 
 **Internal Behavior:**
 
-1. Scans checkpoint directory and loads latest checkpoint (if exists)
-2. Restores vector index configuration from checkpoint metadata
-3. Replays WAL entries starting from `checkpoint.lsn + 1` (or LSN 1 if no checkpoint)
-4. Tracks maximum IDs during replay for ID generator initialization
-5. Returns fully recovered storage + final LSN
-
-**Important Notes:**
-
-- Recovery uses `TxId(0)` for all replayed operations (original transaction IDs not preserved)
-- Vector index is automatically rebuilt during replay if configuration exists
-- If vector index restoration fails, entire recovery fails (maintains data integrity)
-- Partial recovery is supported for corrupted segments (see error handling)
-
-#### AletheiaDB::open()
-
-**File Location:** `src/db.rs` (implementation pending full integration)
-
-Opens an existing database from persistent storage.
-
-```rust
-// Future API (when fully integrated):
-pub fn open(config: AletheiaDBConfig) -> Result<Self>
-```
-
-**Current Workaround:**
-
-The database doesn't yet have a dedicated `open()` method. To recover a database, use the low-level persistence API:
-
-```rust
-use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
-use aletheiadb::storage::persistence::{PersistenceManager, CheckpointConfig};
-
-// 1. Recover storage from checkpoint + WAL
-let wal_config = WalConfig::default().wal_dir("data/mydb/wal");
-let wal = ConcurrentWalSystem::new(wal_config)?;
-
-let checkpoint_config = CheckpointConfig {
-    checkpoint_dir: "data/mydb/checkpoints".into(),
-    ..Default::default()
-};
-let mut persistence = PersistenceManager::new(checkpoint_config)?;
-let (current, historical, lsn) = persistence.recover(&wal)?;
-
-// 2. Construct database with recovered state
-// (Currently requires manual wiring - will be simplified in future)
-let db = AletheiaDB::with_recovered_state(current, historical, wal, lsn)?;
-```
-
-**Planned API (Issue #XYZ):**
-
-```rust
-// Simplified future API:
-let db = AletheiaDB::open("data/mydb")?;
-```
-
-This will handle checkpoint loading, WAL replay, and state reconstruction automatically.
+1. Loads persisted string/graph/temporal/vector indexes (if present)
+2. Reads checkpoint/manifest LSN
+3. Replays WAL entries starting from `lsn + 1`
+4. Returns recovered state and final LSN
 
 ### Performance Characteristics
 
@@ -571,17 +461,16 @@ The following table shows typical recovery times for different dataset sizes wit
 
 **Key Insights:**
 
-1. **Checkpoint load time** scales linearly with database size (currently metadata-only)
+1. **Checkpoint/index load** is typically much smaller than replay cost
 2. **WAL replay time** scales with number of entries since last checkpoint (not total DB size)
 3. **Worst case:** Crash immediately before checkpoint creation (max WAL replay)
 4. **Best case:** Crash immediately after checkpoint (minimal WAL replay)
 
-**Future Optimization (Full State Checkpoints):**
+**Modern Full-State Path:**
 
-When checkpoints include full storage state (Issue #XYZ), load times will be:
-- Memory-mapped loading: ~100-500ms for 1M nodes (Issue #XYZ)
-- Parallel loading: Graph + Temporal + Vector indexes loaded concurrently
-- Compression: Zstd compression reduces checkpoint size by 60-75%
+For full-state persistence, prefer index-persistence checkpointing (`storage::checkpoint` +
+`storage::index_persistence`) which persists string/graph/temporal/vector state to disk and
+replays WAL from manifest LSN + 1.
 
 #### Recovery Time Estimation
 
@@ -592,7 +481,7 @@ fn estimate_recovery_time(
     edge_count: usize,
     wal_entries_since_checkpoint: usize,
 ) -> Duration {
-    // Checkpoint load (metadata-only, ~10ns per node)
+    // Checkpoint/index load (small, near-constant)
     let checkpoint_load_ms = (node_count + edge_count) as f64 * 0.00001;
 
     // WAL replay (~5µs per entry average)
@@ -733,13 +622,11 @@ To optimize recovery performance:
 
 1. **Transaction ID Loss:** Original transaction IDs are not preserved during recovery. All replayed operations use `TxId(0)`. This means temporal queries cannot distinguish which operations were part of the same transaction after a crash/restart. (Issue #86 tracks WAL format extension to preserve transaction IDs)
 
-2. **Metadata-Only Checkpoints:** Current checkpoints store only metadata (counts, LSN, vector config), not full storage state. This means recovery always replays the entire WAL from the beginning. Full state checkpoints (with memory-mapped loading) are planned for Phase 2. (Issue #XYZ)
+2. **No Incremental Checkpoints Yet:** The current checkpoint system persists full index snapshots rather than incremental diffs. For very large datasets, snapshot writes can take noticeable time.
 
-3. **No Incremental Checkpoints:** Checkpoints are full snapshots, not incremental. For large databases (>10M nodes), checkpoint creation can take several seconds. Incremental checkpoints are planned for future optimization.
+3. **Single-Threaded Replay:** WAL replay is currently single-threaded. For databases with >100K WAL entries since checkpoint, this can be a bottleneck. Parallel replay (by partitioning entries) is planned for Phase 3.
 
-4. **Single-Threaded Replay:** WAL replay is currently single-threaded. For databases with >100K WAL entries since checkpoint, this can be a bottleneck. Parallel replay (by partitioning entries) is planned for Phase 3.
-
-5. **No Streaming Replay:** All WAL entries since checkpoint are loaded into memory before replay begins. For extremely large WAL files (>1M entries), this can consume significant memory. Streaming replay is planned for future enhancement.
+4. **No Streaming Replay:** All WAL entries since checkpoint are loaded into memory before replay begins. For extremely large WAL files (>1M entries), this can consume significant memory. Streaming replay is planned for future enhancement.
 
 See [docs/ARCHITECTURE.md](ARCHITECTURE.md) for long-term recovery optimization plans.
 

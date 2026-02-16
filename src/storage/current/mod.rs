@@ -287,32 +287,6 @@ impl CurrentStorage {
             .map(|entry| entry.config.clone())
     }
 
-    /// Get vector index configuration for checkpoint persistence.
-    ///
-    /// Returns the current vector index configuration if enabled, or disabled
-    /// checkpoint data if no index is active.
-    ///
-    /// # Limitation
-    ///
-    /// Currently, this only returns the configuration for the "default" vector index
-    /// (alphabetically first property name). If multiple vector indexes are enabled,
-    /// only the default one will be included in the checkpoint.
-    pub fn get_vector_index_config(
-        &self,
-    ) -> crate::storage::persistence::VectorIndexCheckpointData {
-        use crate::storage::persistence::VectorIndexCheckpointData;
-
-        self.get_default_vector_property_name()
-            .and_then(|property_name| {
-                let entry = self.vector_indexes.get(&property_name)?;
-                Some(VectorIndexCheckpointData::enabled(
-                    property_name,
-                    entry.value().config.clone(),
-                ))
-            })
-            .unwrap_or_else(VectorIndexCheckpointData::disabled)
-    }
-
     /// Register a vector index (used during index loading from disk).
     ///
     /// This directly inserts the index without any initialization logic.

@@ -5,7 +5,7 @@ mod common;
 use aletheiadb::core::{interning::GLOBAL_INTERNER, property::PropertyMapBuilder, temporal::time};
 use aletheiadb::storage::{
     CurrentStorage, HistoricalStorage, LSN,
-    persistence::{Checkpoint, CheckpointConfig, PersistenceManager},
+    checkpoint::{CheckpointConfig, CheckpointManager},
     wal::{
         WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -44,12 +44,14 @@ fn bench_checkpoint_creation(c: &mut Criterion) {
             );
 
             let temp_dir = TempDir::new().unwrap();
-            let checkpoint_path = temp_dir.path().join("benchmark.dat");
+            let mut manager =
+                CheckpointManager::new(CheckpointConfig::with_data_dir(temp_dir.path())).unwrap();
 
             b.iter(|| {
-                let checkpoint = Checkpoint::new(LSN(100), &current, &historical);
-                checkpoint.save(&checkpoint_path).unwrap();
-                black_box(());
+                let stats = manager
+                    .create_checkpoint(LSN(100), &current, &historical)
+                    .unwrap();
+                black_box(stats.bytes_written);
             });
         });
     }
@@ -63,6 +65,7 @@ fn bench_checkpoint_load(c: &mut Criterion) {
     // Setup: Create checkpoints with different sizes
     for node_count in &[100, 1000, 10000] {
         let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
         let current = CurrentStorage::new();
         let historical = HistoricalStorage::new();
 
@@ -83,21 +86,30 @@ fn bench_checkpoint_load(c: &mut Criterion) {
             node_count
         );
 
-        // Create a checkpoint file
-        let checkpoint_path = temp_dir.path().join("checkpoint_000001.dat");
-        let checkpoint = Checkpoint::new(LSN(100), &current, &historical);
-        checkpoint.save(&checkpoint_path).unwrap();
+        // Create persisted checkpoint state once
+        let mut setup_manager =
+            CheckpointManager::new(CheckpointConfig::with_data_dir(&data_dir)).unwrap();
+        setup_manager
+            .create_checkpoint(LSN(100), &current, &historical)
+            .unwrap();
 
-        let checkpoint_config = CheckpointConfig {
-            checkpoint_dir: temp_dir.path().to_path_buf(),
-            ..Default::default()
-        };
+        // Empty WAL for replay step
+        let wal =
+            ConcurrentWalSystem::new(ConcurrentWalSystemConfig::new(temp_dir.path().join("wal")))
+                .unwrap();
+        wal.flush().unwrap();
 
         // Benchmark loading the checkpoint
         group.bench_function(BenchmarkId::from_parameter(node_count), |b| {
             b.iter(|| {
-                let manager = PersistenceManager::new(checkpoint_config.clone()).unwrap();
-                black_box(manager.find_latest_checkpoint().unwrap());
+                let mut manager =
+                    CheckpointManager::new(CheckpointConfig::with_data_dir(&data_dir)).unwrap();
+                let (loaded_current, loaded_historical, lsn) = manager.recover(&wal).unwrap();
+                black_box((
+                    loaded_current.node_count(),
+                    loaded_historical.stats().total_node_versions,
+                    lsn.0,
+                ));
             });
         });
     }
@@ -109,13 +121,15 @@ fn bench_recovery(c: &mut Criterion) {
     let mut group = c.benchmark_group("recovery");
 
     // Benchmark recovery with different WAL sizes
-    for wal_entries in &[10, 100, 1000] {
+    for wal_entries in &[10u64, 100, 1000] {
         group.bench_function(BenchmarkId::from_parameter(wal_entries), |b| {
             let temp_dir = TempDir::new().unwrap();
+            let wal_dir = temp_dir.path().join("wal");
+            let checkpoint_data_dir = temp_dir.path().join("checkpoints");
 
             // Setup: Create WAL with entries using ConcurrentWalSystem
-            let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path().join("wal"));
-            let wal = ConcurrentWalSystem::new(wal_config.clone()).unwrap();
+            let wal_config = ConcurrentWalSystemConfig::new(wal_dir.clone());
+            let wal = ConcurrentWalSystem::new(wal_config).unwrap();
 
             for i in 0..*wal_entries {
                 let operation = WalOperation::CreateNode {
@@ -132,19 +146,13 @@ fn bench_recovery(c: &mut Criterion) {
             // Create a checkpoint partway through
             let current = CurrentStorage::new();
             let historical = HistoricalStorage::new();
-            let checkpoint_config = CheckpointConfig {
-                checkpoint_dir: temp_dir.path().join("checkpoints"),
-                ..Default::default()
-            };
-
-            // Create checkpoint directory and save checkpoint
-            std::fs::create_dir_all(&checkpoint_config.checkpoint_dir).unwrap();
-            let checkpoint_path = checkpoint_config
-                .checkpoint_dir
-                .join("checkpoint_000001.dat");
+            let mut setup_manager =
+                CheckpointManager::new(CheckpointConfig::with_data_dir(&checkpoint_data_dir))
+                    .unwrap();
             let mid_lsn = wal.current_lsn();
-            let checkpoint = Checkpoint::new(mid_lsn, &current, &historical);
-            checkpoint.save(&checkpoint_path).unwrap();
+            setup_manager
+                .create_checkpoint(mid_lsn, &current, &historical)
+                .unwrap();
 
             // Add more WAL entries after checkpoint
             for i in *wal_entries..(*wal_entries + 100) {
@@ -160,11 +168,20 @@ fn bench_recovery(c: &mut Criterion) {
 
             // Benchmark recovery
             b.iter(|| {
-                let mut manager = PersistenceManager::new(checkpoint_config.clone()).unwrap();
-                // Use ConcurrentWalSystem for recovery (reads same segment files)
-                let wal_sys_config = ConcurrentWalSystemConfig::new(wal_config.wal_dir.clone());
-                let wal = ConcurrentWalSystem::new(wal_sys_config).unwrap();
-                black_box(manager.recover(&wal).unwrap());
+                let mut manager =
+                    CheckpointManager::new(CheckpointConfig::with_data_dir(&checkpoint_data_dir))
+                        .unwrap();
+                // Re-open WAL from the same directory for each benchmark iteration
+                let wal_for_recovery =
+                    ConcurrentWalSystem::new(ConcurrentWalSystemConfig::new(wal_dir.clone()))
+                        .unwrap();
+                let (recovered_current, recovered_historical, lsn) =
+                    manager.recover(&wal_for_recovery).unwrap();
+                black_box((
+                    recovered_current.node_count(),
+                    recovered_historical.stats().total_node_versions,
+                    lsn.0,
+                ));
             });
         });
     }

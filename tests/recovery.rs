@@ -40,13 +40,6 @@
 //!   - LSN tracking
 //!   - Max ID tracking across operation types
 //!
-//! - **`crash_scenarios`** - End-to-end crash scenario tests (Issue #294)
-//!   - Crash before checkpoint (WAL-only recovery)
-//!   - Crash after checkpoint (partial replay)
-//!   - Crash during WAL write (truncated/corrupt entries)
-//!   - Multiple crash/recovery cycles
-//!   - Complex workflow (create/update/delete sequences)
-//!
 //! - **`large_dataset_recovery`** - Large dataset recovery tests (Issue #294)
 //!   - 10,000 nodes and 50,000 edges recovery
 //!   - Recovery time benchmarks (target: <10 seconds)
@@ -77,9 +70,6 @@
 //! # Run individual test
 //! cargo test --test recovery test_replay_create_node_basic
 //!
-//! # Run crash scenario tests
-//! cargo test --test recovery crash_scenarios
-//!
 //! # Run large dataset tests (ignored by default)
 //! cargo test --test recovery large_dataset -- --ignored
 //!
@@ -96,7 +86,6 @@
 //! - ✅ Vector index recovery (Issue #292)
 //! - ✅ Property handling (including vectors, strings, numbers, booleans)
 //! - ✅ Error handling and edge cases
-//! - ✅ Crash scenarios with WAL corruption (Issue #294)
 //! - ✅ Large dataset recovery performance (Issue #294)
 
 #[path = "recovery/replay_create_tests.rs"]
@@ -113,9 +102,6 @@ mod replay_id_tracking_tests;
 
 #[path = "recovery/replay_loop_tests.rs"]
 mod replay_loop_tests;
-
-#[path = "recovery/crash_scenarios.rs"]
-mod crash_scenarios;
 
 #[path = "recovery/large_dataset_recovery.rs"]
 mod large_dataset_recovery;

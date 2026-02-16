@@ -81,7 +81,7 @@ Tests are organized by operation type, with each file covering a specific aspect
 - ✅ Handling gaps in ID sequences
 - ✅ Independence of different ID generators
 - ✅ Deleted entity ID handling (no reuse)
-- ✅ Empty WAL initialization (start from 1)
+- ✅ Empty WAL initialization (start from 0)
 
 **Key Tests:**
 - `test_recover_initializes_node_id_generator` - Node ID continuity
@@ -283,4 +283,4 @@ When adding new recovery tests:
 For questions about the recovery system or tests:
 - See [docs/WAL.md](../../docs/WAL.md) for WAL architecture
 - See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for bi-temporal design
-- See [src/storage/persistence.rs](../../src/storage/persistence.rs) for recovery implementation
+- See [src/storage/checkpoint.rs](../../src/storage/checkpoint.rs) for recovery implementation

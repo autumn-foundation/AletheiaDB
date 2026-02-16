@@ -80,7 +80,7 @@ use aletheiadb::core::{
     temporal::time,
 };
 use aletheiadb::storage::{
-    persistence::{CheckpointConfig, PersistenceManager},
+    checkpoint::{CheckpointConfig, CheckpointManager},
     wal::{
         WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -202,12 +202,9 @@ fn main() -> Result<()> {
     );
 
     // Check for checkpoint
-    let checkpoint_config = CheckpointConfig {
-        checkpoint_dir: checkpoint_dir.clone(),
-        ..Default::default()
-    };
-    let persistence_manager = PersistenceManager::new(checkpoint_config.clone())?;
-    let has_checkpoint = persistence_manager.find_latest_checkpoint()?.is_some();
+    let checkpoint_config = CheckpointConfig::with_data_dir(checkpoint_dir.clone());
+    let checkpoint_manager = CheckpointManager::new(checkpoint_config.clone())?;
+    let has_checkpoint = checkpoint_manager.has_persisted_state();
 
     if has_checkpoint {
         println!("✓ Checkpoint exists (will replay incremental WAL)");
@@ -233,11 +230,11 @@ fn main() -> Result<()> {
     let wal_config_recovery = ConcurrentWalSystemConfig::new(wal_dir);
     let wal_recovery = ConcurrentWalSystem::new(wal_config_recovery)?;
 
-    // Create persistence manager
-    let mut persistence_manager = PersistenceManager::new(checkpoint_config)?;
+    // Create checkpoint manager
+    let mut checkpoint_manager = CheckpointManager::new(checkpoint_config)?;
 
     // Perform recovery and collect statistics
-    let (current, historical, final_lsn) = persistence_manager.recover(&wal_recovery)?;
+    let (current, historical, final_lsn) = checkpoint_manager.recover(&wal_recovery)?;
 
     println!("✓ Recovery completed successfully!\n");
 

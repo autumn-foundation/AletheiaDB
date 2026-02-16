@@ -570,7 +570,7 @@ Index Rebuild:    ~100ms/10K  (HNSW construction from vectors)
 
 ## References
 
-- **Current Implementation**: `src/storage/persistence.rs:429-476` (recover stub)
+- **Current Implementation**: `src/storage/checkpoint.rs` (`CheckpointManager::recover` + `replay_wal`)
 - **Write Transaction Pattern**: `src/api/transaction/write_tx.rs:668-950` (apply_changes)
 - **WAL Format**: `docs/WAL.md` (binary format specification)
 - **Bi-Temporal Semantics**: Issue #290, Issue #12 (time-travel correctness)

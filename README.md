@@ -521,6 +521,8 @@ let db = AletheiaDB::with_unified_config(config);
 
 // Indexes automatically persist in background
 // On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
+// Includes StringInterner persistence (interned label/property IDs survive restart)
+// Recovery path: CheckpointManager loads indexes, then replays WAL from manifest LSN + 1
 ```
 
 See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** for complete guide.

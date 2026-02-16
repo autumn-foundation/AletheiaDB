@@ -1110,9 +1110,9 @@ impl CheckpointManager {
 
         const RECOVERY_TX_ID: u64 = 0;
 
-        let mut max_node_id: u64 = 0;
-        let mut max_edge_id: u64 = 0;
-        let mut max_version_id: u64 = 0;
+        let mut max_node_id: Option<u64> = None;
+        let mut max_edge_id: Option<u64> = None;
+        let mut max_version_id: Option<u64> = None;
         let mut next_version_id: u64 = 1;
 
         let wal_entries = wal.read_from(start_lsn)?;
@@ -1125,7 +1125,10 @@ impl CheckpointManager {
                     properties,
                     valid_from,
                 } => {
-                    max_node_id = max_node_id.max(node_id.as_u64());
+                    max_node_id = Some(match max_node_id {
+                        Some(current_max) => current_max.max(node_id.as_u64()),
+                        None => node_id.as_u64(),
+                    });
 
                     // Label is already an InternedString (no allocation needed!)
                     let interned_label = label;
@@ -1156,7 +1159,10 @@ impl CheckpointManager {
                         false, // not a tombstone
                     )?;
 
-                    max_version_id = max_version_id.max(next_version_id - 1);
+                    max_version_id = Some(match max_version_id {
+                        Some(current_max) => current_max.max(next_version_id - 1),
+                        None => next_version_id - 1,
+                    });
                 }
                 WalOperation::CreateEdge {
                     edge_id,
@@ -1166,7 +1172,10 @@ impl CheckpointManager {
                     properties,
                     valid_from,
                 } => {
-                    max_edge_id = max_edge_id.max(edge_id.as_u64());
+                    max_edge_id = Some(match max_edge_id {
+                        Some(current_max) => current_max.max(edge_id.as_u64()),
+                        None => edge_id.as_u64(),
+                    });
 
                     // Label is already an InternedString (no allocation needed!)
                     let interned_label = label;
@@ -1200,7 +1209,10 @@ impl CheckpointManager {
                         false, // not a tombstone
                     )?;
 
-                    max_version_id = max_version_id.max(next_version_id - 1);
+                    max_version_id = Some(match max_version_id {
+                        Some(current_max) => current_max.max(next_version_id - 1),
+                        None => next_version_id - 1,
+                    });
                 }
                 WalOperation::UpdateNode {
                     node_id,
@@ -1209,7 +1221,10 @@ impl CheckpointManager {
                     properties,
                     valid_from,
                 } => {
-                    max_version_id = max_version_id.max(version_id.as_u64());
+                    max_version_id = Some(match max_version_id {
+                        Some(current_max) => current_max.max(version_id.as_u64()),
+                        None => version_id.as_u64(),
+                    });
                     next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
                     // Label is already an InternedString (no allocation needed!)
@@ -1253,7 +1268,10 @@ impl CheckpointManager {
                     properties,
                     valid_from,
                 } => {
-                    max_version_id = max_version_id.max(version_id.as_u64());
+                    max_version_id = Some(match max_version_id {
+                        Some(current_max) => current_max.max(version_id.as_u64()),
+                        None => version_id.as_u64(),
+                    });
                     next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
                     let current_edge = current.get_edge(edge_id)?;
@@ -1326,7 +1344,10 @@ impl CheckpointManager {
                     )?;
 
                     current.delete_node_direct(node_id, commit_timestamp)?;
-                    max_version_id = max_version_id.max(next_version_id - 1);
+                    max_version_id = Some(match max_version_id {
+                        Some(current_max) => current_max.max(next_version_id - 1),
+                        None => next_version_id - 1,
+                    });
                 }
                 WalOperation::DeleteEdge {
                     edge_id,
@@ -1360,7 +1381,10 @@ impl CheckpointManager {
                     )?;
 
                     current.delete_edge_direct(edge_id)?;
-                    max_version_id = max_version_id.max(next_version_id - 1);
+                    max_version_id = Some(match max_version_id {
+                        Some(current_max) => current_max.max(next_version_id - 1),
+                        None => next_version_id - 1,
+                    });
                 }
                 WalOperation::Checkpoint { .. } => {
                     // Checkpoint markers are informational only during replay
@@ -1370,15 +1394,15 @@ impl CheckpointManager {
 
         let final_lsn = wal.current_lsn();
 
-        // Only update ID generators if we replayed entries with higher IDs
-        // This preserves the values set during load_current_storage if no WAL replay happened
-        if max_node_id > 0 {
+        // Only update ID generators when replay observed IDs for that type.
+        // This preserves values from load_current_storage when no WAL replay happened.
+        if let Some(max_node_id) = max_node_id {
             current.init_node_id_generator(max_node_id + 1);
         }
-        if max_edge_id > 0 {
+        if let Some(max_edge_id) = max_edge_id {
             current.init_edge_id_generator(max_edge_id + 1);
         }
-        if max_version_id > 0 {
+        if let Some(max_version_id) = max_version_id {
             current.init_version_id_generator(max_version_id + 1);
         }
 

@@ -66,7 +66,7 @@ use aletheiadb::core::{
     temporal::time,
 };
 use aletheiadb::storage::{
-    persistence::{CheckpointConfig, PersistenceManager},
+    checkpoint::{CheckpointConfig, CheckpointManager},
     wal::{
         LSN, WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -241,14 +241,11 @@ fn main() -> Result<()> {
 
     println!("Recovery Progress:");
 
-    // Create persistence manager
-    let checkpoint_config = CheckpointConfig {
-        checkpoint_dir,
-        ..Default::default()
-    };
-    let mut persistence_manager = PersistenceManager::new(checkpoint_config)?;
+    // Create checkpoint manager
+    let checkpoint_config = CheckpointConfig::with_data_dir(checkpoint_dir);
+    let mut checkpoint_manager = CheckpointManager::new(checkpoint_config)?;
 
-    // Note: The current PersistenceManager::recover() doesn't support progress callbacks,
+    // Note: The current CheckpointManager::recover() doesn't support progress callbacks,
     // so we'll simulate progress tracking by performing recovery and then showing completion.
     // In a real implementation, you would modify the recovery loop to call progress.update()
     // after each operation.
@@ -262,7 +259,7 @@ fn main() -> Result<()> {
     }
 
     // Perform actual recovery (this happens very fast)
-    let (current, _historical, _final_lsn) = persistence_manager.recover(&wal_recovery)?;
+    let (current, _historical, _final_lsn) = checkpoint_manager.recover(&wal_recovery)?;
 
     progress.finish();
 
@@ -278,7 +275,7 @@ fn main() -> Result<()> {
 
     println!("✅ Recovery completed with progress tracking!");
     println!("\n💡 Note: This example demonstrates manual progress tracking.");
-    println!("   In production, you could extend PersistenceManager::recover()");
+    println!("   In production, you could extend CheckpointManager::recover()");
     println!("   to accept a progress callback for real-time updates.");
 
     Ok(())
