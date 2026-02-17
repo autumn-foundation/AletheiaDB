@@ -1,6 +1,6 @@
+use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::hnsw::{HnswConfig, HnswIndex};
 use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
-use aletheiadb::core::id::NodeId;
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,7 +8,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let count = 10_000;
     let k = 100;
 
-    println!("Setting up index with {} vectors (dims={})...", count, dimensions);
+    println!(
+        "Setting up index with {} vectors (dims={})...",
+        count, dimensions
+    );
     let config = HnswConfig::new(dimensions, DistanceMetric::Cosine)
         .with_m(16)
         .with_ef_construction(100);
@@ -16,7 +19,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add vectors
     for i in 0..count {
-        let vec: Vec<f32> = (0..dimensions).map(|x| (x as f32 + i as f32).sin()).collect();
+        let vec: Vec<f32> = (0..dimensions)
+            .map(|x| (x as f32 + i as f32).sin())
+            .collect();
         index.add(NodeId::new(i as u64 + 1).unwrap(), &vec)?;
     }
 
