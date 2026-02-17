@@ -1416,7 +1416,7 @@ impl HnswIndex {
             .unwrap_or(MAX_VECTOR_CAPACITY); // Cap at max if doubling overflows
 
         // Ensure at least 1024, but don't exceed max
-        Some(new_capacity.max(1024).min(MAX_VECTOR_CAPACITY))
+        Some(new_capacity.clamp(1024, MAX_VECTOR_CAPACITY))
     }
 
     fn save_internal(&self, path: &Path) -> Result<()> {
