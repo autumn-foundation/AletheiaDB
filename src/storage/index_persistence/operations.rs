@@ -1,3 +1,30 @@
+//! Index Persistence Operations
+//!
+//! This module coordinates the high-level operations for saving and loading indexes.
+//! It serves as the "Controller" for the index persistence layer, orchestrating the interaction
+//! between `CurrentStorage`, `HistoricalStorage`, and the disk.
+//!
+//! # Persistence Strategy
+//!
+//! Index persistence allows AletheiaDB to restart quickly (fast cold start) without replaying
+//! the entire Write-Ahead Log (WAL).
+//!
+//! The process involves two main phases:
+//!
+//! 1. **Shutdown Persistence**: When the database shuts down, all in-memory indexes are flushed to disk.
+//! 2. **Startup Loading**: On restart, these indexes are memory-mapped or loaded into memory,
+//!    reconstructing the database state much faster than WAL replay.
+//!
+//! # Dependency Order
+//!
+//! The order of operations is critical due to internal dependencies:
+//!
+//! 1. **String Interner**: Must be saved/loaded first. All other indexes use `InternedString` IDs.
+//! 2. **Graph Index**: Contains the current state (nodes/edges). Defines the max IDs.
+//! 3. **Temporal Index**: Contains historical versions. Links back to nodes/edges.
+//! 4. **Vector Indexes**: Auxiliary indexes for semantic search.
+//! 5. **Manifest**: The final commit record. If present, it guarantees a successful previous save.
+
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -467,6 +494,22 @@ pub(crate) fn persist_temporal_adjacency_index(
 }
 
 /// Persist all indexes on shutdown.
+///
+/// This is the master function for clean shutdown persistence. It ensures that all
+/// indexes are flushed to disk in the correct order, creating a consistent snapshot.
+///
+/// # Workflow
+/// 1. Persist String Interner (basic vocabulary)
+/// 2. Persist Graph Index (current nodes/edges)
+/// 3. Persist Temporal Index (historical versions)
+/// 4. Persist Temporal Adjacency (if enabled)
+/// 5. Persist Vector Indexes (semantic search)
+/// 6. Save Manifest (commit point)
+///
+/// # Manifest
+/// The manifest is written last. On startup, we first check for a valid manifest.
+/// If it exists and matches the WAL LSN, we know the shutdown was clean and we can
+/// safely load the indexes.
 pub(crate) fn persist_all_indexes(
     current: &Arc<CurrentStorage>,
     historical: &Arc<RwLock<HistoricalStorage>>,

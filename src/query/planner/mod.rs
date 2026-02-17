@@ -20,6 +20,37 @@
 //!    - Example: `IndexScan(Person, age > 30)`
 //!
 //! 4. **Execution**: The `PhysicalPlan` is handed off to the `Executor` (not part of this module).
+//!
+//! # Example
+//!
+//! ```rust
+//! use std::sync::Arc;
+//! use aletheiadb::query::planner::{QueryPlanner, Statistics};
+//! use aletheiadb::storage::CurrentStorage;
+//! use aletheiadb::query::builder::QueryBuilder;
+//! use aletheiadb::core::NodeId;
+//!
+//! // 1. Setup dependencies
+//! let storage = Arc::new(CurrentStorage::new());
+//! let stats = Arc::new(Statistics::default());
+//! let planner = QueryPlanner::new(stats, storage);
+//!
+//! // 2. Build a query
+//! let query = QueryBuilder::new()
+//!     .start(NodeId::new(1).unwrap())
+//!     .traverse("KNOWS")
+//!     .filter(aletheiadb::query::ir::Predicate::eq("name", "Alice"))
+//!     .build();
+//!
+//! // 3. Plan the query
+//! match planner.plan(query) {
+//!     Ok(physical_plan) => {
+//!         println!("Plan created with cost: {:?}", physical_plan.estimated_cost);
+//!         // Pass physical_plan to Executor...
+//!     }
+//!     Err(e) => eprintln!("Planning failed: {}", e),
+//! }
+//! ```
 
 pub mod cost;
 pub mod physical;
@@ -44,19 +75,24 @@ pub use rules::OptimizationRule;
 pub use stats::Statistics;
 
 /// Query planner that transforms queries into executable physical plans.
+///
+/// The planner is responsible for:
+/// - converting the high-level `Query` IR into a `LogicalPlan`
+/// - applying optimization rules to the `LogicalPlan`
+/// - selecting the most efficient `PhysicalPlan` based on a cost model
 pub struct QueryPlanner {
-    /// Statistics for cardinality estimation
+    /// Statistics for cardinality estimation (e.g., node counts, property histograms).
     stats: Arc<Statistics>,
-    /// Cost model for plan comparison
+    /// Cost model used to compare different execution plans.
     cost_model: CostModel,
-    /// Optimization rules to apply
+    /// Ordered list of optimization rules to apply.
     rules: Vec<Box<dyn OptimizationRule>>,
-    /// Reference to current storage for index validation
+    /// Reference to current storage, used to validate index existence during planning.
     storage: Arc<CurrentStorage>,
 }
 
 impl QueryPlanner {
-    /// Create a new query planner with the given statistics and storage
+    /// Create a new query planner with the given statistics and storage.
     ///
     /// The storage reference is used to validate that required indexes exist during
     /// query planning, providing earlier and more informative error messages.
@@ -70,21 +106,33 @@ impl QueryPlanner {
         }
     }
 
-    /// Create a planner with custom cost model
+    /// Create a planner with custom cost model.
     #[must_use]
     pub fn with_cost_model(mut self, cost_model: CostModel) -> Self {
         self.cost_model = cost_model;
         self
     }
 
-    /// Create a planner with custom optimization rules
+    /// Create a planner with custom optimization rules.
     #[must_use]
     pub fn with_rules(mut self, rules: Vec<Box<dyn OptimizationRule>>) -> Self {
         self.rules = rules;
         self
     }
 
-    /// Plan a query, returning an executable physical plan
+    /// Plan a query, returning an executable physical plan.
+    ///
+    /// This method orchestrates the entire planning process:
+    /// 1. **Logical Planning**: Converts the `Query` IR into a `LogicalPlan`.
+    /// 2. **Optimization**: Applies registered `OptimizationRule`s to improve the plan.
+    /// 3. **Physical Planning**: Converts the optimized logical plan into a `PhysicalPlan`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The query is invalid (e.g., empty, syntax error).
+    /// - A required index is missing (e.g., vector search without enabled index).
+    /// - An internal planning error occurs.
     pub fn plan(&self, query: Query) -> Result<PhysicalPlan> {
         // 1. Convert query to logical plan
         let logical = self.to_logical_plan(&query)?;
