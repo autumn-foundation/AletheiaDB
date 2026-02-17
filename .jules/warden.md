@@ -39,3 +39,7 @@
 **2026-02-16 - Unchecked Dimensions in HNSW Index**
 **Threat:** The `HnswIndexBuilder` allowed creating indexes with arbitrary dimensions (up to `usize::MAX`). The internal `create_metric_wrapper` function used `unsafe { slice::from_raw_parts(ptr, dims) }`. If a malicious user provided a dimension such that `dims * 4 > isize::MAX`, this would invoke Undefined Behavior (UB) in Rust's slice creation. Additionally, huge dimensions could cause OOM Denial of Service during index construction or loading.
 **Defense:** Enforced `MAX_VECTOR_DIMENSIONS` (100,000) in `HnswIndexBuilder::build`, `HnswConfig::deserialize_from`, `HnswIndex::load`, and `HnswIndex::open_mmap`. This limit (400KB per vector) is sufficient for all reasonable embeddings while preventing UB and massive allocations. Added `tests/warden_hnsw_builder.rs` to verify rejection of excessive dimensions.
+
+**2024-05-22 - [Logic Bug] Cosine Similarity Overflow**
+**Threat:** Floating point inaccuracies in `usearch` distance calculations can result in cosine similarity values slightly greater than 1.0 (e.g., 1.0000001) or less than -1.0. This can cause downstream panics (e.g., `acos` returning NaN) or unexpected behavior in applications assuming strict [-1.0, 1.0] bounds.
+**Defense:** Explicitly clamp the calculated similarity to the valid range [-1.0, 1.0] for Cosine and [0.0, 1.0] for Tanimoto metrics in `HnswIndex::convert_matches`.

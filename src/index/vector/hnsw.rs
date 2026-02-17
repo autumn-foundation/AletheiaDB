@@ -1636,37 +1636,41 @@ impl HnswIndex {
         for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
             if let Some(node_id_ref) = self.reverse_mapping.get(key) {
                 let node_id = *node_id_ref.value();
-
-                // Convert distance to similarity based on metric.
-                // usearch returns distances where lower = more similar (except for some metrics).
-                // We convert to similarity where higher = more similar for consistent API.
-                //
-                // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
-                //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
-                // - Euclidean: usearch returns squared L2 distance, range [0, inf)
-                //   Converting: similarity = -distance, so closer vectors have higher similarity
-                // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
-                //   Converting: similarity = -distance = dot_product, higher is more similar
-                // - Haversine: usearch returns great-circle distance, range [0, pi]
-                //   Converting: similarity = -distance, closer points have higher similarity
-                // - Hamming: usearch returns bit differences count, range [0, dims]
-                //   Converting: similarity = -distance, fewer differences = more similar
-                // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
-                //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
-                let similarity = match self.config.metric {
-                    DistanceMetric::Cosine => 1.0 - distance,
-                    DistanceMetric::Euclidean => -distance,
-                    DistanceMetric::DotProduct => 1.0 - distance,
-                    DistanceMetric::Haversine => -distance,
-                    DistanceMetric::Hamming => -distance,
-                    DistanceMetric::Tanimoto => 1.0 - distance,
-                };
-
+                let similarity = Self::distance_to_similarity(self.config.metric, *distance);
                 results.push((node_id, similarity));
             }
         }
 
         results
+    }
+
+    /// Helper to convert raw usearch distance to similarity score.
+    ///
+    /// # Logic
+    ///
+    /// - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
+    ///   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
+    ///   **Clamped** to [-1.0, 1.0] to handle floating point inaccuracies (e.g. 1.0000001)
+    /// - Euclidean: usearch returns squared L2 distance, range [0, inf)
+    ///   Converting: similarity = -distance, so closer vectors have higher similarity
+    /// - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
+    ///   Converting: similarity = -distance = dot_product, higher is more similar
+    /// - Haversine: usearch returns great-circle distance, range [0, pi]
+    ///   Converting: similarity = -distance, closer points have higher similarity
+    /// - Hamming: usearch returns bit differences count, range [0, dims]
+    ///   Converting: similarity = -distance, fewer differences = more similar
+    /// - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
+    ///   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
+    ///   **Clamped** to [0.0, 1.0] to handle floating point inaccuracies
+    fn distance_to_similarity(metric: DistanceMetric, distance: f32) -> f32 {
+        match metric {
+            DistanceMetric::Cosine => (1.0 - distance).clamp(-1.0, 1.0),
+            DistanceMetric::Euclidean => -distance,
+            DistanceMetric::DotProduct => 1.0 - distance,
+            DistanceMetric::Haversine => -distance,
+            DistanceMetric::Hamming => -distance,
+            DistanceMetric::Tanimoto => (1.0 - distance).clamp(0.0, 1.0),
+        }
     }
 }
 
@@ -3773,5 +3777,96 @@ mod race_recovery_tests {
         assert!(index.inner.read().capacity() > 10);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod clamping_tests {
+    use super::*;
+
+    #[test]
+    fn test_cosine_similarity_clamping() {
+        // Normal case
+        let dist = 0.5; // sim = 0.5
+        assert!(
+            (HnswIndex::distance_to_similarity(DistanceMetric::Cosine, dist) - 0.5).abs()
+                < f32::EPSILON
+        );
+
+        // Identical (dist = 0.0) -> sim = 1.0
+        let dist = 0.0;
+        assert!(
+            (HnswIndex::distance_to_similarity(DistanceMetric::Cosine, dist) - 1.0).abs()
+                < f32::EPSILON
+        );
+
+        // Floating point error: dist slightly negative -> sim > 1.0 -> clamped to 1.0
+        let dist = -0.000001;
+        let sim = HnswIndex::distance_to_similarity(DistanceMetric::Cosine, dist);
+        assert!(
+            (sim - 1.0).abs() < f32::EPSILON,
+            "Expected 1.0, got {}",
+            sim
+        );
+        assert!(sim <= 1.0);
+
+        // Floating point error: dist slightly > 2.0 -> sim < -1.0 -> clamped to -1.0
+        let dist = 2.000001;
+        let sim = HnswIndex::distance_to_similarity(DistanceMetric::Cosine, dist);
+        assert!(
+            (sim - -1.0).abs() < f32::EPSILON,
+            "Expected -1.0, got {}",
+            sim
+        );
+        assert!(sim >= -1.0);
+    }
+
+    #[test]
+    fn test_tanimoto_similarity_clamping() {
+        // Normal case
+        let dist = 0.5; // sim = 0.5
+        assert!(
+            (HnswIndex::distance_to_similarity(DistanceMetric::Tanimoto, dist) - 0.5).abs()
+                < f32::EPSILON
+        );
+
+        // Identical (dist = 0.0) -> sim = 1.0
+        let dist = 0.0;
+        assert!(
+            (HnswIndex::distance_to_similarity(DistanceMetric::Tanimoto, dist) - 1.0).abs()
+                < f32::EPSILON
+        );
+
+        // Floating point error: dist slightly negative -> sim > 1.0 -> clamped to 1.0
+        let dist = -0.000001;
+        let sim = HnswIndex::distance_to_similarity(DistanceMetric::Tanimoto, dist);
+        assert!(
+            (sim - 1.0).abs() < f32::EPSILON,
+            "Expected 1.0, got {}",
+            sim
+        );
+        assert!(sim <= 1.0);
+
+        // Floating point error: dist slightly > 1.0 -> sim < 0.0 -> clamped to 0.0
+        let dist = 1.000001;
+        let sim = HnswIndex::distance_to_similarity(DistanceMetric::Tanimoto, dist);
+        assert!(
+            (sim - 0.0).abs() < f32::EPSILON,
+            "Expected 0.0, got {}",
+            sim
+        );
+        assert!(sim >= 0.0);
+    }
+
+    #[test]
+    fn test_dot_product_no_clamping() {
+        // DotProduct should NOT be clamped as it is unbounded
+        let dist = -100.0; // sim = 101.0
+        let sim = HnswIndex::distance_to_similarity(DistanceMetric::DotProduct, dist);
+        assert!((sim - 101.0).abs() < f32::EPSILON);
+
+        let dist = 100.0; // sim = -99.0
+        let sim = HnswIndex::distance_to_similarity(DistanceMetric::DotProduct, dist);
+        assert!((sim - -99.0).abs() < f32::EPSILON);
     }
 }
