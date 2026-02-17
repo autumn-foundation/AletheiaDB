@@ -86,18 +86,20 @@ fn bench_checkpoint_load(c: &mut Criterion) {
             node_count
         );
 
-        // Create persisted checkpoint state once
-        let mut setup_manager =
-            CheckpointManager::new(CheckpointConfig::with_data_dir(&data_dir)).unwrap();
-        setup_manager
-            .create_checkpoint(LSN(100), &current, &historical)
-            .unwrap();
-
-        // Empty WAL for replay step
+        // Create WAL first so checkpoint LSN is never ahead of WAL.
+        // current_lsn() returns the next allocatable LSN, so subtract 1.
         let wal =
             ConcurrentWalSystem::new(ConcurrentWalSystemConfig::new(temp_dir.path().join("wal")))
                 .unwrap();
         wal.flush().unwrap();
+        let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+
+        // Create persisted checkpoint state once
+        let mut setup_manager =
+            CheckpointManager::new(CheckpointConfig::with_data_dir(&data_dir)).unwrap();
+        setup_manager
+            .create_checkpoint(checkpoint_lsn, &current, &historical)
+            .unwrap();
 
         // Benchmark loading the checkpoint
         group.bench_function(BenchmarkId::from_parameter(node_count), |b| {
@@ -149,7 +151,8 @@ fn bench_recovery(c: &mut Criterion) {
             let mut setup_manager =
                 CheckpointManager::new(CheckpointConfig::with_data_dir(&checkpoint_data_dir))
                     .unwrap();
-            let mid_lsn = wal.current_lsn();
+            // current_lsn() returns next allocatable LSN, so subtract 1.
+            let mid_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
             setup_manager
                 .create_checkpoint(mid_lsn, &current, &historical)
                 .unwrap();
@@ -171,12 +174,7 @@ fn bench_recovery(c: &mut Criterion) {
                 let mut manager =
                     CheckpointManager::new(CheckpointConfig::with_data_dir(&checkpoint_data_dir))
                         .unwrap();
-                // Re-open WAL from the same directory for each benchmark iteration
-                let wal_for_recovery =
-                    ConcurrentWalSystem::new(ConcurrentWalSystemConfig::new(wal_dir.clone()))
-                        .unwrap();
-                let (recovered_current, recovered_historical, lsn) =
-                    manager.recover(&wal_for_recovery).unwrap();
+                let (recovered_current, recovered_historical, lsn) = manager.recover(&wal).unwrap();
                 black_box((
                     recovered_current.node_count(),
                     recovered_historical.stats().total_node_versions,

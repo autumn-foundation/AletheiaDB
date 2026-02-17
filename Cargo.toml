@@ -142,7 +142,7 @@ sql = ["dep:sqlparser"]
 # HTTP server support (Issue #465)
 http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde"]
 
-# MVCC snapshot TDD tests (not yet implemented)
+# MVCC snapshot-focused integration tests
 mvcc-snapshots-tdd = []
 
 # Custom Honeycomb client (replaces libhoney-rust git dependency)
