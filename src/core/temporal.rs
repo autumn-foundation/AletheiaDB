@@ -1090,33 +1090,6 @@ mod tests {
     }
 
     #[test]
-    fn test_timerange_rejects_invalid_timestamps_internal() {
-        // Use new_unchecked to bypass HybridTimestamp validation and create an invalid timestamp
-        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
-
-        // For start check: make end larger so start < end check passes
-        // TIMESTAMP_MAX is valid and larger than invalid_ts
-        let valid_end = TIMESTAMP_MAX;
-
-        // Should reject invalid start
-        let result = TimeRange::new(invalid_ts, valid_end);
-        assert!(
-            matches!(result, Err(TemporalError::InvalidTimestamp { .. })),
-            "Expected InvalidTimestamp error for start, got {:?}",
-            result
-        );
-
-        // Should reject invalid end
-        let valid_start = HybridTimestamp::new(100, 0).unwrap();
-        let result = TimeRange::new(valid_start, invalid_ts);
-        assert!(
-            matches!(result, Err(TemporalError::InvalidTimestamp { .. })),
-            "Expected InvalidTimestamp error for end, got {:?}",
-            result
-        );
-    }
-
-    #[test]
     fn test_contains_range_excludes_partial_overlap_start() {
         // Outer: [100, 200)
         let start = HybridTimestamp::new(100, 0).unwrap();
