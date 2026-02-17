@@ -69,7 +69,7 @@ fn test_havoc_hnsw_capacity_overflow() {
 
     for handle in handles {
         // If thread panics, join will return Err. We want to see that.
-        if let Err(_) = handle.join() {
+        if handle.join().is_err() {
             // Panic detected! Success for Havoc.
             println!("Thread panicked as expected (or unexpectedly).");
         }
