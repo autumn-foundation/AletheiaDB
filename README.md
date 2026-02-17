@@ -400,6 +400,7 @@ let doc_id = db.create_node("Document",
 )?;
 
 // Find similar nodes
+// Note: find_similar excludes the query node itself from results
 let similar = db.find_similar(doc_id, 10)?;
 ```
 
@@ -415,6 +416,10 @@ let tx_time = aletheiadb::core::temporal::time::now();
 
 // Simple: Graph + Vector hybrid
 let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
+for row in results {
+    // Iterate over results (QueryResults is an iterator)
+    println!("Found: {:?}", row?.entity);
+}
 
 // Complex: Full hybrid with builder
 let results = db.query()
@@ -422,9 +427,18 @@ let results = db.query()
     .start(alice_id)                   // Graph: start node
     .traverse("KNOWS")                 // Graph: traverse edges
     .rank_by_similarity(&embedding, 10) // Vector: rank by similarity
-    .filter(Predicate::gt("score", 0.8)) // Filter: high similarity only
     .with_provenance()                 // Include metadata
     .execute(&db)?;
+
+for row in results {
+    // Access score from metadata
+    let row = row?;
+    if let Some(score) = row.score {
+        if score > 0.8 {
+            println!("High similarity match: {:?}", row.entity);
+        }
+    }
+}
 
 // Property-specific vector queries
 let results = db.query()
@@ -471,18 +485,17 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
-use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
+use aletheiadb::{AletheiaDB, properties, WriteOps};
+// ⚠️ REQUIRES FEATURE 'NOVA'
+// Enable in Cargo.toml: features = ["nova"]
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
-
-// Ensure you have features = ["nova"] enabled in Cargo.toml
 
 // 1. Setup database and node (for self-contained example)
 let db = AletheiaDB::new().unwrap();
 let node_id = db.write(|tx| {
-    tx.create_node("Person", PropertyMapBuilder::new()
-        .insert("name", "Alice")
-        .build()
-    )
+    tx.create_node("Person", properties! {
+        "name" => "Alice"
+    })
 })?;
 
 // 2. Generate natural language history of a node
@@ -495,7 +508,7 @@ for event in narrative {
 
     for change in event.changes {
         println!("  - {}", change);
-        // Output: "  - Initial property 'name': 'Alice'"
+        // Output: "  - Initial property 'name': '"Alice"'"
     }
 }
 ```
@@ -629,21 +642,24 @@ See **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** for compl
 For unlimited historical depth with disk-backed cold storage:
 
 ```rust
-use aletheiadb::storage::{
-    HistoricalStorage, TieredStorage, TieredStorageConfig,
-    RedbColdStorage, RedbConfig,
-};
-use std::sync::Arc;
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::config::HistoricalConfigBuilder;
+use std::time::Duration;
 
-// Create cold storage backend
-let cold = RedbColdStorage::new("data/cold.redb", RedbConfig::default())?;
+// Configure cold storage via the unified config builder
+let config = AletheiaDBConfig::builder()
+    .historical(
+        HistoricalConfigBuilder::new()
+            .enable_cold_storage(true)
+            .cold_storage_path("data/cold.redb")
+            .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
+            .max_hot_versions(1000)
+            .build(),
+    )
+    .build();
 
-// Create tiered storage
-let tiered = TieredStorage::with_default_config(Arc::new(cold));
-
-// Configure historical storage
-let mut historical = HistoricalStorage::new();
-historical.set_tiered_storage(Arc::new(tiered));
+// Cold storage automatically initialized!
+let db = AletheiaDB::with_unified_config(config)?;
 ```
 
 See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** for complete guide.
