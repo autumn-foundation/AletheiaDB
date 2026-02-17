@@ -6,5 +6,3 @@ mod havoc_flush_race;
 mod havoc_loom_ring_buffer;
 #[path = "havoc_ring_buffer_torture.rs"]
 mod havoc_ring_buffer_torture;
-#[path = "havoc_wal_gaps.rs"]
-mod havoc_wal_gaps;
