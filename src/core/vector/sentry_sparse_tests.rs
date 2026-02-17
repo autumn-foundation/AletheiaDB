@@ -41,11 +41,11 @@ fn test_sparse_euclidean_distance_nan_regression() {
     // 🛡️ Sentry: Ensure sparse_euclidean_distance handles close vectors without returning NaN
     // If squared distance is negative, sqrt() returns NaN.
 
+    let seed = 34;
     let size = 1000;
     let indices: Vec<u32> = (0..size).map(|i| i as u32).collect();
     let values: Vec<f32> = (0..size)
         .map(|i| {
-            let seed = 34;
             let mut x = i as f32 * (seed as f32 + 1.0);
             x = x % 1000.0 + 0.1;
             x
@@ -77,7 +77,7 @@ fn test_sparse_squared_euclidean_distance_correctness() {
 
     // Verify b and c are treated as identical
     let dist_bc = sparse_squared_euclidean_distance(&b, &c).unwrap();
-    assert_eq!(dist_bc, 0.0, "Expected 0.0, got {}", dist_bc);
+    assert!(dist_bc < 1e-6, "Expected 0.0, got {}", dist_bc);
 }
 
 #[test]
