@@ -91,6 +91,9 @@ pub mod validation;
 
 pub(crate) mod simd;
 
+/// Serialization utilities for vectors.
+pub mod serialization;
+
 #[cfg(test)]
 mod sentry_tests;
 
@@ -106,6 +109,7 @@ mod tests;
 pub use constants::*;
 pub use metric::*;
 pub use ops::*;
+pub use serialization::*;
 pub use sparse::*;
 pub use types::*;
 pub use validation::*;
