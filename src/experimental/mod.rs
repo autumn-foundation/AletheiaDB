@@ -59,3 +59,7 @@ pub mod thermos;
 #[cfg(feature = "nova")]
 /// Sentinel: Semantic Firewall for validating data insertion.
 pub mod sentinel;
+
+#[cfg(feature = "nova")]
+/// Wormhole: Detecting Semantic-Structural Gaps.
+pub mod wormhole;
