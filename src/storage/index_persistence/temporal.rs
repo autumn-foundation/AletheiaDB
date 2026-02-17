@@ -1,4 +1,36 @@
 //! Temporal index persistence.
+//!
+//! This module handles the serialization and deserialization of temporal index data,
+//! which includes the version history of all nodes and edges.
+//!
+//! # Persistence Format
+//!
+//! The temporal index is stored as a `TemporalIndexData` struct, serialized using `bitcode`
+//! and protected by a CRC32 checksum.
+//!
+//! File structure:
+//! ```text
+//! [bitcode_data][crc32_checksum_4_bytes]
+//! ```
+//!
+//! The `TemporalIndexData` contains:
+//! - `node_versions`: List of all node versions (both Anchors and Deltas).
+//! - `edge_versions`: List of all edge versions (both Anchors and Deltas).
+//!
+//! # Version Entries
+//!
+//! Versions are persisted as `NodeVersionEntry` and `EdgeVersionEntry` structs, which flatten
+//! the complex `VersionData` enum into a format suitable for serialization.
+//!
+//! - **Anchors**: Store full property maps.
+//! - **Deltas**: Store only changed properties and a list of removed keys.
+//!
+//! # Vector Deltas
+//!
+//! Special handling is required for `VectorDelta`s:
+//! - `VectorDelta::Full` is persisted as a regular property value.
+//! - `VectorDelta::Sparse` **CANNOT** be persisted directly to prevent data loss. It must be
+//!   materialized into a full vector before persistence using `PropertyDelta::materialize_vector_deltas()`.
 
 use std::fs;
 use std::path::Path;
@@ -18,9 +50,20 @@ use super::{MANIFEST_VERSION, TEMPORAL_MAGIC};
 
 /// Convert NodeVersion to NodeVersionEntry for persistence.
 ///
+/// This function flattens the `NodeVersion` structure into a `NodeVersionEntry` suitable for disk storage.
+/// It handles both `Anchor` and `Delta` versions.
+///
+/// # Vector Delta Handling
+///
+/// If the version contains `VectorDelta::Sparse`, this function will return an error.
+/// Sparse deltas rely on the base version to be fully reconstructed, which is complex during persistence.
+/// Therefore, sparse deltas must be materialized (converted to full vectors) before persistence.
+///
 /// # Errors
 ///
-/// Returns an error if property conversion fails (e.g., unsupported Array type).
+/// Returns an error if:
+/// - Property conversion fails (e.g., unsupported Array type).
+/// - A `VectorDelta::Sparse` is encountered (preventing data loss).
 pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
     let valid_time = version.temporal.valid_time();
     let tx_time = version.temporal.transaction_time();
@@ -109,9 +152,11 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
 
 /// Convert EdgeVersion to EdgeVersionEntry for persistence.
 ///
+/// Similar to `convert_node_version`, this flattens `EdgeVersion` for storage.
+///
 /// # Errors
 ///
-/// Returns an error if property conversion fails (e.g., unsupported Array type).
+/// Returns an error if property conversion fails or `VectorDelta::Sparse` is encountered.
 pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
     let valid_time = version.temporal.valid_time();
     let tx_time = version.temporal.transaction_time();
@@ -193,6 +238,9 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
 }
 
 /// Restore NodeVersionEntry back to NodeVersion.
+///
+/// This reconstructs the in-memory `NodeVersion` from the persisted entry.
+/// It resolves interned strings and rebuilds `VersionData` (Anchor or Delta).
 ///
 /// # Arguments
 ///
@@ -280,6 +328,8 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
 }
 
 /// Restore EdgeVersionEntry back to EdgeVersion.
+///
+/// Reconstructs the in-memory `EdgeVersion` from the persisted entry.
 ///
 /// # Arguments
 ///
@@ -380,6 +430,10 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
 
 /// Restore temporal index data into HistoricalStorage.
 ///
+/// This function populates the `HistoricalStorage` with versions loaded from disk.
+/// It also triggers `rebuild_version_chains()` to reconstruct the linked lists
+/// of versions (prev/next pointers).
+///
 /// # Arguments
 ///
 /// * `data` - The temporal index data loaded from disk
@@ -433,7 +487,12 @@ pub fn restore_into_historical_storage(
 ///
 /// Format: `[bitcode_data][crc32_checksum_4_bytes]`
 ///
-/// Uses write-temp-then-rename to prevent corruption on crash.
+/// Uses `atomic_write` (write-temp-then-rename) to prevent corruption if the
+/// process crashes during write.
+///
+/// # Errors
+///
+/// Returns an error if serialization or file I/O fails.
 pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> {
     let encoded = bitcode::encode(data);
 
@@ -451,6 +510,18 @@ pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> 
 }
 
 /// Load temporal index data from disk and validate CRC32 checksum.
+///
+/// # Validation
+///
+/// This function performs strict validation:
+/// - File size check (against `MAX_TEMPORAL_INDEX_FILE_SIZE`)
+/// - CRC32 checksum verification
+/// - Magic bytes check (`TEMPORAL_MAGIC`)
+/// - Version check (`MANIFEST_VERSION`)
+///
+/// # Errors
+///
+/// Returns an error if the file is missing, corrupted, or incompatible.
 pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
     let metadata = fs::metadata(path)?;
     if metadata.len() > super::MAX_TEMPORAL_INDEX_FILE_SIZE {

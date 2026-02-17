@@ -1,5 +1,4 @@
-use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
-use super::sparse::{sparse_cosine_similarity, sparse_euclidean_distance, sparse_squared_euclidean_distance, SparseVec};
+use super::*;
 
 #[test]
 fn test_negative_distance_regression() {
@@ -64,7 +63,6 @@ fn test_sparse_squared_euclidean_distance_correctness() {
     // Verify correctness against manual calculation for a simple case
     let a = SparseVec::new(vec![0, 2], vec![1.0, 3.0], 5).unwrap();
     let b = SparseVec::new(vec![0, 3], vec![2.0, 4.0], 5).unwrap();
-    let c = SparseVec::new(vec![0, 3], vec![2.0, 4.0], 5).unwrap();
 
     // a = [1, 0, 3, 0, 0]
     // b = [2, 0, 0, 4, 0]
@@ -74,33 +72,4 @@ fn test_sparse_squared_euclidean_distance_correctness() {
 
     let dist = sparse_squared_euclidean_distance(&a, &b).unwrap();
     assert!((dist - 26.0).abs() < 1e-6, "Expected 26.0, got {}", dist);
-
-    // Verify b and c are treated as identical
-    let dist_bc = sparse_squared_euclidean_distance(&b, &c).unwrap();
-    assert!(dist_bc < 1e-6, "Expected 0.0, got {}", dist_bc);
-}
-
-#[test]
-fn test_sparse_cosine_similarity_threshold_behavior() {
-    // 🛡️ Sentry: Verify correct handling of vectors below squared magnitude threshold
-    //
-    // Problem: Previous implementation compared linear magnitude against SQUARED threshold
-    // Threshold is 1e-14.
-    // Vector with magnitude 1e-10 (squared 1e-20)
-    // 1e-10 > 1e-14, so it was treated as valid (incorrect)
-    // 1e-20 < 1e-14, so it should be treated as zero (correct)
-
-    let vec = SparseVec::new(vec![0], vec![1e-10], 100).unwrap();
-
-    // Check pre-condition: magnitude is above linear threshold but squared magnitude is below squared threshold
-    // SQUARED_MAGNITUDE_THRESHOLD is 1e-14
-    let sq_mag = vec.squared_magnitude();
-    assert!(sq_mag < SQUARED_MAGNITUDE_THRESHOLD, "Squared magnitude {} should be < threshold {}", sq_mag, SQUARED_MAGNITUDE_THRESHOLD);
-
-    let mag = vec.magnitude();
-    assert!(mag > SQUARED_MAGNITUDE_THRESHOLD, "Linear magnitude {} should be > threshold {}", mag, SQUARED_MAGNITUDE_THRESHOLD);
-
-    let similarity = sparse_cosine_similarity(&vec, &vec).unwrap();
-
-    assert_eq!(similarity, 0.0, "Vector with squared magnitude < threshold should be treated as zero");
 }

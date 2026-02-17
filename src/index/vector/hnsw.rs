@@ -116,6 +116,10 @@ std::thread_local! {
     static TEST_RACE_HOOK: std::cell::Cell<Option<TestRaceHook>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(test)]
+pub(crate) static TEST_SKIP_CAPACITY_CHECK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
 /// This ensures the flag is always reset, even if the callback panics.
 pub(crate) struct FilterCallbackGuard {
@@ -886,6 +890,17 @@ impl VectorIndex for HnswIndex {
                         || index.remove(existing_key),
                         "Failed to remove existing vector",
                     )?;
+                } else {
+                    // Key doesn't exist, so this is a net addition.
+                    // We must ensure capacity exists, as the optimistic check in
+                    // check_and_expand_capacity might have been raced.
+                    if index.size() >= index.capacity() {
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        self.retry_usearch(
+                            || index.reserve(new_capacity),
+                            "Failed to expand capacity (race recovery)",
+                        )?;
+                    }
                 }
                 // Note: If key doesn't exist, we skip remove() and proceed directly to add()
                 // This is safe because add() with a non-existent key will succeed
@@ -948,6 +963,17 @@ impl VectorIndex for HnswIndex {
                 // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant).
                 // Vacant path updates the index before claiming the map entry (Inner -> Map).
                 let index = self.inner.write();
+
+                // Ensure capacity exists. The optimistic check in check_and_expand_capacity
+                // might have been raced by other threads. Since we hold the write lock now,
+                // we are the source of truth.
+                if index.size() >= index.capacity() {
+                    let new_capacity = (index.capacity() * 2).max(1024);
+                    self.retry_usearch(
+                        || index.reserve(new_capacity),
+                        "Failed to expand capacity (race recovery)",
+                    )?;
+                }
 
                 // Step 3: Add to inner usearch index while holding write lock
                 self.retry_usearch(|| index.add(key, vector), "Failed to add vector")?;
@@ -1083,8 +1109,8 @@ impl VectorIndex for HnswIndex {
                         .searches_performed
                         .fetch_add(1, Ordering::Relaxed);
 
-                    // Convert and sort results using helper function
-                    let results = self.convert_and_sort_matches(matches);
+                    // Convert results using helper function (results are already sorted by usearch)
+                    let results = self.convert_matches(matches);
                     return Ok(results);
                 }
                 Err(e) => {
@@ -1196,7 +1222,8 @@ impl VectorIndex for HnswIndex {
                         }
                     }
 
-                    self.convert_and_sort_matches(maybe_matches.expect(
+                    // Convert matches (already sorted) so we can iterate by best similarity first
+                    self.convert_matches(maybe_matches.expect(
                         "filtered search retry loop should have returned or produced matches",
                     ))
                 };
@@ -1356,6 +1383,11 @@ impl HnswIndex {
     ///
     /// * `vectors_to_add` - Number of vectors expected to be added (usually 1)
     fn check_and_expand_capacity(&self, vectors_to_add: usize) -> Result<()> {
+        #[cfg(test)]
+        if TEST_SKIP_CAPACITY_CHECK.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         // Padding to account for concurrent additions between check and actual add.
         // This prevents a race condition where multiple threads pass the capacity check
         // but then collectively overflow the capacity, causing a crash in usearch.
@@ -1570,7 +1602,7 @@ impl HnswIndex {
     /// This helper function encapsulates the common logic of:
     /// 1. Converting usearch keys back to NodeIds
     /// 2. Converting distances to similarities based on the configured metric
-    /// 3. Sorting results by similarity (descending order)
+    /// 3. Returns results sorted by similarity (descending order)
     ///
     /// # Performance Optimization (Issue #206)
     ///
@@ -1583,6 +1615,14 @@ impl HnswIndex {
     /// By avoiding `NodeId::new()` validation on every result, we save ~1-2ns per
     /// node examined. For a search examining 1,000 candidates, this saves ~1-2μs.
     ///
+    /// # Optimization: No Explicit Sort
+    ///
+    /// We rely on `usearch` returning results sorted by distance (nearest neighbors first).
+    /// Since all our supported distance-to-similarity conversions are monotonic decreasing,
+    /// sorted distances (ascending) map to sorted similarities (descending).
+    ///
+    /// Explicit sorting O(k log k) is removed, saving CPU cycles on hot paths.
+    ///
     /// # Arguments
     ///
     /// * `matches` - The raw matches from usearch containing keys and distances
@@ -1590,7 +1630,7 @@ impl HnswIndex {
     /// # Returns
     ///
     /// A sorted vector of (NodeId, similarity) pairs where higher similarity means more similar.
-    fn convert_and_sort_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
+    fn convert_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
         let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
 
         for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
@@ -1625,10 +1665,6 @@ impl HnswIndex {
                 results.push((node_id, similarity));
             }
         }
-
-        // Results should already be sorted by usearch, but ensure descending order by similarity.
-        // Use sort_unstable_by to avoid auxiliary memory allocation (O(N) vs O(log N) stack).
-        results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         results
     }
@@ -2279,6 +2315,36 @@ mod tests {
         let results = index.search(&[1.0, 0.0, 0.0, 0.0], 2)?;
         assert_eq!(results[0].0, node1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_results_are_sorted() -> Result<()> {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .m(16)
+            .ef_construction(100)
+            .build()?;
+
+        // Add random vectors
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for i in 1..=100 {
+            let vec: Vec<f32> = (0..4).map(|_| rng.r#gen()).collect();
+            index.add(NodeId::new(i).unwrap(), &vec)?;
+        }
+
+        let query: Vec<f32> = (0..4).map(|_| rng.r#gen()).collect();
+        let results = index.search(&query, 20)?;
+
+        for i in 0..results.len().saturating_sub(1) {
+            assert!(
+                results[i].1 >= results[i + 1].1,
+                "Results unsorted at index {}: {} < {}",
+                i,
+                results[i].1,
+                results[i + 1].1
+            );
+        }
         Ok(())
     }
 
@@ -3587,5 +3653,125 @@ mod capacity_tests {
         // Note: we can't easily assert on capacity here without exposing internal usearch state
         // but we can verify it doesn't error
         index.check_and_expand_capacity(1).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod race_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn test_vacant_path_race_recovery() -> Result<()> {
+        // Setup: Ensure we skip the optimistic check
+        TEST_SKIP_CAPACITY_CHECK.store(true, Ordering::SeqCst);
+        struct ResetGuard;
+        impl Drop for ResetGuard {
+            fn drop(&mut self) {
+                TEST_SKIP_CAPACITY_CHECK.store(false, Ordering::SeqCst);
+            }
+        }
+        let _reset = ResetGuard;
+
+        // Create index with small capacity
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .initial_capacity(10)
+            .build()?;
+
+        // Fill to capacity
+        for i in 0..10 {
+            index.add(NodeId::new(i + 1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        }
+        assert_eq!(index.len(), 10);
+
+        // At this point, size=10, capacity=10.
+        // optimistic check is skipped.
+        // add(11) will enter Vacant path.
+        // It will acquire inner write lock.
+        // It will check size >= capacity (10 >= 10). True.
+        // It should trigger expansion.
+
+        index.add(NodeId::new(11).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+
+        assert_eq!(index.len(), 11);
+        // Verify capacity expanded
+        assert!(index.inner.read().capacity() > 10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_occupied_path_inconsistency_race_recovery() -> Result<()> {
+        // Setup: Ensure we skip the optimistic check
+        TEST_SKIP_CAPACITY_CHECK.store(true, Ordering::SeqCst);
+        struct ResetGuard;
+        impl Drop for ResetGuard {
+            fn drop(&mut self) {
+                TEST_SKIP_CAPACITY_CHECK.store(false, Ordering::SeqCst);
+            }
+        }
+        let _reset = ResetGuard;
+
+        // Create index
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .initial_capacity(10)
+            .build()?;
+
+        // Fill to capacity
+        for i in 0..10 {
+            index.add(NodeId::new(i + 1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        }
+        assert_eq!(index.len(), 10);
+
+        // We want to trigger the Occupied path logic:
+        // 1. Update an existing node (e.g., node 1).
+        // 2. Use hook to make inner inconsistent (remove key 1 from inner).
+        // 3. Ensure index is full (add dummy key to inner).
+
+        let node_id = NodeId::new(1).unwrap();
+
+        TEST_RACE_HOOK.with(|h| {
+            h.set(Some(|idx, _id| {
+                // Hook runs after acquiring map lock, before inner lock.
+                // We need to modify inner state.
+                let index = idx.inner.write();
+
+                // Key for node 1 should be 0 (since it was first added)
+                // Remove it from usearch
+                // Note: remove in usearch frees up the slot?
+                // Wait, usearch remove marks as deleted or actually removes?
+                // For dense index, it might just mark it?
+                // If it marks it, size might not decrease?
+                // Let's check size.
+                let _ = index.remove(0); // Removing key 0 (node 1)
+
+                // Now add a dummy key to fill the capacity back up
+                // We need a key that doesn't conflict with map.
+                // Map has keys 0..9.
+                // We removed 0.
+                // We add key 999.
+                let _ = index.add(999, &[0.0, 1.0, 0.0, 0.0]);
+
+                // Now size should be 10 again.
+                // And key 0 is missing from inner.
+            }))
+        });
+
+        // Trigger update
+        // add(1) -> Map Occupied -> Hook runs -> Inner write lock
+        // Inner contains(0)? False (removed in hook).
+        // Enters else block.
+        // Checks size >= capacity. 10 >= 10. True.
+        // Expands.
+        // Adds key 0.
+
+        index.add(node_id, &[0.0, 1.0, 0.0, 0.0])?;
+
+        // Cleanup
+        TEST_RACE_HOOK.with(|h| h.set(None));
+
+        assert_eq!(index.len(), 11); // 9 original + 1 dummy + 1 re-added node 1
+        assert!(index.inner.read().capacity() > 10);
+
+        Ok(())
     }
 }
