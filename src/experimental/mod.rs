@@ -34,6 +34,9 @@ pub mod hindsight;
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
 #[cfg(feature = "nova")]
+/// Mnemosyne: Memory Retention & Decay Engine.
+pub mod mnemosyne;
+#[cfg(feature = "nova")]
 /// Prism: Semantic Spectroscopy for Vectors.
 pub mod prism;
 #[cfg(feature = "nova")]

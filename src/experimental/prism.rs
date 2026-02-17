@@ -15,10 +15,16 @@
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::prism::Prism;
+//! use aletheiadb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let mut prism = Prism::new(&db).with_vector_property("embedding");
+//!
+//! // Dummy IDs for example
+//! let tech_node_id = NodeId::new(1)?;
+//! let magic_node_id = NodeId::new(2)?;
+//! let target_node_id = NodeId::new(3)?;
 //!
 //! // Define the "lens"
 //! prism.add_axis_from_node("Tech", tech_node_id)?;
