@@ -566,11 +566,17 @@ mod tests {
 
         // Test start invalid (use TIMESTAMP_MAX for end so start <= end)
         let res = TimeRange::new(invalid, TIMESTAMP_MAX);
-        assert!(matches!(res, Err(TemporalError::InvalidTimestamp { .. })), "Should reject invalid start timestamp");
+        assert!(
+            matches!(res, Err(TemporalError::InvalidTimestamp { .. })),
+            "Should reject invalid start timestamp"
+        );
 
         // Test end invalid (use 0 for start so start <= end)
         let res = TimeRange::new(HybridTimestamp::new_unchecked(0, 0), invalid);
-        assert!(matches!(res, Err(TemporalError::InvalidTimestamp { .. })), "Should reject invalid end timestamp");
+        assert!(
+            matches!(res, Err(TemporalError::InvalidTimestamp { .. })),
+            "Should reject invalid end timestamp"
+        );
     }
 
     #[test]
