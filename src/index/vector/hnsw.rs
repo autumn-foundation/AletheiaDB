@@ -170,6 +170,11 @@ const MAX_K: usize = 100_000;
 /// 100M entries * (16 bytes data + ~32 bytes DashMap overhead) ≈ 4.8GB RAM.
 const MAX_MAPPINGS_COUNT: usize = 100_000_000;
 
+/// Maximum capacity allowed for the index to prevent integer overflow and excessive memory usage.
+///
+/// This serves as a hard limit for `check_and_expand_capacity`.
+const MAX_VECTOR_CAPACITY: usize = usize::MAX / 2;
+
 /// Number of sharded locks for entry updates.
 /// 64 locks provide reasonable contention reduction for concurrent updates.
 const NUM_ENTRY_LOCKS: usize = 64;
@@ -1363,7 +1368,7 @@ impl HnswIndex {
 
         // Optimistic check with read lock
         let index = self.inner.read();
-        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
+        if index.size().saturating_add(vectors_to_add).saturating_add(CAPACITY_PADDING) <= index.capacity() {
             return Ok(());
         }
         drop(index);
@@ -1372,18 +1377,35 @@ impl HnswIndex {
         let index = self.inner.write();
 
         // Double check capacity under write lock (race condition check)
-        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
+        if index.size().saturating_add(vectors_to_add).saturating_add(CAPACITY_PADDING) <= index.capacity() {
             return Ok(());
         }
 
         // Expand capacity
-        // Double capacity, minimum 1024
-        let new_capacity = (index.capacity() * 2).max(1024);
+        let new_capacity = Self::calculate_new_capacity(index.capacity())
+            .ok_or_else(|| Error::Vector(VectorError::IndexError(
+                "Maximum index capacity reached".to_string()
+            )))?;
 
         // Use retry logic for reserve as well, just in case
         self.retry_usearch(|| index.reserve(new_capacity), "Failed to expand capacity")?;
 
         Ok(())
+    }
+
+    /// Calculate new capacity with overflow protection.
+    /// Returns None if capacity would exceed limits.
+    fn calculate_new_capacity(current_capacity: usize) -> Option<usize> {
+        if current_capacity >= MAX_VECTOR_CAPACITY {
+            return None;
+        }
+
+        let new_capacity = current_capacity
+            .checked_mul(2)
+            .unwrap_or(MAX_VECTOR_CAPACITY); // Cap at max if doubling overflows
+
+        // Ensure at least 1024, but don't exceed max
+        Some(new_capacity.max(1024).min(MAX_VECTOR_CAPACITY))
     }
 
     fn save_internal(&self, path: &Path) -> Result<()> {
@@ -3457,6 +3479,34 @@ mod warden_tests {
         // Since `usearch` is a black box, we can't easily generate such a file without `HnswIndexBuilder` (which forbids it).
         //
         // We will stick to testing the accessible Rust parts.
+    }
+
+    #[test]
+    fn test_calculate_new_capacity() {
+        // Normal case
+        assert_eq!(HnswIndex::calculate_new_capacity(100), Some(1024)); // min 1024
+        assert_eq!(HnswIndex::calculate_new_capacity(1000), Some(2000)); // double
+
+        // At max
+        assert_eq!(HnswIndex::calculate_new_capacity(MAX_VECTOR_CAPACITY), None);
+
+        // Near overflow
+        let near_overflow = MAX_VECTOR_CAPACITY - 100;
+        let new_cap = HnswIndex::calculate_new_capacity(near_overflow);
+        assert_eq!(new_cap, Some(MAX_VECTOR_CAPACITY));
+
+        // Overflow usize (if MAX_VECTOR_CAPACITY wasn't the limit)
+        // With current implementation, it clamps to MAX_VECTOR_CAPACITY.
+        // To strictly test overflow logic, we rely on the fact that MAX_VECTOR_CAPACITY is usize::MAX/2.
+        // So MAX_VECTOR_CAPACITY * 2 is usize::MAX - 1 (approx).
+
+        let half_max = usize::MAX / 2;
+        // At exactly MAX_VECTOR_CAPACITY, we should not expand further
+        assert_eq!(HnswIndex::calculate_new_capacity(half_max), None);
+
+        let slightly_less = half_max - 1;
+        let new_cap = HnswIndex::calculate_new_capacity(slightly_less).unwrap();
+        assert_eq!(new_cap, MAX_VECTOR_CAPACITY);
     }
 }
 
