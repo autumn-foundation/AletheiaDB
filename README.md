@@ -486,9 +486,9 @@ for (node_id, drift_score) in drifted_nodes {
 
 ```rust
 use aletheiadb::{AletheiaDB, properties, WriteOps};
-// ⚠️ REQUIRES FEATURE 'NOVA'
-// Enable in Cargo.toml: features = ["nova"]
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+
+// Ensure you have features = ["nova"] enabled in Cargo.toml
 
 // 1. Setup database and node (for self-contained example)
 let db = AletheiaDB::new().unwrap();
@@ -642,24 +642,21 @@ See **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** for compl
 For unlimited historical depth with disk-backed cold storage:
 
 ```rust
-use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
-use aletheiadb::config::HistoricalConfigBuilder;
-use std::time::Duration;
+use aletheiadb::storage::{
+    HistoricalStorage, TieredStorage, TieredStorageConfig,
+    RedbColdStorage, RedbConfig,
+};
+use std::sync::Arc;
 
-// Configure cold storage via the unified config builder
-let config = AletheiaDBConfig::builder()
-    .historical(
-        HistoricalConfigBuilder::new()
-            .enable_cold_storage(true)
-            .cold_storage_path("data/cold.redb")
-            .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
-            .max_hot_versions(1000)
-            .build(),
-    )
-    .build();
+// Create cold storage backend
+let cold = RedbColdStorage::new("data/cold.redb", RedbConfig::default())?;
 
-// Cold storage automatically initialized!
-let db = AletheiaDB::with_unified_config(config)?;
+// Create tiered storage
+let tiered = TieredStorage::with_default_config(Arc::new(cold));
+
+// Configure historical storage
+let mut historical = HistoricalStorage::new();
+historical.set_tiered_storage(Arc::new(tiered));
 ```
 
 See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** for complete guide.
