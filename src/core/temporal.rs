@@ -1043,6 +1043,33 @@ mod tests {
         // NOT visible at valid_time=Jan 15, tx_time=Jan 15 (before recording)
         assert!(!interval.is_visible_at(jan_15, jan_15));
     }
+
+    #[test]
+    fn test_timerange_rejects_invalid_timestamps_internal() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let invalid_start = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let even_more_invalid_end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 2, 0);
+
+        // Should fail when start is invalid
+        let result = TimeRange::new(invalid_start, even_more_invalid_end);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimestamp { .. }
+        ));
+
+        // Should fail when end is invalid
+        let valid_start = HybridTimestamp::new_unchecked(100, 0);
+        let invalid_end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+
+        let result = TimeRange::new(valid_start, invalid_end);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimestamp { .. }
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1388,5 +1415,3 @@ mod proptests {
         }
     }
 }
-
-// Force update to fix CI sync issue
