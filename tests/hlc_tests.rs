@@ -5,7 +5,7 @@
 //! - Causality preservation
 //! - Serialization/deserialization
 
-use aletheiadb::core::hlc::{evaluate_clock_skew, MAX_BACKWARD_DRIFT_US, HybridTimestamp};
+use aletheiadb::core::hlc::{HybridTimestamp, MAX_BACKWARD_DRIFT_US, evaluate_clock_skew};
 use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
 use aletheiadb::utils::error::{StorageError, TemporalError};
 use proptest::prelude::*;
@@ -54,11 +54,13 @@ fn test_evaluate_clock_skew_exact_boundaries() {
 
     // Test strictly greater forward drift (violation)
     let frontier_forward_violation = current - max_forward - 1;
-    let result = evaluate_clock_skew(current, frontier_forward_violation, Some(max_forward), false);
-    assert!(
-        result.is_err(),
-        "Exceeding forward jump limit should fail"
+    let result = evaluate_clock_skew(
+        current,
+        frontier_forward_violation,
+        Some(max_forward),
+        false,
     );
+    assert!(result.is_err(), "Exceeding forward jump limit should fail");
 }
 
 #[test]

@@ -1085,7 +1085,10 @@ mod tests {
         let inner = TimeRange::new(inner_start, inner_end).unwrap();
 
         // Should return false because inner.start < outer.start
-        assert!(!outer.contains_range(&inner), "Range starting before outer should not be contained");
+        assert!(
+            !outer.contains_range(&inner),
+            "Range starting before outer should not be contained"
+        );
     }
 }
 
