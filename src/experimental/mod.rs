@@ -36,6 +36,7 @@
 //! | [`echo`] | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
 //! | [`kaleidoscope`] | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
 //! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
+//! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
@@ -114,6 +115,9 @@ pub mod semantic_navigator;
 #[cfg(feature = "nova")]
 /// Sherlock: Temporal Pattern Matching Engine.
 pub mod sherlock;
+#[cfg(feature = "nova")]
+/// Sybil: Memetic Propagation Engine.
+pub mod sybil;
 #[cfg(feature = "nova")]
 /// Temporal Diff Engine for computing snapshot differences.
 pub mod temporal_diff;
