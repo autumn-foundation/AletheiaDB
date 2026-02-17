@@ -391,7 +391,12 @@ impl ConcurrentWal {
             // We use LSN(0) as a placeholder. Since `serialize_operation_into` writes the LSN
             // at the very beginning of the buffer (u64 little-endian), we can overwrite it
             // efficiently in Phase 2 without re-serializing.
-            super::serialization::serialize_operation_into(LSN(0), timestamp, operation, &mut buffer)?;
+            super::serialization::serialize_operation_into(
+                LSN(0),
+                timestamp,
+                operation,
+                &mut buffer,
+            )?;
 
             serialized_entries.push(buffer);
         }

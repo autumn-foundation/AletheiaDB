@@ -62,8 +62,15 @@ fn test_wal_batch_atomicity() {
     println!("Append batch error (expected): {}", err);
 
     // Verify error type is CapacityExceeded (robust error matching)
-    if let aletheiadb::utils::error::Error::Storage(aletheiadb::utils::error::StorageError::CapacityExceeded { resource, .. }) = &err {
-        assert!(resource.contains("WAL entry size"), "Unexpected resource: {}", resource);
+    if let aletheiadb::utils::error::Error::Storage(
+        aletheiadb::utils::error::StorageError::CapacityExceeded { resource, .. },
+    ) = &err
+    {
+        assert!(
+            resource.contains("WAL entry size"),
+            "Unexpected resource: {}",
+            resource
+        );
     } else {
         panic!("Expected CapacityExceeded error, got: {:?}", err);
     }
@@ -96,9 +103,9 @@ fn test_wal_batch_atomicity() {
 
 #[test]
 fn test_wal_batch_atomicity_recursion_depth() {
-    use std::sync::Arc;
-    use aletheiadb::core::property::PropertyValue;
     use aletheiadb::core::property::MAX_RECURSION_DEPTH;
+    use aletheiadb::core::property::PropertyValue;
+    use std::sync::Arc;
 
     // 🎯 Target: ConcurrentWal::append_batch atomicity for serialization errors
     // 💣 Risk: If serialization fails (e.g. recursion limit), partial writes could occur.
@@ -159,8 +166,15 @@ fn test_wal_batch_atomicity_recursion_depth() {
     // But `ConcurrentWal` wraps it in `Error::Storage`.
     // The inner error from serialization is `StorageError::CorruptedData`.
 
-    if let aletheiadb::utils::error::Error::Storage(aletheiadb::utils::error::StorageError::CorruptedData(msg)) = &err {
-        assert!(msg.contains("recursion depth"), "Unexpected error message: {}", msg);
+    if let aletheiadb::utils::error::Error::Storage(
+        aletheiadb::utils::error::StorageError::CorruptedData(msg),
+    ) = &err
+    {
+        assert!(
+            msg.contains("recursion depth"),
+            "Unexpected error message: {}",
+            msg
+        );
     } else {
         // It might be wrapped differently depending on how `serialize_into` error propagates.
         // It returns `Result<()>`.
@@ -169,5 +183,8 @@ fn test_wal_batch_atomicity_recursion_depth() {
 
     // Verify atomicity: No LSNs consumed
     let lsn_next = wal.append_async(test_operation(3, "valid")).unwrap();
-    assert_eq!(lsn_next.0, 1, "LSN should still be 1 (no gaps from recursion failure)");
+    assert_eq!(
+        lsn_next.0, 1,
+        "LSN should still be 1 (no gaps from recursion failure)"
+    );
 }
