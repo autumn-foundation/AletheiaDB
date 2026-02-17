@@ -797,9 +797,9 @@ mod tests {
         let client = HttpShardClient::new(shard_id, config).unwrap();
 
         // All operations should return errors when feature is disabled
-        assert!(client.prepare(TxId::new(1), &[], None).is_err());
-        assert!(client.commit(TxId::new(1), None).is_err());
-        assert!(client.abort(TxId::new(1)).is_err());
+        assert!(client.prepare(TxId::new(1).unwrap(), &[], None).is_err());
+        assert!(client.commit(TxId::new(1).unwrap(), None).is_err());
+        assert!(client.abort(TxId::new(1).unwrap()).is_err());
         assert!(client.query(1, &[]).is_err());
         assert!(client.get_state().is_err());
         assert!(client.health_check().is_err());

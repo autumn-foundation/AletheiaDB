@@ -676,7 +676,7 @@ pub(crate) fn load_indexes_startup(
                         properties,
                         current_version: version_id,
                         metadata: VersionMetadata {
-                            created_by_tx: TxId::new(0), // Restored from disk
+                            created_by_tx: TxId::new(0).unwrap(), // Restored from disk
                             commit_timestamp: Some(current_time),
                         },
                     };
@@ -737,7 +737,7 @@ pub(crate) fn load_indexes_startup(
                         properties,
                         current_version: version_id,
                         metadata: VersionMetadata {
-                            created_by_tx: TxId::new(0), // Restored from disk
+                            created_by_tx: TxId::new(0).unwrap(), // Restored from disk
                             commit_timestamp: Some(current_time),
                         },
                     };

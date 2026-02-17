@@ -28,7 +28,7 @@ mod tombstone_tests {
         };
 
         let tx = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot,
             current,
             historical,
@@ -107,7 +107,7 @@ mod general_tests {
         };
 
         let tx = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot,
             current,
             historical,
@@ -998,7 +998,7 @@ mod general_tests {
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
         let mut tx1 = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot1,
             current.clone(),
             historical.clone(),
@@ -1030,7 +1030,7 @@ mod general_tests {
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
         let mut tx2 = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot2,
             current.clone(),
             historical.clone(),
@@ -1457,7 +1457,7 @@ mod general_tests {
         };
 
         let tx = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot,
             current,
             historical,
@@ -1540,7 +1540,7 @@ mod conflict_detection_tests {
             };
 
             WriteTransaction::new(
-                self.tx_id_gen.next(),
+                self.tx_id_gen.next().unwrap(),
                 snapshot,
                 self.current.clone(),
                 self.historical.clone(),
@@ -2452,7 +2452,7 @@ mod clock_skew_tests {
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
             WriteTransaction::new(
-                self.tx_id_gen.next(),
+                self.tx_id_gen.next().unwrap(),
                 snapshot,
                 self.current.clone(),
                 self.historical.clone(),
@@ -2471,7 +2471,7 @@ mod clock_skew_tests {
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
             WriteTransaction::new_with_clock_observed_at(
-                self.tx_id_gen.next(),
+                self.tx_id_gen.next().unwrap(),
                 snapshot,
                 self.current.clone(),
                 self.historical.clone(),
@@ -2685,7 +2685,7 @@ mod timestamp_ordering_tests {
             };
 
             WriteTransaction::new(
-                self.tx_id_gen.next(),
+                self.tx_id_gen.next().unwrap(),
                 snapshot,
                 self.current.clone(),
                 self.historical.clone(),
@@ -2937,7 +2937,7 @@ mod bitemporal_validation_tests {
         }
 
         fn begin_write(&self) -> WriteTransaction {
-            let tx_id = self.tx_id_gen.next();
+            let tx_id = self.tx_id_gen.next().unwrap();
             let snapshot_ts = *self.current_timestamp.lock().unwrap();
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
@@ -3177,7 +3177,7 @@ mod find_nodes_by_property_tests {
         };
 
         let tx = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot,
             current,
             historical,
@@ -3228,7 +3228,7 @@ mod find_nodes_by_property_tests {
         };
 
         let tx = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot,
             current,
             historical,
@@ -3293,7 +3293,7 @@ mod find_nodes_by_property_tests {
         };
 
         let mut tx = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot,
             current,
             historical,
@@ -3344,7 +3344,7 @@ mod find_nodes_by_property_tests {
         };
 
         let mut tx = WriteTransaction::new(
-            tx_id_gen.next(),
+            tx_id_gen.next().unwrap(),
             snapshot,
             current,
             historical,

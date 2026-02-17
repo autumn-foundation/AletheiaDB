@@ -524,7 +524,7 @@ mod tests {
     use super::*;
 
     fn make_tx_id(id: u64) -> TxId {
-        TxId::new(id)
+        TxId::new(id).unwrap()
     }
 
     #[test]

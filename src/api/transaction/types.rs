@@ -49,21 +49,21 @@ mod tests {
 
     #[test]
     fn test_tx_id_creation() {
-        let tx_id = TxId::new(42);
+        let tx_id = TxId::new(42).unwrap();
         assert_eq!(tx_id.as_u64(), 42u64);
     }
 
     #[test]
     fn test_tx_id_ordering() {
-        let tx1 = TxId::new(1);
-        let tx2 = TxId::new(2);
+        let tx1 = TxId::new(1).unwrap();
+        let tx2 = TxId::new(2).unwrap();
         assert!(tx1 < tx2);
         assert_eq!(tx1, tx1);
     }
 
     #[test]
     fn test_tx_id_display() {
-        let tx_id = TxId::new(123);
+        let tx_id = TxId::new(123).unwrap();
         assert_eq!(format!("{}", tx_id), "TxId(123)");
     }
 
@@ -78,9 +78,9 @@ mod tests {
     #[test]
     fn test_tx_id_generator() {
         let generator = TxIdGenerator::new();
-        let tx1 = generator.next();
-        let tx2 = generator.next();
-        let tx3 = generator.next();
+        let tx1 = generator.next().unwrap();
+        let tx2 = generator.next().unwrap();
+        let tx3 = generator.next().unwrap();
 
         assert_eq!(tx1.as_u64(), 1u64);
         assert_eq!(tx2.as_u64(), 2u64);
@@ -102,7 +102,7 @@ mod tests {
             let handle = thread::spawn(move || {
                 let mut ids = vec![];
                 for _ in 0..100 {
-                    ids.push(generator_clone.next());
+                    ids.push(generator_clone.next().unwrap());
                 }
                 ids
             });
@@ -130,14 +130,14 @@ mod tests {
     #[test]
     fn test_tx_metadata() {
         let metadata = TxMetadata {
-            tx_id: TxId::new(1),
+            tx_id: TxId::new(1).unwrap(),
             start_timestamp: 100.into(),
             commit_timestamp: None,
             state: TxState::Active,
             is_read_only: false,
         };
 
-        assert_eq!(metadata.tx_id, TxId::new(1));
+        assert_eq!(metadata.tx_id, TxId::new(1).unwrap());
         assert_eq!(metadata.start_timestamp, 100.into());
         assert_eq!(metadata.commit_timestamp, None);
         assert_eq!(metadata.state, TxState::Active);

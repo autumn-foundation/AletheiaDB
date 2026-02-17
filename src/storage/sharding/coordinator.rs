@@ -358,14 +358,16 @@ impl ShardCoordinator {
         &self,
         participants: Vec<ShardId>,
     ) -> Result<TxId, DistributedTxError> {
-        let tx_id =
-            TxId::new(
-                self.tx_id_generator
-                    .next()
-                    .map_err(|_| DistributedTxError::Aborted {
-                        reason: "Transaction ID exhausted".to_string(),
-                    })?,
-            );
+        let id = self
+            .tx_id_generator
+            .next()
+            .map_err(|_| DistributedTxError::Aborted {
+                reason: "Transaction ID exhausted".to_string(),
+            })?;
+
+        let tx_id = TxId::new(id).map_err(|_| DistributedTxError::Aborted {
+            reason: "Transaction ID invalid".to_string(),
+        })?;
 
         let transaction =
             DistributedTransaction::new(tx_id, participants, self.transaction_timeout);
@@ -1200,13 +1202,13 @@ mod tests {
         let mut conn = ShardConnection::new(shard_id, "localhost:9000".to_string());
 
         assert!(conn.healthy);
-        assert!(conn.prepare(TxId::new(1), None).is_ok());
-        assert!(conn.commit(TxId::new(1), None).is_ok());
-        assert!(conn.abort(TxId::new(1)).is_ok());
+        assert!(conn.prepare(TxId::new(1).unwrap(), None).is_ok());
+        assert!(conn.commit(TxId::new(1).unwrap(), None).is_ok());
+        assert!(conn.abort(TxId::new(1).unwrap()).is_ok());
 
         conn.mark_unhealthy();
         assert!(!conn.healthy);
-        assert!(conn.prepare(TxId::new(2), None).is_err());
+        assert!(conn.prepare(TxId::new(2).unwrap(), None).is_err());
 
         conn.mark_healthy();
         assert!(conn.healthy);
@@ -1241,16 +1243,16 @@ mod tests {
     #[test]
     fn test_recovery_result_is_complete() {
         let result = RecoveryResult {
-            recovered: vec![TxId::new(1), TxId::new(2)],
+            recovered: vec![TxId::new(1).unwrap(), TxId::new(2).unwrap()],
             dead_lettered: vec![],
         };
         assert!(result.is_complete());
         assert_eq!(result.dead_letter_count(), 0);
 
         let result_with_dead = RecoveryResult {
-            recovered: vec![TxId::new(1)],
+            recovered: vec![TxId::new(1).unwrap()],
             dead_lettered: vec![DeadLetteredTransaction {
-                tx_id: TxId::new(2),
+                tx_id: TxId::new(2).unwrap(),
                 reason: "Test failure".to_string(),
                 last_attempt: Instant::now(),
                 attempt_count: 3,
@@ -1282,9 +1284,9 @@ mod tests {
         conn.mark_unhealthy();
 
         // All operations should fail when unhealthy
-        assert!(conn.prepare(TxId::new(1), None).is_err());
-        assert!(conn.commit(TxId::new(1), None).is_err());
-        assert!(conn.abort(TxId::new(1)).is_err());
+        assert!(conn.prepare(TxId::new(1).unwrap(), None).is_err());
+        assert!(conn.commit(TxId::new(1).unwrap(), None).is_err());
+        assert!(conn.abort(TxId::new(1).unwrap()).is_err());
     }
 
     // ==================== Extended Coordinator Tests ====================
@@ -1327,7 +1329,7 @@ mod tests {
     fn test_coordinator_get_nonexistent_transaction() {
         let coordinator = ShardCoordinator::new(test_config());
 
-        let tx = coordinator.get_transaction(TxId::new(99999));
+        let tx = coordinator.get_transaction(TxId::new(99999).unwrap());
         assert!(tx.is_none());
     }
 
@@ -1335,7 +1337,7 @@ mod tests {
     fn test_coordinator_prepare_nonexistent_transaction() {
         let coordinator = ShardCoordinator::new(test_config());
 
-        let result = coordinator.prepare_distributed_transaction(TxId::new(99999));
+        let result = coordinator.prepare_distributed_transaction(TxId::new(99999).unwrap());
         assert!(result.is_err());
     }
 
@@ -1343,7 +1345,7 @@ mod tests {
     fn test_coordinator_commit_nonexistent_transaction() {
         let coordinator = ShardCoordinator::new(test_config());
 
-        let result = coordinator.commit_distributed_transaction(TxId::new(99999));
+        let result = coordinator.commit_distributed_transaction(TxId::new(99999).unwrap());
         assert!(result.is_err());
     }
 
@@ -1351,7 +1353,7 @@ mod tests {
     fn test_coordinator_abort_nonexistent_transaction() {
         let coordinator = ShardCoordinator::new(test_config());
 
-        let result = coordinator.abort_distributed_transaction(TxId::new(99999), "test");
+        let result = coordinator.abort_distributed_transaction(TxId::new(99999).unwrap(), "test");
         assert!(result.is_err());
     }
 
@@ -1384,14 +1386,14 @@ mod tests {
     fn test_coordinator_retry_nonexistent_dead_letter() {
         let coordinator = ShardCoordinator::new(test_config());
 
-        let result = coordinator.retry_dead_lettered_transaction(TxId::new(99999));
+        let result = coordinator.retry_dead_lettered_transaction(TxId::new(99999).unwrap());
         assert!(result.is_err());
     }
 
     #[test]
     fn test_dead_lettered_transaction_debug() {
         let tx = DeadLetteredTransaction {
-            tx_id: TxId::new(1),
+            tx_id: TxId::new(1).unwrap(),
             reason: "Test failure".to_string(),
             last_attempt: Instant::now(),
             attempt_count: 3,
@@ -1406,7 +1408,7 @@ mod tests {
     #[test]
     fn test_recovery_result_debug() {
         let result = RecoveryResult {
-            recovered: vec![TxId::new(1)],
+            recovered: vec![TxId::new(1).unwrap()],
             dead_lettered: vec![],
         };
 

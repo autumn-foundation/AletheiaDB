@@ -278,7 +278,12 @@ impl CommitLogEntry {
             entry_data[offset + 6],
             entry_data[offset + 7],
         ]);
-        let tx_id = TxId::new(tx_id_val);
+        let tx_id = TxId::new(tx_id_val).map_err(|_| {
+            CommitLogError::InvalidEntry(format!(
+                "Invalid transaction ID {} exceeds maximum allowed value",
+                tx_id_val
+            ))
+        })?;
         offset += 8;
 
         // Timestamp
@@ -775,33 +780,36 @@ mod tests {
 
     #[test]
     fn test_entry_serialize_deserialize_commit() {
-        let entry =
-            CommitLogEntry::commit(1, TxId::new(100), vec![make_shard_id(0), make_shard_id(1)]);
+        let entry = CommitLogEntry::commit(
+            1,
+            TxId::new(100).unwrap(),
+            vec![make_shard_id(0), make_shard_id(1)],
+        );
 
         let serialized = entry.serialize();
         let deserialized = CommitLogEntry::deserialize(&serialized).unwrap();
 
         assert_eq!(deserialized.lsn, 1);
         assert_eq!(deserialized.entry_type, EntryType::Commit);
-        assert_eq!(deserialized.tx_id, TxId::new(100));
+        assert_eq!(deserialized.tx_id, TxId::new(100).unwrap());
         assert_eq!(deserialized.participants.len(), 2);
     }
 
     #[test]
     fn test_entry_serialize_deserialize_abort() {
-        let entry = CommitLogEntry::abort(2, TxId::new(200), vec![make_shard_id(3)]);
+        let entry = CommitLogEntry::abort(2, TxId::new(200).unwrap(), vec![make_shard_id(3)]);
 
         let serialized = entry.serialize();
         let deserialized = CommitLogEntry::deserialize(&serialized).unwrap();
 
         assert_eq!(deserialized.lsn, 2);
         assert_eq!(deserialized.entry_type, EntryType::Abort);
-        assert_eq!(deserialized.tx_id, TxId::new(200));
+        assert_eq!(deserialized.tx_id, TxId::new(200).unwrap());
     }
 
     #[test]
     fn test_entry_serialize_deserialize_complete() {
-        let entry = CommitLogEntry::complete(3, TxId::new(300));
+        let entry = CommitLogEntry::complete(3, TxId::new(300).unwrap());
 
         let serialized = entry.serialize();
         let deserialized = CommitLogEntry::deserialize(&serialized).unwrap();
@@ -813,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_entry_checksum_validation() {
-        let entry = CommitLogEntry::commit(1, TxId::new(100), vec![make_shard_id(0)]);
+        let entry = CommitLogEntry::commit(1, TxId::new(100).unwrap(), vec![make_shard_id(0)]);
         let mut serialized = entry.serialize();
 
         // Corrupt the data
@@ -859,37 +867,41 @@ mod tests {
         let log = PersistentCommitLog::in_memory();
 
         let lsn = log
-            .log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)])
+            .log_commit(
+                TxId::new(1).unwrap(),
+                vec![make_shard_id(0), make_shard_id(1)],
+            )
             .unwrap();
         assert_eq!(lsn, 1);
 
-        assert!(log.has_pending_decision(TxId::new(1)));
-        assert!(!log.has_pending_decision(TxId::new(2)));
+        assert!(log.has_pending_decision(TxId::new(1).unwrap()));
+        assert!(!log.has_pending_decision(TxId::new(2).unwrap()));
 
         let pending = log.pending_commits();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].tx_id, TxId::new(1));
+        assert_eq!(pending[0].tx_id, TxId::new(1).unwrap());
     }
 
     #[test]
     fn test_in_memory_log_complete() {
         let log = PersistentCommitLog::in_memory();
 
-        log.log_commit(TxId::new(1), vec![make_shard_id(0)])
+        log.log_commit(TxId::new(1).unwrap(), vec![make_shard_id(0)])
             .unwrap();
-        assert!(log.has_pending_decision(TxId::new(1)));
+        assert!(log.has_pending_decision(TxId::new(1).unwrap()));
 
-        log.log_complete(TxId::new(1)).unwrap();
-        assert!(!log.has_pending_decision(TxId::new(1)));
+        log.log_complete(TxId::new(1).unwrap()).unwrap();
+        assert!(!log.has_pending_decision(TxId::new(1).unwrap()));
     }
 
     #[test]
     fn test_in_memory_log_stats() {
         let log = PersistentCommitLog::in_memory();
 
-        log.log_commit(TxId::new(1), vec![make_shard_id(0)])
+        log.log_commit(TxId::new(1).unwrap(), vec![make_shard_id(0)])
             .unwrap();
-        log.log_abort(TxId::new(2), vec![make_shard_id(1)]).unwrap();
+        log.log_abort(TxId::new(2).unwrap(), vec![make_shard_id(1)])
+            .unwrap();
 
         let stats = log.stats();
         assert_eq!(stats.entries_written, 2);
@@ -918,9 +930,13 @@ mod tests {
         // Write some entries
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            log.log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)])
+            log.log_commit(
+                TxId::new(1).unwrap(),
+                vec![make_shard_id(0), make_shard_id(1)],
+            )
+            .unwrap();
+            log.log_abort(TxId::new(2).unwrap(), vec![make_shard_id(2)])
                 .unwrap();
-            log.log_abort(TxId::new(2), vec![make_shard_id(2)]).unwrap();
             log.close().unwrap();
         }
 
@@ -932,11 +948,11 @@ mod tests {
 
             let commits = log.pending_commits();
             assert_eq!(commits.len(), 1);
-            assert_eq!(commits[0].tx_id, TxId::new(1));
+            assert_eq!(commits[0].tx_id, TxId::new(1).unwrap());
 
             let aborts = log.pending_aborts();
             assert_eq!(aborts.len(), 1);
-            assert_eq!(aborts[0].tx_id, TxId::new(2));
+            assert_eq!(aborts[0].tx_id, TxId::new(2).unwrap());
         }
     }
 
@@ -948,11 +964,11 @@ mod tests {
         // Write entries including completion
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            log.log_commit(TxId::new(1), vec![make_shard_id(0)])
+            log.log_commit(TxId::new(1).unwrap(), vec![make_shard_id(0)])
                 .unwrap();
-            log.log_commit(TxId::new(2), vec![make_shard_id(1)])
+            log.log_commit(TxId::new(2).unwrap(), vec![make_shard_id(1)])
                 .unwrap();
-            log.log_complete(TxId::new(1)).unwrap();
+            log.log_complete(TxId::new(1).unwrap()).unwrap();
             log.close().unwrap();
         }
 
@@ -961,7 +977,7 @@ mod tests {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
             let pending = log.pending_decisions();
             assert_eq!(pending.len(), 1);
-            assert_eq!(pending[0].tx_id, TxId::new(2));
+            assert_eq!(pending[0].tx_id, TxId::new(2).unwrap());
         }
     }
 
@@ -973,9 +989,9 @@ mod tests {
         // Write some entries
         let max_lsn = {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            log.log_commit(TxId::new(1), vec![make_shard_id(0)])
+            log.log_commit(TxId::new(1).unwrap(), vec![make_shard_id(0)])
                 .unwrap();
-            log.log_commit(TxId::new(2), vec![make_shard_id(1)])
+            log.log_commit(TxId::new(2).unwrap(), vec![make_shard_id(1)])
                 .unwrap();
             let lsn = log.current_lsn();
             log.close().unwrap();
@@ -986,7 +1002,7 @@ mod tests {
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
             let new_lsn = log
-                .log_commit(TxId::new(3), vec![make_shard_id(2)])
+                .log_commit(TxId::new(3).unwrap(), vec![make_shard_id(2)])
                 .unwrap();
             assert!(new_lsn >= max_lsn);
         }
@@ -996,16 +1012,19 @@ mod tests {
     fn test_persistent_log_get_decision() {
         let log = PersistentCommitLog::in_memory();
 
-        log.log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)])
-            .unwrap();
+        log.log_commit(
+            TxId::new(1).unwrap(),
+            vec![make_shard_id(0), make_shard_id(1)],
+        )
+        .unwrap();
 
-        let decision = log.get_decision(TxId::new(1));
+        let decision = log.get_decision(TxId::new(1).unwrap());
         assert!(decision.is_some());
         let decision = decision.unwrap();
         assert_eq!(decision.entry_type, EntryType::Commit);
         assert_eq!(decision.participants.len(), 2);
 
-        assert!(log.get_decision(TxId::new(999)).is_none());
+        assert!(log.get_decision(TxId::new(999).unwrap()).is_none());
     }
 
     // ==================== Error Tests ====================
@@ -1018,7 +1037,7 @@ mod tests {
         let err = CommitLogError::CorruptedLog("bad data".to_string());
         assert!(format!("{}", err).contains("Corrupted"));
 
-        let err = CommitLogError::TransactionNotFound(TxId::new(42));
+        let err = CommitLogError::TransactionNotFound(TxId::new(42).unwrap());
         assert!(format!("{}", err).contains("42"));
 
         let err = CommitLogError::ChecksumMismatch {

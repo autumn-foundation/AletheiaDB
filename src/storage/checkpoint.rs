@@ -1136,7 +1136,7 @@ impl CheckpointManager {
                     // Transaction time comes from when the WAL entry was logged
                     let commit_timestamp = entry.timestamp;
                     let metadata =
-                        VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
+                        VersionMetadata::new(TxId::new(RECOVERY_TX_ID).unwrap(), commit_timestamp);
                     let version_id = VersionId::new(next_version_id)?;
                     next_version_id += 1;
 
@@ -1182,7 +1182,7 @@ impl CheckpointManager {
 
                     let commit_timestamp = entry.timestamp;
                     let metadata =
-                        VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
+                        VersionMetadata::new(TxId::new(RECOVERY_TX_ID).unwrap(), commit_timestamp);
                     let version_id = VersionId::new(next_version_id)?;
                     next_version_id += 1;
 
@@ -1232,7 +1232,7 @@ impl CheckpointManager {
 
                     let commit_timestamp = entry.timestamp;
                     let metadata =
-                        VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
+                        VersionMetadata::new(TxId::new(RECOVERY_TX_ID).unwrap(), commit_timestamp);
 
                     let node = Node::with_metadata(
                         node_id,
@@ -1281,7 +1281,7 @@ impl CheckpointManager {
 
                     let commit_timestamp = entry.timestamp;
                     let metadata =
-                        VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
+                        VersionMetadata::new(TxId::new(RECOVERY_TX_ID).unwrap(), commit_timestamp);
 
                     let edge = Edge::with_metadata(
                         edge_id,

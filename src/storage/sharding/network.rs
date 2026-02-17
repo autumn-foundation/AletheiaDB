@@ -1156,7 +1156,7 @@ mod tests {
     fn test_mock_client_prepare() {
         let client = MockShardClient::new(make_shard_id(0));
 
-        let response = client.prepare(TxId::new(1), &[], None).unwrap();
+        let response = client.prepare(TxId::new(1).unwrap(), &[], None).unwrap();
         assert!(response.ready);
         assert_eq!(client.call_count("prepare"), 1);
     }
@@ -1165,7 +1165,7 @@ mod tests {
     fn test_mock_client_commit() {
         let client = MockShardClient::new(make_shard_id(0));
 
-        let response = client.commit(TxId::new(1), None).unwrap();
+        let response = client.commit(TxId::new(1).unwrap(), None).unwrap();
         assert!(response.success);
         assert_eq!(client.call_count("commit"), 1);
     }
@@ -1174,7 +1174,7 @@ mod tests {
     fn test_mock_client_abort() {
         let client = MockShardClient::new(make_shard_id(0));
 
-        let response = client.abort(TxId::new(1)).unwrap();
+        let response = client.abort(TxId::new(1).unwrap()).unwrap();
         assert!(response.acknowledged);
         assert_eq!(client.call_count("abort"), 1);
     }
@@ -1184,7 +1184,7 @@ mod tests {
         let client = MockShardClient::new(make_shard_id(0));
         client.set_healthy(false);
 
-        let result = client.prepare(TxId::new(1), &[], None);
+        let result = client.prepare(TxId::new(1).unwrap(), &[], None);
         assert!(matches!(result, Err(NetworkError::ShardUnavailable(_))));
     }
 
@@ -1198,11 +1198,11 @@ mod tests {
             duration: Duration::from_secs(30),
         });
 
-        let result = client.prepare(TxId::new(1), &[], None);
+        let result = client.prepare(TxId::new(1).unwrap(), &[], None);
         assert!(matches!(result, Err(NetworkError::Timeout { .. })));
 
         // Next call should succeed
-        let result = client.prepare(TxId::new(2), &[], None);
+        let result = client.prepare(TxId::new(2).unwrap(), &[], None);
         assert!(result.is_ok());
     }
 
@@ -1215,7 +1215,7 @@ mod tests {
             reason: Some("test".to_string()),
         });
 
-        let response = client.prepare(TxId::new(1), &[], None).unwrap();
+        let response = client.prepare(TxId::new(1).unwrap(), &[], None).unwrap();
         assert!(!response.ready);
         assert_eq!(response.reason, Some("test".to_string()));
     }

@@ -302,7 +302,9 @@ impl CompressedCommitLog {
 
                 // Check if both tx_id and timestamp increment by 1
                 // Note: We compare wallclock values since logical component should be 0
-                if next_tx == expected_tx && next_ts.wallclock() == expected_ts_wallclock {
+                if expected_tx.map(|tx| tx == next_tx).unwrap_or(false)
+                    && next_ts.wallclock() == expected_ts_wallclock
+                {
                     end_tx = next_tx;
                     end_ts = next_ts;
                     run_length += 1;
@@ -782,7 +784,7 @@ mod tests {
         };
 
         // Version committed before snapshot - visible
-        assert!(snapshot.is_visible(TxId::new(1), Some(50.into())));
+        assert!(snapshot.is_visible(TxId::new(1).unwrap(), Some(50.into())));
     }
 
     #[test]
@@ -793,7 +795,7 @@ mod tests {
         };
 
         // Version committed after snapshot - not visible
-        assert!(!snapshot.is_visible(TxId::new(1), Some(150.into())));
+        assert!(!snapshot.is_visible(TxId::new(1).unwrap(), Some(150.into())));
     }
 
     #[test]
@@ -804,13 +806,13 @@ mod tests {
         };
 
         // Uncommitted version - not visible
-        assert!(!snapshot.is_visible(TxId::new(1), None));
+        assert!(!snapshot.is_visible(TxId::new(1).unwrap(), None));
     }
 
     #[test]
     fn test_snapshot_visibility_active_transaction() {
         let mut active = HashSet::new();
-        active.insert(TxId::new(1));
+        active.insert(TxId::new(1).unwrap());
 
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100.into(),
@@ -818,7 +820,7 @@ mod tests {
         };
 
         // Version from active transaction - not visible even if committed before snapshot
-        assert!(!snapshot.is_visible(TxId::new(1), Some(50.into())));
+        assert!(!snapshot.is_visible(TxId::new(1).unwrap(), Some(50.into())));
     }
 
     #[test]
@@ -831,8 +833,8 @@ mod tests {
     #[test]
     fn test_register_active() {
         let manager = TxVisibilityManager::new();
-        manager.register_active(TxId::new(1));
-        manager.register_active(TxId::new(2));
+        manager.register_active(TxId::new(1).unwrap());
+        manager.register_active(TxId::new(2).unwrap());
 
         assert_eq!(manager.active_count(), 2);
     }
@@ -840,26 +842,26 @@ mod tests {
     #[test]
     fn test_capture_snapshot() {
         let manager = TxVisibilityManager::new();
-        manager.register_active(TxId::new(1));
-        manager.register_active(TxId::new(2));
+        manager.register_active(TxId::new(1).unwrap());
+        manager.register_active(TxId::new(2).unwrap());
 
         let snapshot = manager.capture_snapshot(100.into());
 
         assert_eq!(snapshot.snapshot_timestamp, 100.into());
         assert_eq!(snapshot.active_transactions.len(), 2);
-        assert!(snapshot.active_transactions.contains(&TxId::new(1)));
-        assert!(snapshot.active_transactions.contains(&TxId::new(2)));
+        assert!(snapshot.active_transactions.contains(&TxId::new(1).unwrap()));
+        assert!(snapshot.active_transactions.contains(&TxId::new(2).unwrap()));
     }
 
     #[test]
     fn test_register_commit() {
         let manager = TxVisibilityManager::new();
-        manager.register_active(TxId::new(1));
+        manager.register_active(TxId::new(1).unwrap());
 
         assert_eq!(manager.active_count(), 1);
         assert_eq!(manager.committed_count(), 0);
 
-        manager.register_commit(TxId::new(1), 100.into());
+        manager.register_commit(TxId::new(1).unwrap(), 100.into());
 
         assert_eq!(manager.active_count(), 0);
         assert_eq!(manager.committed_count(), 1);
@@ -868,11 +870,11 @@ mod tests {
     #[test]
     fn test_register_abort() {
         let manager = TxVisibilityManager::new();
-        manager.register_active(TxId::new(1));
+        manager.register_active(TxId::new(1).unwrap());
 
         assert_eq!(manager.active_count(), 1);
 
-        manager.register_abort(TxId::new(1));
+        manager.register_abort(TxId::new(1).unwrap());
 
         assert_eq!(manager.active_count(), 0);
         assert_eq!(manager.committed_count(), 0);
@@ -883,14 +885,14 @@ mod tests {
         let manager = TxVisibilityManager::new();
 
         // Start and commit transaction 1
-        manager.register_active(TxId::new(1));
-        manager.register_commit(TxId::new(1), 50.into());
+        manager.register_active(TxId::new(1).unwrap());
+        manager.register_commit(TxId::new(1).unwrap(), 50.into());
 
         // Take snapshot after commit
         let snapshot = manager.capture_snapshot(100.into());
 
         // Version from tx1 should be visible
-        assert!(manager.is_visible(&snapshot, TxId::new(1)));
+        assert!(manager.is_visible(&snapshot, TxId::new(1).unwrap()));
     }
 
     #[test]
@@ -898,12 +900,12 @@ mod tests {
         let manager = TxVisibilityManager::new();
 
         // Start transaction 1 but don't commit
-        manager.register_active(TxId::new(1));
+        manager.register_active(TxId::new(1).unwrap());
 
         let snapshot = manager.capture_snapshot(100.into());
 
         // Version from uncommitted tx1 should not be visible
-        assert!(!manager.is_visible(&snapshot, TxId::new(1)));
+        assert!(!manager.is_visible(&snapshot, TxId::new(1).unwrap()));
     }
 
     #[test]
@@ -911,17 +913,17 @@ mod tests {
         let manager = TxVisibilityManager::new();
 
         // Start tx1
-        manager.register_active(TxId::new(1));
+        manager.register_active(TxId::new(1).unwrap());
 
         // Take snapshot (tx1 is active)
         let snapshot = manager.capture_snapshot(100.into());
 
         // Commit tx1 after snapshot
-        manager.register_commit(TxId::new(1), 90.into());
+        manager.register_commit(TxId::new(1).unwrap(), 90.into());
 
         // Even though tx1 committed before snapshot timestamp,
         // it was active at snapshot time, so not visible
-        assert!(!manager.is_visible(&snapshot, TxId::new(1)));
+        assert!(!manager.is_visible(&snapshot, TxId::new(1).unwrap()));
     }
 
     #[test]
@@ -929,24 +931,24 @@ mod tests {
         let manager = TxVisibilityManager::new();
 
         // Start tx1
-        manager.register_active(TxId::new(1));
+        manager.register_active(TxId::new(1).unwrap());
 
         // Snapshot 1 - sees tx1 as active
         let snapshot1 = manager.capture_snapshot(100.into());
         assert_eq!(snapshot1.active_transactions.len(), 1);
 
         // Commit tx1, start tx2
-        manager.register_commit(TxId::new(1), 110.into());
-        manager.register_active(TxId::new(2));
+        manager.register_commit(TxId::new(1).unwrap(), 110.into());
+        manager.register_active(TxId::new(2).unwrap());
 
         // Snapshot 2 - sees tx2 as active, tx1 committed
         let snapshot2 = manager.capture_snapshot(120.into());
         assert_eq!(snapshot1.active_transactions.len(), 1);
-        assert!(snapshot2.active_transactions.contains(&TxId::new(2)));
+        assert!(snapshot2.active_transactions.contains(&TxId::new(2).unwrap()));
 
         // Original snapshot1 unchanged
         assert_eq!(snapshot1.active_transactions.len(), 1);
-        assert!(snapshot1.active_transactions.contains(&TxId::new(1)));
+        assert!(snapshot1.active_transactions.contains(&TxId::new(1).unwrap()));
     }
 
     #[test]
@@ -958,18 +960,18 @@ mod tests {
         assert_eq!(manager.committed_count(), 0);
 
         // Add active transactions
-        manager.register_active(TxId::new(1));
-        manager.register_active(TxId::new(2));
+        manager.register_active(TxId::new(1).unwrap());
+        manager.register_active(TxId::new(2).unwrap());
         assert_eq!(manager.active_count(), 2);
         assert_eq!(manager.committed_count(), 0);
 
         // Commit one
-        manager.register_commit(TxId::new(1), 100.into());
+        manager.register_commit(TxId::new(1).unwrap(), 100.into());
         assert_eq!(manager.active_count(), 1);
         assert_eq!(manager.committed_count(), 1);
 
         // Abort the other
-        manager.register_abort(TxId::new(2));
+        manager.register_abort(TxId::new(2).unwrap());
         assert_eq!(manager.active_count(), 0);
         assert_eq!(manager.committed_count(), 1);
     }
@@ -983,8 +985,8 @@ mod tests {
 
         // Setup: commit several transactions
         for i in 1..=10 {
-            manager.register_active(TxId::new(i));
-            manager.register_commit(TxId::new(i), ((i * 10) as i64).into());
+            manager.register_active(TxId::new(i).unwrap());
+            manager.register_commit(TxId::new(i).unwrap(), ((i * 10) as i64).into());
         }
 
         // Take snapshot after all commits (timestamp 100 is the last commit)
@@ -999,7 +1001,7 @@ mod tests {
                 thread::spawn(move || {
                     // Each thread performs many visibility checks
                     for _ in 0..1000 {
-                        let tx_id = TxId::new((i % 10) + 1);
+                        let tx_id = TxId::new((i % 10) + 1).unwrap();
                         // All these transactions were committed before snapshot time
                         assert!(mgr.is_visible(&snap, tx_id));
                     }
@@ -1024,25 +1026,25 @@ mod tests {
     #[test]
     fn test_epoch_range_basic() {
         // Test that EpochRange can represent a range of sequential transactions
-        let epoch = EpochRange::new(TxId::new(1), TxId::new(100), 1000.into(), 1099.into());
+        let epoch = EpochRange::new(TxId::new(1).unwrap(), TxId::new(100).unwrap(), 1000.into(), 1099.into());
 
         // Should contain transactions in the range
-        assert!(epoch.contains(TxId::new(1)));
-        assert!(epoch.contains(TxId::new(50)));
-        assert!(epoch.contains(TxId::new(100)));
+        assert!(epoch.contains(TxId::new(1).unwrap()));
+        assert!(epoch.contains(TxId::new(50).unwrap()));
+        assert!(epoch.contains(TxId::new(100).unwrap()));
 
         // Should not contain transactions outside the range
-        assert!(!epoch.contains(TxId::new(0)));
-        assert!(!epoch.contains(TxId::new(101)));
+        assert!(!epoch.contains(TxId::new(0).unwrap()));
+        assert!(!epoch.contains(TxId::new(101).unwrap()));
 
         // Should be able to get commit timestamp for transactions in range
-        assert_eq!(epoch.get_commit_timestamp(TxId::new(1)), Some(1000.into()));
-        assert_eq!(epoch.get_commit_timestamp(TxId::new(50)), Some(1049.into()));
+        assert_eq!(epoch.get_commit_timestamp(TxId::new(1).unwrap()), Some(1000.into()));
+        assert_eq!(epoch.get_commit_timestamp(TxId::new(50).unwrap()), Some(1049.into()));
         assert_eq!(
-            epoch.get_commit_timestamp(TxId::new(100)),
+            epoch.get_commit_timestamp(TxId::new(100).unwrap()),
             Some(1099.into())
         );
-        assert_eq!(epoch.get_commit_timestamp(TxId::new(101)), None);
+        assert_eq!(epoch.get_commit_timestamp(TxId::new(101).unwrap()), None);
     }
 
     #[test]
@@ -1052,7 +1054,7 @@ mod tests {
 
         // Add 1000 sequential transactions
         for i in 1..=1000 {
-            log.insert(TxId::new(i), (1000 + (i as i64) - 1).into());
+            log.insert(TxId::new(i).unwrap(), (1000 + (i as i64) - 1).into());
         }
 
         // Trigger compression
@@ -1063,9 +1065,9 @@ mod tests {
         assert_eq!(log.exception_count(), 0);
 
         // All lookups should still work
-        assert_eq!(log.get(TxId::new(1)), Some(1000.into()));
-        assert_eq!(log.get(TxId::new(500)), Some(1499.into()));
-        assert_eq!(log.get(TxId::new(1000)), Some(1999.into()));
+        assert_eq!(log.get(TxId::new(1).unwrap()), Some(1000.into()));
+        assert_eq!(log.get(TxId::new(500).unwrap()), Some(1499.into()));
+        assert_eq!(log.get(TxId::new(1000).unwrap()), Some(1999.into()));
 
         // Memory usage should be much smaller than uncompressed
         let compressed_size = log.memory_usage();
@@ -1087,7 +1089,7 @@ mod tests {
         for i in 1..=1000 {
             if i % 100 != 0 {
                 // Skip every 100th transaction (simulating aborts)
-                log.insert(TxId::new(i), (1000 + (i as i64) - 1).into());
+                log.insert(TxId::new(i).unwrap(), (1000 + (i as i64) - 1).into());
             }
         }
 
@@ -1103,10 +1105,10 @@ mod tests {
         );
 
         // All lookups should still work
-        assert_eq!(log.get(TxId::new(1)), Some(1000.into()));
-        assert_eq!(log.get(TxId::new(50)), Some(1049.into()));
-        assert_eq!(log.get(TxId::new(100)), None); // Was skipped
-        assert_eq!(log.get(TxId::new(101)), Some(1100.into()));
+        assert_eq!(log.get(TxId::new(1).unwrap()), Some(1000.into()));
+        assert_eq!(log.get(TxId::new(50).unwrap()), Some(1049.into()));
+        assert_eq!(log.get(TxId::new(100).unwrap()), None); // Was skipped
+        assert_eq!(log.get(TxId::new(101).unwrap()), Some(1100.into()));
     }
 
     #[test]
@@ -1121,7 +1123,7 @@ mod tests {
             } else {
                 (1000 + (i as i64) - 1).into()
             };
-            log.insert(TxId::new(i), timestamp);
+            log.insert(TxId::new(i).unwrap(), timestamp);
         }
 
         log.compress();
@@ -1133,9 +1135,9 @@ mod tests {
         );
 
         // All lookups should still work correctly
-        assert_eq!(log.get(TxId::new(1)), Some(1000.into()));
-        assert_eq!(log.get(TxId::new(50)), Some(5000.into())); // Outlier
-        assert_eq!(log.get(TxId::new(100)), Some(1099.into()));
+        assert_eq!(log.get(TxId::new(1).unwrap()), Some(1000.into()));
+        assert_eq!(log.get(TxId::new(50).unwrap()), Some(5000.into())); // Outlier
+        assert_eq!(log.get(TxId::new(100).unwrap()), Some(1099.into()));
     }
 
     #[test]
@@ -1145,7 +1147,7 @@ mod tests {
 
         // Add and compress first batch
         for i in 1..=1000 {
-            log.insert(TxId::new(i), (1000 + (i as i64) - 1).into());
+            log.insert(TxId::new(i).unwrap(), (1000 + (i as i64) - 1).into());
         }
         log.compress();
 
@@ -1153,7 +1155,7 @@ mod tests {
 
         // Add more sequential transactions
         for i in 1001..=2000 {
-            log.insert(TxId::new(i), (1000 + (i as i64) - 1).into());
+            log.insert(TxId::new(i).unwrap(), (1000 + (i as i64) - 1).into());
         }
         log.compress();
 
@@ -1164,9 +1166,9 @@ mod tests {
         );
 
         // All lookups should still work
-        assert_eq!(log.get(TxId::new(1)), Some(1000.into()));
-        assert_eq!(log.get(TxId::new(1500)), Some(2499.into()));
-        assert_eq!(log.get(TxId::new(2000)), Some(2999.into()));
+        assert_eq!(log.get(TxId::new(1).unwrap()), Some(1000.into()));
+        assert_eq!(log.get(TxId::new(1500).unwrap()), Some(2499.into()));
+        assert_eq!(log.get(TxId::new(2000).unwrap()), Some(2999.into()));
     }
 
     #[test]
@@ -1178,8 +1180,11 @@ mod tests {
         // This is the typical pattern when transactions commit in order
         let base_ts = 1000;
         for i in 1..=10000 {
-            manager.register_active(TxId::new(i));
-            manager.register_commit(TxId::new(i), (base_ts + (i as i64) - 1).into());
+            manager.register_active(TxId::new(i).unwrap());
+            manager.register_commit(
+                TxId::new(i).unwrap(),
+                (base_ts + (i as i64) - 1).into(),
+            );
         }
 
         // Trigger compression
@@ -1196,14 +1201,14 @@ mod tests {
         let snapshot = manager.capture_snapshot(6000.into());
 
         // Committed transactions strictly before snapshot should be visible
-        assert!(manager.is_visible(&snapshot, TxId::new(1))); // commits at 1000
-        assert!(manager.is_visible(&snapshot, TxId::new(5000))); // commits at 5999
+        assert!(manager.is_visible(&snapshot, TxId::new(1).unwrap())); // commits at 1000
+        assert!(manager.is_visible(&snapshot, TxId::new(5000).unwrap())); // commits at 5999
 
         // Transaction at exactly snapshot time should NOT be visible (strict <)
-        assert!(!manager.is_visible(&snapshot, TxId::new(5001))); // commits at 6000
+        assert!(!manager.is_visible(&snapshot, TxId::new(5001).unwrap())); // commits at 6000
 
         // Transactions after snapshot should not be visible
-        assert!(!manager.is_visible(&snapshot, TxId::new(5002))); // commits at 6001
+        assert!(!manager.is_visible(&snapshot, TxId::new(5002).unwrap())); // commits at 6001
 
         // Memory usage should be significantly reduced
         let memory_usage = manager.commit_log_memory_usage();
@@ -1224,8 +1229,11 @@ mod tests {
         // Add 10000 sequential transactions with sequential timestamps
         let base_ts = 1000;
         for i in 1..=10000 {
-            manager.register_active(TxId::new(i));
-            manager.register_commit(TxId::new(i), (base_ts + (i as i64) - 1).into());
+            manager.register_active(TxId::new(i).unwrap());
+            manager.register_commit(
+                TxId::new(i).unwrap(),
+                (base_ts + (i as i64) - 1).into(),
+            );
         }
 
         let uncompressed_count = manager.committed_count();
@@ -1257,8 +1265,11 @@ mod tests {
         // Add transactions until memory threshold is exceeded
         let base_ts = 1000;
         for i in 1..=1000 {
-            manager.register_active(TxId::new(i));
-            manager.register_commit(TxId::new(i), (base_ts + (i as i64) - 1).into());
+            manager.register_active(TxId::new(i).unwrap());
+            manager.register_commit(
+                TxId::new(i).unwrap(),
+                (base_ts + (i as i64) - 1).into(),
+            );
         }
 
         // Should recommend compression if memory exceeds low threshold

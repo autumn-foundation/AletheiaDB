@@ -73,7 +73,7 @@ impl AletheiaDB {
     /// // No commit needed - transaction is read-only
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
-        let tx_id = self.tx_id_gen.next();
+        let tx_id = self.tx_id_gen.next()?;
         let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
         // Register as active
@@ -157,7 +157,7 @@ impl AletheiaDB {
     /// tx.commit()?;  // or tx.rollback()
     /// ```
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
-        let tx_id = self.tx_id_gen.next();
+        let tx_id = self.tx_id_gen.next()?;
         let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
         // Register as active
@@ -388,7 +388,7 @@ impl AletheiaDB {
         &self,
         options: WriteOptions,
     ) -> Result<WriteTransaction> {
-        let tx_id = self.tx_id_gen.next();
+        let tx_id = self.tx_id_gen.next()?;
         let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
         // Register as active

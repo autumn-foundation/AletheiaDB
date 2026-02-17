@@ -55,7 +55,7 @@ impl VersionMetadata {
     pub fn default_for_existing() -> Self {
         use crate::core::hlc::HybridTimestamp;
         VersionMetadata {
-            created_by_tx: TxId::new(0),
+            created_by_tx: TxId::new(0).unwrap(),
             // Phase 2: Use HybridTimestamp instead of integer literal
             commit_timestamp: Some(HybridTimestamp::new_unchecked(0, 0)),
         }
@@ -1038,7 +1038,7 @@ mod metadata_tests {
 
     #[test]
     fn test_version_metadata_new() {
-        let tx_id = TxId::new(100);
+        let tx_id = TxId::new(100).unwrap();
         let timestamp = Timestamp::from(5000);
         let metadata = VersionMetadata::new(tx_id, timestamp);
 
@@ -1048,7 +1048,7 @@ mod metadata_tests {
 
     #[test]
     fn test_version_metadata_uncommitted() {
-        let tx_id = TxId::new(200);
+        let tx_id = TxId::new(200).unwrap();
         let metadata = VersionMetadata::uncommitted(tx_id);
 
         assert_eq!(metadata.created_by_tx, tx_id);
@@ -1101,13 +1101,13 @@ mod metadata_tests {
 
         assert_eq!(metadata.created_by_tx, default_expected.created_by_tx);
         assert_eq!(metadata.commit_timestamp, default_expected.commit_timestamp);
-        assert_eq!(metadata.created_by_tx, TxId::new(0));
+        assert_eq!(metadata.created_by_tx, TxId::new(0).unwrap());
         assert!(metadata.commit_timestamp.is_some());
     }
 
     #[test]
     fn test_version_metadata_debug() {
-        let tx_id = TxId::new(123);
+        let tx_id = TxId::new(123).unwrap();
         let timestamp = Timestamp::from(456);
         let metadata = VersionMetadata::new(tx_id, timestamp);
         let debug_str = format!("{:?}", metadata);
@@ -1120,7 +1120,7 @@ mod metadata_tests {
 
     #[test]
     fn test_version_metadata_clone_copy() {
-        let tx_id = TxId::new(123);
+        let tx_id = TxId::new(123).unwrap();
         let timestamp = Timestamp::from(456);
         let metadata = VersionMetadata::new(tx_id, timestamp);
 

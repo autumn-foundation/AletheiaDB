@@ -504,17 +504,17 @@ mod sentry_tests {
         // Initial state: starts at 1
         // current() returns counter - 1. So initially 1 - 1 = 0.
         // This means "last generated ID was 0" (reserved).
-        assert_eq!(tx_gen.current(), TxId(0));
+        assert_eq!(tx_gen.current(), TxId::new(0).unwrap());
 
         // First generation
-        let id1 = tx_gen.next();
-        assert_eq!(id1, TxId(1));
-        assert_eq!(tx_gen.current(), TxId(1));
+        let id1 = tx_gen.next().unwrap();
+        assert_eq!(id1, TxId::new(1).unwrap());
+        assert_eq!(tx_gen.current(), TxId::new(1).unwrap());
 
         // Second generation
-        let id2 = tx_gen.next();
-        assert_eq!(id2, TxId(2));
-        assert_eq!(tx_gen.current(), TxId(2));
+        let id2 = tx_gen.next().unwrap();
+        assert_eq!(id2, TxId::new(2).unwrap());
+        assert_eq!(tx_gen.current(), TxId::new(2).unwrap());
 
         // Verify strict ordering
         assert!(id2 > id1);
@@ -522,8 +522,21 @@ mod sentry_tests {
 
     #[test]
     fn test_tx_id_display() {
-        let tx_id = TxId::new(12345);
+        let tx_id = TxId::new(12345).unwrap();
         assert_eq!(format!("{}", tx_id), "TxId(12345)");
+    }
+
+    #[test]
+    fn test_tx_id_validation_rejects_out_of_range() {
+        assert!(TxId::new(MAX_VALID_ID).is_ok());
+        assert!(TxId::new(MAX_VALID_ID + 1).is_err());
+        assert!(TxId::new(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn test_tx_id_new_unchecked() {
+        let tx_id = TxId::new_unchecked(u64::MAX);
+        assert_eq!(tx_id.as_u64(), u64::MAX);
     }
 
     #[test]
@@ -1413,10 +1426,10 @@ mod proptests {
         #[test]
         fn prop_tx_id_generator_monotonic(_dummy in 0..50usize) {
             let tx_gen = TxIdGenerator::new();
-            let mut prev = tx_gen.next();
+            let mut prev = tx_gen.next().unwrap();
 
             for _ in 0..10 {
-                let curr = tx_gen.next();
+                let curr = tx_gen.next().unwrap();
                 prop_assert!(curr > prev,
                     "TxId should be strictly increasing: {:?} vs {:?}", prev, curr);
                 prev = curr;
@@ -1449,11 +1462,27 @@ pub struct TxId(u64);
 
 impl TxId {
     /// Create a new transaction ID
-    pub fn new(id: u64) -> Self {
+    ///
+    /// Returns an error if the ID exceeds MAX_VALID_ID.
+    #[inline]
+    pub fn new(id: u64) -> Result<Self, StorageError> {
+        if id > MAX_VALID_ID {
+            return Err(StorageError::InvalidId {
+                id,
+                id_type: "transaction",
+            });
+        }
+        Ok(TxId(id))
+    }
+
+    /// Create a new transaction ID without validation (for internal use only).
+    #[inline]
+    pub const fn new_unchecked(id: u64) -> Self {
         TxId(id)
     }
 
     /// Get the inner ID value
+    #[inline]
     pub fn as_u64(&self) -> u64 {
         self.0
     }
@@ -1474,7 +1503,7 @@ pub struct TxIdGenerator {
 
 impl TxIdGenerator {
     /// Create a new transaction ID generator starting from 1
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         TxIdGenerator {
             counter: AtomicU64::new(1),
         }
@@ -1483,8 +1512,17 @@ impl TxIdGenerator {
     /// Generate the next transaction ID
     ///
     /// This operation is atomic and thread-safe.
-    pub fn next(&self) -> TxId {
-        TxId(self.counter.fetch_add(1, Ordering::SeqCst))
+    ///
+    /// Returns an error if the generator would exceed `MAX_VALID_ID`.
+    pub fn next(&self) -> Result<TxId, StorageError> {
+        let id = self.counter.fetch_add(1, Ordering::SeqCst);
+        if id > MAX_VALID_ID {
+            return Err(StorageError::InvalidId {
+                id,
+                id_type: "generated_transaction",
+            });
+        }
+        Ok(TxId(id))
     }
 
     /// Get the current transaction ID (last generated)

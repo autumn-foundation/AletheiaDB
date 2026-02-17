@@ -111,7 +111,7 @@ impl ReadTransaction {
                 // NOTE: Historical versions don't track created_by_tx, so we use TxId(0)
                 // The commit_timestamp is extracted from transaction_time.start
                 let metadata = VersionMetadata::new(
-                    super::TxId::new(0), // Historical versions don't track creating tx
+                    super::TxId::new(0).unwrap(), // Historical versions don't track creating tx
                     version.temporal.transaction_time().start(), // Extract commit timestamp
                 );
 
@@ -179,7 +179,7 @@ impl ReadTransaction {
                 // NOTE: Historical versions don't track created_by_tx, so we use TxId(0)
                 // The commit_timestamp is extracted from transaction_time.start
                 let metadata = VersionMetadata::new(
-                    super::TxId::new(0), // Historical versions don't track creating tx
+                    super::TxId::new(0).unwrap(), // Historical versions don't track creating tx
                     version.temporal.transaction_time().start(), // Extract commit timestamp
                 );
 
@@ -325,11 +325,11 @@ mod tests {
     #[test]
     fn test_read_transaction_creation() {
         let current = Arc::new(CurrentStorage::new());
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1).unwrap(), current);
 
-        assert_eq!(tx.tx_id(), TxId::new(1));
+        assert_eq!(tx.tx_id(), TxId::new(1).unwrap());
         let metadata = tx.metadata();
-        assert_eq!(metadata.tx_id, TxId::new(1));
+        assert_eq!(metadata.tx_id, TxId::new(1).unwrap());
         assert!(metadata.is_read_only);
         assert_eq!(metadata.state, TxState::Active);
         assert_eq!(metadata.commit_timestamp, None);
@@ -347,7 +347,7 @@ mod tests {
         let node_id = current.create_node("Person", props.clone()).unwrap();
 
         // Read through transaction
-        let tx = create_test_read_tx(TxId::new(1), Arc::clone(&current));
+        let tx = create_test_read_tx(TxId::new(1).unwrap(), Arc::clone(&current));
         let node = tx.get_node(node_id).unwrap();
 
         assert_eq!(node.id, node_id);
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn test_read_transaction_get_node_not_found() {
         let current = Arc::new(CurrentStorage::new());
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1).unwrap(), current);
 
         let result = tx.get_node(NodeId::new(999).unwrap());
         assert!(result.is_err());
@@ -377,7 +377,7 @@ mod tests {
         current.create_node("Person", props.clone()).unwrap();
         current.create_node("Person", props).unwrap();
 
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1).unwrap(), current);
         assert_eq!(tx.node_count(), 3);
     }
 
@@ -391,7 +391,7 @@ mod tests {
         let node2 = current.create_node("Person", props.clone()).unwrap();
         let edge_id = current.create_edge(node1, node2, "KNOWS", props).unwrap();
 
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1).unwrap(), current);
 
         // Get edge
         let edge = tx.get_edge(edge_id).unwrap();
@@ -425,7 +425,7 @@ mod tests {
             .unwrap();
         let _edge2 = current.create_edge(node1, node3, "FOLLOWS", props).unwrap();
 
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1).unwrap(), current);
 
         // Get only KNOWS edges
         let knows_edges = tx.get_outgoing_edges_with_label(node1, "KNOWS");
@@ -452,7 +452,7 @@ mod tests {
         for i in 0..10 {
             let current_clone = Arc::clone(&current);
             let handle = thread::spawn(move || {
-                let tx = create_test_read_tx(TxId::new(i), current_clone);
+                let tx = create_test_read_tx(TxId::new(i).unwrap(), current_clone);
                 let node = tx.get_node(node_id).unwrap();
                 assert_eq!(
                     node.get_property("value").and_then(|v| v.as_int()),
@@ -474,7 +474,7 @@ mod tests {
         let current = Arc::new(CurrentStorage::new());
         let visibility_manager = Arc::new(TxVisibilityManager::new());
 
-        let tx_id = TxId::new(42);
+        let tx_id = TxId::new(42).unwrap();
 
         // Register transaction as active
         visibility_manager.register_active(tx_id);
@@ -530,7 +530,7 @@ mod tests {
             )
             .unwrap();
 
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1).unwrap(), current);
 
         let results = tx.find_nodes_by_property(
             "Person",
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn test_read_transaction_find_nodes_by_property_empty() {
         let current = Arc::new(CurrentStorage::new());
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1).unwrap(), current);
 
         let results = tx.find_nodes_by_property(
             "Person",
