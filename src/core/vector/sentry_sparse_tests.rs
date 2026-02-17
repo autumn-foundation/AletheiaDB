@@ -77,7 +77,7 @@ fn test_sparse_squared_euclidean_distance_correctness() {
 
     // Verify b and c are treated as identical
     let dist_bc = sparse_squared_euclidean_distance(&b, &c).unwrap();
-    assert!(dist_bc < 1e-6, "Expected 0.0, got {}", dist_bc);
+    assert_eq!(dist_bc, 0.0, "Expected 0.0, got {}", dist_bc);
 }
 
 #[test]
