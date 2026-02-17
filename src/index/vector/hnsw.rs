@@ -886,6 +886,17 @@ impl VectorIndex for HnswIndex {
                         || index.remove(existing_key),
                         "Failed to remove existing vector",
                     )?;
+                } else {
+                    // Key doesn't exist, so this is a net addition.
+                    // We must ensure capacity exists, as the optimistic check in
+                    // check_and_expand_capacity might have been raced.
+                    if index.size() >= index.capacity() {
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        self.retry_usearch(
+                            || index.reserve(new_capacity),
+                            "Failed to expand capacity (race recovery)",
+                        )?;
+                    }
                 }
                 // Note: If key doesn't exist, we skip remove() and proceed directly to add()
                 // This is safe because add() with a non-existent key will succeed
@@ -948,6 +959,17 @@ impl VectorIndex for HnswIndex {
                 // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant).
                 // Vacant path updates the index before claiming the map entry (Inner -> Map).
                 let index = self.inner.write();
+
+                // Ensure capacity exists. The optimistic check in check_and_expand_capacity
+                // might have been raced by other threads. Since we hold the write lock now,
+                // we are the source of truth.
+                if index.size() >= index.capacity() {
+                    let new_capacity = (index.capacity() * 2).max(1024);
+                    self.retry_usearch(
+                        || index.reserve(new_capacity),
+                        "Failed to expand capacity (race recovery)",
+                    )?;
+                }
 
                 // Step 3: Add to inner usearch index while holding write lock
                 self.retry_usearch(|| index.add(key, vector), "Failed to add vector")?;
