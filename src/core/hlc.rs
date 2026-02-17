@@ -743,6 +743,34 @@ mod tests {
         assert_eq!(ts.as_secs(), micros / 1_000_000);
         assert_eq!(ts.as_millis(), micros / 1000);
     }
+
+    #[test]
+    fn test_receive_when_physical_equals_local_and_ahead_of_msg() {
+        // Scenario: Physical clock catches up to local clock, and both are ahead of message.
+        // HLC should increment logical counter, not reset it.
+        // This targets the specific gap where `new_wallclock == self.wallclock` but strict `>` was mutated to `>=`.
+
+        let local = HybridTimestamp::new(1000, 5).unwrap();
+        let msg = HybridTimestamp::new(900, 0).unwrap();
+        let physical = 1000; // Equals local.wallclock
+
+        // Expected: new_wallclock = 1000.
+        // Logic should fall through to "new_wallclock == self.wallclock" branch.
+        // Result logical should be local.logical + 1 = 6.
+
+        let result = local.receive(msg, physical).unwrap();
+
+        assert_eq!(result.wallclock(), 1000);
+        assert_eq!(
+            result.logical(),
+            6,
+            "Logical counter should increment, not reset"
+        );
+        assert!(
+            result > local,
+            "Result should be strictly greater than local"
+        );
+    }
 }
 
 #[cfg(test)]
