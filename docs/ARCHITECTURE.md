@@ -282,6 +282,49 @@ classDiagram
     Hindsight --> AletheiaDB : Wraps
 ```
 
+**Wormhole (Latent Edge Detection)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class WormholeDetector {
+            +find_wormholes(candidates, k, max_hops)
+        }
+        class Wormhole {
+            +source: NodeId
+            +target: NodeId
+            +similarity: f32
+            +structural_distance: Option<usize>
+        }
+    }
+    class AletheiaDB
+
+    WormholeDetector --> AletheiaDB : Uses
+    WormholeDetector ..> Wormhole : Produces
+```
+
+**Sequence: Detecting Wormholes**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Wormhole as WormholeDetector
+    participant DB as AletheiaDB
+
+    User->>Wormhole: find_wormholes(candidates, k, max_hops)
+    loop Every Candidate
+        Wormhole->>DB: find_similar(candidate, k)
+        DB-->>Wormhole: semantic_neighbors
+        loop Every Neighbor
+            Wormhole->>DB: bfs_distance(candidate, neighbor, max_hops)
+            alt Distance > max_hops or None
+                Wormhole->>Wormhole: Record Latent Edge
+            end
+        end
+    end
+    Wormhole-->>User: List<Wormhole>
+```
+
 ### Temporal Query Processing
 
 **Query Types:**
