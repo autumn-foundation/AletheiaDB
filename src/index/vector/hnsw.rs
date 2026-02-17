@@ -173,7 +173,7 @@ const MAX_MAPPINGS_COUNT: usize = 100_000_000;
 /// Maximum capacity allowed for the index to prevent integer overflow and excessive memory usage.
 ///
 /// This serves as a hard limit for `check_and_expand_capacity`.
-const MAX_VECTOR_CAPACITY: usize = usize::MAX / 2;
+const MAX_VECTOR_CAPACITY: usize = MAX_MAPPINGS_COUNT;
 
 /// Number of sharded locks for entry updates.
 /// 64 locks provide reasonable contention reduction for concurrent updates.
