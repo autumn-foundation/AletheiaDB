@@ -741,20 +741,20 @@ mod tests {
         let result = TimeRange::new(invalid, invalid_end);
         assert!(result.is_err());
         match result.unwrap_err() {
-             TemporalError::InvalidTimestamp { timestamp, .. } => {
-                 assert_eq!(timestamp, invalid);
-             },
-             err => panic!("Expected InvalidTimestamp error, got {:?}", err),
+            TemporalError::InvalidTimestamp { timestamp, .. } => {
+                assert_eq!(timestamp, invalid);
+            }
+            err => panic!("Expected InvalidTimestamp error, got {:?}", err),
         }
 
         // End timestamp invalid
         let result = TimeRange::new(valid, invalid);
         assert!(result.is_err());
         match result.unwrap_err() {
-             TemporalError::InvalidTimestamp { timestamp, .. } => {
-                 assert_eq!(timestamp, invalid);
-             },
-             err => panic!("Expected InvalidTimestamp error, got {:?}", err),
+            TemporalError::InvalidTimestamp { timestamp, .. } => {
+                assert_eq!(timestamp, invalid);
+            }
+            err => panic!("Expected InvalidTimestamp error, got {:?}", err),
         }
     }
 
