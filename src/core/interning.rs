@@ -85,8 +85,16 @@ impl Hasher for IdentityHasher {
     fn write(&mut self, bytes: &[u8]) {
         // Handle common integer sizes directly to support various key types
         match bytes.len() {
-            4 => self.0 = u32::from_le_bytes(bytes.try_into().unwrap()) as u64,
-            8 => self.0 = u64::from_le_bytes(bytes.try_into().unwrap()),
+            4 => {
+                // SAFETY: Length checked in match arm. unwrap_or_default avoids panic code generation.
+                let arr = bytes.try_into().unwrap_or_default();
+                self.0 = u32::from_le_bytes(arr) as u64;
+            }
+            8 => {
+                // SAFETY: Length checked in match arm. unwrap_or_default avoids panic code generation.
+                let arr = bytes.try_into().unwrap_or_default();
+                self.0 = u64::from_le_bytes(arr);
+            }
             _ => {
                 // Should not happen for known integer keys
                 self.0 = bytes.len() as u64;
