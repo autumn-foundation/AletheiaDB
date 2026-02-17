@@ -5,10 +5,63 @@
 //! - Causality preservation
 //! - Serialization/deserialization
 
-use aletheiadb::core::hlc::HybridTimestamp;
+use aletheiadb::core::hlc::{HybridTimestamp, MAX_BACKWARD_DRIFT_US, evaluate_clock_skew};
 use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
 use aletheiadb::utils::error::{StorageError, TemporalError};
 use proptest::prelude::*;
+
+#[test]
+fn test_evaluate_clock_skew_exact_boundaries() {
+    let current = 1_000_000;
+
+    // Test Backward Drift Boundary
+    // Drift = current - frontier
+    // We want drift = -MAX_BACKWARD_DRIFT_US
+    // So 1_000_000 - frontier = -MAX_BACKWARD_DRIFT_US
+    // frontier = 1_000_000 + MAX_BACKWARD_DRIFT_US
+    let frontier_exact = current + MAX_BACKWARD_DRIFT_US;
+
+    // Should be OK (exact boundary allowed)
+    let result = evaluate_clock_skew(current, frontier_exact, None, false);
+    assert!(
+        result.is_ok(),
+        "Exact backward drift limit should be allowed, got {:?}",
+        result
+    );
+
+    // Test strictly greater backward drift (violation)
+    let frontier_violation = current + MAX_BACKWARD_DRIFT_US + 1;
+    let result = evaluate_clock_skew(current, frontier_violation, None, false);
+    assert!(
+        result.is_err(),
+        "Exceeding backward drift limit should fail"
+    );
+
+    // Test Forward Jump Boundary
+    let max_forward = 100_000;
+    // Drift = current - frontier
+    // We want drift = max_forward
+    // current - frontier = max_forward
+    // frontier = current - max_forward
+    let frontier_forward_exact = current - max_forward;
+
+    let result = evaluate_clock_skew(current, frontier_forward_exact, Some(max_forward), false);
+    assert!(
+        result.is_ok(),
+        "Exact forward jump limit should be allowed, got {:?}",
+        result
+    );
+
+    // Test strictly greater forward drift (violation)
+    let frontier_forward_violation = current - max_forward - 1;
+    let result = evaluate_clock_skew(
+        current,
+        frontier_forward_violation,
+        Some(max_forward),
+        false,
+    );
+    assert!(result.is_err(), "Exceeding forward jump limit should fail");
+}
 
 #[test]
 fn test_new_validates_wallclock() {
