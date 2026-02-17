@@ -1,6 +1,6 @@
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
-use aletheiadb::index::VectorIndex;
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -32,13 +32,15 @@ fn test_havoc_hnsw_capacity_overflow() {
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .initial_capacity(capacity)
             .build()
-            .expect("Failed to build index")
+            .expect("Failed to build index"),
     );
 
     // Fill initially to 70
     for i in 0..initial_size {
         let id = NodeId::new((i + 1) as u64).unwrap();
-        index.add(id, &[1.0, 0.0, 0.0, 0.0]).expect("Failed initial add");
+        index
+            .add(id, &[1.0, 0.0, 0.0, 0.0])
+            .expect("Failed initial add");
     }
 
     assert_eq!(index.len(), initial_size);
@@ -68,8 +70,8 @@ fn test_havoc_hnsw_capacity_overflow() {
     for handle in handles {
         // If thread panics, join will return Err. We want to see that.
         if let Err(_) = handle.join() {
-             // Panic detected! Success for Havoc.
-             println!("Thread panicked as expected (or unexpectedly).");
+            // Panic detected! Success for Havoc.
+            println!("Thread panicked as expected (or unexpectedly).");
         }
     }
 
