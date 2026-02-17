@@ -1368,7 +1368,12 @@ impl HnswIndex {
 
         // Optimistic check with read lock
         let index = self.inner.read();
-        if index.size().saturating_add(vectors_to_add).saturating_add(CAPACITY_PADDING) <= index.capacity() {
+        if index
+            .size()
+            .saturating_add(vectors_to_add)
+            .saturating_add(CAPACITY_PADDING)
+            <= index.capacity()
+        {
             return Ok(());
         }
         drop(index);
@@ -1377,15 +1382,21 @@ impl HnswIndex {
         let index = self.inner.write();
 
         // Double check capacity under write lock (race condition check)
-        if index.size().saturating_add(vectors_to_add).saturating_add(CAPACITY_PADDING) <= index.capacity() {
+        if index
+            .size()
+            .saturating_add(vectors_to_add)
+            .saturating_add(CAPACITY_PADDING)
+            <= index.capacity()
+        {
             return Ok(());
         }
 
         // Expand capacity
-        let new_capacity = Self::calculate_new_capacity(index.capacity())
-            .ok_or_else(|| Error::Vector(VectorError::IndexError(
-                "Maximum index capacity reached".to_string()
-            )))?;
+        let new_capacity = Self::calculate_new_capacity(index.capacity()).ok_or_else(|| {
+            Error::Vector(VectorError::IndexError(
+                "Maximum index capacity reached".to_string(),
+            ))
+        })?;
 
         // Use retry logic for reserve as well, just in case
         self.retry_usearch(|| index.reserve(new_capacity), "Failed to expand capacity")?;
