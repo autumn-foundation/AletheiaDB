@@ -357,9 +357,12 @@ impl StringInterner {
         // Collect all (id, string) pairs
         for entry in self.id_to_string.iter() {
             let id = entry.key().as_u32() as usize;
-            if id < count {
-                strings[id] = entry.value().to_string();
+            // If the ID is outside our initial estimate (due to concurrent inserts),
+            // resize the vector to accommodate it.
+            if id >= strings.len() {
+                strings.resize(id + 1, String::new());
             }
+            strings[id] = entry.value().to_string();
         }
 
         strings

@@ -219,3 +219,10 @@
 **Severity:** 🟢 Acquitted (Conditional)
 **Finding:** The test `test_havoc_wal_batch_gaps` passes when it successfully identifies gaps in the LSN sequence after a failed batch append. This confirms the system's failure mode (atomicity is per-entry, not per-batch for LSN allocation).
 **Evidence:** Test logic explicitly asserts `!contiguous` to pass.
+
+**[StringInterner Snapshot Truncation]**
+**Module:** `src/core/interning.rs`
+**Severity:** 🔴 Critical
+**Finding:** `get_all_strings` relied on `self.len()` to pre-allocate the result vector. Due to lock ordering in `intern` (inserting into `id_to_string` before `string_to_id`), a concurrent insert could produce an ID that exists in `id_to_string` but is not yet reflected in `len()`. The iterator would skip this ID, resulting in a truncated snapshot. If used for checkpointing, this could cause data corruption (dangling references).
+**Evidence:** Manual audit revealed the race condition. `tests/regression_interning_snapshot.rs` was created to stress-test snapshot consistency.
+**Resolution:** Modified `get_all_strings` to dynamically resize the result vector if an encountered ID exceeds the initial capacity, ensuring all visible IDs are captured.
