@@ -166,7 +166,7 @@ impl AletheiaDB {
         // Capture snapshot
         let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-        Ok(WriteTransaction::new(
+        Ok(WriteTransaction::new_with_clock_observed_at(
             tx_id,
             snapshot,
             Arc::clone(&self.current),
@@ -174,6 +174,7 @@ impl AletheiaDB {
             Arc::clone(&self.temporal_indexes),
             Arc::clone(&self.wal),
             Arc::clone(&self.current_timestamp),
+            Arc::clone(&self.commit_clock_observed_at),
             Arc::clone(&self.visibility_manager),
             Arc::clone(&self.node_id_gen),
             Arc::clone(&self.edge_id_gen),
@@ -399,7 +400,7 @@ impl AletheiaDB {
         // Determine effective durability mode
         let durability = options.effective_durability(self.default_durability);
 
-        Ok(WriteTransaction::new_with_durability(
+        Ok(WriteTransaction::new_with_durability_and_clock_observed_at(
             tx_id,
             snapshot,
             Arc::clone(&self.current),
@@ -407,6 +408,7 @@ impl AletheiaDB {
             Arc::clone(&self.temporal_indexes),
             Arc::clone(&self.wal),
             Arc::clone(&self.current_timestamp),
+            Arc::clone(&self.commit_clock_observed_at),
             Arc::clone(&self.visibility_manager),
             Arc::clone(&self.node_id_gen),
             Arc::clone(&self.edge_id_gen),

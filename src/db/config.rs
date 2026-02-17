@@ -17,6 +17,7 @@ use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalS
 use crate::utils::error::Result;
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 fn bootstrap_timestamp(
     current: &CurrentStorage,
@@ -201,6 +202,7 @@ impl AletheiaDB {
             temporal_indexes: Arc::new(TemporalIndexes::new()),
             wal,
             current_timestamp: Arc::new(Mutex::new(time::now())),
+            commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
             tx_id_gen: Arc::new(TxIdGenerator::new()),
             visibility_manager: Arc::new(TxVisibilityManager::new()),
             node_id_gen: Arc::new(IdGenerator::new()),
@@ -324,6 +326,7 @@ impl AletheiaDB {
             temporal_indexes: Arc::new(TemporalIndexes::new()),
             wal,
             current_timestamp: Arc::new(Mutex::new(time::now())),
+            commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
             tx_id_gen: Arc::new(TxIdGenerator::new()),
             visibility_manager: Arc::new(TxVisibilityManager::new()),
             node_id_gen: Arc::new(IdGenerator::new()),

@@ -1,5 +1,4 @@
 use super::types::VectorDimension;
-use crate::core::property::MAX_VECTOR_DIMENSIONS;
 
 // ============================================================================
 // Constants
@@ -27,7 +26,17 @@ pub(crate) const SQUARED_MAGNITUDE_THRESHOLD: f32 = 1e-14;
 
 /// Maximum allowed vector dimension.
 ///
-/// Re-exported from [`crate::core::property::MAX_VECTOR_DIMENSIONS`] for convenience.
 /// This limit (100,000) far exceeds typical embedding sizes and exists to prevent
 /// DoS attacks via memory exhaustion during deserialization.
+pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
+
+/// Type tag for Vector (dense f32 array) value.
+pub const TAG_VECTOR: u8 = 7;
+
+/// Type tag for SparseVector value.
+pub const TAG_SPARSE_VECTOR: u8 = 8;
+
+/// Maximum allowed vector dimension (typed).
+///
+/// Re-exported from [`MAX_VECTOR_DIMENSIONS`] for convenience.
 pub const MAX_DIMENSION: VectorDimension = VectorDimension::new(MAX_VECTOR_DIMENSIONS);
