@@ -1083,8 +1083,8 @@ impl VectorIndex for HnswIndex {
                         .searches_performed
                         .fetch_add(1, Ordering::Relaxed);
 
-                    // Convert and sort results using helper function
-                    let results = self.convert_and_sort_matches(matches);
+                    // Convert results using helper function (results are already sorted by usearch)
+                    let results = self.convert_matches(matches);
                     return Ok(results);
                 }
                 Err(e) => {
@@ -1196,7 +1196,8 @@ impl VectorIndex for HnswIndex {
                         }
                     }
 
-                    self.convert_and_sort_matches(maybe_matches.expect(
+                    // Convert matches (already sorted) so we can iterate by best similarity first
+                    self.convert_matches(maybe_matches.expect(
                         "filtered search retry loop should have returned or produced matches",
                     ))
                 };
@@ -1570,7 +1571,7 @@ impl HnswIndex {
     /// This helper function encapsulates the common logic of:
     /// 1. Converting usearch keys back to NodeIds
     /// 2. Converting distances to similarities based on the configured metric
-    /// 3. Sorting results by similarity (descending order)
+    /// 3. Returns results sorted by similarity (descending order)
     ///
     /// # Performance Optimization (Issue #206)
     ///
@@ -1583,6 +1584,14 @@ impl HnswIndex {
     /// By avoiding `NodeId::new()` validation on every result, we save ~1-2ns per
     /// node examined. For a search examining 1,000 candidates, this saves ~1-2μs.
     ///
+    /// # Optimization: No Explicit Sort
+    ///
+    /// We rely on `usearch` returning results sorted by distance (nearest neighbors first).
+    /// Since all our supported distance-to-similarity conversions are monotonic decreasing,
+    /// sorted distances (ascending) map to sorted similarities (descending).
+    ///
+    /// Explicit sorting O(k log k) is removed, saving CPU cycles on hot paths.
+    ///
     /// # Arguments
     ///
     /// * `matches` - The raw matches from usearch containing keys and distances
@@ -1590,7 +1599,7 @@ impl HnswIndex {
     /// # Returns
     ///
     /// A sorted vector of (NodeId, similarity) pairs where higher similarity means more similar.
-    fn convert_and_sort_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
+    fn convert_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
         let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
 
         for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
@@ -1625,10 +1634,6 @@ impl HnswIndex {
                 results.push((node_id, similarity));
             }
         }
-
-        // Results should already be sorted by usearch, but ensure descending order by similarity.
-        // Use sort_unstable_by to avoid auxiliary memory allocation (O(N) vs O(log N) stack).
-        results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         results
     }
@@ -2279,6 +2284,36 @@ mod tests {
         let results = index.search(&[1.0, 0.0, 0.0, 0.0], 2)?;
         assert_eq!(results[0].0, node1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_results_are_sorted() -> Result<()> {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .m(16)
+            .ef_construction(100)
+            .build()?;
+
+        // Add random vectors
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for i in 1..=100 {
+            let vec: Vec<f32> = (0..4).map(|_| rng.r#gen()).collect();
+            index.add(NodeId::new(i).unwrap(), &vec)?;
+        }
+
+        let query: Vec<f32> = (0..4).map(|_| rng.r#gen()).collect();
+        let results = index.search(&query, 20)?;
+
+        for i in 0..results.len().saturating_sub(1) {
+            assert!(
+                results[i].1 >= results[i + 1].1,
+                "Results unsorted at index {}: {} < {}",
+                i,
+                results[i].1,
+                results[i + 1].1
+            );
+        }
         Ok(())
     }
 
