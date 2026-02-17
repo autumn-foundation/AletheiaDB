@@ -601,6 +601,18 @@ mod tests {
     }
 
     #[test]
+    fn test_time_range_overlaps_touching_repro() {
+        let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+        let r2 = TimeRange::new(200.into(), 300.into()).unwrap();
+
+        // Ensure symmetry: neither should overlap the other
+        // This prevents the mutant where "start < end" becomes "start <= end"
+        // which would cause r2.overlaps(r1) to be true (200 <= 200)
+        assert!(!r1.overlaps(&r2));
+        assert!(!r2.overlaps(&r1));
+    }
+
+    #[test]
     fn test_time_range_contains_range() {
         let outer = TimeRange::new(100.into(), 300.into()).unwrap();
         let inner = TimeRange::new(150.into(), 250.into()).unwrap();
