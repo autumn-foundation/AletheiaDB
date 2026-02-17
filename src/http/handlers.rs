@@ -1,4 +1,25 @@
 //! HTTP request handlers.
+//!
+//! This module defines the JSON API contract for the AletheiaDB HTTP server.
+//! It includes the request structures, response formats, and handler functions.
+//!
+//! # API Structure
+//!
+//! All query operations are handled via a single POST endpoint (`/query`) that accepts
+//! a JSON payload. The payload is polymorphic, using the `operation` field to distinguish
+//! between different request types.
+//!
+//! # Example Request
+//!
+//! ```json
+//! {
+//!   "operation": "find_node",
+//!   "label": "Person",
+//!   "properties": {
+//!     "name": "Alice"
+//!   }
+//! }
+//! ```
 
 use crate::core::NodeId;
 use crate::http::converters::{interned_to_string, json_to_property_map, property_map_to_json};
@@ -35,41 +56,156 @@ pub fn configure_health_routes(cfg: &mut web::ServiceConfig) {
 // Query Endpoint
 // ============================================================================
 
+/// Polymorphic request structure for the `/query` endpoint.
+///
+/// The structure deserializes based on the `operation` field tag.
+///
+/// # Examples
+///
+/// ## Create a Node
+/// ```json
+/// {
+///   "operation": "create_node",
+///   "label": "Person",
+///   "properties": {
+///     "name": "Alice",
+///     "age": 30
+///   }
+/// }
+/// ```
+///
+/// ## Find Nodes
+/// ```json
+/// {
+///   "operation": "find_node",
+///   "label": "Person",
+///   "limit": 10
+/// }
+/// ```
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum QueryRequest {
+    /// Find nodes matching specific criteria.
+    ///
+    /// # Fields
+    /// * `label` - Optional label to filter by (e.g., "Person").
+    /// * `properties` - Optional map of property key-value pairs to match (exact match).
+    /// * `limit` - Maximum number of results to return (default: 100, max: 1000).
+    /// * `offset` - Number of results to skip (default: 0).
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "find_node",
+    ///   "label": "Person",
+    ///   "properties": { "active": true },
+    ///   "limit": 50
+    /// }
+    /// ```
     FindNode {
+        /// Optional label to filter by (e.g., "Person").
         label: Option<String>,
+        /// Optional map of property key-value pairs to match (exact match).
         properties: Option<HashMap<String, serde_json::Value>>,
+        /// Maximum number of results to return (default: 100, max: 1000).
         limit: Option<usize>,
+        /// Number of results to skip (default: 0).
         offset: Option<usize>,
     },
+
+    /// Get a single node by its internal ID.
+    ///
+    /// # Fields
+    /// * `node_id` - The 64-bit unsigned integer ID of the node.
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "get_node",
+    ///   "node_id": 12345
+    /// }
+    /// ```
     GetNode {
+        /// The 64-bit unsigned integer ID of the node.
         node_id: u64,
     },
+
+    /// Create a new node.
+    ///
+    /// # Fields
+    /// * `label` - The label/type of the node (e.g., "User").
+    /// * `properties` - Optional initial properties for the node.
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "create_node",
+    ///   "label": "User",
+    ///   "properties": {
+    ///     "username": "jdoe",
+    ///     "email": "jdoe@example.com"
+    ///   }
+    /// }
+    /// ```
     CreateNode {
+        /// The label/type of the node (e.g., "User").
         label: String,
+        /// Optional initial properties for the node.
         properties: Option<HashMap<String, serde_json::Value>>,
     },
+
+    /// Find all neighbors connected to a specific node.
+    ///
+    /// Returns nodes connected by *any* edge direction (incoming or outgoing).
+    ///
+    /// # Fields
+    /// * `node_id` - The ID of the central node.
+    /// * `limit` - Maximum number of neighbors to return (default: 100).
+    /// * `offset` - Pagination offset (default: 0).
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "find_neighbors",
+    ///   "node_id": 12345,
+    ///   "limit": 20
+    /// }
+    /// ```
     FindNeighbors {
+        /// The ID of the central node.
         node_id: u64,
+        /// Maximum number of neighbors to return (default: 100).
         #[serde(default)]
         limit: Option<usize>,
+        /// Pagination offset (default: 0).
         #[serde(default)]
         offset: Option<usize>,
     },
 }
 
+/// Standardized API response structure.
+///
+/// All API responses follow this wrapper format.
+///
+/// # Structure
+///
+/// * `success`: Boolean indicating if the operation succeeded.
+/// * `data`: The result payload (only present if `success` is true).
+/// * `error`: Error message string (only present if `success` is false).
 #[derive(Debug, Serialize)]
 pub struct ApiResponse {
+    /// Indicates whether the request was successful.
     success: bool,
+    /// The successful response payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<serde_json::Value>,
+    /// The error message if the request failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
 impl ApiResponse {
+    /// Create a success response.
     fn success(data: serde_json::Value) -> Self {
         Self {
             success: true,
@@ -78,6 +214,7 @@ impl ApiResponse {
         }
     }
 
+    /// Create an error response.
     fn error(msg: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -105,6 +242,14 @@ fn json_to_predicate_value(v: &serde_json::Value) -> Option<PredicateValue> {
 }
 
 /// Query endpoint handler.
+///
+/// Accepts a JSON `QueryRequest` and executes the corresponding operation against the database.
+/// Returns an `ApiResponse` wrapped in an `HttpResponse`.
+///
+/// # Resource Limits
+///
+/// * **Pagination**: `limit + offset` must not exceed 10,000 to prevent CPU exhaustion.
+/// * **Result Size**: `limit` is capped at 1000 for neighbor queries.
 pub async fn handle_query(
     state: web::Data<AppState>,
     req: web::Json<QueryRequest>,
