@@ -624,6 +624,42 @@ mod tests {
     }
 
     #[test]
+    fn test_time_range_contains_range_boundaries() {
+        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+
+        // Match start exactly
+        let start_match = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(
+            outer.contains_range(&start_match),
+            "Should contain range with same start"
+        );
+
+        // Match end exactly
+        let end_match = TimeRange::new(200.into(), 300.into()).unwrap();
+        assert!(
+            outer.contains_range(&end_match),
+            "Should contain range with same end"
+        );
+
+        // Match both (reflexive)
+        assert!(outer.contains_range(&outer), "Should contain itself");
+
+        // Slightly outside start
+        let start_out = TimeRange::new(99.into(), 200.into()).unwrap();
+        assert!(
+            !outer.contains_range(&start_out),
+            "Should not contain range starting earlier"
+        );
+
+        // Slightly outside end
+        let end_out = TimeRange::new(200.into(), 301.into()).unwrap();
+        assert!(
+            !outer.contains_range(&end_out),
+            "Should not contain range ending later"
+        );
+    }
+
+    #[test]
     fn test_time_range_close_at() {
         let open = TimeRange::from(100.into());
         let closed = open.close_at(200.into()).unwrap();
@@ -703,6 +739,16 @@ mod tests {
         let closed_both = interval.close_both(1500.into(), 2500.into()).unwrap();
         assert!(!closed_both.is_currently_valid());
         assert!(!closed_both.is_currently_recorded());
+        assert_eq!(
+            closed_both.valid_time().end(),
+            1500.into(),
+            "Valid time end should be correct"
+        );
+        assert_eq!(
+            closed_both.transaction_time().end(),
+            2500.into(),
+            "Transaction time end should be correct"
+        );
     }
 
     #[test]
