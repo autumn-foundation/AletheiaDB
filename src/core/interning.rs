@@ -83,17 +83,23 @@ pub struct IdentityHasher(u64);
 
 impl Hasher for IdentityHasher {
     fn write(&mut self, bytes: &[u8]) {
-        // Fallback: treat bytes as little-endian u32 if length matches
-        if let Ok(bytes) = bytes.try_into() {
-            self.0 = u32::from_le_bytes(bytes) as u64;
-        } else {
-            // Should not happen for InternedString keys
-            self.0 = bytes.len() as u64;
+        // Handle common integer sizes directly to support various key types
+        match bytes.len() {
+            4 => self.0 = u32::from_le_bytes(bytes.try_into().unwrap()) as u64,
+            8 => self.0 = u64::from_le_bytes(bytes.try_into().unwrap()),
+            _ => {
+                // Should not happen for known integer keys
+                self.0 = bytes.len() as u64;
+            }
         }
     }
 
     fn write_u32(&mut self, i: u32) {
         self.0 = i as u64;
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
     }
 
     fn finish(&self) -> u64 {
@@ -1091,10 +1097,20 @@ mod tests {
         hasher.write_u32(42);
         assert_eq!(hasher.finish(), 42);
 
-        // Test write with 4 bytes (fallback success path)
+        // Test write_u64
+        hasher.write_u64(u64::MAX);
+        assert_eq!(hasher.finish(), u64::MAX);
+
+        // Test write with 4 bytes (fallback to u32)
         let bytes = 12345u32.to_le_bytes();
         hasher.write(&bytes);
         assert_eq!(hasher.finish(), 12345);
+
+        // Test write with 8 bytes (fallback to u64)
+        let val = 0x1234567890ABCDEFu64;
+        let bytes = val.to_le_bytes();
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), val);
 
         // Test write with other length (fallback fail path)
         // This covers the else branch in IdentityHasher::write

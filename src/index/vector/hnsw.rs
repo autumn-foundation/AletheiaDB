@@ -1626,8 +1626,9 @@ impl HnswIndex {
             }
         }
 
-        // Results should already be sorted by usearch, but ensure descending order by similarity
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Results should already be sorted by usearch, but ensure descending order by similarity.
+        // Use sort_unstable_by to avoid allocation and improve performance (stability not required).
+        results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         results
     }
