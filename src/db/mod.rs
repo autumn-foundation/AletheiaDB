@@ -15,6 +15,7 @@ use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Administrative and maintenance operations.
 pub mod admin;
@@ -108,6 +109,8 @@ pub struct AletheiaDB {
     pub(crate) wal: Arc<ConcurrentWalSystem>,
     /// Current logical timestamp for transaction time - Mutex-protected for thread-safe increment
     pub(crate) current_timestamp: Arc<Mutex<Timestamp>>,
+    /// Monotonic observation time for adaptive forward clock-skew limits.
+    pub(crate) commit_clock_observed_at: Arc<Mutex<Instant>>,
     /// Transaction ID generator for MVCC
     pub(crate) tx_id_gen: Arc<TxIdGenerator>,
     /// Transaction visibility manager for Snapshot Isolation

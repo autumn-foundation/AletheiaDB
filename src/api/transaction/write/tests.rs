@@ -2394,6 +2394,7 @@ mod clock_skew_tests {
     use crate::api::transaction::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     /// Test harness for clock skew tests.
@@ -2403,6 +2404,7 @@ mod clock_skew_tests {
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
+        commit_clock_observed_at: Arc<Mutex<Instant>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -2422,6 +2424,7 @@ mod clock_skew_tests {
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
             let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let commit_clock_observed_at = Arc::new(Mutex::new(Instant::now()));
             let node_id_gen = Arc::new(IdGenerator::new());
             let edge_id_gen = Arc::new(IdGenerator::new());
             let version_id_gen = Arc::new(IdGenerator::new());
@@ -2434,6 +2437,7 @@ mod clock_skew_tests {
                 temporal_indexes,
                 wal,
                 current_timestamp,
+                commit_clock_observed_at,
                 visibility_manager,
                 node_id_gen,
                 edge_id_gen,
@@ -2455,6 +2459,26 @@ mod clock_skew_tests {
                 self.temporal_indexes.clone(),
                 self.wal.clone(),
                 self.current_timestamp.clone(),
+                self.visibility_manager.clone(),
+                self.node_id_gen.clone(),
+                self.edge_id_gen.clone(),
+                self.version_id_gen.clone(),
+            )
+        }
+
+        fn create_tx_with_shared_observation_clock(&self) -> WriteTransaction {
+            let snapshot_ts = *self.current_timestamp.lock().unwrap();
+            let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
+
+            WriteTransaction::new_with_clock_observed_at(
+                self.tx_id_gen.next(),
+                snapshot,
+                self.current.clone(),
+                self.historical.clone(),
+                self.temporal_indexes.clone(),
+                self.wal.clone(),
+                self.current_timestamp.clone(),
+                self.commit_clock_observed_at.clone(),
                 self.visibility_manager.clone(),
                 self.node_id_gen.clone(),
                 self.edge_id_gen.clone(),
@@ -2524,6 +2548,78 @@ mod clock_skew_tests {
             }
             err => panic!("Expected ClockSkew error, got: {:?}", err),
         }
+    }
+
+    #[test]
+    fn test_clock_skew_failure_does_not_advance_observation_timestamp() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx_with_shared_observation_clock();
+
+        let props = PropertyMapBuilder::new().insert("test", true).build();
+        tx.create_node("Test", props).unwrap();
+
+        {
+            let mut ts = harness.current_timestamp.lock().unwrap();
+            let old_frontier = time::now().wallclock() - (6 * 60 * 60 * 1_000_000);
+            *ts = crate::core::hlc::HybridTimestamp::new(old_frontier, 0).unwrap();
+        }
+
+        let old_observed_at = {
+            let mut observed_at = harness.commit_clock_observed_at.lock().unwrap();
+            let now = Instant::now();
+            let old_observed = now.checked_sub(Duration::from_secs(5)).unwrap_or(now);
+            *observed_at = old_observed;
+            old_observed
+        };
+
+        let result = tx.commit();
+        assert!(matches!(
+            result,
+            Err(crate::utils::error::Error::Transaction(
+                TransactionError::ClockSkew { .. }
+            ))
+        ));
+
+        let observed_after_failure = *harness.commit_clock_observed_at.lock().unwrap();
+        assert_eq!(
+            observed_after_failure, old_observed_at,
+            "failed skew validation must not consume idle-time budget"
+        );
+    }
+
+    #[test]
+    fn test_clock_skew_allows_idle_forward_drift_with_shared_observation_clock() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx_with_shared_observation_clock();
+
+        let props = PropertyMapBuilder::new().insert("test", true).build();
+        tx.create_node("Test", props).unwrap();
+
+        let idle_gap_us = super::MAX_FORWARD_JUMP_US + 2_000_000;
+        {
+            let mut ts = harness.current_timestamp.lock().unwrap();
+            let past_time = time::now().wallclock() - idle_gap_us;
+            *ts = crate::core::hlc::HybridTimestamp::new(past_time, 0).unwrap();
+        }
+
+        {
+            let mut observed_at = harness.commit_clock_observed_at.lock().unwrap();
+            match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
+                Some(past_instant) => *observed_at = past_instant,
+                None => {
+                    println!(
+                        "Skipping test_clock_skew_allows_idle_forward_drift_with_shared_observation_clock: uptime insufficient for 1h+ idle gap."
+                    );
+                    return;
+                }
+            }
+        }
+
+        let result = tx.commit();
+        assert!(
+            result.is_ok(),
+            "normal idle time should not be treated as forward clock skew"
+        );
     }
 }
 
