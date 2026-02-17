@@ -219,3 +219,10 @@
 **Severity:** 🟢 Acquitted (Conditional)
 **Finding:** The test `test_havoc_wal_batch_gaps` passes when it successfully identifies gaps in the LSN sequence after a failed batch append. This confirms the system's failure mode (atomicity is per-entry, not per-batch for LSN allocation).
 **Evidence:** Test logic explicitly asserts `!contiguous` to pass.
+
+**[Test Inversion: WAL Gaps]**
+**Module:** `tests/havoc_wal_gaps.rs`
+**Severity:** 🔴 Critical
+**Finding:** The test `test_havoc_wal_batch_gaps` asserted that the WAL `append_batch` operation MUST be non-atomic and leave LSN gaps upon failure. It treated "contiguous LSNs" as a failure condition ("Boring. LSNs are contiguous"). This actively prevented fixing the atomicity bug.
+**Evidence:** Code inspection: `if !contiguous { success } else { panic }`.
+**Resolution:** Modified `src/storage/wal/concurrent.rs` to pre-validate batch entries, ensuring atomicity. Rewrote the test as `tests/wal_batch_atomicity.rs` to assert that failures are atomic (no LSNs consumed, no partial writes).

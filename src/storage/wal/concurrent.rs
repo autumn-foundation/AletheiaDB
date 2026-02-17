@@ -360,6 +360,20 @@ impl ConcurrentWal {
             return Ok(Vec::new());
         }
 
+        // Pre-validate all operations to ensure atomicity.
+        // If any operation exceeds the size limit, we reject the entire batch
+        // BEFORE allocating LSNs. This prevents LSN gaps and partial writes.
+        for operation in &operations {
+            let estimated_capacity = super::estimate_entry_capacity(operation);
+            if estimated_capacity > super::entry::MAX_WAL_ENTRY_SIZE {
+                return Err(Error::Storage(StorageError::CapacityExceeded {
+                    resource: "WAL entry size".to_string(),
+                    current: estimated_capacity,
+                    limit: super::entry::MAX_WAL_ENTRY_SIZE,
+                }));
+            }
+        }
+
         let count = operations.len() as u64;
 
         // Defensive check: ensure count > 0 to prevent panic in allocate_batch
