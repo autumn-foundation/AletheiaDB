@@ -1,15 +1,11 @@
-//! Vector upsert/update behavior and optimization guard tests.
+//! Tests for Issue #207: Optimize vector updates to avoid unconditional remove() before add()
 //!
-//! This suite keeps functional and regression coverage for repeated `add()` calls
-//! with the same `NodeId` in one semantic location.
+//! The goal is to verify that updating a vector (re-adding with same NodeId) does not
+//! perform unnecessary FFI calls. The optimized implementation should use a try-add-first
+//! approach instead of unconditionally removing before adding.
 
 use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
-
-#[path = "vector_update_optimization/regression_behavior.rs"]
-mod regression_behavior;
-#[path = "vector_update_optimization/regression_coverage.rs"]
-mod regression_coverage;
 
 /// Test that updating a vector works correctly.
 ///

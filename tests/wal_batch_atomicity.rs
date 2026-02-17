@@ -48,7 +48,7 @@ fn test_wal_batch_atomicity() {
     let ops = vec![
         test_operation(1, "Op1"),
         huge_operation(2),
-        test_operation(3, "Op3")
+        test_operation(3, "Op3"),
     ];
 
     // 2. Append batch - should fail atomically due to size check
@@ -70,7 +70,10 @@ fn test_wal_batch_atomicity() {
     let lsn_after = wal.append_async(test_operation(4, "Op4")).unwrap();
     println!("Appended valid op after failure, LSN: {:?}", lsn_after);
 
-    assert_eq!(lsn_after.0, 1, "LSN should be 1, verifying no LSNs were wasted by failed batch");
+    assert_eq!(
+        lsn_after.0, 1,
+        "LSN should be 1, verifying no LSNs were wasted by failed batch"
+    );
 
     // 4. Drain and inspect
     let entries = wal.drain_all();

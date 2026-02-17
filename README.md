@@ -400,7 +400,6 @@ let doc_id = db.create_node("Document",
 )?;
 
 // Find similar nodes
-// Note: find_similar excludes the query node itself from results
 let similar = db.find_similar(doc_id, 10)?;
 ```
 
@@ -416,10 +415,6 @@ let tx_time = aletheiadb::core::temporal::time::now();
 
 // Simple: Graph + Vector hybrid
 let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
-for row in results {
-    // Iterate over results (QueryResults is an iterator)
-    println!("Found: {:?}", row?.entity);
-}
 
 // Complex: Full hybrid with builder
 let results = db.query()
@@ -427,18 +422,9 @@ let results = db.query()
     .start(alice_id)                   // Graph: start node
     .traverse("KNOWS")                 // Graph: traverse edges
     .rank_by_similarity(&embedding, 10) // Vector: rank by similarity
+    .filter(Predicate::gt("score", 0.8)) // Filter: high similarity only
     .with_provenance()                 // Include metadata
     .execute(&db)?;
-
-for row in results {
-    // Access score from metadata
-    let row = row?;
-    if let Some(score) = row.score {
-        if score > 0.8 {
-            println!("High similarity match: {:?}", row.entity);
-        }
-    }
-}
 
 // Property-specific vector queries
 let results = db.query()
@@ -485,7 +471,7 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
 // Ensure you have features = ["nova"] enabled in Cargo.toml
@@ -493,9 +479,10 @@ use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 // 1. Setup database and node (for self-contained example)
 let db = AletheiaDB::new().unwrap();
 let node_id = db.write(|tx| {
-    tx.create_node("Person", properties! {
-        "name" => "Alice"
-    })
+    tx.create_node("Person", PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .build()
+    )
 })?;
 
 // 2. Generate natural language history of a node
@@ -508,7 +495,7 @@ for event in narrative {
 
     for change in event.changes {
         println!("  - {}", change);
-        // Output: "  - Initial property 'name': '"Alice"'"
+        // Output: "  - Initial property 'name': 'Alice'"
     }
 }
 ```

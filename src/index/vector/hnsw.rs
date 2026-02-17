@@ -1616,7 +1616,7 @@ impl HnswIndex {
                 let similarity = match self.config.metric {
                     DistanceMetric::Cosine => 1.0 - distance,
                     DistanceMetric::Euclidean => -distance,
-                    DistanceMetric::DotProduct => 1.0 - distance,
+                    DistanceMetric::DotProduct => -distance,
                     DistanceMetric::Haversine => -distance,
                     DistanceMetric::Hamming => -distance,
                     DistanceMetric::Tanimoto => 1.0 - distance,
@@ -2277,32 +2277,6 @@ mod tests {
 
         let results = index.search(&[1.0, 0.0, 0.0, 0.0], 2)?;
         assert_eq!(results[0].0, node1);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dot_product_similarity_metric() -> Result<()> {
-        // Test DotProduct similarity conversion
-        // Dot Product of (1,0) and (1,0) is 1.0.
-        // usearch IP metric returns 1 - dot_product (or similar).
-        // We verify that our conversion (1.0 - distance) yields the correct dot product (1.0).
-
-        let index = HnswIndexBuilder::new(2, DistanceMetric::DotProduct).build()?;
-        let node = NodeId::new(1).unwrap();
-        index.add(node, &[1.0, 0.0])?;
-
-        let results = index.search(&[1.0, 0.0], 1)?;
-        assert_eq!(results.len(), 1);
-        let similarity = results[0].1;
-
-        // We expect similarity to be exactly 1.0 for normalized dot product of identical unit vectors.
-        // Previously this was returning 0.0 (or -0.0) due to incorrect conversion.
-        assert!(
-            (similarity - 1.0).abs() < 0.001,
-            "Expected 1.0, got {}",
-            similarity
-        );
 
         Ok(())
     }

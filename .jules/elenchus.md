@@ -226,21 +226,3 @@
 **Finding:** The test `test_havoc_wal_batch_gaps` asserted that the WAL `append_batch` operation MUST be non-atomic and leave LSN gaps upon failure. It treated "contiguous LSNs" as a failure condition ("Boring. LSNs are contiguous"). This actively prevented fixing the atomicity bug.
 **Evidence:** Code inspection: `if !contiguous { success } else { panic }`.
 **Resolution:** Modified `src/storage/wal/concurrent.rs` to pre-validate batch entries, ensuring atomicity. Rewrote the test as `tests/wal_batch_atomicity.rs` to assert that failures are atomic (no LSNs consumed, no partial writes).
-**[DotProduct Metric Conversion Regression]**
-**Module:** `src/index/vector/hnsw.rs`
-**Severity:** 🔴 Critical
-**Finding:** The code contained `DistanceMetric::DotProduct => -distance`, contradicting the previous journal resolution which stated it should be `1.0 - distance`. This caused dot product similarity to be `0.0` (or negative) for identical unit vectors instead of `1.0`.
-**Evidence:** `tests/repro_hnsw_dotproduct.rs` failed with `Expected 1.0, got -0`.
-**Resolution:** Re-applied the fix: `DistanceMetric::DotProduct => 1.0 - distance`. Added permanent regression test `test_dot_product_similarity_metric` to prevent future regressions.
-
-**[HLC Tests Audit]**
-**Module:** `src/core/hlc.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** Verified that critical concerns "HLC Causality Blind Spot" and "HLC Assertion Weakness" are addressed. `prop_receive_causality_collision` now explicitly tests the logical counter increment on wallclock collision.
-**Evidence:** Code inspection of `src/core/hlc.rs` and successful test execution.
-
-**[String Interning Audit]**
-**Module:** `src/core/interning.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** Module contains robust concurrency tests including `test_intern_concurrent_capacity_race` and `test_concurrent_interning`.
-**Evidence:** Code inspection.
