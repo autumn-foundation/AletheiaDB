@@ -1,8 +1,8 @@
 //! Observable pattern for storage events.
 //!
 //! This module provides an event-driven architecture for components to react to
-//! storage operations without tight coupling. Components implement the `StorageObserver`
-//! trait to receive notifications about anchors, deletes, checkpoints, and other events.
+//! storage operations without tight coupling. Components register a callback
+//! to receive notifications about anchors, deletes, checkpoints, and other events.
 //!
 //! # Architecture
 //!
@@ -19,32 +19,27 @@
 //! │ Vector │   │ Metrics  │   │  WAL     │
 //! │ Index  │   │ System   │   │ Logger   │
 //! └────────┘   └──────────┘   └──────────┘
-//!   (Observer)   (Observer)     (Observer)
+//!   (Callback)   (Callback)     (Callback)
 //! ```
 //!
 //! # Example
 //!
 //! ```no_run
-//! use aletheiadb::core::observer::{StorageObserver, StorageEvent};
+//! use aletheiadb::core::observer::{StorageEvent};
 //! use aletheiadb::storage::historical::HistoricalStorage;
 //! use std::sync::Arc;
 //!
-//! struct MetricsCollector;
-//!
-//! impl StorageObserver for MetricsCollector {
-//!     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
-//!         match event {
-//!             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
-//!                 println!("Anchor created: {} at {}", version_id, timestamp);
-//!             }
-//!             _ => {}
-//!         }
-//!         Ok(())
-//!     }
-//! }
-//!
 //! let mut storage = HistoricalStorage::new();
-//! storage.add_observer(Arc::new(MetricsCollector));
+//!
+//! storage.add_observer(Arc::new(|event: &StorageEvent| {
+//!     match event {
+//!         StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
+//!             println!("Anchor created: {} at {}", version_id, timestamp);
+//!         }
+//!         _ => {}
+//!     }
+//!     Ok(())
+//! }));
 //! ```
 //!
 //! # Hooks vs Observers: When to Use Each
@@ -139,48 +134,6 @@
 //!   - Observer for notifications (metrics)
 //! ```
 //!
-//! ## Example: Temporal Vector Integration (VS-047)
-//!
-//! ```rust
-//! # use aletheiadb::storage::historical::{HistoricalStorage, PreAnchorHook};
-//! # use aletheiadb::core::observer::{StorageObserver, StorageEvent};
-//! # use aletheiadb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
-//! # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-//! # use std::sync::Arc;
-//! #
-//! # let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
-//! # let config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
-//!
-//! // Pre-Anchor Hook: Create snapshot BEFORE anchor storage, return ID
-//! let index = Arc::new(TemporalVectorIndex::new(config)?);
-//! let node_hook: PreAnchorHook = Arc::new({
-//!     let index = Arc::clone(&index);
-//!     move |_entity_type, _entity_id, timestamp, _properties| {
-//!         // Returns Option<snapshot_id> to be stored in anchor
-//!         index.create_snapshot_for_anchor(timestamp)
-//!     }
-//! });
-//!
-//! let mut storage = HistoricalStorage::new();
-//! storage.register_pre_node_anchor_hook(node_hook);
-//!
-//! // Post-Commit Observer: Collect metrics AFTER anchor storage
-//! struct VectorMetricsObserver;
-//! impl StorageObserver for VectorMetricsObserver {
-//!     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
-//!         if let StorageEvent::NodeAnchorCreated { .. } = event {
-//!             // Log metrics, update counters, etc.
-//!         }
-//!         Ok(())
-//!     }
-//! }
-//!
-//! storage.add_observer(Arc::new(VectorMetricsObserver));
-//!
-//! // Result: Anchor stored with snapshot_id + observers notified
-//! # Ok::<(), aletheiadb::utils::error::Error>(())
-//! ```
-//!
 //! ## Key Takeaways
 //!
 //! 1. **Observers** = Post-commit notifications (this module)
@@ -252,11 +205,6 @@ pub enum StorageEvent {
         /// Whether this version is an anchor (true) or delta (false)
         is_anchor: bool,
     },
-    // Future events (examples):
-    // NodeDeleted { node_id, timestamp },
-    // EdgeDeleted { edge_id, timestamp },
-    // CheckpointCreated { timestamp },
-    // VersionPruned { version_id, timestamp },
 }
 
 impl StorageEvent {
@@ -279,89 +227,8 @@ impl StorageEvent {
     }
 }
 
-/// Observer trait for receiving storage events.
-///
-/// Components implement this trait to react to storage operations.
-/// The observer pattern enables:
-/// - **Loose coupling**: Observers don't depend on HistoricalStorage implementation
-/// - **Multiple subscribers**: Many observers can react to the same event
-/// - **Extensibility**: New event types don't break existing observers
-///
-/// # Error Handling
-///
-/// Observers should handle errors gracefully. If an observer returns an error:
-/// - The error is logged but doesn't fail the storage operation
-/// - Other observers are still notified
-/// - This ensures storage ACID guarantees are maintained
-///
-/// # Thread Safety
-///
-/// Observers must be `Send + Sync` as they may be called from any thread.
-/// Use appropriate synchronization primitives if maintaining mutable state.
-pub trait StorageObserver: Send + Sync {
-    /// Called when a storage event occurs.
-    ///
-    /// # Arguments
-    /// - `event`: The storage event that occurred
-    ///
-    /// # Returns
-    /// - `Ok(())`: Event processed successfully
-    /// - `Err(...)`: Processing failed (logged, doesn't block storage operation)
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use aletheiadb::core::observer::{StorageObserver, StorageEvent};
-    /// struct VectorIndexObserver;
-    ///
-    /// impl StorageObserver for VectorIndexObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
-    ///         match event {
-    ///             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
-    ///                 // Create vector snapshot aligned with this anchor
-    ///                 println!("Creating vector snapshot for anchor {}", version_id);
-    ///                 Ok(())
-    ///             }
-    ///             _ => Ok(()), // Ignore other events
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    fn on_event(&self, event: &StorageEvent) -> Result<()>;
-
-    /// Optional: Filter events this observer cares about.
-    ///
-    /// By default, observers receive all events. Override this method to receive
-    /// only specific event types, improving performance by avoiding unnecessary calls.
-    ///
-    /// # Returns
-    /// - `true`: Call `on_event()` for this event
-    /// - `false`: Skip this observer for this event type
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use aletheiadb::core::observer::{StorageObserver, StorageEvent};
-    /// struct AnchorOnlyObserver;
-    ///
-    /// impl StorageObserver for AnchorOnlyObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
-    ///         // Only called for anchor events due to filter
-    ///         Ok(())
-    ///     }
-    ///
-    ///     fn interested_in(&self, event: &StorageEvent) -> bool {
-    ///         event.is_anchor_event()
-    ///     }
-    /// }
-    /// ```
-    fn interested_in(&self, event: &StorageEvent) -> bool {
-        // By default, interested in all events
-        let _ = event;
-        true
-    }
-}
-
-/// Type alias for thread-safe observer references.
-pub type Observer = Arc<dyn StorageObserver>;
+/// Callback type for storage observers.
+pub type StorageCallback = Arc<dyn Fn(&StorageEvent) -> Result<()> + Send + Sync>;
 
 /// Helper for notifying multiple observers of an event.
 ///
@@ -375,15 +242,10 @@ pub type Observer = Arc<dyn StorageObserver>;
 /// # Design Note
 /// This is a standalone function rather than a method to keep HistoricalStorage
 /// focused on storage logic, not observer management.
-pub fn notify_observers(observers: &[Observer], event: &StorageEvent) {
+pub fn notify_observers(observers: &[StorageCallback], event: &StorageEvent) {
     for observer in observers {
-        // Skip if observer not interested in this event type
-        if !observer.interested_in(event) {
-            continue;
-        }
-
         // Notify observer, log errors but don't fail
-        if let Err(e) = observer.on_event(event) {
+        if let Err(e) = observer(event) {
             #[cfg(feature = "observability")]
             {
                 use crate::utils::error::Error;
@@ -413,53 +275,17 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Mock observer that counts events
-    struct CountingObserver {
-        count: AtomicUsize,
-    }
-
-    impl StorageObserver for CountingObserver {
-        fn on_event(&self, _event: &StorageEvent) -> Result<()> {
-            self.count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    /// Mock observer that only cares about anchors
-    struct AnchorOnlyObserver {
-        count: AtomicUsize,
-    }
-
-    impl StorageObserver for AnchorOnlyObserver {
-        fn on_event(&self, _event: &StorageEvent) -> Result<()> {
-            self.count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn interested_in(&self, event: &StorageEvent) -> bool {
-            event.is_anchor_event()
-        }
-    }
-
-    /// Mock observer that collects events
-    struct CollectingObserver {
-        events: Mutex<Vec<StorageEvent>>,
-    }
-
-    impl StorageObserver for CollectingObserver {
-        fn on_event(&self, event: &StorageEvent) -> Result<()> {
-            self.events.lock().unwrap().push(event.clone());
-            Ok(())
-        }
-    }
-
     #[test]
     fn test_notify_observers() {
-        let observer = Arc::new(CountingObserver {
-            count: AtomicUsize::new(0),
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = count.clone();
+
+        let observer: StorageCallback = Arc::new(move |_event| {
+            count_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         });
 
-        let observers: Vec<Observer> = vec![Arc::clone(&observer) as Observer];
+        let observers = vec![observer];
 
         let event = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
@@ -469,22 +295,26 @@ mod tests {
 
         notify_observers(&observers, &event);
 
-        assert_eq!(observer.count.load(Ordering::SeqCst), 1);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn test_multiple_observers() {
-        let observer1 = Arc::new(CountingObserver {
-            count: AtomicUsize::new(0),
-        });
-        let observer2 = Arc::new(CountingObserver {
-            count: AtomicUsize::new(0),
+        let count1 = Arc::new(AtomicUsize::new(0));
+        let count1_clone = count1.clone();
+        let observer1: StorageCallback = Arc::new(move |_event| {
+            count1_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         });
 
-        let observers: Vec<Observer> = vec![
-            Arc::clone(&observer1) as Observer,
-            Arc::clone(&observer2) as Observer,
-        ];
+        let count2 = Arc::new(AtomicUsize::new(0));
+        let count2_clone = count2.clone();
+        let observer2: StorageCallback = Arc::new(move |_event| {
+            count2_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let observers = vec![observer1, observer2];
 
         let event = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
@@ -494,17 +324,24 @@ mod tests {
 
         notify_observers(&observers, &event);
 
-        assert_eq!(observer1.count.load(Ordering::SeqCst), 1);
-        assert_eq!(observer2.count.load(Ordering::SeqCst), 1);
+        assert_eq!(count1.load(Ordering::SeqCst), 1);
+        assert_eq!(count2.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn test_filtered_observer() {
-        let anchor_observer = Arc::new(AnchorOnlyObserver {
-            count: AtomicUsize::new(0),
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = count.clone();
+
+        // Observer only interested in anchors
+        let observer: StorageCallback = Arc::new(move |event| {
+            if event.is_anchor_event() {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
         });
 
-        let observers: Vec<Observer> = vec![Arc::clone(&anchor_observer) as Observer];
+        let observers = vec![observer];
 
         // Send anchor event - should be counted
         let anchor_event = StorageEvent::NodeAnchorCreated {
@@ -513,7 +350,7 @@ mod tests {
             timestamp: 1000.into(),
         };
         notify_observers(&observers, &anchor_event);
-        assert_eq!(anchor_observer.count.load(Ordering::SeqCst), 1);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
 
         // Send version event - should be filtered out
         let version_event = StorageEvent::NodeVersionCreated {
@@ -523,7 +360,7 @@ mod tests {
             is_anchor: false,
         };
         notify_observers(&observers, &version_event);
-        assert_eq!(anchor_observer.count.load(Ordering::SeqCst), 1); // Still 1
+        assert_eq!(count.load(Ordering::SeqCst), 1); // Still 1
     }
 
     #[test]
@@ -539,11 +376,15 @@ mod tests {
 
     #[test]
     fn test_event_collection() {
-        let collector = Arc::new(CollectingObserver {
-            events: Mutex::new(Vec::new()),
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+
+        let observer: StorageCallback = Arc::new(move |event| {
+            events_clone.lock().unwrap().push(event.clone());
+            Ok(())
         });
 
-        let observers: Vec<Observer> = vec![Arc::clone(&collector) as Observer];
+        let observers = vec![observer];
 
         let event1 = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
@@ -559,7 +400,7 @@ mod tests {
         notify_observers(&observers, &event1);
         notify_observers(&observers, &event2);
 
-        let collected = collector.events.lock().unwrap();
+        let collected = events.lock().unwrap();
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0], event1);
         assert_eq!(collected[1], event2);
@@ -571,16 +412,11 @@ mod tests {
         // 💣 Risk: A panicking observer crashes the storage operation.
         // This test confirms the current behavior (fail-fast).
 
-        struct PanickingObserver;
+        let observer: StorageCallback = Arc::new(|_event| {
+            panic!("Observer panic!");
+        });
 
-        impl StorageObserver for PanickingObserver {
-            fn on_event(&self, _event: &StorageEvent) -> Result<()> {
-                panic!("Observer panic!");
-            }
-        }
-
-        let observer = Arc::new(PanickingObserver);
-        let observers: Vec<Observer> = vec![observer as Observer];
+        let observers = vec![observer];
 
         let event = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),

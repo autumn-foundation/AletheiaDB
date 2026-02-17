@@ -1,9 +1,10 @@
 use crate::api::vector_builder::VectorIndexBuilder;
 use crate::core::id::NodeId;
+use crate::core::observer::StorageEvent;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
-use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
+use crate::index::vector::temporal::TemporalVectorConfig;
 use crate::utils::error::Result;
 use std::sync::Arc;
 
@@ -148,9 +149,22 @@ impl AletheiaDB {
         historical.register_pre_node_anchor_hook(node_hook);
         historical.register_pre_edge_anchor_hook(edge_hook);
 
-        // Create observer and register with historical storage (for extensibility)
-        let observer = VectorIndexObserver::new(temporal_index);
-        historical.add_observer(std::sync::Arc::new(observer));
+        // Create observer and register with historical storage
+        let observer = {
+            let index = Arc::clone(&temporal_index);
+            Arc::new(move |event: &StorageEvent| {
+                match event {
+                    StorageEvent::NodeAnchorCreated { timestamp, .. }
+                    | StorageEvent::EdgeAnchorCreated { timestamp, .. } => {
+                        // Trigger snapshot creation aligned with this anchor
+                        index.create_snapshot_for_anchor(*timestamp)?;
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
+            })
+        };
+        historical.add_observer(observer);
 
         Ok(())
     }
