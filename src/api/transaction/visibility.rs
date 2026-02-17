@@ -849,8 +849,16 @@ mod tests {
 
         assert_eq!(snapshot.snapshot_timestamp, 100.into());
         assert_eq!(snapshot.active_transactions.len(), 2);
-        assert!(snapshot.active_transactions.contains(&TxId::new(1).unwrap()));
-        assert!(snapshot.active_transactions.contains(&TxId::new(2).unwrap()));
+        assert!(
+            snapshot
+                .active_transactions
+                .contains(&TxId::new(1).unwrap())
+        );
+        assert!(
+            snapshot
+                .active_transactions
+                .contains(&TxId::new(2).unwrap())
+        );
     }
 
     #[test]
@@ -944,11 +952,19 @@ mod tests {
         // Snapshot 2 - sees tx2 as active, tx1 committed
         let snapshot2 = manager.capture_snapshot(120.into());
         assert_eq!(snapshot1.active_transactions.len(), 1);
-        assert!(snapshot2.active_transactions.contains(&TxId::new(2).unwrap()));
+        assert!(
+            snapshot2
+                .active_transactions
+                .contains(&TxId::new(2).unwrap())
+        );
 
         // Original snapshot1 unchanged
         assert_eq!(snapshot1.active_transactions.len(), 1);
-        assert!(snapshot1.active_transactions.contains(&TxId::new(1).unwrap()));
+        assert!(
+            snapshot1
+                .active_transactions
+                .contains(&TxId::new(1).unwrap())
+        );
     }
 
     #[test]
@@ -1026,7 +1042,12 @@ mod tests {
     #[test]
     fn test_epoch_range_basic() {
         // Test that EpochRange can represent a range of sequential transactions
-        let epoch = EpochRange::new(TxId::new(1).unwrap(), TxId::new(100).unwrap(), 1000.into(), 1099.into());
+        let epoch = EpochRange::new(
+            TxId::new(1).unwrap(),
+            TxId::new(100).unwrap(),
+            1000.into(),
+            1099.into(),
+        );
 
         // Should contain transactions in the range
         assert!(epoch.contains(TxId::new(1).unwrap()));
@@ -1038,8 +1059,14 @@ mod tests {
         assert!(!epoch.contains(TxId::new(101).unwrap()));
 
         // Should be able to get commit timestamp for transactions in range
-        assert_eq!(epoch.get_commit_timestamp(TxId::new(1).unwrap()), Some(1000.into()));
-        assert_eq!(epoch.get_commit_timestamp(TxId::new(50).unwrap()), Some(1049.into()));
+        assert_eq!(
+            epoch.get_commit_timestamp(TxId::new(1).unwrap()),
+            Some(1000.into())
+        );
+        assert_eq!(
+            epoch.get_commit_timestamp(TxId::new(50).unwrap()),
+            Some(1049.into())
+        );
         assert_eq!(
             epoch.get_commit_timestamp(TxId::new(100).unwrap()),
             Some(1099.into())
@@ -1181,10 +1208,7 @@ mod tests {
         let base_ts = 1000;
         for i in 1..=10000 {
             manager.register_active(TxId::new(i).unwrap());
-            manager.register_commit(
-                TxId::new(i).unwrap(),
-                (base_ts + (i as i64) - 1).into(),
-            );
+            manager.register_commit(TxId::new(i).unwrap(), (base_ts + (i as i64) - 1).into());
         }
 
         // Trigger compression
@@ -1230,10 +1254,7 @@ mod tests {
         let base_ts = 1000;
         for i in 1..=10000 {
             manager.register_active(TxId::new(i).unwrap());
-            manager.register_commit(
-                TxId::new(i).unwrap(),
-                (base_ts + (i as i64) - 1).into(),
-            );
+            manager.register_commit(TxId::new(i).unwrap(), (base_ts + (i as i64) - 1).into());
         }
 
         let uncompressed_count = manager.committed_count();
@@ -1266,10 +1287,7 @@ mod tests {
         let base_ts = 1000;
         for i in 1..=1000 {
             manager.register_active(TxId::new(i).unwrap());
-            manager.register_commit(
-                TxId::new(i).unwrap(),
-                (base_ts + (i as i64) - 1).into(),
-            );
+            manager.register_commit(TxId::new(i).unwrap(), (base_ts + (i as i64) - 1).into());
         }
 
         // Should recommend compression if memory exceeds low threshold
