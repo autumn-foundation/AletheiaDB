@@ -726,6 +726,39 @@ mod tests {
     }
 
     #[test]
+    fn test_timerange_rejects_invalid_timestamps_internal() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+        // Use new_unchecked to bypass HybridTimestamp validation and test TimeRange validation
+        let invalid = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+
+        // Start timestamp invalid
+        // We use a valid end > invalid start to ensure it's not rejected by start > end check
+        // But invalid is MAX + 1, so end must be >= MAX + 1.
+        let invalid_end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 2, 0);
+
+        let result = TimeRange::new(invalid, invalid_end);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TemporalError::InvalidTimestamp { timestamp, .. } => {
+                assert_eq!(timestamp, invalid);
+            }
+            err => panic!("Expected InvalidTimestamp error, got {:?}", err),
+        }
+
+        // End timestamp invalid
+        let result = TimeRange::new(valid, invalid);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TemporalError::InvalidTimestamp { timestamp, .. } => {
+                assert_eq!(timestamp, invalid);
+            }
+            err => panic!("Expected InvalidTimestamp error, got {:?}", err),
+        }
+    }
+
+    #[test]
     fn test_time_range_valid_returns_ok() {
         // TimeRange::new should return Ok for valid ranges
         let result = TimeRange::new(100.into(), 200.into());
