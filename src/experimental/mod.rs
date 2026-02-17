@@ -40,7 +40,7 @@
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
-//! ```rust,no_run
+//! ```rust
 //! // Requires features = ["nova"]
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
