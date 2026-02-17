@@ -94,6 +94,7 @@ pub use config::{
     HistoricalConfigBuilder, VectorIndexConfig, VectorIndexConfigBuilder, WalConfig,
     WalConfigBuilder,
 };
+pub use core::temporal::time;
 pub use core::{
     BiTemporalInterval, Edge, EdgeId, EntityId, GLOBAL_INTERNER, InternedString, Node, NodeId,
     PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange,
