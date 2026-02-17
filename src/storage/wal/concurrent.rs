@@ -360,11 +360,23 @@ impl ConcurrentWal {
             return Ok(Vec::new());
         }
 
-        // Pre-validate all operations to ensure atomicity.
-        // If any operation exceeds the size limit, we reject the entire batch
-        // BEFORE allocating LSNs. This prevents LSN gaps and partial writes.
+        let count = operations.len() as u64;
+
+        // Phase 1: Pre-serialization
+        // We serialize ALL operations into temporary buffers *before* allocating LSNs.
+        // This ensures that:
+        // 1. All operations are valid (pass size checks, recursion checks, etc.)
+        // 2. We don't allocate LSNs for a batch that is destined to fail.
+        // 3. We don't partially write a batch to the WAL stripes.
+        // This guarantees true atomicity: either all ops are serialized and ready, or none are.
+
+        let timestamp = crate::core::temporal::time::now();
+        let mut serialized_entries = Vec::with_capacity(operations.len());
+
         for operation in &operations {
             let estimated_capacity = super::estimate_entry_capacity(operation);
+
+            // Security Check: Enforce maximum entry size to prevent DoS
             if estimated_capacity > super::entry::MAX_WAL_ENTRY_SIZE {
                 return Err(Error::Storage(StorageError::CapacityExceeded {
                     resource: "WAL entry size".to_string(),
@@ -372,10 +384,19 @@ impl ConcurrentWal {
                     limit: super::entry::MAX_WAL_ENTRY_SIZE,
                 }));
             }
+
+            let mut buffer = Vec::with_capacity(estimated_capacity);
+
+            // Serialize with a dummy LSN (will be patched later).
+            // We use LSN(0) as a placeholder. Since `serialize_operation_into` writes the LSN
+            // at the very beginning of the buffer (u64 little-endian), we can overwrite it
+            // efficiently in Phase 2 without re-serializing.
+            super::serialization::serialize_operation_into(LSN(0), timestamp, operation, &mut buffer)?;
+
+            serialized_entries.push(buffer);
         }
 
-        let count = operations.len() as u64;
-
+        // Phase 2: Allocation and Append
         // Defensive check: ensure count > 0 to prevent panic in allocate_batch
         debug_assert!(count > 0, "count should be > 0 after empty check");
 
@@ -385,15 +406,19 @@ impl ConcurrentWal {
         // Pre-allocate result vector
         let mut lsns = Vec::with_capacity(operations.len());
 
-        // Serialize and append each operation individually since each entry has its own LSN.
-        // The main optimization is the single batch LSN allocation above (vs N atomic operations).
-        for (idx, operation) in operations.into_iter().enumerate() {
+        // Append pre-serialized buffers
+        for (idx, mut data) in serialized_entries.into_iter().enumerate() {
             let lsn = LSN(first_lsn.0 + idx as u64);
             lsns.push(lsn);
 
-            let data = self.serialize_entry(lsn, &operation)?;
+            // Patch the correct LSN into the buffer
+            // The LSN is the first 8 bytes of the serialized entry.
+            let lsn_bytes = lsn.0.to_le_bytes();
+            data[0..8].copy_from_slice(&lsn_bytes);
+
             let stripe = self.get_stripe();
 
+            // This should generally not fail unless the WAL is closed mid-operation
             match stripe.append_blocking(lsn, data) {
                 Ok(()) => {
                     self.total_appends.fetch_add(1, Ordering::Relaxed);

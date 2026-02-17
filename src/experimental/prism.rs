@@ -15,21 +15,9 @@
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::prism::Prism;
-//! use aletheiadb::core::property::PropertyMapBuilder;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
-//!
-//! // Create dummy nodes for the example
-//! let props = PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build();
-//! let tech_node_id = db.create_node("Concept", props)?;
-//!
-//! let props = PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 1.0]).build();
-//! let magic_node_id = db.create_node("Concept", props)?;
-//!
-//! let props = PropertyMapBuilder::new().insert_vector("embedding", &[0.5, 0.5]).build();
-//! let target_node_id = db.create_node("Target", props)?;
-//!
 //! let mut prism = Prism::new(&db).with_vector_property("embedding");
 //!
 //! // Define the "lens"

@@ -3,23 +3,6 @@
 //! Transforms logical plans into optimized physical plans for execution.
 //! The planner applies optimization rules and uses a cost model to choose
 //! the best execution strategy.
-//!
-//! # Life of a Query
-//!
-//! 1. **Logical Planning**: The `Query` struct (IR) is converted into a `LogicalPlan`.
-//!    This represents *what* to compute without specifying *how*.
-//!    - Example: `Scan(Person) -> Filter(age > 30)`
-//!
-//! 2. **Optimization**: The planner applies a series of `OptimizationRule`s to the logical plan.
-//!    - **Filter Pushdown**: Moves filters closer to the data source.
-//!    - **Join Reordering**: Reorders joins to minimize intermediate result sizes.
-//!    - **Cost-Based Decisions**: Uses `Statistics` and a `CostModel` to estimate the cost of different plans.
-//!
-//! 3. **Physical Planning**: The optimized logical plan is converted into a `PhysicalPlan`.
-//!    This represents the actual execution strategy (e.g., "Index Scan" vs "Full Scan").
-//!    - Example: `IndexScan(Person, age > 30)`
-//!
-//! 4. **Execution**: The `PhysicalPlan` is handed off to the `Executor` (not part of this module).
 
 pub mod cost;
 pub mod physical;
