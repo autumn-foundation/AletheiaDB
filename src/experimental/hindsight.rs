@@ -610,6 +610,9 @@ mod tests {
 
         // 5. Verify
         let found = results.iter().any(|(n_id, _)| *n_id == id);
-        assert!(!found, "Removed node should not be found in similarity search, but it was found as a zombie candidate from modified_nodes");
+        assert!(
+            !found,
+            "Removed node should not be found in similarity search, but it was found as a zombie candidate from modified_nodes"
+        );
     }
 }
