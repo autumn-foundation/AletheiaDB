@@ -219,3 +219,22 @@
 **Severity:** 🟢 Acquitted (Conditional)
 **Finding:** The test `test_havoc_wal_batch_gaps` passes when it successfully identifies gaps in the LSN sequence after a failed batch append. This confirms the system's failure mode (atomicity is per-entry, not per-batch for LSN allocation).
 **Evidence:** Test logic explicitly asserts `!contiguous` to pass.
+
+**[DotProduct Metric Conversion Regression]**
+**Module:** `src/index/vector/hnsw.rs`
+**Severity:** 🔴 Critical
+**Finding:** The code contained `DistanceMetric::DotProduct => -distance`, contradicting the previous journal resolution which stated it should be `1.0 - distance`. This caused dot product similarity to be `0.0` (or negative) for identical unit vectors instead of `1.0`.
+**Evidence:** `tests/repro_hnsw_dotproduct.rs` failed with `Expected 1.0, got -0`.
+**Resolution:** Re-applied the fix: `DistanceMetric::DotProduct => 1.0 - distance`. Added permanent regression test `test_dot_product_similarity_metric` to prevent future regressions.
+
+**[HLC Tests Audit]**
+**Module:** `src/core/hlc.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** Verified that critical concerns "HLC Causality Blind Spot" and "HLC Assertion Weakness" are addressed. `prop_receive_causality_collision` now explicitly tests the logical counter increment on wallclock collision.
+**Evidence:** Code inspection of `src/core/hlc.rs` and successful test execution.
+
+**[String Interning Audit]**
+**Module:** `src/core/interning.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** Module contains robust concurrency tests including `test_intern_concurrent_capacity_race` and `test_concurrent_interning`.
+**Evidence:** Code inspection.
