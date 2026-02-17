@@ -409,6 +409,10 @@ impl<'a> Hindsight<'a> {
 
         // Scan modified nodes (if they have the vector property, they override DB)
         for (id, patch) in &self.scenario.modified_nodes {
+            if self.scenario.removed_nodes.contains(id) {
+                continue;
+            }
+
             if let Some(val) = patch.get(property)
                 && let Some(vec) = val.as_vector()
             {
@@ -575,5 +579,37 @@ mod tests {
         assert!(ids.contains(&n1));
         assert!(ids.contains(&n3));
         assert!(!ids.contains(&n2));
+    }
+
+    #[test]
+    fn test_hindsight_find_similar_excludes_removed_modified_nodes() {
+        let db = AletheiaDB::new().unwrap();
+        let mut hindsight = Hindsight::new(&db);
+
+        // 1. Create a node in the DB
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Zombie")
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+
+        let id = db.create_node("Node", props.clone()).unwrap();
+
+        // 2. Modify the node's vector in the scenario
+        // This puts it into `modified_nodes` with the vector property
+        let update_props = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.9, 0.1])
+            .build();
+        hindsight.update_node(id, update_props).unwrap();
+
+        // 3. Remove the node in the scenario
+        // This adds it to `removed_nodes`, but currently leaves it in `modified_nodes`
+        hindsight.remove_node(id);
+
+        // 4. Search for it
+        let results = hindsight.find_similar("vec", &[1.0, 0.0], 10).unwrap();
+
+        // 5. Verify
+        let found = results.iter().any(|(n_id, _)| *n_id == id);
+        assert!(!found, "Removed node should not be found in similarity search, but it was found as a zombie candidate from modified_nodes");
     }
 }
