@@ -41,6 +41,9 @@ impl<'a> Dreamer<'a> {
     ///
     /// # Returns
     /// A list of `(NodeId, score)` pairs representing the nodes closest to the predicted future state.
+    ///
+    /// This uses [`AletheiaDB::search_vectors_in`] internally to find the nearest neighbors
+    /// to the extrapolated vector.
     pub fn predict_future(
         &self,
         node_id: NodeId,
