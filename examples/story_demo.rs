@@ -23,7 +23,6 @@
 //! ```
 
 use aletheiadb::AletheiaDB;
-use aletheiadb::WriteOps;
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 use aletheiadb::properties;
 
@@ -40,16 +39,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // 2. Update Node
-    db.write(|tx| {
-        tx.update_node(
-            node_id,
-            properties! {
-                "name" => "Alice",
-                "age" => 31,
-                "city" => "London",
-            },
-        )
-    })?;
+    db.update_node(
+        node_id,
+        properties! {
+            "name" => "Alice",
+            "age" => 31,
+            "city" => "London",
+        },
+    )?;
 
     // 3. Generate Narrative
     let generator = NarrativeGenerator::new(&db);

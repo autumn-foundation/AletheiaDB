@@ -11,7 +11,6 @@
 
 use aletheiadb::{
     AletheiaDB, GLOBAL_INTERNER, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
-    WriteOps,
 };
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -542,16 +541,14 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         let incarnation_owned = incarnation.to_string();
         let regen = *regen_num;
 
-        demo.db.write(|tx| {
-            tx.update_node(
-                doctor,
-                props! {
-                    "actor" => actor_owned.as_str(),
-                    "current_incarnation" => incarnation_owned.as_str(),
-                    "regeneration_count" => regen,
-                },
-            )
-        })?;
+        demo.db.update_node(
+            doctor,
+            props! {
+                "actor" => actor_owned.as_str(),
+                "current_incarnation" => incarnation_owned.as_str(),
+                "regeneration_count" => regen,
+            },
+        )?;
 
         // Record the regeneration event
         demo.regenerations.push(RegenerationEvent {
@@ -798,16 +795,14 @@ fn update_doctor_incarnation(
         let new_actor_owned = new_actor.to_string();
         let incarnation_owned = incarnation_final.clone();
 
-        demo.db.write(|tx| {
-            tx.update_node(
-                doctor_id,
-                props! {
-                    "actor" => new_actor_owned.as_str(),
-                    "current_incarnation" => incarnation_owned.as_str(),
-                    "regeneration_count" => regen_count + 1,
-                },
-            )
-        })?;
+        demo.db.update_node(
+            doctor_id,
+            props! {
+                "actor" => new_actor_owned.as_str(),
+                "current_incarnation" => incarnation_owned.as_str(),
+                "regeneration_count" => regen_count + 1,
+            },
+        )?;
 
         // Record the regeneration event
         demo.record_regeneration(

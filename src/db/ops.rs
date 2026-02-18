@@ -63,6 +63,65 @@ impl AletheiaDB {
         self.write(|tx| tx.create_edge(source, target, label, properties))
     }
 
+    /// Update a node's properties.
+    ///
+    /// This is a convenience method that internally uses a write transaction.
+    /// For multiple operations, prefer using `write()` or `write_transaction()`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// db.update_node(
+    ///     node_id,
+    ///     properties! { "age" => 31 }
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn update_node(&self, node_id: NodeId, properties: PropertyMap) -> Result<()> {
+        self.write(|tx| tx.update_node(node_id, properties))
+    }
+
+    /// Update an edge's properties.
+    ///
+    /// This is a convenience method that internally uses a write transaction.
+    /// For multiple operations, prefer using `write()` or `write_transaction()`.
+    pub fn update_edge(&self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
+        self.write(|tx| tx.update_edge(edge_id, properties))
+    }
+
+    /// Delete a node (leaves connected edges).
+    ///
+    /// **Warning**: This leaves orphaned edges. Use [`delete_node_cascade`](Self::delete_node_cascade)
+    /// for safe deletion.
+    ///
+    /// This is a convenience method that internally uses a write transaction.
+    pub fn delete_node(&self, node_id: NodeId) -> Result<()> {
+        self.write(|tx| tx.delete_node(node_id))
+    }
+
+    /// Delete a node and all connected edges (cascade delete).
+    ///
+    /// This method deletes both the node and all edges where the node
+    /// appears as either the source or target. This prevents orphaned edges
+    /// and maintains referential integrity in the graph.
+    ///
+    /// This is a convenience method that internally uses a write transaction.
+    pub fn delete_node_cascade(&self, node_id: NodeId) -> Result<()> {
+        self.write(|tx| tx.delete_node_cascade(node_id))
+    }
+
+    /// Delete an edge.
+    ///
+    /// This is a convenience method that internally uses a write transaction.
+    pub fn delete_edge(&self, edge_id: EdgeId) -> Result<()> {
+        self.write(|tx| tx.delete_edge(edge_id))
+    }
+
     /// Get the current state of a node.
     ///
     /// This uses the fast path (current storage) for O(1) lookup.

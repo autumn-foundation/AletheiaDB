@@ -326,29 +326,23 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 ### Basic Graph Operations
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps};
+use aletheiadb::{AletheiaDB, properties};
 
 // Create a new database
 let db = AletheiaDB::new().unwrap();
 
-// Create nodes using write transactions
-let alice_id = db.write(|tx| {
-    tx.create_node("Person", properties! {
-        "name" => "Alice",
-        "age" => 30,
-    })
+// Create nodes
+let alice_id = db.create_node("Person", properties! {
+    "name" => "Alice",
+    "age" => 30,
 })?;
 
-let bob_id = db.write(|tx| {
-    tx.create_node("Person", properties! {
-        "name" => "Bob",
-    })
+let bob_id = db.create_node("Person", properties! {
+    "name" => "Bob",
 })?;
 
 // Create relationships
-db.write(|tx| {
-    tx.create_edge(alice_id, bob_id, "KNOWS", properties! {})
-})?;
+db.create_edge(alice_id, bob_id, "KNOWS", properties! {})?;
 
 // Read current state
 let alice = db.get_node(alice_id)?;
@@ -407,7 +401,16 @@ let similar = db.find_similar(doc_id, 10)?;
 ### Hybrid Queries (Graph + Vector + Temporal)
 
 ```rust
-use aletheiadb::query::ir::Predicate;
+use aletheiadb::{AletheiaDB, properties, HnswConfig, DistanceMetric};
+
+// Setup database context (if starting fresh)
+let db = AletheiaDB::new().unwrap();
+let alice_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+
+// Ensure vector index is enabled (required for vector operations)
+db.vector_index("embedding")
+    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .enable()?;
 
 // Setup query parameters
 let query_embedding = vec![0.1f32; 384];
@@ -507,7 +510,9 @@ for (node_id, drift_score) in drifted_nodes {
 
 ### Narrative Generation (Experimental)
 
-> **Requires `nova` feature**
+> ⚠️ **REQUIRES FEATURE `nova`**
+>
+> This example requires the `nova` feature flag. If you see "could not find `experimental`", you forgot to enable it!
 >
 > Run the demo:
 > ```bash
@@ -515,7 +520,7 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps};
+use aletheiadb::{AletheiaDB, properties};
 // ⚠️ REQUIRES FEATURE 'NOVA'
 // Enable in Cargo.toml: features = ["nova"]
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
