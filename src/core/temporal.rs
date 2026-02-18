@@ -624,6 +624,46 @@ mod tests {
     }
 
     #[test]
+    fn test_time_range_contains_range_boundaries() {
+        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+
+        // Same start
+        let inner_same_start = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(
+            outer.contains_range(&inner_same_start),
+            "Should contain range with same start"
+        );
+
+        // Same end
+        let inner_same_end = TimeRange::new(200.into(), 300.into()).unwrap();
+        assert!(
+            outer.contains_range(&inner_same_end),
+            "Should contain range with same end"
+        );
+
+        // Same start and end (exact match)
+        let exact_match = TimeRange::new(100.into(), 300.into()).unwrap();
+        assert!(
+            outer.contains_range(&exact_match),
+            "Should contain exact same range"
+        );
+
+        // Just outside start
+        let outside_start = TimeRange::new(99.into(), 200.into()).unwrap();
+        assert!(
+            !outer.contains_range(&outside_start),
+            "Should not contain range starting before"
+        );
+
+        // Just outside end (301)
+        let outside_end = TimeRange::new(200.into(), 301.into()).unwrap();
+        assert!(
+            !outer.contains_range(&outside_end),
+            "Should not contain range ending after"
+        );
+    }
+
+    #[test]
     fn test_time_range_close_at() {
         let open = TimeRange::from(100.into());
         let closed = open.close_at(200.into()).unwrap();
