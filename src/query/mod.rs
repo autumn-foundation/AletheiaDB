@@ -98,6 +98,7 @@ pub mod plan;
 pub mod planner;
 pub mod result;
 pub mod semantic_pathfinding;
+/// Query execution traits.
 pub mod traits;
 
 // Re-export commonly used types
