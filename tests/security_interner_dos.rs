@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::env;
+use std::process::Command;
 
 #[test]
 fn test_property_map_silent_loss_when_interner_full() {
@@ -27,11 +27,11 @@ fn test_property_map_silent_loss_when_interner_full() {
         println!("Subprocess stderr:\n{}", stderr);
 
         if stdout.contains("VULNERABILITY CONFIRMED") {
-             // We reproduced it!
-             // To make the test "pass" in the sense of "we confirmed the bug exists",
-             // we could assert(true). But normally we want tests to pass when code is correct.
-             // So initially this test will FAIL.
-             panic!("Vulnerability reproduced: Property silently dropped!");
+            // We reproduced it!
+            // To make the test "pass" in the sense of "we confirmed the bug exists",
+            // we could assert(true). But normally we want tests to pass when code is correct.
+            // So initially this test will FAIL.
+            panic!("Vulnerability reproduced: Property silently dropped!");
         }
         panic!("Subprocess failed unexpectedly");
     }
@@ -41,8 +41,8 @@ fn test_property_map_silent_loss_when_interner_full() {
 }
 
 fn run_subprocess_test() {
-    use aletheiadb::core::property::PropertyMapBuilder;
     use aletheiadb::core::GLOBAL_INTERNER;
+    use aletheiadb::core::property::PropertyMapBuilder;
 
     println!("Interner len: {}", GLOBAL_INTERNER.len());
 
@@ -61,7 +61,9 @@ fn run_subprocess_test() {
             } else {
                 // If we reach here, it means the key WAS inserted, which implies the
                 // interner limit was NOT enforced. This is a test setup failure.
-                panic!("TEST SETUP FAILURE: Key was inserted successfully. Interner limit was not enforced?");
+                panic!(
+                    "TEST SETUP FAILURE: Key was inserted successfully. Interner limit was not enforced?"
+                );
             }
         }
         Err(e) => {
