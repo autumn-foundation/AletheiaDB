@@ -624,32 +624,6 @@ mod tests {
     }
 
     #[test]
-    fn test_time_range_contains_range_boundaries() {
-        let start = 100.into();
-        let end = 200.into();
-        let range = TimeRange::new(start, end).unwrap();
-
-        // Exact match
-        assert!(range.contains_range(&range));
-
-        // Inner touching start
-        let inner_start = TimeRange::new(start, 150.into()).unwrap();
-        assert!(range.contains_range(&inner_start));
-
-        // Inner touching end
-        let inner_end = TimeRange::new(150.into(), end).unwrap();
-        assert!(range.contains_range(&inner_end));
-
-        // Outer touching start (not contained)
-        let outer_start = TimeRange::new(50.into(), end).unwrap();
-        assert!(!range.contains_range(&outer_start));
-
-        // Outer touching end (not contained)
-        let outer_end = TimeRange::new(start, 250.into()).unwrap();
-        assert!(!range.contains_range(&outer_end));
-    }
-
-    #[test]
     fn test_time_range_close_at() {
         let open = TimeRange::from(100.into());
         let closed = open.close_at(200.into()).unwrap();

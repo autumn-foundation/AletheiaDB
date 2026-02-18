@@ -629,3 +629,12 @@ mod tests {
         let result = validate_pagination(Some(1), Some(10_000), 1000);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_validate_pagination_boundary() {
+        // Exactly at limit should be OK
+        // limit 100 + offset 9900 = 10000 <= 10000
+        let (limit, offset) = validate_pagination(Some(100), Some(9900), 10000).unwrap();
+        assert_eq!(limit, 100);
+        assert_eq!(offset, 9900);
+    }
