@@ -1115,6 +1115,53 @@ mod tests {
             "Range starting before outer should not be contained"
         );
     }
+
+    #[test]
+    fn test_time_range_rejects_timestamps_exceeding_max_valid() {
+        use crate::core::hlc::HybridTimestamp;
+
+        // Test with MAX_VALID_TIMESTAMP + 1
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+
+        // Test start timestamp validation
+        // Use invalid_ts for both start and end to avoid InvalidTimeRange (start > end)
+        let result = TimeRange::new(invalid_ts, invalid_ts);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimestamp { .. }
+        ));
+
+        // Test end timestamp validation
+        let result = TimeRange::new(valid_ts, invalid_ts);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimestamp { .. }
+        ));
+    }
+
+    #[test]
+    fn test_time_range_contains_range_boundaries() {
+        use crate::core::hlc::HybridTimestamp;
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let mid = HybridTimestamp::new(200, 0).unwrap();
+        let end = HybridTimestamp::new(300, 0).unwrap();
+
+        let outer = TimeRange::new(start, end).unwrap(); // [100, 300)
+        let inner_start = TimeRange::new(start, mid).unwrap(); // [100, 200)
+        let inner_end = TimeRange::new(mid, end).unwrap(); // [200, 300)
+
+        // Should contain range starting at same time
+        assert!(outer.contains_range(&inner_start));
+
+        // Should contain range ending at same time
+        assert!(outer.contains_range(&inner_end));
+
+        // Should contain itself
+        assert!(outer.contains_range(&outer));
+    }
 }
 
 #[cfg(test)]
