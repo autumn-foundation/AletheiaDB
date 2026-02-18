@@ -877,3 +877,116 @@ mod tests {
         assert!(wal.stripe(1000).is_none());
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::GLOBAL_INTERNER;
+    use crate::core::id::NodeId;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
+    use crate::storage::wal::entry::MAX_WAL_ENTRY_SIZE;
+    use tempfile::tempdir;
+
+    /// 🎯 Target: MAX_WAL_ENTRY_SIZE boundary check
+    /// 💣 Risk: Off-by-one errors (e.g. `>` becoming `>=`) could reject valid max-size entries.
+    /// 🧪 Strategy: Construct an entry exactly at the size limit.
+    /// 🔬 Verification: Ensure append succeeds.
+    #[test]
+    fn test_append_entry_exactly_max_size_succeeds() {
+        let dir = tempdir().unwrap();
+        // Increase segment size to accommodate large entry
+        let config = ConcurrentWalConfig::new(dir.path()).with_segment_size(MAX_WAL_ENTRY_SIZE * 2);
+        let wal = ConcurrentWal::new(config).unwrap();
+
+        // Calculate size needed for payload
+        // CreateNode overhead:
+        // Fixed: 24 bytes (LSN + Time + Checksum)
+        // Variable: 1 (op) + 8 (node_id) + 4 (label) + 12 (time) = 25 bytes
+        // PropertyMap overhead:
+        // 4 (count) + 4 (key_len) + key_bytes + 1 (tag_string) + 4 (val_len) + val_bytes
+
+        // Let's use a key "k" (1 byte)
+        // Overhead = 24 + 25 + 4 + 4 + 1 + 1 + 4 = 63 bytes
+        // Total = 63 + val_bytes
+        // Target = MAX_WAL_ENTRY_SIZE
+        // val_bytes = MAX_WAL_ENTRY_SIZE - 63
+
+        let overhead = 63;
+        let target_val_len = MAX_WAL_ENTRY_SIZE - overhead;
+
+        // Create a string of target length
+        // We use repeat to create it efficiently
+        let big_string = "x".repeat(target_val_len);
+
+        let properties = PropertyMapBuilder::new().insert("k", big_string).build();
+
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
+            properties,
+            valid_from: time::now(),
+        };
+
+        // Verify our math was correct
+        let estimated = crate::storage::wal::estimate_entry_capacity(&op);
+        assert_eq!(
+            estimated, MAX_WAL_ENTRY_SIZE,
+            "Entry size calculation incorrect"
+        );
+
+        // Attempt append - should succeed
+        let result = wal.append_async(op);
+        assert!(
+            result.is_ok(),
+            "Failed to append entry of exactly MAX_WAL_ENTRY_SIZE: {:?}",
+            result.err()
+        );
+    }
+
+    /// 🎯 Target: MAX_WAL_ENTRY_SIZE boundary check
+    /// 💣 Risk: Missing check or loose check (e.g. removing check entirely) allows DoS.
+    /// 🧪 Strategy: Construct an entry 1 byte over the limit.
+    /// 🔬 Verification: Ensure append fails with CapacityExceeded.
+    #[test]
+    fn test_append_entry_exceeding_max_size_fails() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalConfig::new(dir.path()).with_segment_size(MAX_WAL_ENTRY_SIZE * 2);
+        let wal = ConcurrentWal::new(config).unwrap();
+
+        // Use same calculation as above but +1 byte
+        let overhead = 63;
+        let target_val_len = MAX_WAL_ENTRY_SIZE - overhead + 1;
+
+        let big_string = "x".repeat(target_val_len);
+
+        let properties = PropertyMapBuilder::new().insert("k", big_string).build();
+
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
+            properties,
+            valid_from: time::now(),
+        };
+
+        // Verify size
+        let estimated = crate::storage::wal::estimate_entry_capacity(&op);
+        assert_eq!(
+            estimated,
+            MAX_WAL_ENTRY_SIZE + 1,
+            "Entry size calculation incorrect"
+        );
+
+        // Attempt append - should fail
+        let result = wal.append_async(op);
+        assert!(result.is_err(), "Should have rejected oversized entry");
+
+        match result {
+            Err(Error::Storage(StorageError::CapacityExceeded { current, limit, .. })) => {
+                assert_eq!(current, MAX_WAL_ENTRY_SIZE + 1);
+                assert_eq!(limit, MAX_WAL_ENTRY_SIZE);
+            }
+            _ => panic!("Expected CapacityExceeded error, got {:?}", result),
+        }
+    }
+}
