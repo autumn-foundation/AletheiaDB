@@ -335,7 +335,7 @@ impl TieredStorage {
     ) -> Result<Option<Arc<V>>>
     where
         V: EntityVersion + 'static,
-        F: Fn(VersionId) -> Result<Option<V>> + Copy,
+        F: Fn(VersionId) -> Result<Option<V>>,
     {
         // Check warm cache first
         if let Some(cached) = cache.get(&id) {
@@ -360,7 +360,7 @@ impl TieredStorage {
 
                 // Prefetch prev_version if enabled
                 if self.config.enable_prefetch {
-                    self.prefetch_chain(&*version_arc, cache, fetch_fn);
+                    self.prefetch_chain(&*version_arc, cache, &fetch_fn);
                 }
 
                 Ok(Some(version_arc))
@@ -401,7 +401,7 @@ impl TieredStorage {
     }
 
     /// Prefetch versions in a chain (up to prefetch_depth).
-    fn prefetch_chain<V, F>(&self, start: &V, cache: &Cache<VersionId, Arc<V>>, fetch_fn: F)
+    fn prefetch_chain<V, F>(&self, start: &V, cache: &Cache<VersionId, Arc<V>>, fetch_fn: &F)
     where
         V: EntityVersion + 'static,
         F: Fn(VersionId) -> Result<Option<V>>,
