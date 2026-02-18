@@ -199,6 +199,20 @@ impl PendingEntry {
     }
 }
 
+impl Drop for PendingEntry {
+    fn drop(&mut self) {
+        // Safety Check: If the entry is being dropped and completion hasn't been signaled,
+        // we must notify error to prevent the waiter from deadlocking.
+        if let Some(ref notifier) = self.completion {
+            // If it's already complete (success or error), this is a no-op.
+            // If it's Pending, we must signal Error.
+            if !notifier.is_complete() {
+                notifier.notify_error("PendingEntry dropped without being processed (buffer clear or shutdown)");
+            }
+        }
+    }
+}
+
 /// Completion notification state.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1151,7 +1165,7 @@ mod tests {
                 for entry in entries {
                     drained_count += 1;
                     // Verify data integrity
-                    let val = u64::from_le_bytes(entry.data.try_into().unwrap());
+                    let val = u64::from_le_bytes(entry.data.as_slice().try_into().unwrap());
                     checksum = checksum.wrapping_add(val);
                 }
             }
