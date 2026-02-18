@@ -1990,6 +1990,17 @@ impl HnswIndex {
                 )))
             })?;
 
+        // Security Check: Verify loaded index dimensions match configuration
+        // This prevents buffer over-reads in custom metric wrappers if a malicious actor
+        // provides a mismatched index (e.g. index has 4 dims, config has 100).
+        if index.dimensions() != config.dimensions {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Index dimension mismatch: usearch index has {}, config has {}",
+                index.dimensions(),
+                config.dimensions
+            ))));
+        }
+
         // Apply custom metric if configured (must happen after load, before use)
         // This ensures custom metrics are preserved across save/load cycles
         if let Some(ref custom) = config.custom_metric {

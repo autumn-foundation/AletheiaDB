@@ -454,18 +454,48 @@ See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** f
 ### Semantic Drift Tracking
 
 ```rust
-use aletheiadb::index::vector::temporal::DriftMetric;
+use aletheiadb::{AletheiaDB, properties, WriteOps};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::index::vector::temporal::{DriftMetric, TemporalVectorConfig, SnapshotStrategy};
 use aletheiadb::core::temporal::TimeRange;
 
-// Define time range
-let timestamp_2023 = aletheiadb::time::from_secs(1672531200);
-let timestamp_2024 = aletheiadb::time::from_secs(1704067200);
+let db = AletheiaDB::new().unwrap();
 
-// Find all nodes with significant semantic drift
-let time_range = TimeRange::new(timestamp_2023, timestamp_2024)?;
+// Configure vector indexing with frequent snapshots for demonstration
+let mut temp_config = TemporalVectorConfig::default();
+temp_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
+
+db.vector_index("embedding")
+    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .temporal(temp_config)
+    .enable()?;
+
+// 1. Create node with initial embedding
+let embedding1 = vec![0.0f32; 384];
+let node_id = db.write(|tx| {
+    tx.create_node("Person", properties! {
+        "name" => "Alice",
+        "embedding" => &embedding1[..],
+    })
+})?;
+
+// 2. Update node with different embedding (simulating drift)
+let mut embedding2 = vec![0.0f32; 384];
+embedding2[0] = 1.0; // Changed!
+db.write(|tx| {
+    tx.update_node(node_id, properties! {
+        "embedding" => &embedding2[..],
+    })
+})?;
+
+// 3. Find drift covering the changes
+let start = aletheiadb::time::from_secs(0);
+let end = aletheiadb::time::now();
+let time_range = TimeRange::new(start, end)?;
+
 let drifted_nodes = db.find_drift_in(
-    "embedding",              // Property name
-    0.3,                      // Cosine distance threshold
+    "embedding",
+    0.1,
     time_range,
     DriftMetric::Cosine,
 )?;
@@ -536,6 +566,9 @@ let db = AletheiaDB::with_unified_config(config);
 // On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
 // Includes StringInterner persistence (interned label/property IDs survive restart)
 // Recovery path: CheckpointManager loads indexes, then replays WAL from manifest LSN + 1
+
+// Note: On first run, you may see "Missing required index file" warnings.
+// This is normal for a fresh database.
 ```
 
 See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** for complete guide.
@@ -546,17 +579,19 @@ See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-gui
 use aletheiadb::{AletheiaDB, config::AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::storage::wal::DurabilityMode;
 
-// Load from TOML file
-let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
-let db = AletheiaDB::with_unified_config(config);
+// Load from TOML file (requires file to exist)
+// let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
+// let db = AletheiaDB::with_unified_config(config);
 
-// Or programmatic configuration
+// Programmatic configuration
 let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .num_stripes(64).unwrap()  // High concurrency
         .durability_mode(DurabilityMode::group_commit_default())
         .build())
     .build();
+
+let db = AletheiaDB::with_unified_config(config)?;
 ```
 
 See **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for all configuration options and presets.
