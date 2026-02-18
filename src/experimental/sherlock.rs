@@ -18,7 +18,7 @@ use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::property::PropertyValue;
 use crate::core::temporal::Timestamp;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 use std::time::Duration;
 
 /// A Clue represents a specific event or state change to look for.

@@ -16,7 +16,7 @@
 use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::temporal::TimeRange;
-use crate::utils::{Error, Result, VectorError};
+use crate::core::error::{Error, Result, VectorError};
 use std::time::Duration;
 
 /// The Dreamer engine for predictive semantic analysis.

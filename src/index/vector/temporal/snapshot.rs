@@ -8,7 +8,7 @@ use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::index::vector::VectorIndex;
 use crate::index::vector::hnsw::HnswIndex;
-use crate::utils::{Result, VectorError};
+use crate::core::error::{Result, VectorError};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 

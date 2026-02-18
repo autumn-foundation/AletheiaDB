@@ -191,7 +191,7 @@
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::temporal::Timestamp;
-use crate::utils::Result;
+use crate::core::error::Result;
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]
@@ -386,7 +386,7 @@ pub fn notify_observers(observers: &[Observer], event: &StorageEvent) {
         if let Err(e) = observer.on_event(event) {
             #[cfg(feature = "observability")]
             {
-                use crate::utils::error::Error;
+                use crate::core::error::Error;
                 match &e {
                     Error::Vector(ve) => {
                         tracing::warn!("Observer error for event {:?}: {}", event, ve);

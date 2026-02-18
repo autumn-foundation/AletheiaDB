@@ -11,7 +11,7 @@
 use crate::AletheiaDB;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::{TimeRange, Timestamp};
-use crate::utils::error::Result;
+use crate::core::error::Result;
 use std::collections::{HashSet, VecDeque};
 
 /// The Time Lord of the Graph.

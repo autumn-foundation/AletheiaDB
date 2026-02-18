@@ -6,7 +6,7 @@ use crate::AletheiaDB;
 use crate::config::{AletheiaDBConfig, WalConfigBuilder};
 use crate::storage::index_persistence::PersistenceConfig;
 use crate::storage::wal::DurabilityMode;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 use std::path::PathBuf;
 
 /// Create a test database with in-memory/temporary WAL.
@@ -51,7 +51,7 @@ use std::path::PathBuf;
 /// let (_temp_dir, db) = create_test_db().unwrap();
 /// ```
 pub fn create_test_db() -> Result<(tempfile::TempDir, AletheiaDB)> {
-    let temp_dir = tempfile::tempdir().map_err(crate::utils::error::Error::Io)?;
+    let temp_dir = tempfile::tempdir().map_err(crate::core::error::Error::Io)?;
 
     let wal_dir = temp_dir.path().join("wal");
     let data_dir = temp_dir.path().join("data");
@@ -118,7 +118,7 @@ pub fn create_test_db() -> Result<(tempfile::TempDir, AletheiaDB)> {
 pub fn create_test_db_with_config(
     mut config: AletheiaDBConfig,
 ) -> Result<(tempfile::TempDir, AletheiaDB)> {
-    let temp_dir = tempfile::tempdir().map_err(crate::utils::error::Error::Io)?;
+    let temp_dir = tempfile::tempdir().map_err(crate::core::error::Error::Io)?;
 
     // Override storage directories to keep all test artifacts isolated.
     config.wal.wal_dir = temp_dir.path().join("wal");

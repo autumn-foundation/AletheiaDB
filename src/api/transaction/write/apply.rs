@@ -26,7 +26,7 @@ use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use crate::core::version::VersionMetadata;
 use crate::storage::historical::HistoricalStorage;
-use crate::utils::error::{Result, StorageError};
+use crate::core::error::{Result, StorageError};
 
 /// Helper function to create a bi-temporal interval with proper closing logic.
 ///

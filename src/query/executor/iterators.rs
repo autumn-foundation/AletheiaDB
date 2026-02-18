@@ -19,7 +19,7 @@ use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{Direction, Predicate, PredicateValue};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 use super::results::{EntityId, EntityResult, QueryRow};
 
@@ -242,7 +242,7 @@ impl ResultIterator for TemporalNodeIterator {
             let version_id =
                 historical
                     .find_node_version_at_time(id, self.valid_time, self.transaction_time)
-                    .ok_or(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+                    .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
                         node_id: id,
                         valid_time: self.valid_time,
                         transaction_time: self.transaction_time,
@@ -260,7 +260,7 @@ impl ResultIterator for TemporalNodeIterator {
             // Get the version metadata
             let version = historical
                 .get_node_version(version_id)
-                .ok_or(crate::utils::error::TemporalError::VersionNotFound(version_id))?;
+                .ok_or(crate::core::error::TemporalError::VersionNotFound(version_id))?;
 
             // Reconstruct the properties from the version
             let properties = historical.reconstruct_node_properties(version_id)?;
@@ -316,7 +316,7 @@ impl BatchTemporalNodeIterator {
                 // Find the version valid at the requested time
                 let version_id = guard
                     .find_node_version_at_time(id, valid_time, transaction_time)
-                    .ok_or(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+                    .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
                         node_id: id,
                         valid_time,
                         transaction_time,
@@ -334,7 +334,7 @@ impl BatchTemporalNodeIterator {
                 // Get the version metadata
                 let version = guard
                     .get_node_version(version_id)
-                    .ok_or(crate::utils::error::TemporalError::VersionNotFound(version_id))?;
+                    .ok_or(crate::core::error::TemporalError::VersionNotFound(version_id))?;
 
                 // Reconstruct the properties from the version
                 let properties = guard.reconstruct_node_properties(version_id)?;
@@ -474,7 +474,7 @@ impl TemporalNodeScanIterator {
         // Step 1: Find the version valid at the requested time
         let version_id = guard
             .find_node_version_at_time(node_id, self.valid_time, self.transaction_time)
-            .ok_or(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+            .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
                 node_id,
                 valid_time: self.valid_time,
                 transaction_time: self.transaction_time,
@@ -491,7 +491,7 @@ impl TemporalNodeScanIterator {
 
         // Step 2: Get the version metadata
         let version = guard.get_node_version(version_id).ok_or(
-            crate::utils::error::TemporalError::VersionNotFound(version_id),
+            crate::core::error::TemporalError::VersionNotFound(version_id),
         )?;
 
         // Step 3: Reconstruct properties
@@ -1128,8 +1128,8 @@ impl ResultIterator for VectorRerankIterator {
             let vector_property = match &self.vector_property {
                 Some(prop) => prop.clone(),
                 None => {
-                    return Some(Err(crate::utils::error::Error::Vector(
-                        crate::utils::error::VectorError::IndexError(
+                    return Some(Err(crate::core::error::Error::Vector(
+                        crate::core::error::VectorError::IndexError(
                             "VectorRerank requires a vector index to be enabled. \
                              Call db.enable_vector_index() first."
                                 .to_string(),
@@ -1941,7 +1941,7 @@ mod tests {
             Ok(QueryRow::from_entity(EntityResult::Node(test_node(
                 1, "Alice",
             )))),
-            Err(crate::utils::error::Error::other("test error")),
+            Err(crate::core::error::Error::other("test error")),
         ];
 
         let input = MockIterator::from_results(results);
@@ -2065,7 +2065,7 @@ mod tests {
     #[test]
     fn test_limit_iterator_propagates_errors_during_skip() {
         let results = vec![
-            Err(crate::utils::error::Error::other("test error")),
+            Err(crate::core::error::Error::other("test error")),
             Ok(QueryRow::from_entity(EntityResult::Node(test_node(
                 1, "Alice",
             )))),

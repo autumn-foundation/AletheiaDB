@@ -89,7 +89,7 @@ use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
-use crate::utils::{Error, Result, error::VectorError};
+use crate::core::error::{Error, Result, VectorError};
 use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};

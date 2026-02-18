@@ -54,7 +54,7 @@ use super::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig, FlushSt
 use super::group_commit::GroupCommitCoordinator;
 use super::{LSN, WalOperation};
 use crate::storage::wal::DurabilityMode;
-use crate::utils::error::{Error, Result, StorageError};
+use crate::core::error::{Error, Result, StorageError};
 
 /// Configuration for the concurrent WAL system.
 #[derive(Debug, Clone)]
@@ -251,7 +251,7 @@ impl BackgroundFlusher {
 
                 if let Some(ref gc) = self.group_commit {
                     // Create a new error from the string representation
-                    gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
+                    gc.mark_flushed(Err(crate::core::error::Error::other(e.to_string())))
                         .expect(
                             "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
                         );

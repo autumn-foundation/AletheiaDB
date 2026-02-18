@@ -14,7 +14,7 @@ use crate::core::temporal::time;
 use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::utils::error::{Result, StorageError};
+use crate::core::error::{Result, StorageError};
 use parking_lot::RwLock;
 use std::sync::Arc;
 

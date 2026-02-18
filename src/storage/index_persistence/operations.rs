@@ -40,7 +40,7 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::IndexPersistenceManager;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
-use crate::utils::error::{Result, StorageError};
+use crate::core::error::{Result, StorageError};
 
 use super::tracker::PersistenceTracker;
 

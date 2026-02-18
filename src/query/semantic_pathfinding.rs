@@ -11,7 +11,7 @@ use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::core::vector::cosine_similarity;
 use crate::db::AletheiaDB;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
@@ -315,7 +315,7 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
-    use crate::utils::error::Error;
+    use crate::core::error::Error;
 
     fn create_test_db() -> AletheiaDB {
         let db = AletheiaDB::new().unwrap();

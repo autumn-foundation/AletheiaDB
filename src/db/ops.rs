@@ -4,7 +4,7 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::db::AletheiaDB;
 use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 impl AletheiaDB {
     /// Create a node with the given label and properties.

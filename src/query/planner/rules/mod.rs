@@ -5,7 +5,7 @@
 //! transformations are possible.
 
 use crate::query::plan::LogicalPlan;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 use super::stats::Statistics;
 

@@ -3,7 +3,7 @@ use crate::core::id::{NodeId, VersionId};
 use crate::core::observer::{StorageEvent, StorageObserver};
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, HnswConfig};
-use crate::utils::Result;
+use crate::core::error::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

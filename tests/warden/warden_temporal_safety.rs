@@ -5,7 +5,7 @@
 
 use aletheiadb::core::hlc::HybridTimestamp;
 use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
-use aletheiadb::utils::error::TemporalError;
+use aletheiadb::core::error::TemporalError;
 
 /// 🎯 Target: TimeRange::new validation
 /// 💣 Risk: Creating TimeRange with invalid timestamps via unchecked constructors

@@ -36,7 +36,7 @@
 
 use crate::AletheiaDB;
 use crate::core::id::NodeId;
-use crate::utils::Result;
+use crate::core::error::Result;
 use std::collections::{HashSet, VecDeque};
 
 /// A detected wormhole (semantic shortcut).

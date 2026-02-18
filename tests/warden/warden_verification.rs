@@ -2,7 +2,7 @@ use aletheiadb::core::property::{
     MAX_RECURSION_DEPTH, MAX_VECTOR_DIMENSIONS, PropertyValue, TAG_SPARSE_VECTOR, TAG_VECTOR,
     deserialize_sparse_vector, deserialize_vector,
 };
-use aletheiadb::utils::error::{Error, StorageError, VectorError};
+use aletheiadb::core::error::{Error, StorageError, VectorError};
 
 // 🔒 Warden Security Verification Tests
 // These tests act as "Test Exploits" to verify that security controls are active and effective.

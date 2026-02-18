@@ -20,7 +20,7 @@ use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
 use crate::core::version::{
     AnchorConfig, EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData,
 };
-use crate::utils::error::{Result, StorageError, TemporalError};
+use crate::core::error::{Result, StorageError, TemporalError};
 use quick_cache::sync::Cache;
 use std::collections::HashMap;
 use std::sync::Arc;

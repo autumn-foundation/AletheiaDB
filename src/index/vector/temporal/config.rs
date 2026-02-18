@@ -4,7 +4,7 @@
 //! and configuration validation for the temporal vector index.
 
 use crate::index::vector::hnsw::HnswConfig;
-use crate::utils::{Result, VectorError};
+use crate::core::error::{Result, VectorError};
 use std::time::Duration;
 
 /// Maximum number of retries when creating a snapshot due to races (default: 3)

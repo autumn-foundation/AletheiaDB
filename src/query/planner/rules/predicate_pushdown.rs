@@ -40,7 +40,7 @@
 //!    - **CRITICAL**: Filters must NOT be pushed past `Limit` or `Top-K` operations, as this changes the result set.
 
 use crate::query::plan::{LogicalOp, LogicalPlan, UnaryOp};
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 use super::{OptimizationRule, Statistics};
 

@@ -30,7 +30,7 @@
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
 use crate::db::AletheiaDB;
-use crate::utils::Result;
+use crate::core::error::Result;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -263,7 +263,7 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
-    use crate::utils::error::VectorError;
+    use crate::core::error::VectorError;
 
     /// Helper to create a test database with vector indexing enabled.
     fn create_test_db() -> AletheiaDB {
@@ -423,8 +423,8 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::utils::error::Error::Storage(
-                    crate::utils::error::StorageError::NodeNotFound(_)
+                crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::NodeNotFound(_)
                 )
             ),
             "Should return NodeNotFound error"
@@ -443,7 +443,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::utils::error::Error::Vector(VectorError::ContainsNaN { .. })
+                crate::core::error::Error::Vector(VectorError::ContainsNaN { .. })
             ),
             "Should return ContainsNaN error"
         );
@@ -455,7 +455,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::utils::error::Error::Vector(VectorError::ContainsInfinity { .. })
+                crate::core::error::Error::Vector(VectorError::ContainsInfinity { .. })
             ),
             "Should return ContainsInfinity error"
         );
@@ -888,7 +888,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::utils::error::Error::Vector(VectorError::ContainsNaN { .. })
+                crate::core::error::Error::Vector(VectorError::ContainsNaN { .. })
             ),
             "Should return ContainsNaN error"
         );
@@ -900,7 +900,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::utils::error::Error::Vector(VectorError::ContainsInfinity { .. })
+                crate::core::error::Error::Vector(VectorError::ContainsInfinity { .. })
             ),
             "Should return ContainsInfinity error"
         );
@@ -933,7 +933,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::utils::error::Error::Vector(VectorError::IndexError(_))
+                crate::core::error::Error::Vector(VectorError::IndexError(_))
             ),
             "Should return IndexError"
         );

@@ -9,7 +9,7 @@ use crate::storage::historical::{HistoricalStats, HistoricalStorage};
 use crate::storage::index_persistence::operations::{
     persist_temporal_index, persist_vector_indexes,
 };
-use crate::utils::error::{Result, StorageError};
+use crate::core::error::{Result, StorageError};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
