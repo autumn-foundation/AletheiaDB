@@ -97,11 +97,7 @@ impl<'a> Chameleon<'a> {
     }
 
     /// Compute the centroid of the context node and its outgoing neighbors.
-    fn compute_context_centroid(
-        &self,
-        node_id: NodeId,
-        property_name: &str,
-    ) -> Result<Vec<f32>> {
+    fn compute_context_centroid(&self, node_id: NodeId, property_name: &str) -> Result<Vec<f32>> {
         let mut vectors: Vec<Vec<f32>> = Vec::new();
 
         // Helper to try fetch vector from a node
@@ -127,9 +123,9 @@ impl<'a> Chameleon<'a> {
         let neighbors = self.db.current.get_outgoing_edges(node_id);
         for edge_id in neighbors {
             if let Ok(target) = self.db.current.get_edge_target(edge_id) {
-                 if let Some(v) = fetch_vector(target) {
+                if let Some(v) = fetch_vector(target) {
                     vectors.push(v);
-                 }
+                }
             }
         }
 
@@ -180,15 +176,19 @@ impl<'a> Chameleon<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMapBuilder;
-    use crate::index::vector::{HnswConfig, DistanceMetric};
     use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+    use crate::core::property::PropertyMapBuilder;
+    use crate::index::vector::{DistanceMetric, HnswConfig};
     use tempfile::tempdir;
 
     fn create_test_db() -> (AletheiaDB, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let config = AletheiaDBConfig::builder()
-            .wal(WalConfigBuilder::new().wal_dir(dir.path().to_path_buf()).build())
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.path().to_path_buf())
+                    .build(),
+            )
             .persistence(crate::storage::index_persistence::PersistenceConfig {
                 enabled: false,
                 data_dir: dir.path().join("data"),
@@ -208,15 +208,21 @@ mod tests {
         db.enable_vector_index("vec", config).unwrap();
 
         // 2. Create Context Node (C) at [1.0, 0.0]
-        let props_c = PropertyMapBuilder::new().insert_vector("vec", &[1.0f32, 0.0]).build();
+        let props_c = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0f32, 0.0])
+            .build();
         let c = db.create_node("Context", props_c).unwrap();
 
         // 3. Create Target Node (T) at [0.707, 0.707] (45 degrees)
-        let props_t = PropertyMapBuilder::new().insert_vector("vec", &[0.707f32, 0.707]).build();
+        let props_t = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.707f32, 0.707])
+            .build();
         let t = db.create_node("Target", props_t).unwrap();
 
         // 4. Create Distractor Node (D) at [0.0, 1.0] (90 degrees)
-        let props_d = PropertyMapBuilder::new().insert_vector("vec", &[0.0f32, 1.0]).build();
+        let props_d = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0f32, 1.0])
+            .build();
         let d = db.create_node("Distractor", props_d).unwrap();
 
         // 5. Query
@@ -228,12 +234,16 @@ mod tests {
         let query = vec![0.0f32, 1.0];
 
         // Case A: Alpha = 1.0 (Pure Query) -> Should find Distractor
-        let results_pure = chameleon.search_with_context(&query, c, "vec", 1.0, 1).unwrap();
+        let results_pure = chameleon
+            .search_with_context(&query, c, "vec", 1.0, 1)
+            .unwrap();
         assert!(!results_pure.is_empty(), "Should return results");
         assert_eq!(results_pure[0].0, d, "Pure query should find Distractor");
 
         // Case B: Alpha = 0.5 (Blended) -> Should find Target
-        let results_blend = chameleon.search_with_context(&query, c, "vec", 0.5, 1).unwrap();
+        let results_blend = chameleon
+            .search_with_context(&query, c, "vec", 0.5, 1)
+            .unwrap();
         assert!(!results_blend.is_empty(), "Should return results");
         assert_eq!(results_blend[0].0, t, "Blended query should find Target");
     }
@@ -250,18 +260,25 @@ mod tests {
         let c = db.create_node("Context", props_c).unwrap();
 
         // Neighbor 1 (N1) - [1.0, 0.0]
-        let props_n1 = PropertyMapBuilder::new().insert_vector("vec", &[1.0f32, 0.0]).build();
+        let props_n1 = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0f32, 0.0])
+            .build();
         let n1 = db.create_node("Neighbor", props_n1).unwrap();
 
         // Connect C -> N1
-        db.create_edge(c, n1, "LINK", PropertyMapBuilder::new().build()).unwrap();
+        db.create_edge(c, n1, "LINK", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Target (T) - [0.707, 0.707]
-        let props_t = PropertyMapBuilder::new().insert_vector("vec", &[0.707f32, 0.707]).build();
+        let props_t = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.707f32, 0.707])
+            .build();
         let t = db.create_node("Target", props_t).unwrap();
 
         // Distractor (D) - [0.0, 1.0]
-        let props_d = PropertyMapBuilder::new().insert_vector("vec", &[0.0f32, 1.0]).build();
+        let props_d = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0f32, 1.0])
+            .build();
         let _d = db.create_node("Distractor", props_d).unwrap();
 
         let chameleon = Chameleon::new(&db);
@@ -269,9 +286,14 @@ mod tests {
 
         // With context from neighbor N1, centroid becomes [1.0, 0.0]
         // Blend 0.5 -> [0.5, 0.5] -> T
-        let results = chameleon.search_with_context(&query, c, "vec", 0.5, 1).unwrap();
+        let results = chameleon
+            .search_with_context(&query, c, "vec", 0.5, 1)
+            .unwrap();
         assert!(!results.is_empty(), "Should return results");
-        assert_eq!(results[0].0, t, "Neighbor context should steer query to Target");
+        assert_eq!(
+            results[0].0, t,
+            "Neighbor context should steer query to Target"
+        );
     }
 
     #[test]
@@ -285,7 +307,9 @@ mod tests {
         let c = db.create_node("Context", props_c).unwrap();
 
         // Target (matches query [1.0, 0.0])
-        let props_t = PropertyMapBuilder::new().insert_vector("vec", &[1.0f32, 0.0]).build();
+        let props_t = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0f32, 0.0])
+            .build();
         let t = db.create_node("Target", props_t).unwrap();
 
         let chameleon = Chameleon::new(&db);
@@ -293,9 +317,14 @@ mod tests {
 
         // Even with alpha=0.0 (pure context), if no context exists, it should fallback to query
         // and find the target.
-        let results = chameleon.search_with_context(&query, c, "vec", 0.0, 1).unwrap();
+        let results = chameleon
+            .search_with_context(&query, c, "vec", 0.0, 1)
+            .unwrap();
 
         assert!(!results.is_empty());
-        assert_eq!(results[0].0, t, "Should fallback to original query when no context available");
+        assert_eq!(
+            results[0].0, t,
+            "Should fallback to original query when no context available"
+        );
     }
 }
