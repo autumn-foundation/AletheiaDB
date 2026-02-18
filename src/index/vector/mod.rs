@@ -712,6 +712,58 @@ mod tests {
 
         assert!(Quantization::from_u8(3).is_err());
     }
+
+    // Mock implementation to test default trait methods
+    struct MockVectorIndex {
+        count: usize,
+    }
+
+    impl VectorIndex for MockVectorIndex {
+        fn add(&self, _id: NodeId, _vector: &[f32]) -> Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _id: NodeId) -> Result<()> {
+            Ok(())
+        }
+        fn search(&self, _query: &[f32], _k: usize) -> Result<Vec<(NodeId, f32)>> {
+            Ok(vec![])
+        }
+        fn search_with_filter<F>(
+            &self,
+            _query: &[f32],
+            _k: usize,
+            _predicate: F,
+        ) -> Result<Vec<(NodeId, f32)>>
+        where
+            F: Fn(&NodeId) -> bool + Send + Sync,
+        {
+            Ok(vec![])
+        }
+        fn len(&self) -> usize {
+            self.count
+        }
+        fn dimensions(&self) -> usize {
+            128
+        }
+        fn distance_metric(&self) -> DistanceMetric {
+            DistanceMetric::Cosine
+        }
+    }
+
+    #[test]
+    fn test_vector_index_default_is_empty() {
+        let empty_index = MockVectorIndex { count: 0 };
+        assert!(
+            empty_index.is_empty(),
+            "is_empty() should be true when len() is 0"
+        );
+
+        let populated_index = MockVectorIndex { count: 10 };
+        assert!(
+            !populated_index.is_empty(),
+            "is_empty() should be false when len() > 0"
+        );
+    }
 }
 
 // HNSW implementation
