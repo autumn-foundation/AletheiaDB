@@ -503,14 +503,18 @@ mod tests {
         let edge = EdgeId::new(100).unwrap();
         let label = InternedString::from_raw(1);
 
-        index.insert_edge(
-            edge,
-            source,
-            target,
-            label,
-            ts(10), ts(20), // valid range [10, 20)
-            ts(5), TIMESTAMP_MAX, // tx range [5, MAX)
-        ).unwrap();
+        index
+            .insert_edge(
+                edge,
+                source,
+                target,
+                label,
+                ts(10),
+                ts(20), // valid range [10, 20)
+                ts(5),
+                TIMESTAMP_MAX, // tx range [5, MAX)
+            )
+            .unwrap();
 
         // Valid query
         let result = index.get_outgoing_at_time(source, ts(15), ts(10));
@@ -534,14 +538,18 @@ mod tests {
         let edge = EdgeId::new(100).unwrap();
         let label = InternedString::from_raw(1);
 
-        index.insert_edge(
-            edge,
-            source,
-            target,
-            label,
-            ts(10), ts(20),
-            ts(5), TIMESTAMP_MAX,
-        ).unwrap();
+        index
+            .insert_edge(
+                edge,
+                source,
+                target,
+                label,
+                ts(10),
+                ts(20),
+                ts(5),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         // Incoming to target
         let result = index.get_incoming_at_time(target, ts(15), ts(10));
@@ -561,14 +569,18 @@ mod tests {
         let edge = EdgeId::new(100).unwrap();
         let label = InternedString::from_raw(1);
 
-        index.insert_edge(
-            edge,
-            source,
-            target,
-            label,
-            ts(100), ts(200),
-            ts(0), TIMESTAMP_MAX,
-        ).unwrap();
+        index
+            .insert_edge(
+                edge,
+                source,
+                target,
+                label,
+                ts(100),
+                ts(200),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         // Valid boundary (inclusive start)
         assert_eq!(index.get_outgoing_at_time(source, ts(100), ts(10)).len(), 1);
@@ -588,14 +600,18 @@ mod tests {
         let edge = EdgeId::new(100).unwrap();
         let label = InternedString::from_raw(1);
 
-        index.insert_edge(
-            edge,
-            source,
-            target,
-            label,
-            ts(10), ts(20),
-            ts(100), ts(200), // Recorded between 100 and 200
-        ).unwrap();
+        index
+            .insert_edge(
+                edge,
+                source,
+                target,
+                label,
+                ts(10),
+                ts(20),
+                ts(100),
+                ts(200), // Recorded between 100 and 200
+            )
+            .unwrap();
 
         // Query at valid time 15, tx time 150 (visible)
         assert_eq!(index.get_outgoing_at_time(source, ts(15), ts(150)).len(), 1);
@@ -616,14 +632,18 @@ mod tests {
         let label = InternedString::from_raw(1);
 
         // Insert open-ended edge
-        index.insert_edge(
-            edge,
-            source,
-            target,
-            label,
-            ts(10), ts(100), // Initially valid until 100
-            ts(0), TIMESTAMP_MAX,
-        ).unwrap();
+        index
+            .insert_edge(
+                edge,
+                source,
+                target,
+                label,
+                ts(10),
+                ts(100), // Initially valid until 100
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         assert_eq!(index.get_outgoing_at_time(source, ts(50), ts(10)).len(), 1);
 
@@ -639,20 +659,56 @@ mod tests {
 
     #[test]
     fn test_capacity_limit() {
-        let config = TemporalAdjacencyConfig { max_entries_per_node: 2 };
+        let config = TemporalAdjacencyConfig {
+            max_entries_per_node: 2,
+        };
         let index = TemporalAdjacencyIndex::new(config);
         let source = NodeId::new(1).unwrap();
         let target = NodeId::new(2).unwrap();
         let label = InternedString::from_raw(1);
 
         // Insert 2 edges (limit reached)
-        index.insert_edge(EdgeId::new(1).unwrap(), source, target, label, ts(10), ts(20), ts(0), TIMESTAMP_MAX).unwrap();
-        index.insert_edge(EdgeId::new(2).unwrap(), source, target, label, ts(20), ts(30), ts(0), TIMESTAMP_MAX).unwrap();
+        index
+            .insert_edge(
+                EdgeId::new(1).unwrap(),
+                source,
+                target,
+                label,
+                ts(10),
+                ts(20),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
+        index
+            .insert_edge(
+                EdgeId::new(2).unwrap(),
+                source,
+                target,
+                label,
+                ts(20),
+                ts(30),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         // Insert 3rd edge (should fail)
-        let result = index.insert_edge(EdgeId::new(3).unwrap(), source, target, label, ts(30), ts(40), ts(0), TIMESTAMP_MAX);
+        let result = index.insert_edge(
+            EdgeId::new(3).unwrap(),
+            source,
+            target,
+            label,
+            ts(30),
+            ts(40),
+            ts(0),
+            TIMESTAMP_MAX,
+        );
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), StorageError::CapacityExceeded { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            StorageError::CapacityExceeded { .. }
+        ));
     }
 
     #[test]
@@ -663,14 +719,18 @@ mod tests {
         let label = InternedString::from_raw(1);
 
         // Insert self-loop
-        index.insert_edge(
-            edge,
-            node,
-            node,
-            label,
-            ts(10), ts(20),
-            ts(0), TIMESTAMP_MAX,
-        ).unwrap();
+        index
+            .insert_edge(
+                edge,
+                node,
+                node,
+                label,
+                ts(10),
+                ts(20),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         // Should be outgoing from node
         let out_res = index.get_outgoing_at_time(node, ts(15), ts(10));
@@ -692,24 +752,32 @@ mod tests {
         let label = InternedString::from_raw(1);
 
         // Version 1: [10, 20)
-        index.insert_edge(
-            edge,
-            source,
-            target,
-            label,
-            ts(10), ts(20),
-            ts(0), TIMESTAMP_MAX,
-        ).unwrap();
+        index
+            .insert_edge(
+                edge,
+                source,
+                target,
+                label,
+                ts(10),
+                ts(20),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         // Version 2: [30, 40)
-        index.insert_edge(
-            edge,
-            source,
-            target,
-            label,
-            ts(30), ts(40),
-            ts(0), TIMESTAMP_MAX,
-        ).unwrap();
+        index
+            .insert_edge(
+                edge,
+                source,
+                target,
+                label,
+                ts(30),
+                ts(40),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         // Query at 15 -> find V1
         assert_eq!(index.get_outgoing_at_time(source, ts(15), ts(10)).len(), 1);
@@ -733,28 +801,42 @@ mod tests {
         let label = InternedString::from_raw(1);
 
         // Case 1: source < target
-        index.insert_edge(
-            EdgeId::new(1).unwrap(),
-            small_id,
-            large_id,
-            label,
-            ts(10), ts(20),
-            ts(0), TIMESTAMP_MAX
-        ).unwrap();
+        index
+            .insert_edge(
+                EdgeId::new(1).unwrap(),
+                small_id,
+                large_id,
+                label,
+                ts(10),
+                ts(20),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         // Case 2: source > target
-        index.insert_edge(
-            EdgeId::new(2).unwrap(),
-            large_id,
-            small_id,
-            label,
-            ts(10), ts(20),
-            ts(0), TIMESTAMP_MAX
-        ).unwrap();
+        index
+            .insert_edge(
+                EdgeId::new(2).unwrap(),
+                large_id,
+                small_id,
+                label,
+                ts(10),
+                ts(20),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         // Verify both were inserted
-        assert_eq!(index.get_outgoing_at_time(small_id, ts(15), ts(10)).len(), 1);
-        assert_eq!(index.get_outgoing_at_time(large_id, ts(15), ts(10)).len(), 1);
+        assert_eq!(
+            index.get_outgoing_at_time(small_id, ts(15), ts(10)).len(),
+            1
+        );
+        assert_eq!(
+            index.get_outgoing_at_time(large_id, ts(15), ts(10)).len(),
+            1
+        );
     }
 
     #[test]
@@ -765,8 +847,30 @@ mod tests {
         let label1 = InternedString::from_raw(1);
         let label2 = InternedString::from_raw(2);
 
-        index.insert_edge(EdgeId::new(1).unwrap(), source, target, label1, ts(10), ts(20), ts(0), TIMESTAMP_MAX).unwrap();
-        index.insert_edge(EdgeId::new(2).unwrap(), source, target, label2, ts(10), ts(20), ts(0), TIMESTAMP_MAX).unwrap();
+        index
+            .insert_edge(
+                EdgeId::new(1).unwrap(),
+                source,
+                target,
+                label1,
+                ts(10),
+                ts(20),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
+        index
+            .insert_edge(
+                EdgeId::new(2).unwrap(),
+                source,
+                target,
+                label2,
+                ts(10),
+                ts(20),
+                ts(0),
+                TIMESTAMP_MAX,
+            )
+            .unwrap();
 
         let res1 = index.get_outgoing_with_label_at_time(source, label1, ts(15), ts(10));
         assert_eq!(res1.len(), 1);
