@@ -1475,9 +1475,9 @@ impl PropertyMapBuilder {
 
     /// Insert a property (fallible).
     pub fn try_insert<V: Into<PropertyValue>>(mut self, key: &str, value: V) -> Result<Self> {
-        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
-            return Ok(self);
-        };
+        // Warden: Propagate interning errors (e.g. CapacityExceeded) to prevent silent data loss.
+        // Previously, failure to intern would silently drop the property, which is a security risk.
+        let interned_key = GLOBAL_INTERNER.intern(key)?;
         let val = value.into();
         let val_size = val.serialized_size()?;
 

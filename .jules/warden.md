@@ -43,3 +43,7 @@
 **2025-05-15 - [HNSW Dimension Mismatch Vulnerability]**
 **Threat:** Inconsistent state between `usearch` index (C++) and `HnswConfig` (Rust) allowed buffer over-read in custom metric wrapper. A malicious user could provide a small index file and a config claiming large dimensions, causing `unsafe` slice construction with out-of-bounds length.
 **Defense:** Added explicit check in `HnswIndex::load` to enforce `index.dimensions() == config.dimensions()`.
+
+**2026-02-18 - Silent Data Loss in Property Interning**
+**Threat:** `PropertyMapBuilder::try_insert` silently swallowed errors when the string interner was full (e.g. DoS attack filling capacity). This resulted in properties being silently dropped during node/edge creation or updates, potentially leading to security bypasses (e.g. missing "role: admin" or "acl" properties) or data integrity issues.
+**Defense:** Modified `try_insert` to propagate the `CapacityExceeded` error instead of returning `Ok(self)`. Added regression test `tests/security_interner_dos.rs` which verifies that insertion fails when the interner is full.
