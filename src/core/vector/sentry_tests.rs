@@ -493,13 +493,18 @@ fn test_normalize_consistency_small_vector() {
     // Construct a vector with squared magnitude slightly below threshold
     // threshold is 1e-14
     let small_val = (0.5 * SQUARED_MAGNITUDE_THRESHOLD).sqrt();
-    let small_vec = vec![small_val];
+    // Using multi-dimensional vector to ensure all components are zeroed
+    // Magnitude squared check: val^2 + 0 + (val/2)^2 = 1.25 * val^2
+    // 1.25 * 0.5 * threshold = 0.625 * threshold (< threshold)
+    let small_vec = vec![small_val, 0.0, -small_val / 2.0];
 
     // normalize() returns zero vector
     let normalized = normalize(&small_vec);
+    let expected = vec![0.0; 3];
     assert_eq!(
-        normalized[0], 0.0,
-        "normalize() should zero out small vectors"
+        normalized, expected,
+        "normalize() should zero out small vectors, but got {:?}",
+        normalized
     );
 
     // normalize_in_place()
@@ -508,7 +513,7 @@ fn test_normalize_consistency_small_vector() {
 
     // This assertion verifies the fix
     assert_eq!(
-        in_place_vec[0], 0.0,
+        in_place_vec, expected,
         "normalize_in_place() should zero out small vectors to match normalize(), but got {:?}",
         in_place_vec
     );

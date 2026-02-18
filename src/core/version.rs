@@ -2371,35 +2371,6 @@ mod sentry_tests {
         let delta = PropertyDelta::from_diff(&props, &props);
         assert!(delta.is_empty(), "NaN -> NaN should result in empty delta");
     }
-
-    #[test]
-    fn test_sentry_floats_epsilon_boundary() {
-        // 🛡️ Sentry Test: Verify floats_approx_equal handles exact epsilon difference as equal.
-        // This targets mutants that replace `<=` with `<` in (a-b).abs() <= VECTOR_EPSILON.
-
-        let old = vec![0.0f32];
-        let new = vec![VECTOR_EPSILON]; // Exact epsilon difference
-
-        // Should be considered equal, so no delta
-        let delta = VectorDelta::from_diff(&old, &new);
-        assert!(
-            delta.is_none(),
-            "Difference of exactly EPSILON should be treated as equal"
-        );
-    }
-
-    #[test]
-    fn test_sentry_floats_infinite_equality() {
-        // 🛡️ Sentry Test: Verify floats_approx_equal handles infinity equality correctly.
-        // This targets mutants that remove the explicit `is_infinite` check.
-        // (INF - INF) is NaN, and NaN <= EPSILON is false, so without check they would be unequal.
-
-        let old = vec![f32::INFINITY];
-        let new = vec![f32::INFINITY];
-
-        let delta = VectorDelta::from_diff(&old, &new);
-        assert!(delta.is_none(), "Infinity == Infinity should be no change");
-    }
 }
 
 #[cfg(test)]

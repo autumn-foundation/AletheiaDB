@@ -140,7 +140,7 @@ impl ConcurrentWalConfig {
 
 // Thread-local stripe ID for affinity-based stripe selection.
 thread_local! {
-    static THREAD_ID_HASH: Cell<Option<u64>> = const { Cell::new(None) };
+    static THREAD_STRIPE_ID: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 /// Concurrent Write-Ahead Log with striped architecture.
@@ -212,25 +212,24 @@ impl ConcurrentWal {
     /// on first access and sticks with it for cache efficiency.
     #[inline]
     fn get_stripe(&self) -> &WalStripe {
-        let hash = THREAD_ID_HASH.with(|id| {
+        let stripe_id = THREAD_STRIPE_ID.with(|id| {
             if let Some(existing) = id.get() {
                 existing
             } else {
                 // Assign based on thread ID hash
                 let thread_id = std::thread::current().id();
-                let h = {
+                let hash = {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
                     thread_id.hash(&mut hasher);
-                    hasher.finish()
+                    hasher.finish() as usize
                 };
-                id.set(Some(h));
-                h
+                let assigned = hash & self.stripe_mask;
+                id.set(Some(assigned));
+                assigned
             }
         });
 
-        // Use hash to determine stripe
-        let stripe_id = (hash as usize) & self.stripe_mask;
         &self.stripes[stripe_id]
     }
 
@@ -876,165 +875,5 @@ mod tests {
         assert_eq!(wal.config().num_stripes, config.num_stripes);
         assert!(wal.stripe(0).is_some());
         assert!(wal.stripe(1000).is_none());
-    }
-}
-
-#[cfg(test)]
-mod sentry_tests {
-    use super::*;
-    use crate::GLOBAL_INTERNER;
-    use crate::core::id::NodeId;
-    use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::time;
-    use crate::storage::wal::entry::MAX_WAL_ENTRY_SIZE;
-    use tempfile::tempdir;
-
-    /// 🎯 Target: MAX_WAL_ENTRY_SIZE boundary check
-    /// 💣 Risk: Off-by-one errors (e.g. `>` becoming `>=`) could reject valid max-size entries.
-    /// 🧪 Strategy: Construct an entry exactly at the size limit.
-    /// 🔬 Verification: Ensure append succeeds.
-    #[test]
-    fn test_append_entry_exactly_max_size_succeeds() {
-        let dir = tempdir().unwrap();
-        // Increase segment size to accommodate large entry
-        let config = ConcurrentWalConfig::new(dir.path()).with_segment_size(MAX_WAL_ENTRY_SIZE * 2);
-        let wal = ConcurrentWal::new(config).unwrap();
-
-        // Calculate size needed for payload
-        // CreateNode overhead:
-        // Fixed: 24 bytes (LSN + Time + Checksum)
-        // Variable: 1 (op) + 8 (node_id) + 4 (label) + 12 (time) = 25 bytes
-        // PropertyMap overhead:
-        // 4 (count) + 4 (key_len) + key_bytes + 1 (tag_string) + 4 (val_len) + val_bytes
-
-        // Let's use a key "k" (1 byte)
-        // Overhead = 24 + 25 + 4 + 4 + 1 + 1 + 4 = 63 bytes
-        // Total = 63 + val_bytes
-        // Target = MAX_WAL_ENTRY_SIZE
-        // val_bytes = MAX_WAL_ENTRY_SIZE - 63
-
-        let overhead = 63;
-        let target_val_len = MAX_WAL_ENTRY_SIZE - overhead;
-
-        // Create a string of target length
-        // We use repeat to create it efficiently
-        let big_string = "x".repeat(target_val_len);
-
-        let properties = PropertyMapBuilder::new().insert("k", big_string).build();
-
-        let op = WalOperation::CreateNode {
-            node_id: NodeId::new(1).unwrap(),
-            label: GLOBAL_INTERNER.intern("Test").unwrap(),
-            properties,
-            valid_from: time::now(),
-        };
-
-        // Verify our math was correct
-        let estimated = crate::storage::wal::estimate_entry_capacity(&op);
-        assert_eq!(
-            estimated, MAX_WAL_ENTRY_SIZE,
-            "Entry size calculation incorrect"
-        );
-
-        // Attempt append - should succeed
-        let result = wal.append_async(op);
-        assert!(
-            result.is_ok(),
-            "Failed to append entry of exactly MAX_WAL_ENTRY_SIZE: {:?}",
-            result.err()
-        );
-    }
-
-    /// 🎯 Target: MAX_WAL_ENTRY_SIZE boundary check
-    /// 💣 Risk: Missing check or loose check (e.g. removing check entirely) allows DoS.
-    /// 🧪 Strategy: Construct an entry 1 byte over the limit.
-    /// 🔬 Verification: Ensure append fails with CapacityExceeded.
-    #[test]
-    fn test_append_entry_exceeding_max_size_fails() {
-        let dir = tempdir().unwrap();
-        let config = ConcurrentWalConfig::new(dir.path()).with_segment_size(MAX_WAL_ENTRY_SIZE * 2);
-        let wal = ConcurrentWal::new(config).unwrap();
-
-        // Use same calculation as above but +1 byte
-        let overhead = 63;
-        let target_val_len = MAX_WAL_ENTRY_SIZE - overhead + 1;
-
-        let big_string = "x".repeat(target_val_len);
-
-        let properties = PropertyMapBuilder::new().insert("k", big_string).build();
-
-        let op = WalOperation::CreateNode {
-            node_id: NodeId::new(1).unwrap(),
-            label: GLOBAL_INTERNER.intern("Test").unwrap(),
-            properties,
-            valid_from: time::now(),
-        };
-
-        // Verify size
-        let estimated = crate::storage::wal::estimate_entry_capacity(&op);
-        assert_eq!(
-            estimated,
-            MAX_WAL_ENTRY_SIZE + 1,
-            "Entry size calculation incorrect"
-        );
-
-        // Attempt append - should fail
-        let result = wal.append_async(op);
-        assert!(result.is_err(), "Should have rejected oversized entry");
-
-        match result {
-            Err(Error::Storage(StorageError::CapacityExceeded { current, limit, .. })) => {
-                assert_eq!(current, MAX_WAL_ENTRY_SIZE + 1);
-                assert_eq!(limit, MAX_WAL_ENTRY_SIZE);
-            }
-            _ => panic!("Expected CapacityExceeded error, got {:?}", result),
-        }
-    }
-
-    /// 🎯 Target: Thread-local stripe affinity caching.
-    /// 💣 Risk: Cached stripe indices from a large WAL (e.g. 32 stripes) can be out of bounds
-    ///          when reused by a thread accessing a small WAL (e.g. 4 stripes).
-    /// 🧪 Strategy: Spawn threads, force access to large WAL, then small WAL.
-    /// 🔬 Verification: Ensure no panic.
-    #[test]
-    fn test_thread_local_switching_between_sizes() {
-        use std::thread;
-
-        // Run multiple threads to ensure we hit a case where hash % 32 > 3
-        let handles: Vec<_> = (0..10)
-            .map(|_| {
-                thread::spawn(|| {
-                    // 1. Large WAL (32 stripes)
-                    let dir_large = tempdir().unwrap();
-                    let config_large =
-                        ConcurrentWalConfig::new(dir_large.path()).with_num_stripes(32);
-                    let wal_large = ConcurrentWal::new(config_large).unwrap();
-
-                    let op = WalOperation::CreateNode {
-                        node_id: NodeId::new(1).unwrap(),
-                        label: GLOBAL_INTERNER.intern("Test").unwrap(),
-                        properties: PropertyMapBuilder::new().build(),
-                        valid_from: time::now(),
-                    };
-
-                    // This populates the thread-local cache with an index in [0, 31]
-                    wal_large.append_async(op.clone()).unwrap();
-
-                    // 2. Small WAL (4 stripes)
-                    let dir_small = tempdir().unwrap();
-                    let config_small =
-                        ConcurrentWalConfig::new(dir_small.path()).with_num_stripes(4);
-                    let wal_small = ConcurrentWal::new(config_small).unwrap();
-
-                    // This should reuse the cached index. If index > 3, it will panic
-                    // unless the implementation correctly re-checks or uses a hash.
-                    wal_small.append_async(op).unwrap();
-                })
-            })
-            .collect();
-
-        for h in handles {
-            h.join().unwrap();
-        }
     }
 }

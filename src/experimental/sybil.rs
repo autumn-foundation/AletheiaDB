@@ -240,10 +240,10 @@ impl<'a> Sybil<'a> {
 
                 let mut neighbor_vectors = Vec::new();
                 for edge_id in incoming_edges {
-                    if let Ok(source) = self.db.get_edge_source(edge_id)
-                        && let Some(vec) = current_state.get(&source)
-                    {
-                        neighbor_vectors.push((source, vec.as_slice()));
+                    if let Ok(source) = self.db.get_edge_source(edge_id) {
+                        if let Some(vec) = current_state.get(&source) {
+                            neighbor_vectors.push((source, vec.as_slice()));
+                        }
                     }
                 }
 
@@ -267,11 +267,12 @@ impl<'a> Sybil<'a> {
 
         for row in results {
             let row = row?;
-            if let Some(node) = row.entity.as_node()
-                && let Some(prop) = node.get_property(property_name)
-                && let Some(vec) = prop.as_vector()
-            {
-                state.insert(node.id, vec.to_vec());
+            if let Some(node) = row.entity.as_node() {
+                if let Some(prop) = node.get_property(property_name) {
+                    if let Some(vec) = prop.as_vector() {
+                        state.insert(node.id, vec.to_vec());
+                    }
+                }
             }
         }
         Ok(state)

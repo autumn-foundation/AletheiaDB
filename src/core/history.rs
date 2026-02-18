@@ -11,20 +11,6 @@ use crate::core::temporal::{BiTemporalInterval, Timestamp};
 /// Information about a specific version of an entity (node or edge).
 ///
 /// Represents a snapshot of an entity at a particular point in its history.
-///
-/// # Temporal Access
-///
-/// Note that `VersionInfo` does not expose `tx_time` (transaction time) directly as a field.
-/// Instead, it is embedded within the `temporal` field (a [`BiTemporalInterval`]).
-///
-/// To access the timestamp when this version was recorded:
-/// ```rust
-/// # use aletheiadb::core::history::VersionInfo;
-/// # fn example(version: &VersionInfo) {
-/// let recorded_at = version.temporal.transaction_time().start();
-/// let valid_from = version.temporal.valid_time().start();
-/// # }
-/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct VersionInfo {
     /// Sequential version number (1, 2, 3, ...)

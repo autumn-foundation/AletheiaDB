@@ -23,15 +23,3 @@
 ## 2024-05-26 - HTTP JSON Conversion Limits
 **Confusion:** The HTTP API's JSON conversion logic enforces a recursion depth limit (100) to prevent stack overflow attacks, but this behavior was undocumented and could surprise developers working with deeply nested data.
 **Clarification:** Added documentation to `src/http/converters.rs` explicitly stating the recursion limit and detailing the type mappings between AletheiaDB types and JSON types.
-
-## 2024-05-27 - Hidden Transaction Time Access
-**Confusion:** The `VersionInfo` struct does not expose a `tx_time` field, forcing users to dive into the source code to realize they must access `version.temporal.transaction_time().start()`.
-**Clarification:** Added a "Temporal Access" section to `VersionInfo` documentation with a clear code example demonstrating how to retrieve both valid time and transaction time.
-
-## 2024-05-27 - Temporal Logic Pitfalls
-**Confusion:** Users were unaware of critical boundaries like `MAX_VALID_TIMESTAMP` (causing runtime errors) and the reflexive nature of `TimeRange::contains_range` (causing off-by-one logic bugs).
-**Clarification:** Added a "Gotchas & Corner Cases" section to `src/core/temporal.rs` explicitly listing `MAX_VALID_TIMESTAMP` limits, range containment rules, and visibility logic nuances.
-
-## 2024-05-27 - Experimental Feature Opacity
-**Confusion:** The `Chronos` (pathfinding) and `Dreamer` (vector extrapolation) experimental modules lacked explanations of their underlying algorithms, making them opaque "black boxes."
-**Clarification:** Added detailed algorithmic explanations to `Chronos` (Snapshot Pathfinding, Path Stability) and clarified `Dreamer`'s dependency on `search_vectors_in`.

@@ -589,7 +589,7 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
 /// Normalizes a vector to unit length in place.
 ///
 /// Modifies the vector in place to have magnitude 1.0.
-/// For zero vectors (magnitude = 0), leaves the vector unchanged.
+/// For zero vectors (magnitude = 0), sets all elements to zero.
 ///
 /// # Arguments
 ///
