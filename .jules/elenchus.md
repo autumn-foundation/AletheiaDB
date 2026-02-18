@@ -238,3 +238,17 @@
 **Severity:** 🟢 Acquitted
 **Finding:** Module contains robust concurrency tests including `test_intern_concurrent_capacity_race` and `test_concurrent_interning`.
 **Evidence:** Code inspection.
+
+**[Tiered Storage Inefficiency]**
+**Module:** `src/storage/tiered_storage.rs` & `src/storage/historical/mod.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `HistoricalStorage::reconstruct_node_properties_iterative` performs a "Double Fetch" pattern: fetching version metadata in a backward pass (warming the cache) and then fetching again in a forward pass (hitting the cache). This effectively doubles the lookup overhead (O(2N) instead of O(N)).
+**Evidence:** `tests/elenchus_tiered_storage.rs` confirmed that `warm_hits` equals `cold_hits` + `chain_length` during reconstruction, proving every version is accessed twice.
+**Recommendation:** Refactor reconstruction to collect `Vec<Arc<NodeVersion>>` during the backward pass instead of `Vec<VersionId>`, eliminating the second lookup pass.
+
+**[Tiered Storage Test Fragility]**
+**Module:** `tests/tiered_storage_reconstruction.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Existing tests relied on side-effect cache warming from assertions (`get_node_version_tiered`), masking potential issues with true cold storage reconstruction.
+**Evidence:** `tests/elenchus_tiered_storage.rs` isolates this behavior by avoiding intermediate lookups and confirms reconstruction works from cold storage, but highlights the double-fetch cost.
+**Resolution:** Added `tests/elenchus_tiered_storage.rs` as a robust regression suite. Confirmed that depth limits (`MaxDepthExceeded`) are correctly enforced even across tiered storage boundaries.
