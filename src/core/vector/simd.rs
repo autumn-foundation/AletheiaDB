@@ -712,3 +712,69 @@ pub(crate) fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
     // Fallback for non-x86 platforms or x86 CPUs without SSE2.
     dot_product_scalar(a, b)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scale_and_copy_implementation_coverage() {
+        let src = vec![1.0f32; 17]; // 17 to force remainder logic (8*2 + 1)
+        let mut dst = vec![0.0f32; 17];
+        let scalar = 2.0;
+        let expected = vec![2.0f32; 17];
+
+        // 1. Unconditional Scalar coverage
+        scale_and_copy_scalar(&src, &mut dst, scalar);
+        assert_eq!(dst, expected, "Scalar implementation failed");
+        dst.fill(0.0);
+
+        // 2. Conditional x86 SIMD coverage
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Try SSE2 if available
+            if is_x86_feature_detected!("sse2") {
+                unsafe { x86_ops::scale_and_copy_sse2(&src, &mut dst, scalar) };
+                assert_eq!(dst, expected, "SSE2 implementation failed");
+                dst.fill(0.0);
+            }
+
+            // Try AVX2 if available
+            if is_x86_feature_detected!("avx2") {
+                unsafe { x86_ops::scale_and_copy_avx2(&src, &mut dst, scalar) };
+                assert_eq!(dst, expected, "AVX2 implementation failed");
+                dst.fill(0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_scale_in_place_implementation_coverage() {
+        let v = vec![1.0f32; 17];
+        let scalar = 2.0;
+        let expected = vec![2.0f32; 17];
+
+        // 1. Unconditional Scalar coverage
+        let mut v_scalar = v.clone();
+        scale_in_place_scalar(&mut v_scalar, scalar);
+        assert_eq!(v_scalar, expected, "Scalar implementation failed");
+
+        // 2. Conditional x86 SIMD coverage
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Try SSE2
+            if is_x86_feature_detected!("sse2") {
+                let mut v_sse2 = v.clone();
+                unsafe { x86_ops::scale_in_place_sse2(&mut v_sse2, scalar) };
+                assert_eq!(v_sse2, expected, "SSE2 implementation failed");
+            }
+
+            // Try AVX2
+            if is_x86_feature_detected!("avx2") {
+                let mut v_avx2 = v.clone();
+                unsafe { x86_ops::scale_in_place_avx2(&mut v_avx2, scalar) };
+                assert_eq!(v_avx2, expected, "AVX2 implementation failed");
+            }
+        }
+    }
+}
