@@ -317,7 +317,8 @@ sequenceDiagram
         DB-->>Wormhole: semantic_neighbors
         loop Every Neighbor
             Wormhole->>DB: bfs_distance(candidate, neighbor, max_hops)
-            alt Distance > max_hops or None
+            DB-->>Wormhole: distance
+            alt distance is None
                 Wormhole->>Wormhole: Record Latent Edge
             end
         end
