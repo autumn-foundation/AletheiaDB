@@ -31,6 +31,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
+/// Maximum sum of limit + offset to prevent deep pagination DoS.
+const MAX_DEEP_PAGINATION: usize = 10_000;
+
 /// Health check response structure.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -262,12 +265,11 @@ fn validate_pagination(
 ) -> Result<(usize, usize), String> {
     let limit_val = limit.unwrap_or(default_limit).min(max_limit);
     let offset_val = offset.unwrap_or(0);
-    let max_deep_pagination = 10_000;
 
-    if offset_val.saturating_add(limit_val) > max_deep_pagination {
+    if offset_val.saturating_add(limit_val) > MAX_DEEP_PAGINATION {
         return Err(format!(
             "Pagination limit exceeded: offset + limit must be <= {}",
-            max_deep_pagination
+            MAX_DEEP_PAGINATION
         ));
     }
 
@@ -347,7 +349,15 @@ fn handle_find_node(
     match builder.limit(limit_val).execute(db) {
         Ok(results) => {
             let mut nodes = Vec::new();
-            for row in results.flatten() {
+            for row_res in results {
+                let row = match row_res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return HttpResponse::InternalServerError()
+                            .json(ApiResponse::error(e.to_string()));
+                    }
+                };
+
                 if let crate::query::executor::EntityResult::Node(node) = row.entity {
                     match node_to_json(&node) {
                         Ok(j) => nodes.push(j),
@@ -379,27 +389,43 @@ fn handle_find_neighbors(
             // Deduplication
             let mut seen_ids = HashSet::new();
             let mut neighbors = Vec::with_capacity(limit_val);
+            let mut processed_count = 0;
 
-            // Use zero-allocation iterators
             // Outgoing: edge -> target node
             let outgoing_iter = db
                 .get_outgoing_edges_iter(nid)
-                .map(|edge_id| db.get_edge_target(edge_id).ok());
+                .map(|edge_id| db.get_edge_target(edge_id));
 
             // Incoming: edge -> source node
             let incoming_iter = db
                 .get_incoming_edges_iter(nid)
-                .map(|edge_id| db.get_edge_source(edge_id).ok());
+                .map(|edge_id| db.get_edge_source(edge_id));
 
-            // Chain iterators -> filter valid -> filter duplicates -> skip -> take
-            let combined_iter = outgoing_iter
-                .chain(incoming_iter)
-                .flatten() // remove None (failed lookups)
-                .filter(|&neighbor_id| seen_ids.insert(neighbor_id)) // deduplicate
-                .skip(offset_val)
-                .take(limit_val);
+            // Chain iterators
+            let combined_iter = outgoing_iter.chain(incoming_iter);
 
-            for neighbor_id in combined_iter {
+            for neighbor_res in combined_iter {
+                let neighbor_id = match neighbor_res {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return HttpResponse::InternalServerError()
+                            .json(ApiResponse::error(e.to_string()));
+                    }
+                };
+
+                // Deduplicate
+                if !seen_ids.insert(neighbor_id) {
+                    continue;
+                }
+
+                processed_count += 1;
+
+                // Handle pagination manually since we can't use .skip().take() on Results easily
+                // without collecting or complex combinators
+                if processed_count <= offset_val {
+                    continue;
+                }
+
                 match db.get_node(neighbor_id) {
                     Ok(node) => match node_to_json(&node) {
                         Ok(j) => neighbors.push(j),
@@ -412,6 +438,10 @@ fn handle_find_neighbors(
                         return HttpResponse::InternalServerError()
                             .json(ApiResponse::error(e.to_string()));
                     }
+                }
+
+                if neighbors.len() >= limit_val {
+                    break;
                 }
             }
 
