@@ -569,31 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn test_time_range_contains_range_boundaries() {
-        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
-
-        // Exact match
-        let exact = TimeRange::new(100.into(), 300.into()).unwrap();
-        assert!(outer.contains_range(&exact));
-
-        // Touching start boundary
-        let touch_start = TimeRange::new(100.into(), 150.into()).unwrap();
-        assert!(outer.contains_range(&touch_start));
-
-        // Touching end boundary
-        let touch_end = TimeRange::new(250.into(), 300.into()).unwrap();
-        assert!(outer.contains_range(&touch_end));
-
-        // Slightly out (start)
-        let out_start = TimeRange::new(99.into(), 150.into()).unwrap();
-        assert!(!outer.contains_range(&out_start));
-
-        // Slightly out (end)
-        let out_end = TimeRange::new(250.into(), 301.into()).unwrap();
-        assert!(!outer.contains_range(&out_end));
-    }
-
-    #[test]
     fn test_time_range_current() {
         let range = TimeRange::from(100.into());
         assert_eq!(range.start(), 100.into());
@@ -646,6 +621,46 @@ mod tests {
         assert!(outer.contains_range(&inner));
         assert!(!inner.contains_range(&outer));
         assert!(!outer.contains_range(&overlapping));
+    }
+
+    #[test]
+    fn test_time_range_contains_range_boundaries() {
+        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+
+        // Same start
+        let inner_same_start = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(
+            outer.contains_range(&inner_same_start),
+            "Should contain range with same start"
+        );
+
+        // Same end
+        let inner_same_end = TimeRange::new(200.into(), 300.into()).unwrap();
+        assert!(
+            outer.contains_range(&inner_same_end),
+            "Should contain range with same end"
+        );
+
+        // Same start and end (exact match)
+        let exact_match = TimeRange::new(100.into(), 300.into()).unwrap();
+        assert!(
+            outer.contains_range(&exact_match),
+            "Should contain exact same range"
+        );
+
+        // Just outside start
+        let outside_start = TimeRange::new(99.into(), 200.into()).unwrap();
+        assert!(
+            !outer.contains_range(&outside_start),
+            "Should not contain range starting before"
+        );
+
+        // Just outside end (301)
+        let outside_end = TimeRange::new(200.into(), 301.into()).unwrap();
+        assert!(
+            !outer.contains_range(&outside_end),
+            "Should not contain range ending after"
+        );
     }
 
     #[test]
@@ -1099,6 +1114,53 @@ mod tests {
             !outer.contains_range(&inner),
             "Range starting before outer should not be contained"
         );
+    }
+
+    #[test]
+    fn test_time_range_rejects_timestamps_exceeding_max_valid() {
+        use crate::core::hlc::HybridTimestamp;
+
+        // Test with MAX_VALID_TIMESTAMP + 1
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+
+        // Test start timestamp validation
+        // Use invalid_ts for both start and end to avoid InvalidTimeRange (start > end)
+        let result = TimeRange::new(invalid_ts, invalid_ts);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimestamp { .. }
+        ));
+
+        // Test end timestamp validation
+        let result = TimeRange::new(valid_ts, invalid_ts);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimestamp { .. }
+        ));
+    }
+
+    #[test]
+    fn test_time_range_contains_range_boundaries_hybrid() {
+        use crate::core::hlc::HybridTimestamp;
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let mid = HybridTimestamp::new(200, 0).unwrap();
+        let end = HybridTimestamp::new(300, 0).unwrap();
+
+        let outer = TimeRange::new(start, end).unwrap(); // [100, 300)
+        let inner_start = TimeRange::new(start, mid).unwrap(); // [100, 200)
+        let inner_end = TimeRange::new(mid, end).unwrap(); // [200, 300)
+
+        // Should contain range starting at same time
+        assert!(outer.contains_range(&inner_start));
+
+        // Should contain range ending at same time
+        assert!(outer.contains_range(&inner_end));
+
+        // Should contain itself
+        assert!(outer.contains_range(&outer));
     }
 }
 
