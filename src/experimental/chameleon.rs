@@ -51,8 +51,9 @@
 use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::vector::ops::{magnitude, normalize};
+use crate::core::vector::ops::magnitude;
 use crate::utils::{Error, Result, VectorError};
+use std::collections::HashSet;
 
 /// The Chameleon engine for context-adaptive vector search.
 pub struct Chameleon<'a> {
@@ -104,7 +105,7 @@ impl<'a> Chameleon<'a> {
         // Pre-resolve context types to IDs for fast comparison.
         // If a context type isn't interned, it means no edge uses it yet (or at least not via global interner),
         // so we can safely ignore it.
-        let context_ids: Vec<u32> = context_edge_types
+        let context_ids: HashSet<u32> = context_edge_types
             .iter()
             .filter_map(|&s| GLOBAL_INTERNER.get_id(s).map(|id| id.as_u32()))
             .collect();
@@ -135,22 +136,28 @@ impl<'a> Chameleon<'a> {
             }
         }
 
-        // 3. Compute Centroid
+        // 3. Compute Centroid & Normalize
         if count > 1.0 {
             for s in &mut sum_vec {
                 *s /= count;
             }
-        }
 
-        // 4. Normalize
-        // Centroids can shrink; we want direction, so we normalize.
-        let mag = magnitude(&sum_vec);
-        if mag > 1e-6 {
-            Ok(normalize(&sum_vec))
-        } else {
+            // 4. Normalize
+            // Centroids can shrink; we want direction, so we normalize.
+            let mag = magnitude(&sum_vec);
+            if mag > 1e-6 {
+                // Optimize: Normalize in-place to avoid re-calculating magnitude and allocation.
+                let inv_mag = 1.0 / mag;
+                for s in &mut sum_vec {
+                    *s *= inv_mag;
+                }
+            }
             // If magnitude is zero (unlikely unless vectors cancel out perfectly),
-            // return zero vector or error? Return zero vector.
+            // return zero vector.
             Ok(sum_vec)
+        } else {
+            // No context applied. Return original vector as-is.
+            Ok(target_vec.to_vec())
         }
     }
 
