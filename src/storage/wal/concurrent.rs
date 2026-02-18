@@ -253,7 +253,8 @@ impl ConcurrentWal {
     /// The allocated LSN for this entry.
     pub fn append_async(&self, operation: WalOperation) -> Result<LSN> {
         let lsn = self.lsn_allocator.allocate();
-        let data = self.serialize_entry(lsn, &operation)?;
+        let estimated_capacity = super::estimate_entry_capacity(&operation);
+        let data = self.serialize_entry(lsn, &operation, estimated_capacity)?;
         let stripe = self.get_stripe();
 
         match stripe.append_blocking(lsn, data) {
@@ -278,7 +279,8 @@ impl ConcurrentWal {
     /// - `Err(...)` - Flush failed
     pub fn append_sync(&self, operation: WalOperation) -> Result<LSN> {
         let lsn = self.lsn_allocator.allocate();
-        let data = self.serialize_entry(lsn, &operation)?;
+        let estimated_capacity = super::estimate_entry_capacity(&operation);
+        let data = self.serialize_entry(lsn, &operation, estimated_capacity)?;
         let stripe = self.get_stripe();
 
         match stripe.append_sync(lsn, data) {
@@ -305,7 +307,8 @@ impl ConcurrentWal {
     /// available (backpressure).
     pub fn append_with_handle(&self, operation: WalOperation) -> Result<(LSN, CompletionHandle)> {
         let lsn = self.lsn_allocator.allocate();
-        let data = self.serialize_entry(lsn, &operation)?;
+        let estimated_capacity = super::estimate_entry_capacity(&operation);
+        let data = self.serialize_entry(lsn, &operation, estimated_capacity)?;
         let stripe = self.get_stripe();
 
         match stripe.append_sync_blocking(lsn, data) {
@@ -362,6 +365,8 @@ impl ConcurrentWal {
 
         // ATOMICITY CHECK: Pre-validate all operations before allocating LSNs.
         // This prevents partial batch application (gaps in LSN sequence) if one entry fails.
+        // Optimization: Store calculated capacities to avoid re-computation during serialization.
+        let mut capacities = Vec::with_capacity(operations.len());
         for operation in &operations {
             let estimated_capacity = super::estimate_entry_capacity(operation);
             if estimated_capacity > super::entry::MAX_WAL_ENTRY_SIZE {
@@ -371,6 +376,7 @@ impl ConcurrentWal {
                     limit: super::entry::MAX_WAL_ENTRY_SIZE,
                 }));
             }
+            capacities.push(estimated_capacity);
         }
 
         let count = operations.len() as u64;
@@ -390,7 +396,8 @@ impl ConcurrentWal {
             let lsn = LSN(first_lsn.0 + idx as u64);
             lsns.push(lsn);
 
-            let data = self.serialize_entry(lsn, &operation)?;
+            // Use pre-calculated capacity
+            let data = self.serialize_entry(lsn, &operation, capacities[idx])?;
             let stripe = self.get_stripe();
 
             match stripe.append_blocking(lsn, data) {
@@ -417,10 +424,20 @@ impl ConcurrentWal {
     ///
     /// This implementation avoids `WalOperation::clone()` and eliminates the
     /// need for a temporary buffer copy, reducing both CPU and memory overhead.
-    fn serialize_entry(&self, lsn: LSN, operation: &WalOperation) -> Result<Vec<u8>> {
-        let estimated_capacity = super::estimate_entry_capacity(operation);
-
+    ///
+    /// # Arguments
+    ///
+    /// * `lsn` - The LSN for this entry
+    /// * `operation` - The operation to serialize
+    /// * `estimated_capacity` - Pre-calculated capacity (avoids re-computation)
+    fn serialize_entry(
+        &self,
+        lsn: LSN,
+        operation: &WalOperation,
+        estimated_capacity: usize,
+    ) -> Result<Vec<u8>> {
         // Security Check: Enforce maximum entry size to prevent DoS
+        // This is a fast integer comparison, so it's fine to repeat it even if checked earlier.
         if estimated_capacity > super::entry::MAX_WAL_ENTRY_SIZE {
             return Err(Error::Storage(StorageError::CapacityExceeded {
                 resource: "WAL entry size".to_string(),
