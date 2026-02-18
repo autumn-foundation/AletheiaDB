@@ -1486,3 +1486,95 @@ mod proptests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    #[test]
+    fn test_sentry_bitemporal_is_current_mixed_state() {
+        // 🛡️ Sentry Test: Verify BiTemporalInterval::is_current() correctly handles mixed states.
+        // This test ensures that if only one dimension is open (current), is_current() returns false.
+        // It specifically targets mutants that might replace `&&` with `||` in the implementation.
+
+        let valid_start = 1000.into();
+        let valid_end = 2000.into();
+        let tx_start = 3000.into();
+
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(valid_start, valid_end).unwrap(), // Closed (not current)
+            TimeRange::from(tx_start),                       // Open (current)
+        );
+
+        assert!(!interval.is_currently_valid());
+        assert!(interval.is_currently_recorded());
+
+        // Assert that is_current() is false. If implementation used OR, this would be true.
+        assert!(!interval.is_current(), "is_current() should be false if one dimension is closed");
+    }
+
+    #[test]
+    fn test_sentry_iso8601_format_content() {
+        // 🛡️ Sentry Test: Verify time::to_iso8601 produces expected content.
+        // This targets arithmetic mutants (e.g., replacing / with %) that would produce
+        // wildly incorrect second values in the output string.
+
+        let secs = 1609459200; // 2021-01-01 00:00:00 UTC
+        let ts = time::from_secs(secs);
+        let output = time::to_iso8601(ts);
+
+        // The output should contain the seconds count in some form (Debug output of SystemTime usually does)
+        assert!(output.contains(&secs.to_string()),
+            "to_iso8601 output should contain the seconds timestamp. Got: {}", output);
+    }
+
+    #[test]
+    fn test_sentry_time_range_display_format() {
+        // 🛡️ Sentry Test: Verify Display implementation for TimeRange.
+        // Ensures proper bracketing [ ) for ranges.
+
+        let start = 100.into();
+        let end = 200.into();
+
+        // Closed range
+        let closed = TimeRange::new(start, end).unwrap();
+        let closed_str = format!("{}", closed);
+        assert!(closed_str.starts_with("["));
+        assert!(closed_str.ends_with(")"));
+        assert!(closed_str.contains(", "));
+
+        // Open range
+        let open = TimeRange::from(start);
+        let open_str = format!("{}", open);
+        assert!(open_str.starts_with("["));
+        assert!(open_str.ends_with(")"));
+        assert!(open_str.contains("current"));
+    }
+
+    #[test]
+    fn test_sentry_overlaps_strict_inequality() {
+        // 🛡️ Sentry Test: Verify strict inequality in overlaps().
+        // Explicitly check the touching case from the other direction.
+
+        let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+        let r2 = TimeRange::new(200.into(), 300.into()).unwrap();
+
+        // r2 overlaps r1? 200 < 200 is False.
+        // If logic was <=, it would be True.
+        assert!(!r2.overlaps(&r1), "Touching ranges should not overlap (checking symmetry)");
+    }
+
+    #[test]
+    fn test_sentry_contains_range_strict_inequality() {
+        // 🛡️ Sentry Test: Verify strict inequality in contains_range().
+        // Specifically check exact end boundary match.
+
+        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+        let inner = TimeRange::new(200.into(), 300.into()).unwrap();
+
+        // outer.end (300) == inner.end (300)
+        // Logic requires inner.end <= outer.end.
+        // If logic was <, this would fail.
+        assert!(outer.contains_range(&inner), "Should contain range ending at exact same time");
+    }
+}
