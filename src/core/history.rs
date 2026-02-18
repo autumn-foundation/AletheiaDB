@@ -645,12 +645,7 @@ mod tests {
         let from_id = test_version_id(1);
         let to_id = test_version_id(2);
 
-        let diff = VersionDiff::compute(
-            &from_props,
-            &to_props,
-            from_id,
-            to_id,
-        );
+        let diff = VersionDiff::compute(&from_props, &to_props, from_id, to_id);
 
         // Verify that ID fields are correctly assigned
         // This kills mutants that swap or default-initialize these fields
