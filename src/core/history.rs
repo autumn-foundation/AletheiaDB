@@ -637,4 +637,25 @@ mod tests {
         );
         assert!(!diff.has_changes());
     }
+
+    #[test]
+    fn test_version_diff_compute_verifies_ids() {
+        let from_props = PropertyMapBuilder::new().build();
+        let to_props = PropertyMapBuilder::new().build();
+        let from_id = test_version_id(1);
+        let to_id = test_version_id(2);
+
+        let diff = VersionDiff::compute(
+            &from_props,
+            &to_props,
+            from_id,
+            to_id,
+        );
+
+        // Verify that ID fields are correctly assigned
+        // This kills mutants that swap or default-initialize these fields
+        assert_eq!(diff.from_version, from_id, "from_version must match input");
+        assert_eq!(diff.to_version, to_id, "to_version must match input");
+        assert_ne!(from_id, to_id, "Test requires distinct IDs");
+    }
 }
