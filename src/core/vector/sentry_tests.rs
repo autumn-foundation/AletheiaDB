@@ -481,3 +481,31 @@ fn test_scale_in_place_zero_scalar() {
     assert!(v[2].is_nan()); // Inf * 0 = NaN
     assert!(v[3].is_nan()); // NaN * 0 = NaN
 }
+
+// ============================================================================
+// Normalization Consistency Tests
+// ============================================================================
+
+#[test]
+fn test_normalize_consistency_small_vector() {
+    use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
+
+    // Construct a vector with squared magnitude slightly below threshold
+    // threshold is 1e-14
+    let small_val = (0.5 * SQUARED_MAGNITUDE_THRESHOLD).sqrt();
+    let small_vec = vec![small_val];
+
+    // normalize() returns zero vector
+    let normalized = normalize(&small_vec);
+    assert_eq!(normalized[0], 0.0, "normalize() should zero out small vectors");
+
+    // normalize_in_place()
+    let mut in_place_vec = small_vec.clone();
+    normalize_in_place(&mut in_place_vec);
+
+    // This assertion verifies the fix
+    assert_eq!(in_place_vec[0], 0.0,
+        "normalize_in_place() should zero out small vectors to match normalize(), but got {:?}", in_place_vec);
+
+    assert_eq!(normalized, in_place_vec, "normalize and normalize_in_place should be consistent");
+}

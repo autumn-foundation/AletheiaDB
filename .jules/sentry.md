@@ -21,3 +21,7 @@
 ## [Catastrophic Cancellation in Euclidean Distance]
 **Learning:** The formula `||a||^2 + ||b||^2 - 2<a,b>` for squared Euclidean distance is numerically unstable for vectors that are very close to each other, leading to negative results due to floating-point errors. This causes `sqrt()` to return `NaN`.
 **Action:** Replaced with the stable single-pass algorithm `sum((a_i - b_i)^2)` in `sparse_squared_euclidean_distance`. This is both numerically robust and faster (1 pass vs 3). Added deterministic regression test with seed 34.
+
+## 2026-02-15 - Inconsistent Normalization Behavior
+**Learning:** `normalize_in_place` was silently failing (leaving vectors unchanged) for small magnitudes, while `normalize` was correctly returning a zero vector. This inconsistency could lead to subtle bugs where "normalized" vectors are not actually normalized.
+**Action:** Updated `normalize_in_place` to explicitly zero out small vectors, matching `normalize` behavior. Added regression test `test_normalize_consistency_small_vector`.
