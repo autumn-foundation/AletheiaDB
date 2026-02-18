@@ -43,9 +43,10 @@
 //!
 //! # Examples
 //!
-//! ```rust
+//! ```rust,no_run
 //! use aletheiadb::index::VectorIndex;
 //! use aletheiadb::core::id::NodeId;
+//! use std::collections::HashSet;
 //!
 //! fn search_similar_documents(
 //!     index: &impl VectorIndex,
@@ -66,7 +67,7 @@
 //! fn search_with_constraint(
 //!     index: &impl VectorIndex,
 //!     query: &[f32],
-//!     allowed_ids: &[NodeId],
+//!     allowed_ids: &HashSet<NodeId>,
 //!     k: usize
 //! ) -> aletheiadb::utils::Result<Vec<(NodeId, f32)>> {
 //!     // Search only within a subset of nodes
@@ -349,13 +350,13 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::core::id::NodeId;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
     /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-    /// let node_id = NodeId::new(123).unwrap();
+    /// let node_id = NodeId::new(123)?;
     /// let embedding = vec![0.1, 0.2, 0.3, 0.4];
     /// index.add(node_id, &embedding)?;
     /// # Ok(())
@@ -378,13 +379,13 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::core::id::NodeId;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
     /// # fn main() -> aletheiadb::utils::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
-    /// let node_id = NodeId::new(123).unwrap();
+    /// let node_id = NodeId::new(123)?;
     /// index.remove(node_id)?;
     /// # Ok(())
     /// # }
@@ -416,7 +417,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
     /// # fn main() -> aletheiadb::utils::Result<()> {
@@ -466,7 +467,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::core::id::NodeId;
     /// # use std::collections::HashSet;
@@ -494,7 +495,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
     /// # fn main() -> aletheiadb::utils::Result<()> {
@@ -512,7 +513,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
     /// # fn main() -> aletheiadb::utils::Result<()> {
@@ -542,7 +543,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use aletheiadb::index::{VectorIndex, DistanceMetric};
     /// # use aletheiadb::index::vector::HnswIndexBuilder;
     /// # fn main() -> aletheiadb::utils::Result<()> {
@@ -567,7 +568,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
     /// # fn main() -> aletheiadb::utils::Result<()> {

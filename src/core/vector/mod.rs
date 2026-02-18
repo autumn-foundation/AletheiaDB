@@ -1,80 +1,83 @@
 //! Vector utilities for AletheiaDB.
 //!
-//! This module provides types and functions for working with dense vectors
-//! (embeddings) used in semantic search and similarity operations.
+//! This module provides types and functions for working with vector embeddings
+//! used in semantic search and similarity operations.
 //!
 //! # Overview
 //!
 //! AletheiaDB supports storing vectors as property values on nodes via
-//! [`crate::core::PropertyValue::Vector`]. This module provides the utilities needed
-//! to work with those vectors effectively:
+//! [`crate::core::PropertyValue`]. This enables:
+//! - **Dense Vectors**: Standard embeddings (e.g., from OpenAI, BERT) for semantic search.
+//! - **Sparse Vectors**: High-dimensional sparse data (e.g., BM25, SPLADE) for keyword search.
 //!
-//! - **Type definitions**: [`VectorDimension`] for expressing vector sizes
-//! - **Similarity functions**: [`cosine_similarity`], [`cosine_similarity_normalized`]
-//! - **Distance functions**: [`euclidean_distance`], [`squared_euclidean_distance`]
-//! - **Inner product**: [`dot_product`] for pre-normalized vectors or projections
-//! - **Normalization**: [`magnitude`], [`squared_magnitude`], [`normalize`], [`normalize_in_place`], [`is_normalized`]
-//! - **Validation**: [`validate_vector`], [`check_dimensions_match`] for NaN/Inf detection and dimension checking
+//! This module provides the low-level utilities needed to work with these vectors,
+//! including similarity functions, normalization, and validation.
 //!
 //! # Usage
 //!
+//! ## Dense Vectors
+//!
 //! ```rust
-//! use aletheiadb::core::vector::VectorDimension;
 //! use aletheiadb::core::PropertyValue;
+//! use aletheiadb::core::vector::{cosine_similarity, normalize};
 //!
-//! // Create a vector property
-//! let embedding: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
-//! let dim = VectorDimension::new(embedding.len());
-//! let prop = PropertyValue::vector(embedding);
+//! // Create a vector property (automatically stored as Arc<[f32]>)
+//! let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
+//! let prop = PropertyValue::vector(&embedding);
 //!
-//! // Access the vector
+//! // Access the vector data
 //! if let Some(vec) = prop.as_vector() {
-//!     assert_eq!(vec.len(), dim.as_usize());
+//!     assert_eq!(vec.len(), 4);
+//!
+//!     // Perform vector operations
+//!     let normalized = normalize(vec);
+//!     let similarity = cosine_similarity(vec, &normalized).unwrap();
+//!     assert!(similarity > 0.0);
+//! }
+//! ```
+//!
+//! ## Sparse Vectors
+//!
+//! Sparse vectors are efficient for high-dimensional data where most values are zero.
+//! They store only indices and values.
+//!
+//! ```rust
+//! use aletheiadb::core::PropertyValue;
+//! use aletheiadb::core::vector::SparseVec;
+//!
+//! // Create a sparse vector: dim=1000, non-zero at indices 10 and 42
+//! let sparse = SparseVec::new(
+//!     vec![10, 42],           // Indices (must be sorted)
+//!     vec![0.5, 0.8],         // Values
+//!     1000                    // Total dimension
+//! ).expect("Invalid sparse vector");
+//!
+//! let prop = PropertyValue::sparse_vector(sparse);
+//!
+//! // Access the sparse vector
+//! if let Some(sv) = prop.as_sparse_vector() {
+//!     assert_eq!(sv.nnz(), 2);
+//!     assert_eq!(sv.dimension(), 1000);
 //! }
 //! ```
 //!
 //! # Design Notes
 //!
-//! Vectors in AletheiaDB are stored as `Arc<[f32]>` within [`crate::core::PropertyValue::Vector`].
-//! This design enables:
+//! Vectors in AletheiaDB are designed for efficiency:
 //!
-//! - **Efficient cloning**: Multiple versions can share the same vector data
-//! - **Memory efficiency**: f32 provides good precision with half the memory of f64
-//! - **Temporal compatibility**: Unchanged vectors across versions share storage
-//!
-//! For similarity computations, vectors should typically be L2-normalized to enable
-//! fast cosine similarity via dot product.
-//!
-//! # Type Safety
-//!
-//! [`VectorDimension`] is implemented as a newtype struct rather than a type alias.
-//! This provides stronger type safety by preventing accidental interchange with
-//! other `usize` values (e.g., byte counts, array indices).
+//! - **Storage**: Stored as `Arc<[f32]>` (dense) or `Arc<SparseVec>` (sparse) for cheap cloning and zero-copy sharing across versions.
+//! - **Memory**: `f32` precision provides the best balance of accuracy and memory usage for ML embeddings.
+//! - **SIMD**: Operations like cosine similarity are accelerated using AVX2/SSE2/NEON when available.
 //!
 //! # Implemented Functions
 //!
 //! - **[`cosine_similarity`]**: Measures angle between vectors, range `[-1, 1]`
-//! - **[`cosine_similarity_normalized`]**: Optimized for pre-normalized (unit) vectors
 //! - **[`euclidean_distance`]**: L2 distance between vectors
-//! - **[`squared_euclidean_distance`]**: Squared L2 distance (faster for comparisons)
 //! - **[`dot_product`]**: Inner product, useful for pre-normalized vectors
 //! - **[`magnitude`]**: L2 norm of a vector
-//! - **[`squared_magnitude`]**: Squared L2 norm (faster for comparisons)
-//! - **[`normalize`]**: Returns new unit vector with magnitude 1.0
-//! - **[`normalize_in_place`]**: Normalizes vector in place
-//! - **[`is_normalized`]**: Checks if vector has unit magnitude
+//! - **[`normalize`]**: Returns new unit vector
 //!
-//! All functions use SIMD acceleration (AVX2/SSE2) when available.
-//!
-//! # Future Additions
-//!
-//! This module will be expanded to include:
-//!
-//! - Manhattan distance
-//! - Dimension validation helpers
-//! - Sparse vector support
-//!
-//! See `docs/VECTOR_SEARCH_DESIGN.md` for the complete design.
+//! For complete API of sparse vectors, see [`SparseVec`].
 
 /// Constants and thresholds.
 pub mod constants;

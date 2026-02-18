@@ -243,7 +243,8 @@ pub trait WriteOps: ReadOps {
 
     /// Create a new node.
     ///
-    /// This is a convenience method that sets `valid_from` to the **transaction start time**.
+    /// This is a convenience method that sets `valid_from` to the **transaction start time**
+    /// (the time when this transaction object was created).
     ///
     /// # Example
     ///
@@ -275,7 +276,8 @@ pub trait WriteOps: ReadOps {
 
     /// Create a new edge.
     ///
-    /// This is a convenience method that sets `valid_from` to the **transaction start time**.
+    /// This is a convenience method that sets `valid_from` to the **transaction start time**
+    /// (the time when this transaction object was created).
     ///
     /// # Example
     ///
