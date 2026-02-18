@@ -2692,6 +2692,9 @@ mod mutant_kill_tests {
         // This targets mutants that replace `<=` with `<` in floats_approx_equal.
         // (a - b).abs() <= VECTOR_EPSILON
 
+        // A small offset to test boundaries around VECTOR_EPSILON.
+        const SMALL_OFFSET: f32 = 1e-9;
+
         // Use 0.0 as base to ensure EPSILON is exactly representable and addition
         // doesn't lose precision (which happens around 1.0 due to f32::EPSILON > VECTOR_EPSILON).
         let v1 = vec![0.0f32];
@@ -2700,7 +2703,7 @@ mod mutant_kill_tests {
         // 0.0 + 1e-7. abs(diff) = 1e-7.
         // Original (<=): Equal -> No Delta (None)
         // Mutant (<): Not Equal -> Delta (Some)
-        let v2 = vec![0.0f32 + VECTOR_EPSILON];
+        let v2 = vec![VECTOR_EPSILON];
         assert!(
             VectorDelta::from_diff(&v1, &v2).is_none(),
             "Difference of exactly EPSILON should be considered equal (no delta)"
@@ -2708,7 +2711,7 @@ mod mutant_kill_tests {
 
         // Case 2: Difference slightly larger than EPSILON
         // Should be detected as different
-        let v3 = vec![0.0f32 + VECTOR_EPSILON + 1e-9];
+        let v3 = vec![VECTOR_EPSILON + SMALL_OFFSET];
         assert!(
             VectorDelta::from_diff(&v1, &v3).is_some(),
             "Difference > EPSILON should be detected"
@@ -2716,7 +2719,7 @@ mod mutant_kill_tests {
 
         // Case 3: Difference slightly smaller than EPSILON
         // Should be considered equal
-        let v4 = vec![0.0f32 + VECTOR_EPSILON - 1e-9];
+        let v4 = vec![VECTOR_EPSILON - SMALL_OFFSET];
         assert!(
             VectorDelta::from_diff(&v1, &v4).is_none(),
             "Difference < EPSILON should be considered equal"
