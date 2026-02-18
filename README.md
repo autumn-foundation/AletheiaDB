@@ -358,7 +358,7 @@ println!("Created Alice: {:?}", alice);
 ### Time-Travel Queries
 
 ```rust
-use aletheiadb::core::temporal::time;
+use aletheiadb::time;
 
 // Get current time
 let now = time::now();
@@ -411,8 +411,8 @@ use aletheiadb::query::ir::Predicate;
 
 // Setup query parameters
 let query_embedding = vec![0.1f32; 384];
-let valid_time = aletheiadb::core::temporal::time::now();
-let tx_time = aletheiadb::core::temporal::time::now();
+let valid_time = aletheiadb::time::now();
+let tx_time = aletheiadb::time::now();
 
 // Simple: Graph + Vector hybrid
 let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
@@ -426,7 +426,7 @@ let results = db.query()
     .as_of(valid_time, tx_time)        // Temporal: point-in-time
     .start(alice_id)                   // Graph: start node
     .traverse("KNOWS")                 // Graph: traverse edges
-    .rank_by_similarity(&embedding, 10) // Vector: rank by similarity
+    .rank_by_similarity(&query_embedding, 10) // Vector: rank by similarity
     .with_provenance()                 // Include metadata
     .execute(&db)?;
 
@@ -442,7 +442,7 @@ for row in results {
 
 // Property-specific vector queries
 let results = db.query()
-    .find_similar_builder(&embedding, 10)
+    .find_similar_builder(&query_embedding, 10)
     .property("embedding")  // Query specific property
     .metric(DistanceMetric::Cosine)
     .finish()
@@ -458,8 +458,8 @@ use aletheiadb::index::vector::temporal::DriftMetric;
 use aletheiadb::core::temporal::TimeRange;
 
 // Define time range
-let timestamp_2023 = aletheiadb::core::temporal::time::from_secs(1672531200);
-let timestamp_2024 = aletheiadb::core::temporal::time::from_secs(1704067200);
+let timestamp_2023 = aletheiadb::time::from_secs(1672531200);
+let timestamp_2024 = aletheiadb::time::from_secs(1704067200);
 
 // Find all nodes with significant semantic drift
 let time_range = TimeRange::new(timestamp_2023, timestamp_2024)?;
