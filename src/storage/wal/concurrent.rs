@@ -138,7 +138,9 @@ impl ConcurrentWalConfig {
     }
 }
 
-// Thread-local stripe ID for affinity-based stripe selection.
+// Thread-local hash for affinity-based stripe selection.
+// Stores the raw hash of the thread ID to allow consistent mapping across
+// multiple WAL instances with different stripe counts.
 thread_local! {
     static THREAD_STRIPE_ID: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -212,9 +214,9 @@ impl ConcurrentWal {
     /// on first access and sticks with it for cache efficiency.
     #[inline]
     fn get_stripe(&self) -> &WalStripe {
-        let stripe_id = THREAD_STRIPE_ID.with(|id| {
-            if let Some(existing) = id.get() {
-                existing
+        let hash = THREAD_STRIPE_ID.with(|id| {
+            if let Some(existing_hash) = id.get() {
+                existing_hash
             } else {
                 // Assign based on thread ID hash
                 let thread_id = std::thread::current().id();
@@ -224,12 +226,16 @@ impl ConcurrentWal {
                     thread_id.hash(&mut hasher);
                     hasher.finish() as usize
                 };
-                let assigned = hash & self.stripe_mask;
-                id.set(Some(assigned));
-                assigned
+                // Store the raw hash, not the masked stripe ID.
+                // This ensures that if the thread accesses another WAL with a different
+                // stripe count, we can re-mask correctly.
+                id.set(Some(hash));
+                hash
             }
         });
 
+        // Always apply mask to ensure valid index for THIS WAL instance
+        let stripe_id = hash & self.stripe_mask;
         &self.stripes[stripe_id]
     }
 
@@ -875,5 +881,76 @@ mod tests {
         assert_eq!(wal.config().num_stripes, config.num_stripes);
         assert!(wal.stripe(0).is_some());
         assert!(wal.stripe(1000).is_none());
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_thread_local_stripe_id_pollution_regression() {
+        // Step 1: Create a WAL with many stripes (e.g., 16)
+        let dir1 = tempdir().unwrap();
+        let config1 = ConcurrentWalConfig::new(dir1.path()).with_num_stripes(16);
+        let wal1 = ConcurrentWal::new(config1).unwrap();
+
+        // Access the WAL to initialize THREAD_STRIPE_ID
+        // This sets the thread-local hash.
+        let _ = wal1.append_async(WalOperation::Checkpoint {
+            lsn: LSN(1),
+            timestamp: crate::core::temporal::time::now(),
+        });
+
+        // Step 2: Create a WAL with fewer stripes (e.g., 4)
+        let dir2 = tempdir().unwrap();
+        let config2 = ConcurrentWalConfig::new(dir2.path()).with_num_stripes(4);
+        let wal2 = ConcurrentWal::new(config2).unwrap();
+
+        // Step 3: Access the new WAL.
+        // Previously, the cached masked ID from wal1 (could be > 3) was used directly,
+        // causing an index out of bounds panic on wal2's stripes vector.
+        // The fix stores the raw hash and re-masks it, ensuring a valid index.
+
+        // We run this multiple times to increase confidence (though deterministic with same thread)
+        for _ in 0..10 {
+            let _ = wal2.append_async(WalOperation::Checkpoint {
+                lsn: LSN(1),
+                timestamp: crate::core::temporal::time::now(),
+            });
+        }
+    }
+
+    #[test]
+    fn test_thread_local_switching_between_sizes() {
+        // Verify that switching back and forth works correctly
+        let dir1 = tempdir().unwrap();
+        let wal_large = ConcurrentWal::new(
+            ConcurrentWalConfig::new(dir1.path()).with_num_stripes(16)
+        ).unwrap();
+
+        let dir2 = tempdir().unwrap();
+        let wal_small = ConcurrentWal::new(
+            ConcurrentWalConfig::new(dir2.path()).with_num_stripes(2)
+        ).unwrap();
+
+        // Access large
+        let _ = wal_large.append_async(WalOperation::Checkpoint {
+            lsn: LSN(1),
+            timestamp: crate::core::temporal::time::now(),
+        });
+
+        // Access small
+        let _ = wal_small.append_async(WalOperation::Checkpoint {
+            lsn: LSN(1),
+            timestamp: crate::core::temporal::time::now(),
+        });
+
+        // Access large again
+        let _ = wal_large.append_async(WalOperation::Checkpoint {
+            lsn: LSN(2),
+            timestamp: crate::core::temporal::time::now(),
+        });
     }
 }
