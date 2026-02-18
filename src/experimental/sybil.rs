@@ -35,6 +35,8 @@
 //! # }
 //! ```
 
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::NodeId;
 use crate::utils::error::Result;

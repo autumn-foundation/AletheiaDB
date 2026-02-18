@@ -33,6 +33,7 @@
 //! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
 //! | [`chronos`] | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
 //! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
+//! | [`chameleon`] | **Chameleon** | Context-Adaptive Vector Search. "Polysemy resolution via graph context." |
 //! | [`echo`] | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
 //! | [`kaleidoscope`] | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
 //! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
@@ -79,6 +80,9 @@ pub mod ariadne;
 #[cfg(feature = "nova")]
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
+#[cfg(feature = "nova")]
+/// Chameleon: Context-Adaptive Vector Search.
+pub mod chameleon;
 #[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
