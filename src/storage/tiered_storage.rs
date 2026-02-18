@@ -497,7 +497,7 @@ impl TieredStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::id::NodeId;
+    use crate::core::id::{EdgeId, NodeId};
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::BiTemporalInterval;
@@ -514,6 +514,20 @@ mod tests {
             NodeId::new(100).unwrap(),
             BiTemporalInterval::current(1000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties,
+        )
+    }
+
+    fn create_test_edge_version(id: u64) -> EdgeVersion {
+        let properties = PropertyMapBuilder::new().insert("weight", 1.0f64).build();
+
+        EdgeVersion::new_anchor(
+            VersionId::new(id).unwrap(),
+            EdgeId::new(200).unwrap(),
+            BiTemporalInterval::current(1000.into()),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(100).unwrap(),
+            NodeId::new(101).unwrap(),
             properties,
         )
     }
@@ -573,6 +587,50 @@ mod tests {
         let metrics = tiered.metrics();
         assert_eq!(metrics.cold_hits, 1);
         assert_eq!(metrics.warm_hits, 0);
+    }
+
+    #[test]
+    fn test_tiered_storage_edge_cold_lookup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
+
+        // Store a version in cold storage
+        let version = create_test_edge_version(1);
+        tiered.store_edge_version(&version).unwrap();
+
+        // Retrieve from cold (first access)
+        let retrieved = tiered.get_edge_version_cold(version.id).unwrap().unwrap();
+        assert_eq!(retrieved.id, version.id);
+
+        // Check metrics
+        let metrics = tiered.metrics();
+        assert_eq!(metrics.cold_hits, 1);
+        assert_eq!(metrics.warm_hits, 0);
+    }
+
+    #[test]
+    fn test_tiered_storage_edge_warm_cache() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
+
+        let version = create_test_edge_version(1);
+        tiered.store_edge_version(&version).unwrap();
+
+        // First access (cold)
+        let _ = tiered.get_edge_version_cold(version.id).unwrap();
+
+        // Second access (warm cache)
+        let retrieved = tiered.get_edge_version_cold(version.id).unwrap().unwrap();
+        assert_eq!(retrieved.id, version.id);
+
+        // Check metrics
+        let metrics = tiered.metrics();
+        assert_eq!(metrics.cold_hits, 1);
+        assert_eq!(metrics.warm_hits, 1);
     }
 
     #[test]
