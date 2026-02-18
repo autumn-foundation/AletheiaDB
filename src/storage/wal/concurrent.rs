@@ -926,14 +926,12 @@ mod regression_tests {
     fn test_thread_local_switching_between_sizes() {
         // Verify that switching back and forth works correctly
         let dir1 = tempdir().unwrap();
-        let wal_large = ConcurrentWal::new(
-            ConcurrentWalConfig::new(dir1.path()).with_num_stripes(16)
-        ).unwrap();
+        let wal_large =
+            ConcurrentWal::new(ConcurrentWalConfig::new(dir1.path()).with_num_stripes(16)).unwrap();
 
         let dir2 = tempdir().unwrap();
-        let wal_small = ConcurrentWal::new(
-            ConcurrentWalConfig::new(dir2.path()).with_num_stripes(2)
-        ).unwrap();
+        let wal_small =
+            ConcurrentWal::new(ConcurrentWalConfig::new(dir2.path()).with_num_stripes(2)).unwrap();
 
         // Access large
         let _ = wal_large.append_async(WalOperation::Checkpoint {
