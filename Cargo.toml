@@ -56,7 +56,8 @@ tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional =
 async-trait = { version = "0.1", optional = true }
 
 # HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
-reqwest = { version = "0.11", features = ["json", "blocking"], optional = true }
+# Switched to rustls to avoid native-tls/openssl compilation issues (See Issue #285)
+reqwest = { version = "0.11", default-features = false, features = ["json", "blocking", "rustls-tls"], optional = true }
 serde_json = { version = "1.0", optional = false }
 
 # ONNX runtime for local model inference
