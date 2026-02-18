@@ -88,6 +88,7 @@ classDiagram
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+        class StorageEngine["StorageEngine (Trait)"]
     }
     namespace Storage {
         class CurrentStorage
@@ -103,8 +104,9 @@ classDiagram
 
     MCPServer --> QueryEngine : Uses
     QueryEngine --> AletheiaDB : Uses
-    AletheiaDB --> CurrentStorage : Composes
-    AletheiaDB --> HistoricalStorage : Composes
+    AletheiaDB --> StorageEngine : Uses (Trait Bound)
+    CurrentStorage ..|> StorageEngine : Implements
+    HistoricalStorage ..|> StorageEngine : Implements
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
 ```
@@ -444,6 +446,182 @@ sequenceDiagram
         Chronos->>Chronos: traverse
     end
     Chronos-->>User: Path
+```
+
+### Cognitive Architecture
+
+The Cognitive Layer provides advanced reasoning services on top of the graph:
+
+**Ariadne (Semantic Thread Weaver)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Ariadne
+    participant DB as AletheiaDB
+
+    User->>Ariadne: weave(start, goal, max_steps)
+    loop A* Search
+        Ariadne->>DB: get_outgoing_edges(current)
+        DB-->>Ariadne: explicit_edges
+        Ariadne->>DB: find_similar(current_vector)
+        DB-->>Ariadne: semantic_candidates
+        Ariadne->>Ariadne: Score candidates (Cost + Heuristic)
+        Note right of Ariadne: Edges are cheap, Jumps are expensive
+    end
+    Ariadne-->>User: Narrative Thread
+```
+
+**Prophet (Link Prediction)**
+
+```mermaid
+classDiagram
+    class Prophet {
+        +predict_links(target, k)
+    }
+    class Scorer {
+        +adamic_adar(neighbors_a, neighbors_b)
+        +vector_similarity(vec_a, vec_b)
+    }
+    Prophet --> Scorer : Uses
+    Prophet --> AletheiaDB : Queries Structure + Vectors
+```
+
+**Fishing (Associative Retrieval)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Rod as FishingRod
+    participant DB as AletheiaDB
+
+    User->>Rod: cast(bait_vector)
+    Rod->>DB: search_vectors(bait_vector)
+    DB-->>Rod: School (Initial Candidates)
+
+    loop Spread Net (Graph Expansion)
+        Rod->>DB: get_neighbors(school_member)
+        DB-->>Rod: neighbors
+        Rod->>Rod: Boost Score(neighbor)
+    end
+
+    Rod->>Rod: Apply Freshness Decay
+    Rod-->>User: Catch (Ranked Results)
+```
+
+**Kaleidoscope (Semantic Layout)**
+
+```mermaid
+classDiagram
+    class LayoutEngine {
+        +add_node(id)
+        +add_edge(a, b)
+        +add_semantic_link(a, b, similarity)
+        +step()
+    }
+    class Point {
+        +x: f32
+        +y: f32
+    }
+    LayoutEngine "1" *-- "*" Point : Positions
+    Note right of LayoutEngine: Physics: Repulsion (Nodes) + Springs (Edges) + Gravity (Vectors)
+```
+
+**Semantic Navigator (Heuristic Pathfinding)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Nav as SemanticNavigator
+    participant DB as AletheiaDB
+
+    User->>Nav: find_path(start, end)
+    Nav->>DB: get_vector(end)
+    loop A* Search
+        Nav->>DB: get_neighbors(current)
+        loop Each Neighbor
+            Nav->>DB: get_vector(neighbor)
+            Nav->>Nav: h = 1.0 - cosine_similarity(neighbor, end)
+            Nav->>Nav: Update PriorityQueue
+        end
+    end
+    Nav-->>User: Path
+```
+
+**Sentinel (Semantic Firewall)**
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Sentinel
+    participant Rule
+
+    App->>Sentinel: validate(properties)
+    loop Every Rule
+        Sentinel->>Rule: validate(properties)
+        alt VectorBanRule
+            Rule->>Rule: check_similarity(prop_vector, banned_vectors)
+        else NumericRangeRule
+            Rule->>Rule: check_bounds(value)
+        end
+        Rule-->>Sentinel: Result
+    end
+    Sentinel-->>App: Result (Ok/Err)
+```
+
+**Sybil (Memetic Propagation)**
+
+```mermaid
+stateDiagram-v2
+    [*] --> InitialState
+    InitialState --> Iterating
+    Iterating --> CalculateUpdates
+    state CalculateUpdates {
+        [*] --> GetNeighbors
+        GetNeighbors --> AverageVectors
+        AverageVectors --> BlendSelf
+        BlendSelf --> NewState
+    }
+    NewState --> Iterating : Steps < Max
+    Iterating --> FinalState : Steps >= Max
+    FinalState --> [*]
+```
+
+**Temporal Diff (State Comparison)**
+
+```mermaid
+classDiagram
+    class TemporalDiff {
+        +compute_diff(t1, t2)
+    }
+    class DiffReport {
+        +t1: Timestamp
+        +t2: Timestamp
+        +changes: Vec<EntityChange>
+    }
+    class PropertyDiff {
+        +added: Vec<String>
+        +removed: Vec<String>
+        +modified: Map<Key, (Old, New)>
+    }
+    TemporalDiff ..> DiffReport : Produces
+    DiffReport *-- PropertyDiff : Contains
+```
+
+**Narrative Generator (History to Text)**
+
+```mermaid
+classDiagram
+    class NarrativeGenerator {
+        +generate_node_narrative(id)
+    }
+    class NarrativeEvent {
+        +timestamp: String
+        +description: String
+        +changes: Vec<String>
+    }
+    NarrativeGenerator ..> NarrativeEvent : Produces
+    NarrativeGenerator --> AletheiaDB : Reads History
 ```
 
 ### Temporal Query Processing
