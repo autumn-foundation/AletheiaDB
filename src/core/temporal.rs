@@ -1583,4 +1583,56 @@ mod sentry_tests {
             "Should contain range ending at exact same time"
         );
     }
+
+    #[test]
+    fn test_sentry_iso8601_precision() {
+        // 🛡️ Sentry Test: Verify sub-second precision in ISO 8601 output.
+        // This targets mutants that break nanosecond calculation.
+
+        let secs = 1609459200;
+        let micros = 123456;
+        let ts = HybridTimestamp::new_unchecked(secs * 1_000_000 + micros, 0);
+        let output = time::to_iso8601(ts);
+
+        // Expected nanoseconds: 123456000
+        // Debug format for Duration/SystemTime usually includes "tv_nsec: 123456000" or similar.
+        // Or if it prints float-like seconds: ".123456000".
+        assert!(
+            output.contains("123456000"),
+            "Output should contain nanoseconds: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_sentry_max_valid_timestamp_value() {
+        // 🛡️ Sentry Test: Verify MAX_VALID_TIMESTAMP allows reasonably large values.
+        // This targets mutants that drastically reduce MAX_VALID_TIMESTAMP (e.g. replace - with /).
+
+        // i64::MAX is ~9e18. i64::MAX / 1000 is ~9e15.
+        // We want to ensure we can store something larger than 9e15.
+        // 9e15 micros is ~285 years.
+        // Wait, i64::MAX micros is ~292,000 years.
+        // If we mutate to i64::MAX / 1000, we limit to ~292 years.
+        // Current time is ~1.7e15 micros (2024).
+        // So i64::MAX / 1000 (9e15) is still future (year ~2250).
+        // But we want to support timestamps far in the future (e.g. year 3000).
+
+        // Let's just pick a value close to i64::MAX, e.g. i64::MAX - 2000.
+        // If MAX_VALID_TIMESTAMP is i64::MAX / 1000, this will fail.
+
+        let large_val = i64::MAX - 2000;
+        let ts = HybridTimestamp::new_unchecked(large_val, 0);
+
+        // This should be accepted by TimeRange::new if MAX_VALID_TIMESTAMP is correct.
+        // But wait, TimeRange::new checks against MAX_VALID_TIMESTAMP.
+        // If MAX_VALID_TIMESTAMP is correct (i64::MAX - 1000), then i64::MAX - 2000 < MAX_VALID_TIMESTAMP. OK.
+        // If MAX_VALID_TIMESTAMP is mutated to (i64::MAX / 1000), then i64::MAX - 2000 > MAX_VALID_TIMESTAMP. Error.
+
+        let result = TimeRange::new(ts, ts);
+        assert!(
+            result.is_ok(),
+            "Should accept large timestamp close to i64::MAX"
+        );
+    }
 }
