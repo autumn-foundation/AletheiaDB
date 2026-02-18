@@ -47,7 +47,7 @@
 //!
 //! // Create a sparse vector: dim=1000, non-zero at indices 10 and 42
 //! let sparse = SparseVec::new(
-//!     vec![10, 42],           // Indices (will be sorted if not already)
+//!     vec![10, 42],           // Indices (must be sorted)
 //!     vec![0.5, 0.8],         // Values
 //!     1000                    // Total dimension
 //! ).expect("Invalid sparse vector");

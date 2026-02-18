@@ -75,6 +75,10 @@ rayon = "1.8"
 comfy-table = "7.2.2"
 crossterm = "0.29.0"
 
+# Pin openssl to 0.10.74 to fix build failure with native-tls 0.2.17
+# See: https://github.com/sfackler/rust-native-tls/issues/290
+openssl = { version = "=0.10.74", optional = true }
+
 [dev-dependencies]
 criterion = "0.8"
 proptest = "1.4"
