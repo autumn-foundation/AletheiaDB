@@ -1595,13 +1595,30 @@ mod sentry_tests {
         let output = time::to_iso8601(ts);
 
         // Expected nanoseconds: 123456000
-        // Debug format for Duration/SystemTime usually includes "tv_nsec: 123456000" or similar.
-        // Or if it prints float-like seconds: ".123456000".
-        assert!(
-            output.contains("123456000"),
-            "Output should contain nanoseconds: {}",
-            output
-        );
+        if cfg!(windows) {
+            // On Windows, SystemTime debug format is "SystemTime { intervals: <count> }"
+            // intervals are 100ns ticks since 1601-01-01.
+            // Base seconds (1601 to 1970) = 11644473600.
+            // Target seconds (1970 to 2021) = 1609459200.
+            // Total seconds = 13253932800.
+            // Total ticks from seconds = 13253932800 * 10_000_000 = 132539328000000000.
+            // Ticks from microseconds = 123456 * 10 = 1234560.
+            // Total ticks = 132539328001234560.
+            // We check for the fractional part contribution or the exact tick count.
+            // Since the output observed is "intervals: 132539328001234560", we check for that suffix.
+            assert!(
+                output.contains("1234560"),
+                "Output should contain the fractional ticks (1234560): {}",
+                output
+            );
+        } else {
+            // On Unix-like systems, Debug format usually contains "tv_nsec: 123456000".
+            assert!(
+                output.contains("123456000"),
+                "Output should contain nanoseconds (123456000): {}",
+                output
+            );
+        }
     }
 
     #[test]
