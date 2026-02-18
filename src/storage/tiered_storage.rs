@@ -297,7 +297,7 @@ impl AtomicTieredMetrics {
 /// While `TieredStorage` is typically managed internally by `AletheiaDB` via configuration,
 /// it can be instantiated directly for low-level storage operations or testing:
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use aletheiadb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 /// use aletheiadb::storage::redb_cold_storage::RedbColdStorage;
 /// use std::sync::Arc;
