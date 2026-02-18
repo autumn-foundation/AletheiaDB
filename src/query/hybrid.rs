@@ -30,7 +30,7 @@
 use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
-use crate::db::AletheiaDB;
+use crate::query::traits::GraphView;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -112,8 +112,8 @@ impl Ord for ScoredCandidate {
 /// let bob_embedding = db.get_node(bob_id)?.get_property("embedding")?.as_vector()?;
 /// let similar_friends = traverse_and_rank(&db, alice_id, "KNOWS", bob_embedding, 5)?;
 /// ```
-pub fn traverse_and_rank(
-    db: &AletheiaDB,
+pub fn traverse_and_rank<G: GraphView + ?Sized>(
+    db: &G,
     start: NodeId,
     edge_label: &str,
     target_embedding: &[f32],
@@ -245,8 +245,8 @@ pub fn traverse_and_rank(
 ///     println!("Document {:?} was similar at that time: {:.3}", node_id, similarity);
 /// }
 /// ```
-pub fn find_similar_as_of(
-    db: &AletheiaDB,
+pub fn find_similar_as_of<G: GraphView + ?Sized>(
+    db: &G,
     embedding: &[f32],
     k: usize,
     timestamp: crate::core::temporal::Timestamp,
@@ -263,6 +263,7 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::error::VectorError;
     use crate::core::property::PropertyMapBuilder;
+    use crate::db::AletheiaDB;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     /// Helper to create a test database with vector indexing enabled.

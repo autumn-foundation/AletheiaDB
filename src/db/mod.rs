@@ -21,6 +21,8 @@ use std::time::Instant;
 pub mod admin;
 /// Configuration and initialization.
 pub mod config;
+/// GraphView implementation.
+pub mod graph_view;
 /// Basic graph operations (CRUD).
 pub mod ops;
 /// Query builder and executor hooks.
