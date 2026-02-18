@@ -1,5 +1,5 @@
 use aletheiadb::core::property::{PropertyMap, PropertyValue, TAG_ARRAY};
-use aletheiadb::utils::error::StorageError;
+use aletheiadb::core::error::StorageError;
 
 #[test]
 fn test_array_preallocation_dos_protection() {
@@ -20,7 +20,7 @@ fn test_array_preallocation_dos_protection() {
 
     println!("Array Error received: {:?}", err);
 
-    if let aletheiadb::utils::error::Error::Storage(StorageError::CorruptedData(msg)) = err {
+    if let aletheiadb::core::error::Error::Storage(StorageError::CorruptedData(msg)) = err {
         // Verify we hit the NEW protection check (before allocation)
         assert!(msg.contains("Insufficient buffer size for Array elements"));
     } else {
@@ -46,7 +46,7 @@ fn test_propertymap_preallocation_dos_protection() {
 
     println!("Map Error received: {:?}", err);
 
-    if let aletheiadb::utils::error::Error::Storage(StorageError::CorruptedData(msg)) = err {
+    if let aletheiadb::core::error::Error::Storage(StorageError::CorruptedData(msg)) = err {
         // Verify we hit the NEW protection check
         // "Insufficient buffer size for PropertyMap entries: need 50000 bytes, have 0"
         assert!(msg.contains("Insufficient buffer size for PropertyMap entries"));

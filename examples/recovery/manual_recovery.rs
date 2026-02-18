@@ -86,7 +86,7 @@ use aletheiadb::storage::{
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
-use aletheiadb::utils::error::Result;
+use aletheiadb::core::error::Result;
 use std::path::Path;
 use tempfile::TempDir;
 

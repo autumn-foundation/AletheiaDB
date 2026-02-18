@@ -22,7 +22,7 @@ use aletheiadb::{
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
         },
     },
-    utils::error::Result,
+    core::error::Result,
 };
 use std::time::Instant;
 use tempfile::TempDir;

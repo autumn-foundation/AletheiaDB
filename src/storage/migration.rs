@@ -27,7 +27,7 @@
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
-//! # fn example() -> aletheiadb::utils::error::Result<()> {
+//! # fn example() -> aletheiadb::core::error::Result<()> {
 //! // 1. Configure the cold storage backend
 //! let cold_storage = Arc::new(RedbColdStorage::new("data/cold.redb", RedbConfig::default())?);
 //!

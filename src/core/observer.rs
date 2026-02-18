@@ -32,7 +32,7 @@
 //! struct MetricsCollector;
 //!
 //! impl StorageObserver for MetricsCollector {
-//!     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
+//!     fn on_event(&self, event: &StorageEvent) -> aletheiadb::core::error::Result<()> {
 //!         match event {
 //!             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
 //!                 println!("Anchor created: {} at {}", version_id, timestamp);
@@ -167,7 +167,7 @@
 //! // Post-Commit Observer: Collect metrics AFTER anchor storage
 //! struct VectorMetricsObserver;
 //! impl StorageObserver for VectorMetricsObserver {
-//!     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
+//!     fn on_event(&self, event: &StorageEvent) -> aletheiadb::core::error::Result<()> {
 //!         if let StorageEvent::NodeAnchorCreated { .. } = event {
 //!             // Log metrics, update counters, etc.
 //!         }
@@ -178,7 +178,7 @@
 //! storage.add_observer(Arc::new(VectorMetricsObserver));
 //!
 //! // Result: Anchor stored with snapshot_id + observers notified
-//! # Ok::<(), aletheiadb::utils::error::Error>(())
+//! # Ok::<(), aletheiadb::core::error::Error>(())
 //! ```
 //!
 //! ## Key Takeaways
@@ -314,7 +314,7 @@ pub trait StorageObserver: Send + Sync {
     /// struct VectorIndexObserver;
     ///
     /// impl StorageObserver for VectorIndexObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
+    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::core::error::Result<()> {
     ///         match event {
     ///             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
     ///                 // Create vector snapshot aligned with this anchor
@@ -343,7 +343,7 @@ pub trait StorageObserver: Send + Sync {
     /// struct AnchorOnlyObserver;
     ///
     /// impl StorageObserver for AnchorOnlyObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
+    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::core::error::Result<()> {
     ///         // Only called for anchor events due to filter
     ///         Ok(())
     ///     }

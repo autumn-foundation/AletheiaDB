@@ -71,7 +71,7 @@ use aletheiadb::storage::{
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
-use aletheiadb::utils::error::Result;
+use aletheiadb::core::error::Result;
 use tempfile::TempDir;
 
 fn main() -> Result<()> {

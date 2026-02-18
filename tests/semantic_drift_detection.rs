@@ -9,7 +9,7 @@ use aletheiadb::index::vector::temporal::{
     DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
-use aletheiadb::utils::Result;
+use aletheiadb::core::error::Result;
 
 /// Creates a normalized vector from raw values.
 fn normalize(v: &[f32]) -> Vec<f32> {

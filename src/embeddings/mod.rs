@@ -315,7 +315,7 @@ impl std::error::Error for EmbeddingError {}
 /// Convert `EmbeddingError` to AletheiaDB's main `Error` type.
 ///
 /// This allows embedding errors to be used with the `?` operator in
-/// functions that return `Result<T, aletheiadb::utils::Error>`.
+/// functions that return `Result<T, aletheiadb::core::error::Error>`.
 #[cfg(feature = "embeddings")]
 impl From<EmbeddingError> for crate::core::error::Error {
     fn from(e: EmbeddingError) -> Self {

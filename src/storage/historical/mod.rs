@@ -420,7 +420,7 @@ impl HistoricalStorage {
     /// struct VectorIndexObserver;
     ///
     /// impl StorageObserver for VectorIndexObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::utils::Result<()> {
+    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::core::error::Result<()> {
     ///         match event {
     ///             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
     ///                 println!("Anchor {} created at {}", version_id, timestamp);

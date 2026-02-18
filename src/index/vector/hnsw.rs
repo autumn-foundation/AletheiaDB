@@ -53,7 +53,7 @@
 //! use aletheiadb::index::VectorIndex;
 //! use aletheiadb::core::id::NodeId;
 //!
-//! # fn example() -> aletheiadb::utils::Result<()> {
+//! # fn example() -> aletheiadb::core::error::Result<()> {
 //! // Create an index for 384-dimensional embeddings using cosine similarity
 //! let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine)
 //!     .m(16)                    // 16 connections per node

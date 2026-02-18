@@ -3,7 +3,7 @@ use aletheiadb::core::temporal::TimeRange;
 use aletheiadb::index::VectorIndex;
 use aletheiadb::index::vector::temporal::*;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
-use aletheiadb::utils::Result;
+use aletheiadb::core::error::Result;
 
 fn create_test_index() -> Result<TemporalVectorIndex> {
     let config = TemporalVectorConfig {

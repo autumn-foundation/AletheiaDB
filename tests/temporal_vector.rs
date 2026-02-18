@@ -13,7 +13,7 @@ use aletheiadb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
-use aletheiadb::utils::Result;
+use aletheiadb::core::error::Result;
 use std::time::Duration;
 
 /// Helper to create a test temporal vector index with default config

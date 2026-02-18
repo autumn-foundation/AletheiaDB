@@ -45,7 +45,7 @@
 //! use aletheiadb::index::vector::{HnswConfig, DistanceMetric, VectorIndex};
 //! use aletheiadb::core::id::NodeId;
 //!
-//! # fn example() -> aletheiadb::utils::Result<()> {
+//! # fn example() -> aletheiadb::core::error::Result<()> {
 //! // Create a sharded index with 4 shards
 //! let config = ShardedVectorConfig::new(4)
 //!     .with_hnsw_config(HnswConfig::new(384, DistanceMetric::Cosine))
@@ -367,7 +367,7 @@ impl ShardedVectorIndex {
     /// ```rust,no_run
     /// # use aletheiadb::index::vector::sharded::ShardedVectorIndex;
     /// # use aletheiadb::index::vector::DistanceMetric;
-    /// # fn example() -> aletheiadb::utils::Result<()> {
+    /// # fn example() -> aletheiadb::core::error::Result<()> {
     /// let index = ShardedVectorIndex::with_defaults(128, DistanceMetric::Cosine, 4)?;
     /// // ... add vectors ...
     /// let vectors_to_move = index.estimate_rebalance_cost()?;

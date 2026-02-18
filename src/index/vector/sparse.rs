@@ -29,7 +29,7 @@
 //! use aletheiadb::core::id::NodeId;
 //! use aletheiadb::core::vector::SparseVec;
 //!
-//! # fn example() -> aletheiadb::utils::Result<()> {
+//! # fn example() -> aletheiadb::core::error::Result<()> {
 //! // Create an index for 10,000-dimensional sparse vectors
 //! let index = SparseVectorIndex::new(SparseIndexConfig {
 //!     dimensions: 10_000,
