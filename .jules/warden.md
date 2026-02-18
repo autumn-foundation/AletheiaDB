@@ -39,3 +39,7 @@
 **2026-02-16 - Unchecked Dimensions in HNSW Index**
 **Threat:** The `HnswIndexBuilder` allowed creating indexes with arbitrary dimensions (up to `usize::MAX`). The internal `create_metric_wrapper` function used `unsafe { slice::from_raw_parts(ptr, dims) }`. If a malicious user provided a dimension such that `dims * 4 > isize::MAX`, this would invoke Undefined Behavior (UB) in Rust's slice creation. Additionally, huge dimensions could cause OOM Denial of Service during index construction or loading.
 **Defense:** Enforced `MAX_VECTOR_DIMENSIONS` (100,000) in `HnswIndexBuilder::build`, `HnswConfig::deserialize_from`, `HnswIndex::load`, and `HnswIndex::open_mmap`. This limit (400KB per vector) is sufficient for all reasonable embeddings while preventing UB and massive allocations. Added `tests/warden_hnsw_builder.rs` to verify rejection of excessive dimensions.
+
+**2025-05-15 - [HNSW Dimension Mismatch Vulnerability]**
+**Threat:** Inconsistent state between `usearch` index (C++) and `HnswConfig` (Rust) allowed buffer over-read in custom metric wrapper. A malicious user could provide a small index file and a config claiming large dimensions, causing `unsafe` slice construction with out-of-bounds length.
+**Defense:** Added explicit check in `HnswIndex::load` to enforce `index.dimensions() == config.dimensions()`.
