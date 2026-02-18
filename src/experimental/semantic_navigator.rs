@@ -7,7 +7,7 @@
 use crate::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::vector::cosine_similarity;
-use crate::utils::{Error, Result};
+use crate::core::error::{Error, Result};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 

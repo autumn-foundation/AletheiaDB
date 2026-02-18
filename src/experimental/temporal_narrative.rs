@@ -4,7 +4,7 @@ use crate::core::history::{VersionDiff, VersionInfo};
 use crate::core::id::NodeId;
 use crate::core::interning::InternedString;
 use crate::core::temporal::time;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 /// A single event in the narrative history of an entity.
 #[derive(Debug, Clone)]

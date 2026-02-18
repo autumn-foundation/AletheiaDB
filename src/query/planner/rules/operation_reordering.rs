@@ -8,7 +8,7 @@
 
 use crate::query::ir::Predicate;
 use crate::query::plan::{BinaryOp, LogicalOp, LogicalPlan, ScanOp, UnaryOp};
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 use super::{OptimizationRule, Statistics};
 

@@ -1,10 +1,10 @@
-use crate::api::vector_builder::VectorIndexBuilder;
+use crate::db::vector_builder::VectorIndexBuilder;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
-use crate::utils::error::Result;
+use crate::core::error::Result;
 use std::sync::Arc;
 
 impl AletheiaDB {
@@ -87,7 +87,7 @@ impl AletheiaDB {
             } else if self.current.is_vector_index_enabled_for(property_name) {
                 // No config provided, but vector index exists - use its config
                 self.current.get_hnsw_config_for(property_name).ok_or_else(|| {
-                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                     format!(
                         "Vector index exists for '{}' but could not retrieve its configuration",
                         property_name
@@ -96,8 +96,8 @@ impl AletheiaDB {
             })?
             } else {
                 // No config provided and no vector index exists - error
-                return Err(crate::utils::error::Error::Vector(
-                    crate::utils::error::VectorError::IndexError(
+                return Err(crate::core::error::Error::Vector(
+                    crate::core::error::VectorError::IndexError(
                         "HNSW configuration is required when no vector index exists. \
                      Use TemporalVectorConfig::default_with_hnsw() to provide one, \
                      or enable the vector index first with enable_vector_index()."
@@ -126,7 +126,7 @@ impl AletheiaDB {
 
         // Get the temporal vector index from current storage
         let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                 "Temporal vector index not found after enabling".to_string(),
             ))
         })?;

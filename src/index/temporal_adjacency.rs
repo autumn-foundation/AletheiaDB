@@ -21,7 +21,7 @@
 use dashmap::DashMap;
 
 use crate::core::{EdgeId, InternedString, NodeId, Timestamp};
-use crate::utils::error::StorageError;
+use crate::core::error::StorageError;
 
 /// Configuration for temporal adjacency index.
 #[derive(Debug, Clone)]

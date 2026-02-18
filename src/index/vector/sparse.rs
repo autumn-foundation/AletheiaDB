@@ -63,7 +63,7 @@
 use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::SparseVec;
-use crate::utils::{Error, Result, error::VectorError};
+use crate::core::error::{Error, Result, VectorError};
 use bitcode::{Decode, Encode};
 use crc32fast::Hasher;
 use dashmap::DashMap;

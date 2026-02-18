@@ -5,7 +5,7 @@ use super::entry::WalEntry;
 use super::entry::{LSN, WalOperation};
 use crate::core::interning::InternedString;
 use crate::core::temporal::Timestamp;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 /// Helper to serialize an InternedString into the buffer (4-byte ID)
 #[inline(always)]

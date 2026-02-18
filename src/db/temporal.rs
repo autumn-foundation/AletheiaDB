@@ -3,7 +3,7 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::temporal::{Timestamp, time};
 use crate::db::AletheiaDB;
 use crate::query::{EntityHistory, VersionDiff};
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 impl AletheiaDB {
     /// Get outgoing edges from a node at a specific point in time.

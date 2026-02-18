@@ -14,7 +14,7 @@ use crate::AletheiaDB;
 use crate::core::history::EntityHistory;
 use crate::core::id::NodeId;
 use crate::core::temporal::time;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 /// A normalized representation of a node's temporal activity.
 #[derive(Debug, Clone)]

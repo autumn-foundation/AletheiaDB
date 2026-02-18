@@ -36,7 +36,7 @@
 use crate::core::id::VersionId;
 use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
-use crate::utils::error::{Result, StorageError};
+use crate::core::error::{Result, StorageError};
 use redb::{ReadableDatabase, ReadableTable};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -207,45 +207,45 @@ impl AtomicColdStorageStats {
 // ============================================================================
 
 #[inline]
-fn map_io_error(context: &str) -> impl Fn(std::io::Error) -> crate::utils::error::Error + '_ {
+fn map_io_error(context: &str) -> impl Fn(std::io::Error) -> crate::core::error::Error + '_ {
     move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
 }
 
 #[inline]
-fn map_db_error(context: &str) -> impl Fn(redb::DatabaseError) -> crate::utils::error::Error + '_ {
+fn map_db_error(context: &str) -> impl Fn(redb::DatabaseError) -> crate::core::error::Error + '_ {
     move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
 }
 
 #[inline]
-fn map_table_error(context: &str) -> impl Fn(redb::TableError) -> crate::utils::error::Error + '_ {
+fn map_table_error(context: &str) -> impl Fn(redb::TableError) -> crate::core::error::Error + '_ {
     move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
 }
 
 #[inline]
 fn map_commit_error(
     context: &str,
-) -> impl Fn(redb::CommitError) -> crate::utils::error::Error + '_ {
+) -> impl Fn(redb::CommitError) -> crate::core::error::Error + '_ {
     move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
 }
 
 #[inline]
 fn map_transaction_error(
     context: &str,
-) -> impl Fn(redb::TransactionError) -> crate::utils::error::Error + '_ {
+) -> impl Fn(redb::TransactionError) -> crate::core::error::Error + '_ {
     move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
 }
 
 #[inline]
 fn map_storage_error(
     context: &str,
-) -> impl Fn(redb::StorageError) -> crate::utils::error::Error + '_ {
+) -> impl Fn(redb::StorageError) -> crate::core::error::Error + '_ {
     move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
 }
 
 #[inline]
 fn map_compaction_error(
     context: &str,
-) -> impl Fn(redb::CompactionError) -> crate::utils::error::Error + '_ {
+) -> impl Fn(redb::CompactionError) -> crate::core::error::Error + '_ {
     move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
 }
 
@@ -478,7 +478,7 @@ impl RedbColdStorage {
         let lsn_bytes = final_lsn.0.to_le_bytes();
         table
             .insert(FLUSHED_LSN_KEY, lsn_bytes.as_slice())
-            .map_err(|e| -> crate::utils::error::Error {
+            .map_err(|e| -> crate::core::error::Error {
                 StorageError::io_error(format!("Failed to write flushed_lsn: {}", e)).into()
             })?;
         Ok(())
@@ -504,7 +504,7 @@ impl RedbColdStorage {
 
         {
             let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
-                |e| -> crate::utils::error::Error {
+                |e| -> crate::core::error::Error {
                     StorageError::io_error(format!("Failed to open node_versions table: {}", e))
                         .into()
                 },
@@ -544,7 +544,7 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin read transaction"))?;
 
         let table = read_txn.open_table(NODE_VERSIONS_TABLE).map_err(
-            |e| -> crate::utils::error::Error {
+            |e| -> crate::core::error::Error {
                 StorageError::io_error(format!("Failed to open node_versions table: {}", e)).into()
             },
         )?;
@@ -592,7 +592,7 @@ impl RedbColdStorage {
 
         {
             let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
-                |e| -> crate::utils::error::Error {
+                |e| -> crate::core::error::Error {
                     StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
                         .into()
                 },
@@ -632,7 +632,7 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin read transaction"))?;
 
         let table = read_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
-            |e| -> crate::utils::error::Error {
+            |e| -> crate::core::error::Error {
                 StorageError::io_error(format!("Failed to open edge_versions table: {}", e)).into()
             },
         )?;
@@ -672,7 +672,7 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin read transaction"))?;
 
         let table = read_txn.open_table(NODE_VERSIONS_TABLE).map_err(
-            |e| -> crate::utils::error::Error {
+            |e| -> crate::core::error::Error {
                 StorageError::io_error(format!("Failed to open node_versions table: {}", e)).into()
             },
         )?;
@@ -694,7 +694,7 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin read transaction"))?;
 
         let table = read_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
-            |e| -> crate::utils::error::Error {
+            |e| -> crate::core::error::Error {
                 StorageError::io_error(format!("Failed to open edge_versions table: {}", e)).into()
             },
         )?;
@@ -717,7 +717,7 @@ impl RedbColdStorage {
 
         let deleted = {
             let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
-                |e| -> crate::utils::error::Error {
+                |e| -> crate::core::error::Error {
                     StorageError::io_error(format!("Failed to open node_versions table: {}", e))
                         .into()
                 },
@@ -748,7 +748,7 @@ impl RedbColdStorage {
 
         let deleted = {
             let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
-                |e| -> crate::utils::error::Error {
+                |e| -> crate::core::error::Error {
                     StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
                         .into()
                 },
@@ -785,7 +785,7 @@ impl RedbColdStorage {
 
         {
             let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
-                |e| -> crate::utils::error::Error {
+                |e| -> crate::core::error::Error {
                     StorageError::io_error(format!("Failed to open node_versions table: {}", e))
                         .into()
                 },
@@ -835,7 +835,7 @@ impl RedbColdStorage {
 
         {
             let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
-                |e| -> crate::utils::error::Error {
+                |e| -> crate::core::error::Error {
                     StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
                         .into()
                 },

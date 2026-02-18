@@ -66,7 +66,7 @@ use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
 use crate::storage::wal::flush_coordinator::FlushCoordinator;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 use quick_cache::sync::Cache;
 use std::collections::HashMap;
 use std::panic;

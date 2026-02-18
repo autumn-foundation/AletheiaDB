@@ -63,7 +63,7 @@ use std::sync::Arc;
 use tracing;
 
 use crate::storage::CurrentStorage;
-use crate::utils::error::{Error, QueryError, Result};
+use crate::core::error::{Error, QueryError, Result};
 
 use super::builder::Query;
 use super::ir::QueryOp;
@@ -1597,7 +1597,7 @@ mod tests {
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        assert!(matches!(err, crate::utils::error::Error::Query(_)));
+        assert!(matches!(err, crate::core::error::Error::Query(_)));
     }
 
     // ==================== Multi-Property Temporal Vector Search Tests (Issue #411) ====================

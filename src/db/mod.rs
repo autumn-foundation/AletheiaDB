@@ -34,6 +34,10 @@ pub mod tests;
 pub mod transaction;
 /// Vector index operations.
 pub mod vector;
+/// Vector index builder pattern.
+pub mod vector_builder;
+
+pub use vector_builder::VectorIndexBuilder;
 
 /// Main AletheiaDB database.
 ///

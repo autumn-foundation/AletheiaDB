@@ -1,7 +1,7 @@
 //! Core types for the sharding system.
 
 use crate::core::id::{EdgeId, NodeId};
-use crate::utils::error::StorageError;
+use crate::core::error::StorageError;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;

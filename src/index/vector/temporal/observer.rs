@@ -5,7 +5,7 @@
 
 use super::TemporalVectorIndex;
 use crate::core::observer::{StorageEvent, StorageObserver};
-use crate::utils::Result;
+use crate::core::error::Result;
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]

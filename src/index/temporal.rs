@@ -37,7 +37,7 @@
 
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
-use crate::utils::error::{Result, StorageError};
+use crate::core::error::{Result, StorageError};
 use dashmap::DashMap;
 use smallvec::SmallVec;
 

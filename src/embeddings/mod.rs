@@ -317,9 +317,9 @@ impl std::error::Error for EmbeddingError {}
 /// This allows embedding errors to be used with the `?` operator in
 /// functions that return `Result<T, aletheiadb::utils::Error>`.
 #[cfg(feature = "embeddings")]
-impl From<EmbeddingError> for crate::utils::Error {
+impl From<EmbeddingError> for crate::core::error::Error {
     fn from(e: EmbeddingError) -> Self {
-        crate::utils::Error::Other(format!("Embedding error: {}", e))
+        crate::core::error::Error::Other(format!("Embedding error: {}", e))
     }
 }
 
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn test_embedding_error_conversion_to_main_error() {
         let emb_err = EmbeddingError::ConfigError("Test error".to_string());
-        let main_err: crate::utils::Error = emb_err.into();
+        let main_err: crate::core::error::Error = emb_err.into();
 
         let display = format!("{}", main_err);
         assert!(display.contains("Embedding error"));

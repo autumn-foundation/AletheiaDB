@@ -35,7 +35,7 @@
 
 use crate::AletheiaDB;
 use crate::core::id::NodeId;
-use crate::utils::{Error, Result, VectorError};
+use crate::core::error::{Error, Result, VectorError};
 
 /// A tool for performing vector arithmetic on graph nodes.
 pub struct ConceptAlgebra<'a> {

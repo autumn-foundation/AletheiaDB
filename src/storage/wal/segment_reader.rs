@@ -22,7 +22,7 @@ use std::path::Path;
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::property::PropertyMap;
-use crate::utils::error::{Error, Result, StorageError};
+use crate::core::error::{Error, Result, StorageError};
 
 use super::{LSN, WalEntry, WalOperation};
 

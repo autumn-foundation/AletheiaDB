@@ -7,7 +7,7 @@ use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
-use crate::utils::Result;
+use crate::core::error::Result;
 use std::collections::HashMap;
 
 /// A report of changes between two timestamps.

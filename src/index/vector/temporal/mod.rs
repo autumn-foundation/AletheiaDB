@@ -84,7 +84,7 @@ use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::{cosine_similarity, euclidean_distance};
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
-use crate::utils::{Error, Result, TemporalError, VectorError};
+use crate::core::error::{Error, Result, TemporalError, VectorError};
 
 // Submodules
 /// Configuration types for temporal vector indexing.

@@ -4,7 +4,7 @@
 //! enabling early termination and reducing work.
 
 use crate::query::plan::{LogicalOp, LogicalPlan, UnaryOp};
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 use super::{OptimizationRule, Statistics};
 

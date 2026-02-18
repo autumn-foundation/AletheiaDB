@@ -88,7 +88,7 @@
 
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
-use crate::utils::Result;
+use crate::core::error::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -134,7 +134,7 @@ impl Quantization {
             0 => Ok(Quantization::F32),
             1 => Ok(Quantization::F16),
             2 => Ok(Quantization::I8),
-            _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
+            _ => Err(crate::core::error::StorageError::CorruptedData(format!(
                 "Invalid quantization encoding: {}",
                 value
             ))
@@ -280,7 +280,7 @@ impl DistanceMetric {
             3 => Ok(DistanceMetric::Haversine),
             4 => Ok(DistanceMetric::Hamming),
             5 => Ok(DistanceMetric::Tanimoto),
-            _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
+            _ => Err(crate::core::error::StorageError::CorruptedData(format!(
                 "Invalid distance metric encoding: {}",
                 value
             ))
@@ -619,8 +619,8 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// Returns `Err(UnsupportedOperation)` if the implementation doesn't support persistence.
     fn save(&self, _path: &std::path::Path) -> Result<()> {
-        Err(crate::utils::Error::Vector(
-            crate::utils::error::VectorError::IndexError(
+        Err(crate::core::error::Error::Vector(
+            crate::core::error::VectorError::IndexError(
                 "save not supported by this index type".to_string(),
             ),
         ))

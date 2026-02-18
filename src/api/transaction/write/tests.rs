@@ -71,7 +71,7 @@ mod tombstone_tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            crate::utils::error::Error::Storage(StorageError::InconsistentState { reason }) => {
+            crate::core::error::Error::Storage(StorageError::InconsistentState { reason }) => {
                 assert!(reason.contains("Tombstone ID exhaustion"));
             }
             err => panic!("Expected InconsistentState error, got: {:?}", err),
@@ -2508,7 +2508,7 @@ mod clock_skew_tests {
 
         // Verify it is a ClockSkew error
         match result.unwrap_err() {
-            crate::utils::error::Error::Transaction(TransactionError::ClockSkew {
+            crate::core::error::Error::Transaction(TransactionError::ClockSkew {
                 drift_us,
                 ..
             }) => {
@@ -2539,7 +2539,7 @@ mod clock_skew_tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            crate::utils::error::Error::Transaction(TransactionError::ClockSkew {
+            crate::core::error::Error::Transaction(TransactionError::ClockSkew {
                 drift_us,
                 ..
             }) => {
@@ -2575,7 +2575,7 @@ mod clock_skew_tests {
         let result = tx.commit();
         assert!(matches!(
             result,
-            Err(crate::utils::error::Error::Transaction(
+            Err(crate::core::error::Error::Transaction(
                 TransactionError::ClockSkew { .. }
             ))
         ));
@@ -3009,7 +3009,7 @@ mod bitemporal_validation_tests {
     #[test]
     fn test_create_node_rejects_far_future_valid_time() {
         use crate::core::hlc::HybridTimestamp;
-        use crate::utils::error::TemporalError;
+        use crate::core::error::TemporalError;
 
         let harness = TestHarness::new();
 
@@ -3026,7 +3026,7 @@ mod bitemporal_validation_tests {
         // Verify it's the right error type
         let err = result.unwrap_err();
         match err {
-            crate::utils::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
                 ..
             }) => {
                 // Expected error type
@@ -3038,7 +3038,7 @@ mod bitemporal_validation_tests {
     #[test]
     fn test_update_node_rejects_valid_time_before_creation() {
         use crate::core::hlc::HybridTimestamp;
-        use crate::utils::error::TemporalError;
+        use crate::core::error::TemporalError;
 
         let harness = TestHarness::new();
 
@@ -3077,7 +3077,7 @@ mod bitemporal_validation_tests {
         // Verify it's the right error type
         let err = result.unwrap_err();
         match err {
-            crate::utils::error::Error::Temporal(
+            crate::core::error::Error::Temporal(
                 TemporalError::ValidTimeBeforeEntityCreation { .. },
             ) => {
                 // Expected error type
