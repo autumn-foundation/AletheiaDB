@@ -326,6 +326,126 @@ sequenceDiagram
     Wormhole-->>User: List<Wormhole>
 ```
 
+**Sherlock (Temporal Pattern Matching)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Sherlock {
+            +investigate(node_id, mystery)
+        }
+        class Mystery {
+            +clues: Vec<Clue>
+            +time_window: Duration
+        }
+        class Clue {
+            +key: String
+            +value: Option<PropertyValue>
+        }
+        class Deduction {
+            +node_id: NodeId
+            +event_times: Vec<Timestamp>
+        }
+    }
+    class AletheiaDB
+
+    Sherlock --> AletheiaDB : Uses (History)
+    Sherlock --> Mystery : Consumes
+    Sherlock ..> Deduction : Produces
+    Mystery --> Clue : Contains
+```
+
+**Sequence: Sherlock Investigation**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Sherlock
+    participant DB as AletheiaDB
+
+    User->>Sherlock: investigate(node, mystery)
+    Sherlock->>DB: get_node_history(node)
+    DB-->>Sherlock: versions (unsorted)
+    Sherlock->>Sherlock: sort_by_valid_time(versions)
+
+    loop Find Start
+        Sherlock->>Sherlock: match(clue[0])
+        opt Match Found
+            loop Next Clues
+                Sherlock->>Sherlock: scan_forward()
+                Sherlock->>Sherlock: check_window()
+            end
+        end
+    end
+
+    Sherlock-->>User: List<Deduction>
+```
+
+**Dreamer (Semantic Trajectory)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Dreamer {
+            +predict_future(node, prop, window, horizon)
+        }
+    }
+    class AletheiaDB
+
+    Dreamer --> AletheiaDB : Uses (History + Vector Index)
+```
+
+**Sequence: Dreamer Prediction**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Dreamer
+    participant DB as AletheiaDB
+
+    User->>Dreamer: predict_future(node, horizon)
+    Dreamer->>DB: get_node_history(node)
+    Dreamer->>Dreamer: extract_vector_snapshots()
+    Dreamer->>Dreamer: velocity = (end - start) / time
+    Dreamer->>Dreamer: future = end + (velocity * horizon)
+    Dreamer->>DB: search_vectors(future)
+    DB-->>Dreamer: neighbors
+    Dreamer-->>User: Result
+```
+
+**Chronos (Temporal Pathfinding)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Chronos {
+            +find_path_at_time(start, end, valid_time)
+            +node_volatility(node, window)
+            +path_stability(path, window)
+        }
+    }
+    class AletheiaDB
+
+    Chronos --> AletheiaDB : Uses
+```
+
+**Sequence: Snapshot Pathfinding**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Chronos
+    participant DB as AletheiaDB
+
+    User->>Chronos: find_path_at_time(A, B, T)
+    loop BFS
+        Chronos->>DB: get_outgoing_edges_at_time(curr, T)
+        DB-->>Chronos: edges
+        Chronos->>Chronos: traverse
+    end
+    Chronos-->>User: Path
+```
+
 ### Temporal Query Processing
 
 **Query Types:**
