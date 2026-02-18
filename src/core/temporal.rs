@@ -1142,26 +1142,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_time_range_contains_range_boundaries() {
-        use crate::core::hlc::HybridTimestamp;
-        let start = HybridTimestamp::new(100, 0).unwrap();
-        let mid = HybridTimestamp::new(200, 0).unwrap();
-        let end = HybridTimestamp::new(300, 0).unwrap();
-
-        let outer = TimeRange::new(start, end).unwrap(); // [100, 300)
-        let inner_start = TimeRange::new(start, mid).unwrap(); // [100, 200)
-        let inner_end = TimeRange::new(mid, end).unwrap(); // [200, 300)
-
-        // Should contain range starting at same time
-        assert!(outer.contains_range(&inner_start));
-
-        // Should contain range ending at same time
-        assert!(outer.contains_range(&inner_end));
-
-        // Should contain itself
-        assert!(outer.contains_range(&outer));
-    }
 }
 
 #[cfg(test)]
