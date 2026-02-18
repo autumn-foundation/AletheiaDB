@@ -1608,7 +1608,10 @@ mod sentry_tests {
 
         // Case 1: Start is TIMESTAMP_MAX (point-at-infinity)
         let result = TimeRange::new(TIMESTAMP_MAX, TIMESTAMP_MAX);
-        assert!(result.is_ok(), "TimeRange::new should allow TIMESTAMP_MAX as start");
+        assert!(
+            result.is_ok(),
+            "TimeRange::new should allow TIMESTAMP_MAX as start"
+        );
     }
 
     #[test]
@@ -1641,7 +1644,13 @@ mod sentry_tests {
         // Attempt to close at invalid time
         let result = range.close_at(invalid_ts);
 
-        assert!(result.is_err(), "TimeRange::close_at should reject invalid timestamps > MAX_VALID_TIMESTAMP");
-        assert!(matches!(result, Err(TemporalError::InvalidTimestamp { .. })));
+        assert!(
+            result.is_err(),
+            "TimeRange::close_at should reject invalid timestamps > MAX_VALID_TIMESTAMP"
+        );
+        assert!(matches!(
+            result,
+            Err(TemporalError::InvalidTimestamp { .. })
+        ));
     }
 }
