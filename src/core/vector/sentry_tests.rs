@@ -497,15 +497,24 @@ fn test_normalize_consistency_small_vector() {
 
     // normalize() returns zero vector
     let normalized = normalize(&small_vec);
-    assert_eq!(normalized[0], 0.0, "normalize() should zero out small vectors");
+    assert_eq!(
+        normalized[0], 0.0,
+        "normalize() should zero out small vectors"
+    );
 
     // normalize_in_place()
     let mut in_place_vec = small_vec.clone();
     normalize_in_place(&mut in_place_vec);
 
     // This assertion verifies the fix
-    assert_eq!(in_place_vec[0], 0.0,
-        "normalize_in_place() should zero out small vectors to match normalize(), but got {:?}", in_place_vec);
+    assert_eq!(
+        in_place_vec[0], 0.0,
+        "normalize_in_place() should zero out small vectors to match normalize(), but got {:?}",
+        in_place_vec
+    );
 
-    assert_eq!(normalized, in_place_vec, "normalize and normalize_in_place should be consistent");
+    assert_eq!(
+        normalized, in_place_vec,
+        "normalize and normalize_in_place should be consistent"
+    );
 }
