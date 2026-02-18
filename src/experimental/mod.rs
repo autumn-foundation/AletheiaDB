@@ -32,6 +32,7 @@
 //! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
 //! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
 //! | [`chronos`] | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
+//! | [`chameleon`] | **Chameleon** | Context-Adaptive Vector Search. "Does 'Bank' mean river or money?" |
 //! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
 //! | [`echo`] | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
 //! | [`kaleidoscope`] | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
@@ -79,6 +80,9 @@ pub mod ariadne;
 #[cfg(feature = "nova")]
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
+#[cfg(feature = "nova")]
+/// Chameleon: Context-Adaptive Vector Search.
+pub mod chameleon;
 #[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
