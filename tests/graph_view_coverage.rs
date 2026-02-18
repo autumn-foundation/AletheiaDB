@@ -1,6 +1,6 @@
-use aletheiadb::{AletheiaDB, PropertyMapBuilder};
-use aletheiadb::query::traits::GraphView;
 use aletheiadb::core::temporal::time;
+use aletheiadb::query::traits::GraphView;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 #[test]
 fn test_graph_view_trait_coverage() {
@@ -8,10 +8,16 @@ fn test_graph_view_trait_coverage() {
 
     // Create nodes
     let node1 = db
-        .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
         .unwrap();
     let node2 = db
-        .create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
         .unwrap();
 
     // Create edge
