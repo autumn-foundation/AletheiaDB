@@ -59,6 +59,10 @@ async-trait = { version = "0.1", optional = true }
 reqwest = { version = "0.11", features = ["json", "blocking"], optional = true }
 serde_json = { version = "1.0", optional = false }
 
+# Pin native-tls to avoid 0.2.17 compilation error with openssl (Tlsv13)
+# See: https://github.com/sfackler/rust-native-tls/issues/285
+native-tls = "=0.2.16"
+
 # ONNX runtime for local model inference
 ort = { version = "2.0.0-rc.0", optional = true }
 tokenizers = { version = "0.15", optional = true }
