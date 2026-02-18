@@ -624,6 +624,53 @@ mod tests {
     }
 
     #[test]
+    fn test_time_range_contains_range_boundaries() {
+        use crate::core::hlc::HybridTimestamp;
+        // Outer: [100, 300)
+        let outer = TimeRange::new(
+            HybridTimestamp::new(100, 0).unwrap(),
+            HybridTimestamp::new(300, 0).unwrap(),
+        )
+        .unwrap();
+
+        // Exact match [100, 300) - Should be contained
+        let exact = outer;
+        assert!(outer.contains_range(&exact));
+
+        // Shared start [100, 200) - Should be contained
+        let shared_start = TimeRange::new(
+            HybridTimestamp::new(100, 0).unwrap(),
+            HybridTimestamp::new(200, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(outer.contains_range(&shared_start));
+
+        // Shared end [200, 300) - Should be contained
+        let shared_end = TimeRange::new(
+            HybridTimestamp::new(200, 0).unwrap(),
+            HybridTimestamp::new(300, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(outer.contains_range(&shared_end));
+
+        // Starts before [99, 200) - Should NOT be contained
+        let starts_before = TimeRange::new(
+            HybridTimestamp::new(99, 0).unwrap(),
+            HybridTimestamp::new(200, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(!outer.contains_range(&starts_before));
+
+        // Ends after [200, 301) - Should NOT be contained
+        let ends_after = TimeRange::new(
+            HybridTimestamp::new(200, 0).unwrap(),
+            HybridTimestamp::new(301, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(!outer.contains_range(&ends_after));
+    }
+
+    #[test]
     fn test_time_range_close_at() {
         let open = TimeRange::from(100.into());
         let closed = open.close_at(200.into()).unwrap();
