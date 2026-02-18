@@ -1510,7 +1510,10 @@ mod sentry_tests {
         assert!(interval.is_currently_recorded());
 
         // Assert that is_current() is false. If implementation used OR, this would be true.
-        assert!(!interval.is_current(), "is_current() should be false if one dimension is closed");
+        assert!(
+            !interval.is_current(),
+            "is_current() should be false if one dimension is closed"
+        );
     }
 
     #[test]
@@ -1523,9 +1526,26 @@ mod sentry_tests {
         let ts = time::from_secs(secs);
         let output = time::to_iso8601(ts);
 
-        // The output should contain the seconds count in some form (Debug output of SystemTime usually does)
-        assert!(output.contains(&secs.to_string()),
-            "to_iso8601 output should contain the seconds timestamp. Got: {}", output);
+        if cfg!(windows) {
+            // On Windows, SystemTime debug format is "SystemTime { intervals: <count> }"
+            // intervals are 100ns ticks since 1601-01-01
+            // 1609459200 seconds (Unix epoch to 2021) + 11644473600 seconds (1601 to 1970)
+            // = 13253932800 seconds total
+            // * 10,000,000 (ticks per second) = 132539328000000000
+            let expected = "132539328000000000";
+            assert!(
+                output.contains(expected),
+                "to_iso8601 output should contain expected intervals on Windows. Got: {}",
+                output
+            );
+        } else {
+            // On Unix-like systems, Debug format usually contains "tv_sec: <seconds>"
+            assert!(
+                output.contains(&secs.to_string()),
+                "to_iso8601 output should contain the seconds timestamp. Got: {}",
+                output
+            );
+        }
     }
 
     #[test]
@@ -1561,7 +1581,10 @@ mod sentry_tests {
 
         // r2 overlaps r1? 200 < 200 is False.
         // If logic was <=, it would be True.
-        assert!(!r2.overlaps(&r1), "Touching ranges should not overlap (checking symmetry)");
+        assert!(
+            !r2.overlaps(&r1),
+            "Touching ranges should not overlap (checking symmetry)"
+        );
     }
 
     #[test]
@@ -1575,6 +1598,9 @@ mod sentry_tests {
         // outer.end (300) == inner.end (300)
         // Logic requires inner.end <= outer.end.
         // If logic was <, this would fail.
-        assert!(outer.contains_range(&inner), "Should contain range ending at exact same time");
+        assert!(
+            outer.contains_range(&inner),
+            "Should contain range ending at exact same time"
+        );
     }
 }
