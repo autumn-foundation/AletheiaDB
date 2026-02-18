@@ -70,6 +70,9 @@ redb = "3.1"
 # SQL parser for SQL:2011 temporal syntax support (optional)
 sqlparser = { version = "0.40", optional = true }
 
+# Pin native-tls to 0.2.16 to avoid regression in 0.2.17 (broken build)
+native-tls = { version = "=0.2.16", optional = true }
+
 # Parallel iteration for sharded vector index
 rayon = "1.8"
 comfy-table = "7.2.2"
@@ -89,6 +92,8 @@ lazy_static = "1.4"
 rustyline = "17.0"
 # Loom for concurrency testing
 loom = { version = "0.7", features = ["checkpoint"] }
+# Pin native-tls in dev-dependencies as well
+native-tls = "=0.2.16"
 
 [features]
 # Nova experimental features
@@ -116,11 +121,11 @@ config-toml = ["dep:serde", "dep:toml"]
 embeddings = ["dep:tokio", "dep:async-trait"]
 
 # Individual provider features (each implies 'embeddings')
-embedding-openai = ["embeddings", "dep:reqwest"]
-embedding-huggingface = ["embeddings", "dep:reqwest"]
+embedding-openai = ["embeddings", "dep:reqwest", "dep:native-tls"]
+embedding-huggingface = ["embeddings", "dep:reqwest", "dep:native-tls"]
 # IMPORTANT: ONNX provider is currently a PLACEHOLDER - returns errors, not functional
 embedding-onnx = ["embeddings", "dep:ort", "dep:tokenizers", "dep:num_cpus"]
-embedding-ollama = ["embeddings", "dep:reqwest"]
+embedding-ollama = ["embeddings", "dep:reqwest", "dep:native-tls"]
 
 # Enable all embedding providers
 embedding-all = [
@@ -134,7 +139,7 @@ embedding-all = [
 mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:base64"]
 
 # Sharding RPC client support (uses blocking reqwest)
-sharding-rpc = ["dep:reqwest", "dep:serde"]
+sharding-rpc = ["dep:reqwest", "dep:serde", "dep:native-tls"]
 
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
@@ -150,7 +155,7 @@ mvcc-snapshots-tdd = []
 honeycomb-client = ["dep:serde"]
 
 # Honeycomb client with HTTP transmission support
-honeycomb = ["honeycomb-client", "dep:reqwest"]
+honeycomb = ["honeycomb-client", "dep:reqwest", "dep:native-tls"]
 
 [profile.dev]
 # Fast compilation for development
