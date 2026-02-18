@@ -759,3 +759,21 @@ impl AletheiaDB {
             .find_drift_in(property_name, threshold, time_range, metric)
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn test_enable_temporal_vector_index_missing_config() {
+        let db = AletheiaDB::new().unwrap();
+        // Don't enable vector index first
+        // Provide config without HNSW config
+        let config = TemporalVectorConfig::default();
+
+        let result = db.enable_temporal_vector_index("embedding", config);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("HNSW configuration is required"));
+    }
+}

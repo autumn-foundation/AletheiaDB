@@ -2166,3 +2166,25 @@ impl Default for CurrentStorage {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn test_vector_search_index_not_found() {
+        let storage = CurrentStorage::new();
+        // Don't enable vector index
+
+        let node_id = NodeId::new(1).unwrap();
+        // Try search
+        let result = storage.find_similar(node_id, 5);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("Vector index is not enabled"));
+
+        // Try search with specific property
+        let result = storage.find_similar_in("embedding", node_id, 5);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("Vector index not found"));
+    }
+}
