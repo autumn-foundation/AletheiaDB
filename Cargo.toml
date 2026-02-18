@@ -67,6 +67,9 @@ num_cpus = { version = "1.16", optional = true }
 # Redb for tiered cold storage (pure Rust, ADR-0025)
 redb = "3.1"
 
+# Force native-tls to a newer version to fix compilation on CI (Protocol::Tlsv13 error)
+native-tls = "0.2.18"
+
 # SQL parser for SQL:2011 temporal syntax support (optional)
 sqlparser = { version = "0.40", optional = true }
 
