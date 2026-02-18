@@ -643,7 +643,6 @@ mod tests {
         assert!(!outer.contains_range(&overlapping));
     }
 
-
     #[test]
     fn test_time_range_close_at() {
         let open = TimeRange::from(100.into());
