@@ -546,6 +546,37 @@ mod sentry_tests {
         assert_eq!(entity_edge.as_node(), None);
         assert_eq!(entity_edge.as_edge(), Some(edge_id));
     }
+
+    #[test]
+    fn test_tx_id_as_u64() {
+        let id = TxId::new(12345);
+        assert_eq!(id.as_u64(), 12345);
+    }
+
+    #[test]
+    fn test_tx_id_new() {
+        let id = TxId::new(12345);
+        // Verify creation works as expected
+        assert_eq!(id.as_u64(), 12345);
+    }
+
+    #[test]
+    fn test_tx_id_ordering_and_equality() {
+        let id1 = TxId::new(10);
+        let id2 = TxId::new(20);
+        let id3 = TxId::new(10);
+
+        assert!(id1 < id2);
+        assert!(id2 > id1);
+        assert_eq!(id1, id3);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_tx_id_debug() {
+        let id = TxId::new(123);
+        assert_eq!(format!("{:?}", id), "TxId(123)");
+    }
 }
 
 #[cfg(test)]
