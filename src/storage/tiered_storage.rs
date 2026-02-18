@@ -45,7 +45,7 @@
 //! ```
 
 use crate::core::id::VersionId;
-use crate::core::version::{EdgeVersion, NodeVersion};
+use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
 use crate::storage::redb_cold_storage::{ColdStorageStats, RedbColdStorage};
 use crate::utils::error::Result;
 use parking_lot::Mutex;
@@ -326,6 +326,52 @@ impl TieredStorage {
         self.metrics.hot_hits.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Generic helper to get a version through the cache.
+    fn get_version_through_cache<V, F>(
+        &self,
+        id: VersionId,
+        cache: &Cache<VersionId, Arc<V>>,
+        fetch_fn: F,
+    ) -> Result<Option<Arc<V>>>
+    where
+        V: EntityVersion + 'static,
+        F: Fn(VersionId) -> Result<Option<V>> + Copy,
+    {
+        // Check warm cache first
+        if let Some(cached) = cache.get(&id) {
+            self.metrics.warm_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(Some(cached));
+        }
+
+        // Fetch from cold storage with latency tracking
+        let start = Instant::now();
+        let result = fetch_fn(id)?;
+        let elapsed = start.elapsed();
+
+        match result {
+            Some(version) => {
+                self.metrics.cold_hits.fetch_add(1, Ordering::Relaxed);
+                self.metrics.cold_latency.record(elapsed);
+
+                let version_arc = Arc::new(version);
+
+                // Populate warm cache
+                cache.insert(id, version_arc.clone());
+
+                // Prefetch prev_version if enabled
+                if self.config.enable_prefetch {
+                    self.prefetch_chain(&*version_arc, cache, fetch_fn);
+                }
+
+                Ok(Some(version_arc))
+            }
+            None => {
+                self.metrics.misses.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            }
+        }
+    }
+
     /// Try to get a node version from warm cache or cold storage.
     ///
     /// This method is called when the version is not found in hot storage.
@@ -339,39 +385,9 @@ impl TieredStorage {
     ///
     /// Returns `Some(version)` if found, `None` if not found anywhere.
     pub fn get_node_version_cold(&self, id: VersionId) -> Result<Option<Arc<NodeVersion>>> {
-        // Check warm cache first
-        if let Some(cached) = self.node_warm_cache.get(&id) {
-            self.metrics.warm_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(Some(cached));
-        }
-
-        // Fetch from cold storage with latency tracking
-        let start = Instant::now();
-        let result = self.cold.get_node_version(id)?;
-        let elapsed = start.elapsed();
-
-        match result {
-            Some(version) => {
-                self.metrics.cold_hits.fetch_add(1, Ordering::Relaxed);
-                self.metrics.cold_latency.record(elapsed);
-
-                let version_arc = Arc::new(version);
-
-                // Populate warm cache
-                self.node_warm_cache.insert(id, version_arc.clone());
-
-                // Prefetch prev_version if enabled
-                if self.config.enable_prefetch {
-                    self.prefetch_node_chain(&version_arc);
-                }
-
-                Ok(Some(version_arc))
-            }
-            None => {
-                self.metrics.misses.fetch_add(1, Ordering::Relaxed);
-                Ok(None)
-            }
-        }
+        self.get_version_through_cache(id, &self.node_warm_cache, |id| {
+            self.cold.get_node_version(id)
+        })
     }
 
     /// Try to get an edge version from warm cache or cold storage.
@@ -379,44 +395,18 @@ impl TieredStorage {
     /// This method is called when the version is not found in hot storage.
     /// It first checks the warm cache, then falls back to cold storage.
     pub fn get_edge_version_cold(&self, id: VersionId) -> Result<Option<Arc<EdgeVersion>>> {
-        // Check warm cache first
-        if let Some(cached) = self.edge_warm_cache.get(&id) {
-            self.metrics.warm_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(Some(cached));
-        }
-
-        // Fetch from cold storage with latency tracking
-        let start = Instant::now();
-        let result = self.cold.get_edge_version(id)?;
-        let elapsed = start.elapsed();
-
-        match result {
-            Some(version) => {
-                self.metrics.cold_hits.fetch_add(1, Ordering::Relaxed);
-                self.metrics.cold_latency.record(elapsed);
-
-                let version_arc = Arc::new(version);
-
-                // Populate warm cache
-                self.edge_warm_cache.insert(id, version_arc.clone());
-
-                // Prefetch prev_version if enabled
-                if self.config.enable_prefetch {
-                    self.prefetch_edge_chain(&version_arc);
-                }
-
-                Ok(Some(version_arc))
-            }
-            None => {
-                self.metrics.misses.fetch_add(1, Ordering::Relaxed);
-                Ok(None)
-            }
-        }
+        self.get_version_through_cache(id, &self.edge_warm_cache, |id| {
+            self.cold.get_edge_version(id)
+        })
     }
 
-    /// Prefetch node versions in a chain (up to prefetch_depth).
-    fn prefetch_node_chain(&self, start: &NodeVersion) {
-        let mut current_prev = start.prev_version;
+    /// Prefetch versions in a chain (up to prefetch_depth).
+    fn prefetch_chain<V, F>(&self, start: &V, cache: &Cache<VersionId, Arc<V>>, fetch_fn: F)
+    where
+        V: EntityVersion + 'static,
+        F: Fn(VersionId) -> Result<Option<V>>,
+    {
+        let mut current_prev = start.prev_version();
         let mut depth = 0;
 
         while let Some(prev_id) = current_prev {
@@ -425,44 +415,16 @@ impl TieredStorage {
             }
 
             // Skip if already in warm cache
-            if self.node_warm_cache.get(&prev_id).is_some() {
+            if cache.get(&prev_id).is_some() {
                 break;
             }
 
             // Fetch and cache
-            match self.cold.get_node_version(prev_id) {
+            match fetch_fn(prev_id) {
                 Ok(Some(version)) => {
                     self.metrics.prefetches.fetch_add(1, Ordering::Relaxed);
-                    current_prev = version.prev_version;
-                    self.node_warm_cache.insert(prev_id, Arc::new(version));
-                    depth += 1;
-                }
-                _ => break,
-            }
-        }
-    }
-
-    /// Prefetch edge versions in a chain (up to prefetch_depth).
-    fn prefetch_edge_chain(&self, start: &EdgeVersion) {
-        let mut current_prev = start.prev_version;
-        let mut depth = 0;
-
-        while let Some(prev_id) = current_prev {
-            if depth >= self.config.prefetch_depth {
-                break;
-            }
-
-            // Skip if already in warm cache
-            if self.edge_warm_cache.get(&prev_id).is_some() {
-                break;
-            }
-
-            // Fetch and cache
-            match self.cold.get_edge_version(prev_id) {
-                Ok(Some(version)) => {
-                    self.metrics.prefetches.fetch_add(1, Ordering::Relaxed);
-                    current_prev = version.prev_version;
-                    self.edge_warm_cache.insert(prev_id, Arc::new(version));
+                    current_prev = version.prev_version();
+                    cache.insert(prev_id, Arc::new(version));
                     depth += 1;
                 }
                 _ => break,
