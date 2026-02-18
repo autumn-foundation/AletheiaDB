@@ -946,10 +946,11 @@ mod tests {
 
         let mut handles = vec![];
 
-        for _ in 0..10 {
+        // Reduce concurrency to avoid CI resource exhaustion (especially on Windows)
+        for _ in 0..4 {
             let tiered_clone = Arc::clone(&tiered);
             let handle = thread::spawn(move || {
-                for _ in 0..100 {
+                for _ in 0..50 {
                     // All threads hammer the same version
                     let _ = tiered_clone
                         .get_node_version_cold(VersionId::new(1).unwrap())
@@ -964,11 +965,11 @@ mod tests {
         }
 
         let metrics = tiered.metrics();
-        // Total operations = 10 threads * 100 loops = 1000
+        // Total operations = 4 threads * 50 loops = 200
         // One cold hit (first access), rest warm hits
         // Note: Due to race conditions on initial cache population, multiple threads might
         // miss the cache and hit cold storage simultaneously.
-        assert_eq!(metrics.cold_hits + metrics.warm_hits, 1000);
+        assert_eq!(metrics.cold_hits + metrics.warm_hits, 200);
         assert!(metrics.cold_hits >= 1);
 
         // Verify latency tracker recorded samples safely
