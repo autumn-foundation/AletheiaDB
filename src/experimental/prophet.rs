@@ -7,8 +7,8 @@
 //! Score(A, B) = AdamicAdar(A, B) * (1.0 + VectorSimilarity(A, B))
 
 use crate::AletheiaDB;
-use crate::core::id::NodeId;
 use crate::core::error::Result;
+use crate::core::id::NodeId;
 use std::collections::HashSet;
 
 /// The Prophet predicts the future (connections).

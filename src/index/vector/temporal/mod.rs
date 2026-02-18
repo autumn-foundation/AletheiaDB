@@ -79,12 +79,12 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 
+use crate::core::error::{Error, Result, TemporalError, VectorError};
 use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::{cosine_similarity, euclidean_distance};
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
-use crate::core::error::{Error, Result, TemporalError, VectorError};
 
 // Submodules
 /// Configuration types for temporal vector indexing.

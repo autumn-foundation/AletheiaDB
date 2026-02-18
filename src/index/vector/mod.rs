@@ -86,9 +86,9 @@
 //!
 //! See [`docs/VECTOR_SEARCH_DESIGN.md`](../../docs/VECTOR_SEARCH_DESIGN.md) for complete architecture.
 
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
-use crate::core::error::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 

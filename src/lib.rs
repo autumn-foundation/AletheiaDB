@@ -101,6 +101,7 @@ pub use core::{
 };
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
+pub use core::error::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
 pub use db::{AletheiaDB, VectorIndexBuilder};
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
@@ -108,9 +109,6 @@ pub use index::{
 };
 pub use storage::CurrentStorage;
 pub use storage::wal::{DurabilityMode, WriteOptions};
-pub use core::error::{
-    Error, QueryError, Result, StorageError, TemporalError, TransactionError,
-};
 
 // Query planner re-exports (VS-060)
 pub use query::{

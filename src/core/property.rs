@@ -11,9 +11,9 @@ use std::fmt;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
+use crate::core::error::{Result, StorageError};
 use crate::core::interning::{GLOBAL_INTERNER, IdentityHasher, InternedString};
 use crate::core::vector::SparseVec;
-use crate::core::error::{Result, StorageError};
 
 // ============================================================================
 // Serialization Type Tags
@@ -2527,9 +2527,7 @@ mod tests {
         );
 
         match result {
-            Err(crate::core::error::Error::Storage(StorageError::InconsistentState {
-                reason,
-            })) => {
+            Err(crate::core::error::Error::Storage(StorageError::InconsistentState { reason })) => {
                 assert!(
                     reason.contains("not found in interner"),
                     "Error message should indicate missing key in interner"
@@ -2558,9 +2556,7 @@ mod tests {
 
         assert!(result.is_err(), "Should return error for missing key");
         match result {
-            Err(crate::core::error::Error::Storage(StorageError::InconsistentState {
-                reason,
-            })) => {
+            Err(crate::core::error::Error::Storage(StorageError::InconsistentState { reason })) => {
                 assert!(
                     reason.contains("888888"),
                     "Error message should contain the invalid key ID"

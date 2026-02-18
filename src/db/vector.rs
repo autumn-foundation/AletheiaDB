@@ -1,10 +1,10 @@
-use crate::db::vector_builder::VectorIndexBuilder;
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
+use crate::db::vector_builder::VectorIndexBuilder;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
-use crate::core::error::Result;
 use std::sync::Arc;
 
 impl AletheiaDB {

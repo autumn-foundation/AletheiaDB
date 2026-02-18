@@ -72,10 +72,10 @@
 //! - Multiple threads can search simultaneously
 //! - Searches can run concurrently with additions
 
+use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, Quantization, VectorIndex};
-use crate::core::error::{Error, Result, VectorError};
 use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;

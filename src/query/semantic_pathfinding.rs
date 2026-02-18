@@ -7,11 +7,11 @@
 //! - **Semantic A***: Finds paths where nodes are semantically similar to a query concept.
 //! - **Time-Travel Pathfinding**: Finds paths that were valid at a specific point in time.
 
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::core::vector::cosine_similarity;
 use crate::db::AletheiaDB;
-use crate::core::error::Result;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
@@ -313,9 +313,9 @@ impl<'a> SemanticPathfinder<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
+    use crate::core::error::Error;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
-    use crate::core::error::Error;
 
     fn create_test_db() -> AletheiaDB {
         let db = AletheiaDB::new().unwrap();

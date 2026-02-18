@@ -5,8 +5,8 @@
 //! - Causality preservation across distributed nodes
 //! - Human-readable wallclock semantics for temporal queries
 
-use crate::core::temporal::MAX_VALID_TIMESTAMP;
 use crate::core::error::{StorageError, TemporalError};
+use crate::core::temporal::MAX_VALID_TIMESTAMP;
 use std::sync::OnceLock;
 
 /// Hybrid Logical Clock timestamp combining wallclock and logical components.

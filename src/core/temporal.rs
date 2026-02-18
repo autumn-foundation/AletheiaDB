@@ -9,8 +9,8 @@
 
 use std::fmt;
 
-use crate::core::hlc::HybridTimestamp;
 use crate::core::error::{StorageError, TemporalError};
+use crate::core::hlc::HybridTimestamp;
 
 /// Timestamp represented as Hybrid Logical Clock (HLC).
 ///

@@ -3008,8 +3008,8 @@ mod bitemporal_validation_tests {
 
     #[test]
     fn test_create_node_rejects_far_future_valid_time() {
-        use crate::core::hlc::HybridTimestamp;
         use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
 
         let harness = TestHarness::new();
 
@@ -3037,8 +3037,8 @@ mod bitemporal_validation_tests {
 
     #[test]
     fn test_update_node_rejects_valid_time_before_creation() {
-        use crate::core::hlc::HybridTimestamp;
         use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
 
         let harness = TestHarness::new();
 
@@ -3077,9 +3077,9 @@ mod bitemporal_validation_tests {
         // Verify it's the right error type
         let err = result.unwrap_err();
         match err {
-            crate::core::error::Error::Temporal(
-                TemporalError::ValidTimeBeforeEntityCreation { .. },
-            ) => {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeBeforeEntityCreation {
+                ..
+            }) => {
                 // Expected error type
             }
             other => panic!("Expected ValidTimeBeforeEntityCreation, got: {:?}", other),

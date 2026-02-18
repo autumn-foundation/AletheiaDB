@@ -10,9 +10,9 @@ mod results;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use crate::core::error::Result;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::core::error::Result;
 
 use super::planner::physical::{PhysicalOp, PhysicalPlan};
 

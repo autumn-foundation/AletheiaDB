@@ -19,10 +19,10 @@
 use std::fs::File;
 use std::path::Path;
 
+use crate::core::error::{Error, Result, StorageError};
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::property::PropertyMap;
-use crate::core::error::{Error, Result, StorageError};
 
 use super::{LSN, WalEntry, WalOperation};
 

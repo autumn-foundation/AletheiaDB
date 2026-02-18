@@ -29,6 +29,7 @@
 
 use aletheiadb::{
     GLOBAL_INTERNER,
+    core::error::Result,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMapBuilder,
@@ -43,7 +44,6 @@ use aletheiadb::{
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
         },
     },
-    core::error::Result,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;

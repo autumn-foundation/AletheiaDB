@@ -1,10 +1,10 @@
 //! Write buffering for uncommitted transaction changes
 
+use crate::core::error::{Result, StorageError};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
-use crate::core::error::{Result, StorageError};
 use std::collections::HashMap;
 
 /// Buffered write operation

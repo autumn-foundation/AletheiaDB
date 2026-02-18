@@ -1,10 +1,10 @@
 use crate::AletheiaDB;
 use crate::core::GLOBAL_INTERNER;
+use crate::core::error::Result;
 use crate::core::history::{VersionDiff, VersionInfo};
 use crate::core::id::NodeId;
 use crate::core::interning::InternedString;
 use crate::core::temporal::time;
-use crate::core::error::Result;
 
 /// A single event in the narrative history of an entity.
 #[derive(Debug, Clone)]

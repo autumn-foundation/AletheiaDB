@@ -31,10 +31,10 @@
 //! ```
 
 use crate::AletheiaDB;
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, time};
 use crate::core::vector::ops::euclidean_distance;
-use crate::core::error::Result;
 
 /// A reading of semantic activity.
 #[derive(Debug, Clone, Copy)]

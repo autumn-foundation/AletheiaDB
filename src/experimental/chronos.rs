@@ -9,9 +9,9 @@
 //! - **Path Stability**: Calculate how long a path remains valid over a time window.
 
 use crate::AletheiaDB;
+use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::{TimeRange, Timestamp};
-use crate::core::error::Result;
 use std::collections::{HashSet, VecDeque};
 
 /// The Time Lord of the Graph.

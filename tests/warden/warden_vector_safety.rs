@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use aletheiadb::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
     use aletheiadb::core::error::Error;
+    use aletheiadb::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
 
     #[test]
     fn test_try_insert_vector_returns_error_on_overflow() {

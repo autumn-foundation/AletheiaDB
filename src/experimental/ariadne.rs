@@ -13,8 +13,8 @@
 //! - **Time Arrow**: Threads must move forward in time.
 
 use crate::AletheiaDB;
-use crate::core::id::NodeId;
 use crate::core::error::Result;
+use crate::core::id::NodeId;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -288,9 +288,9 @@ impl<'a> Ariadne<'a> {
     fn get_time(&self, node_id: NodeId, property: &str) -> Result<i64> {
         let node = self.db.get_node(node_id)?;
         let val = node.properties.get(property).ok_or_else(|| {
-            crate::core::error::Error::Storage(
-                crate::core::error::StorageError::PropertyNotFound(property.to_string()),
-            )
+            crate::core::error::Error::Storage(crate::core::error::StorageError::PropertyNotFound(
+                property.to_string(),
+            ))
         })?;
         val.as_int().ok_or_else(|| {
             crate::core::error::Error::Query(crate::core::error::QueryError::TypeMismatch {

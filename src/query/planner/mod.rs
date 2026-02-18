@@ -62,8 +62,8 @@ use std::sync::Arc;
 #[cfg(feature = "observability")]
 use tracing;
 
-use crate::storage::CurrentStorage;
 use crate::core::error::{Error, QueryError, Result};
+use crate::storage::CurrentStorage;
 
 use super::builder::Query;
 use super::ir::QueryOp;

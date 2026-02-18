@@ -60,10 +60,10 @@
 //! - Faster search when sparsity is high (>99%)
 //! - No approximation - exact similarity scores
 
+use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::SparseVec;
-use crate::core::error::{Error, Result, VectorError};
 use bitcode::{Decode, Encode};
 use crc32fast::Hasher;
 use dashmap::DashMap;

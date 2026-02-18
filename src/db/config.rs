@@ -1,5 +1,6 @@
 use crate::api::transaction::{TxIdGenerator, TxVisibilityManager};
 use crate::config::AletheiaDBConfig;
+use crate::core::error::Result;
 use crate::core::id::IdGenerator;
 use crate::core::temporal::time;
 use crate::core::version::AnchorConfig;
@@ -14,7 +15,6 @@ use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 use crate::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
-use crate::core::error::Result;
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;

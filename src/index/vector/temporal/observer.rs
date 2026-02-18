@@ -4,8 +4,8 @@
 //! enabling automatic snapshot creation when graph anchors are created.
 
 use super::TemporalVectorIndex;
-use crate::core::observer::{StorageEvent, StorageObserver};
 use crate::core::error::Result;
+use crate::core::observer::{StorageEvent, StorageObserver};
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]

@@ -1,5 +1,5 @@
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig, Quantization};
 use aletheiadb::core::error::Result;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, Quantization};
 use std::io::Cursor;
 
 #[test]

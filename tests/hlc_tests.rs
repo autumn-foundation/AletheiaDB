@@ -5,9 +5,9 @@
 //! - Causality preservation
 //! - Serialization/deserialization
 
+use aletheiadb::core::error::{StorageError, TemporalError};
 use aletheiadb::core::hlc::{HybridTimestamp, MAX_BACKWARD_DRIFT_US, evaluate_clock_skew};
 use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
-use aletheiadb::core::error::{StorageError, TemporalError};
 use proptest::prelude::*;
 
 #[test]

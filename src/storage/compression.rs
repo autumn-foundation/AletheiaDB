@@ -4,8 +4,8 @@
 //! using various algorithms with optional CRC32 checksums. It is used by all cold
 //! storage backends to ensure consistent data handling.
 
-use crate::storage::redb_cold_storage::ColdStorageConfig;
 use crate::core::error::{Result, StorageError};
+use crate::storage::redb_cold_storage::ColdStorageConfig;
 use std::io::Read;
 
 /// Compress data according to the configuration.
@@ -79,11 +79,9 @@ pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
 
     // Decompress based on algorithm
     match config.compression.zstd_level() {
-        Some(_) => {
-            zstd::decode_all(data_to_decompress).map_err(|e| -> crate::core::error::Error {
-                StorageError::io_error(e.to_string()).into()
-            })
-        }
+        Some(_) => zstd::decode_all(data_to_decompress).map_err(|e| -> crate::core::error::Error {
+            StorageError::io_error(e.to_string()).into()
+        }),
         None => Ok(data_to_decompress.to_vec()),
     }
 }

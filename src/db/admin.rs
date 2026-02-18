@@ -1,4 +1,5 @@
 use crate::api::transaction::visibility::CompressionStats;
+use crate::core::error::{Result, StorageError};
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;
@@ -9,7 +10,6 @@ use crate::storage::historical::{HistoricalStats, HistoricalStorage};
 use crate::storage::index_persistence::operations::{
     persist_temporal_index, persist_vector_indexes,
 };
-use crate::core::error::{Result, StorageError};
 use parking_lot::RwLock;
 use std::sync::Arc;
 

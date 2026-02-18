@@ -28,7 +28,11 @@ impl<'a> Cartographer<'a> {
     }
 
     /// Analyzes the graph to find clusters based on the given vector property.
-    pub fn analyze(&self, property: &str, k: usize) -> crate::core::error::Result<ClusteringResult> {
+    pub fn analyze(
+        &self,
+        property: &str,
+        k: usize,
+    ) -> crate::core::error::Result<ClusteringResult> {
         // Step 1: Harvest vectors
         // We use the query engine to scan all nodes.
         let results = self

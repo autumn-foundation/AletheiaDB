@@ -189,9 +189,9 @@
 //! 4. **Observers** are for extensibility, **hooks** are for consistency
 //! 5. See **ADR-0018** for complete architecture and design rationale
 
+use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::temporal::Timestamp;
-use crate::core::error::Result;
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]

@@ -53,8 +53,8 @@ use super::concurrent::{ConcurrentWal, ConcurrentWalConfig};
 use super::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig, FlushStats};
 use super::group_commit::GroupCommitCoordinator;
 use super::{LSN, WalOperation};
-use crate::storage::wal::DurabilityMode;
 use crate::core::error::{Error, Result, StorageError};
+use crate::storage::wal::DurabilityMode;
 
 /// Configuration for the concurrent WAL system.
 #[derive(Debug, Clone)]

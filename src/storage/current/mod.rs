@@ -4,6 +4,7 @@
 //! graph. It provides O(1) lookups and cache-friendly traversals optimized for
 //! non-temporal queries.
 
+use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
@@ -13,7 +14,6 @@ use crate::index::current::CurrentIndexes;
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::index::vector::{TemporalSearchResults, VectorIndex};
-use crate::core::error::{Result, StorageError};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use parking_lot::RwLock;
@@ -2075,11 +2075,9 @@ impl CurrentStorage {
             .ok_or_else(|| StorageError::PropertyNotFound(prop_name.to_string()))?
             .as_arc_vector()
             .ok_or_else(|| {
-                crate::core::error::Error::Vector(
-                    crate::core::error::VectorError::InvalidVector {
-                        reason: "Property is not a vector".to_string(),
-                    },
-                )
+                crate::core::error::Error::Vector(crate::core::error::VectorError::InvalidVector {
+                    reason: "Property is not a vector".to_string(),
+                })
             })
     }
 
@@ -2098,9 +2096,10 @@ impl CurrentStorage {
         };
 
         let entry = self.vector_indexes.get(&prop_name).ok_or_else(|| {
-            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                format!("Vector index not found for property '{}'", prop_name),
-            ))
+            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(format!(
+                "Vector index not found for property '{}'",
+                prop_name
+            )))
         })?;
 
         Ok((

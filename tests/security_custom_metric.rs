@@ -1,9 +1,9 @@
+use aletheiadb::core::error::VectorError;
+use aletheiadb::core::error::{Error, Result};
 use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::{
     DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, Quantization, VectorIndex,
 };
-use aletheiadb::core::error::VectorError;
-use aletheiadb::core::error::{Error, Result};
 
 #[test]
 fn test_custom_metric_with_quantization_crash() -> Result<()> {

@@ -3,9 +3,9 @@
 //! These tests verify that the system correctly rejects invalid temporal states
 //! and prevents time-travel paradoxes or DoS attacks via malicious timestamps.
 
+use aletheiadb::core::error::TemporalError;
 use aletheiadb::core::hlc::HybridTimestamp;
 use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
-use aletheiadb::core::error::TemporalError;
 
 /// 🎯 Target: TimeRange::new validation
 /// 💣 Risk: Creating TimeRange with invalid timestamps via unchecked constructors

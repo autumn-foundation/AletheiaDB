@@ -2,12 +2,12 @@
 //!
 //! Defines the result types returned by query execution.
 
+use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::VersionId;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
-use crate::core::error::Result;
 
 use super::iterators::ResultIterator;
 

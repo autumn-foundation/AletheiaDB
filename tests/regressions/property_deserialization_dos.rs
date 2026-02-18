@@ -1,5 +1,5 @@
-use aletheiadb::core::property::{PropertyMap, PropertyValue, TAG_ARRAY};
 use aletheiadb::core::error::StorageError;
+use aletheiadb::core::property::{PropertyMap, PropertyValue, TAG_ARRAY};
 
 #[test]
 fn test_array_preallocation_dos_protection() {

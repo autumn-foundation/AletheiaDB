@@ -13,9 +13,9 @@
 //! - **Freshness**: Preferring recently updated information.
 
 use crate::AletheiaDB;
+use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::temporal::time;
-use crate::core::error::{Error, Result};
 use std::collections::HashMap;
 
 /// Configuration for a fishing trip.

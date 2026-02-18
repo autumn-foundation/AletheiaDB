@@ -1,7 +1,7 @@
+use crate::core::error::Result;
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::TemporalVectorConfig;
-use crate::core::error::Result;
 
 /// Builder for configuring and enabling a vector index on a property.
 ///

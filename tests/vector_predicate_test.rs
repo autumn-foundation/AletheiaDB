@@ -1,5 +1,5 @@
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::core::error::Result;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 #[test]

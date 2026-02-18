@@ -11,6 +11,7 @@ use std::sync::Arc;
 #[cfg(feature = "observability")]
 use tracing;
 
+use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
@@ -19,7 +20,6 @@ use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{Direction, Predicate, PredicateValue};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::core::error::Result;
 
 use super::results::{EntityId, EntityResult, QueryRow};
 

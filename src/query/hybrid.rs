@@ -27,10 +27,10 @@
 //! }
 //! ```
 
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
 use crate::db::AletheiaDB;
-use crate::core::error::Result;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -261,9 +261,9 @@ pub fn find_similar_as_of(
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
+    use crate::core::error::VectorError;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
-    use crate::core::error::VectorError;
 
     /// Helper to create a test database with vector indexing enabled.
     fn create_test_db() -> AletheiaDB {
@@ -423,9 +423,9 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::core::error::Error::Storage(
-                    crate::core::error::StorageError::NodeNotFound(_)
-                )
+                crate::core::error::Error::Storage(crate::core::error::StorageError::NodeNotFound(
+                    _
+                ))
             ),
             "Should return NodeNotFound error"
         );

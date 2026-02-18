@@ -1,8 +1,8 @@
 use crate::AletheiaDB;
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::experimental::temporal_narrative::NarrativeGenerator;
-use crate::core::error::Result;
 use std::fmt::Write;
 
 /// Builder for generating a rich context description of a node.

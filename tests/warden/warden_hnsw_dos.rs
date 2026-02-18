@@ -1,6 +1,6 @@
+use aletheiadb::core::error::{Error, VectorError};
 use aletheiadb::index::VectorIndex;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
-use aletheiadb::core::error::{Error, VectorError};
 use std::fs::File;
 use std::io::Write;
 use tempfile::tempdir;

@@ -1,9 +1,9 @@
 use super::*;
 use crate::api::transaction::{ReadOps, WriteOps};
 use crate::core::GLOBAL_INTERNER;
+use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::property::{PropertyMapBuilder, PropertyValue};
-use crate::core::error::{Error, Result};
 
 #[test]
 fn test_create_node() {

@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange, time};
     use aletheiadb::core::error::TemporalError;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange, time};
 
     #[test]
     fn test_timerange_close_at_enforces_invariant() {

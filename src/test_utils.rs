@@ -4,9 +4,9 @@
 
 use crate::AletheiaDB;
 use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+use crate::core::error::Result;
 use crate::storage::index_persistence::PersistenceConfig;
 use crate::storage::wal::DurabilityMode;
-use crate::core::error::Result;
 use std::path::PathBuf;
 
 /// Create a test database with in-memory/temporary WAL.

@@ -71,13 +71,13 @@ pub use visibility::{CompressionStats, TransactionSnapshot, TxVisibilityManager}
 pub use write::WriteTransaction;
 pub use write_buffer::{BufferedWrite, WriteBuffer};
 
+use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 #[cfg(test)]
 use crate::core::id::MAX_VALID_ID;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
-use crate::core::error::Result;
 
 /// Common read operations available in all transaction types
 pub trait ReadOps {
