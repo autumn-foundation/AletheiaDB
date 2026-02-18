@@ -7,19 +7,90 @@ use crate::core::temporal::time;
 use crate::utils::error::Result;
 
 /// A single event in the narrative history of an entity.
+///
+/// Represents a snapshot in time with a human-readable description of what changed.
 #[derive(Debug, Clone)]
 pub struct NarrativeEvent {
     /// ISO 8601 timestamp of when the event was recorded (transaction time).
     pub timestamp: String,
-    /// Sequential version number.
+    /// Sequential version number (1-based index of changes).
     pub version_number: u64,
-    /// High-level description of what happened.
+    /// High-level description of what happened (e.g., "Node created", "Version 2 updated properties").
     pub description: String,
-    /// Detailed list of changes (if any).
+    /// Detailed list of changes as natural language strings.
+    ///
+    /// Examples:
+    /// - "Initial property 'name': 'Alice'"
+    /// - "Modified property 'age' from '30' to '31'"
+    /// - "Added property 'city' with value 'London'"
     pub changes: Vec<String>,
 }
 
 /// Generator for creating natural language narratives from temporal history.
+///
+/// This component reconstructs the bi-temporal history of a node and translates
+/// the low-level deltas (added/removed/modified properties) into a sequence
+/// of human-readable English sentences.
+///
+/// # Feature Flag
+///
+/// This feature requires the `nova` feature flag to be enabled in `Cargo.toml`.
+///
+/// ```toml
+/// [dependencies]
+/// aletheiadb = { version = "0.1", features = ["nova"] }
+/// ```
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::{AletheiaDB, properties, WriteOps};
+/// // This module is only available with feature "nova"
+/// #[cfg(feature = "nova")]
+/// use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # #[cfg(feature = "nova")]
+/// # {
+/// let db = AletheiaDB::new()?;
+///
+/// // 1. Create a node
+/// let node_id = db.write(|tx| {
+///     tx.create_node("Person", properties! {
+///         "name" => "Alice",
+///         "age" => 30
+///     })
+/// })?;
+///
+/// // 2. Update it later
+/// db.write(|tx| {
+///     tx.update_node(node_id, properties! {
+///         "age" => 31,
+///         "city" => "Paris"
+///     })
+/// })?;
+///
+/// // 3. Generate the story
+/// let generator = NarrativeGenerator::new(&db);
+/// let narrative = generator.generate_node_narrative(node_id)?;
+///
+/// for event in narrative {
+///     println!("On {}: {}", event.timestamp, event.description);
+///     for change in event.changes {
+///         println!("  - {}", change);
+///     }
+/// }
+/// // Output:
+/// // On 2023-10-01T10:00:00Z: Node created with label 'Person'.
+/// //   - Initial property 'name': 'Alice'
+/// //   - Initial property 'age': '30'
+/// // On 2023-10-01T12:00:00Z: Version 2 updated properties.
+/// //   - Modified property 'age' from '30' to '31'
+/// //   - Added property 'city' with value 'Paris'
+/// # }
+/// # Ok(())
+/// # }
+/// ```
 pub struct NarrativeGenerator<'a> {
     db: &'a AletheiaDB,
 }

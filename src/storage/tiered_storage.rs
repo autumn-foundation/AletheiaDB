@@ -30,18 +30,28 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use aletheiadb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
-//! use aletheiadb::storage::redb_cold_storage::RedbColdStorage;
-//! use std::sync::Arc;
+//! ```rust
+//! use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+//! use aletheiadb::config::HistoricalConfigBuilder;
+//! use std::time::Duration;
 //!
-//! // Create tiered storage
-//! let config = TieredStorageConfig::default();
-//! let cold = RedbColdStorage::with_default_config("data/cold.redb")?;
-//! let tiered = TieredStorage::new(config, Arc::new(cold));
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Configure cold storage via the unified config builder
+//! let config = AletheiaDBConfig::builder()
+//!     .historical(
+//!         HistoricalConfigBuilder::new()
+//!             .enable_cold_storage(true)
+//!             .cold_storage_path("data/cold.redb")
+//!             .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
+//!             .max_hot_versions(1000)
+//!             .build(),
+//!     )
+//!     .build();
 //!
-//! // Transparently access data from any tier
-//! let version = tiered.get_node_version(version_id)?;
+//! // Cold storage automatically initialized!
+//! // let db = AletheiaDB::with_unified_config(config)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::core::id::VersionId;
@@ -281,6 +291,32 @@ impl AtomicTieredMetrics {
 /// - Transparent fallback from hot to cold storage
 /// - Prefetching for version chain traversal
 /// - Metrics for monitoring access patterns
+///
+/// # Examples
+///
+/// While `TieredStorage` is typically managed internally by `AletheiaDB` via configuration,
+/// it can be instantiated directly for low-level storage operations or testing:
+///
+/// ```rust
+/// use aletheiadb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
+/// use aletheiadb::storage::redb_cold_storage::RedbColdStorage;
+/// use std::sync::Arc;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Create cold storage backend
+/// let temp_dir = tempfile::tempdir()?;
+/// let db_path = temp_dir.path().join("cold.redb");
+/// let cold = RedbColdStorage::with_default_config(&db_path)?;
+///
+/// // 2. Create tiered storage wrapping the cold backend
+/// let config = TieredStorageConfig::default();
+/// let tiered = TieredStorage::new(config, Arc::new(cold));
+///
+/// // 3. Use it to access cold versions (transparently cached)
+/// // let version = tiered.get_node_version_cold(version_id)?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct TieredStorage {
     config: TieredStorageConfig,
     cold: Arc<RedbColdStorage>,
