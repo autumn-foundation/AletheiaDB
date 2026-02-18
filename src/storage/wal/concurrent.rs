@@ -1006,7 +1006,8 @@ mod sentry_tests {
                 thread::spawn(|| {
                     // 1. Large WAL (32 stripes)
                     let dir_large = tempdir().unwrap();
-                    let config_large = ConcurrentWalConfig::new(dir_large.path()).with_num_stripes(32);
+                    let config_large =
+                        ConcurrentWalConfig::new(dir_large.path()).with_num_stripes(32);
                     let wal_large = ConcurrentWal::new(config_large).unwrap();
 
                     let op = WalOperation::CreateNode {
@@ -1021,7 +1022,8 @@ mod sentry_tests {
 
                     // 2. Small WAL (4 stripes)
                     let dir_small = tempdir().unwrap();
-                    let config_small = ConcurrentWalConfig::new(dir_small.path()).with_num_stripes(4);
+                    let config_small =
+                        ConcurrentWalConfig::new(dir_small.path()).with_num_stripes(4);
                     let wal_small = ConcurrentWal::new(config_small).unwrap();
 
                     // This should reuse the cached index. If index > 3, it will panic
