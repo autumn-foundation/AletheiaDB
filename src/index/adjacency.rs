@@ -15,6 +15,7 @@
 
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
+use rayon::prelude::*;
 
 /// A single entry in the adjacency list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,8 +151,9 @@ impl AdjacencyIndex {
         let edge_count = edges.len();
 
         // Sort by source node, then target node for deterministic ordering.
-        // This avoids using a HashMap for grouping, reducing memory allocations and hashing overhead.
-        edges.sort_by_key(|(src, target, _, _)| (*src, *target));
+        // We use parallel sort for performance on large graphs.
+        // We include edge_id for canonical deterministic ordering.
+        edges.par_sort_unstable_by_key(|(src, target, edge_id, _)| (*src, *target, *edge_id));
 
         // Max node id is the maximum of all source and target IDs
         let max_node_id = edges
