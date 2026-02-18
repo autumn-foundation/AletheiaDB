@@ -4,9 +4,21 @@
 //! and navigating it at specific historical snapshots.
 //!
 //! # Features
-//! - **Snapshot Pathfinding**: Find paths as they existed at a specific point in time.
-//! - **Volatility Analysis**: Measure how frequently a node changes.
-//! - **Path Stability**: Calculate how long a path remains valid over a time window.
+//! - **Snapshot Pathfinding**: Find paths as they existed at a specific point in time
+//!   using BFS on a consistent graph snapshot.
+//! - **Volatility Analysis**: Measure how frequently a node changes (updates/sec).
+//! - **Path Stability**: Calculate the percentage of time a path remains fully valid
+//!   over a given window by intersecting the validity intervals of all edges.
+//!
+//! # Algorithm: Path Stability
+//!
+//! To calculate path stability over a window `W`:
+//! 1. For each edge `e` in the path:
+//!    - Retrieve its history.
+//!    - Compute the set of valid time intervals `I_e` where the edge existed within `W`.
+//! 2. Compute the intersection of all interval sets: `I_path = ⋂ I_e`.
+//!    - This results in a set of disjoint intervals where *every* edge in the path was valid.
+//! 3. Sum the duration of intervals in `I_path` and divide by the duration of `W`.
 
 use crate::AletheiaDB;
 use crate::core::id::{EdgeId, NodeId};

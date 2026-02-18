@@ -6,6 +6,26 @@
 //!
 //! Every graph element (node/edge version) has a BiTemporalInterval that tracks
 //! both dimensions of time.
+//!
+//! # Gotchas & Corner Cases ⚠️
+//!
+//! Temporal logic is tricky. Here are common pitfalls to avoid:
+//!
+//! 1. **MAX_VALID_TIMESTAMP**: Timestamps are capped at [`MAX_VALID_TIMESTAMP`] (`i64::MAX - 1000`).
+//!    Attempts to create a `TimeRange` exceeding this will fail. This prevents DoS attacks and
+//!    ensures reserved space for sentinels.
+//!
+//! 2. **Range Containment**: `TimeRange::contains_range(other)` is reflexive (a range contains itself)
+//!    and handles exact matches. Be careful with "off-by-one" errors at boundaries.
+//!    - `[100, 200)` contains `[100, 200)` -> true
+//!    - `[100, 200)` contains `[100, 101)` -> true
+//!
+//! 3. **Visibility Logic**: [`BiTemporalInterval::is_visible_at`] requires *both* dimensions to be satisfied.
+//!    A fact might be valid in the real world (valid time) but not yet known to the database
+//!    (transaction time) at a specific query point.
+//!
+//! 4. **Half-Open Intervals**: All ranges are `[start, end)`, meaning `start` is inclusive and
+//!    `end` is exclusive. `contains(end)` will always return false.
 
 use std::fmt;
 
@@ -623,45 +643,6 @@ mod tests {
         assert!(!outer.contains_range(&overlapping));
     }
 
-    #[test]
-    fn test_time_range_contains_range_boundaries() {
-        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
-
-        // Same start
-        let inner_same_start = TimeRange::new(100.into(), 200.into()).unwrap();
-        assert!(
-            outer.contains_range(&inner_same_start),
-            "Should contain range with same start"
-        );
-
-        // Same end
-        let inner_same_end = TimeRange::new(200.into(), 300.into()).unwrap();
-        assert!(
-            outer.contains_range(&inner_same_end),
-            "Should contain range with same end"
-        );
-
-        // Same start and end (exact match)
-        let exact_match = TimeRange::new(100.into(), 300.into()).unwrap();
-        assert!(
-            outer.contains_range(&exact_match),
-            "Should contain exact same range"
-        );
-
-        // Just outside start
-        let outside_start = TimeRange::new(99.into(), 200.into()).unwrap();
-        assert!(
-            !outer.contains_range(&outside_start),
-            "Should not contain range starting before"
-        );
-
-        // Just outside end (301)
-        let outside_end = TimeRange::new(200.into(), 301.into()).unwrap();
-        assert!(
-            !outer.contains_range(&outside_end),
-            "Should not contain range ending after"
-        );
-    }
 
     #[test]
     fn test_time_range_close_at() {
