@@ -1141,7 +1141,6 @@ mod tests {
             TemporalError::InvalidTimestamp { .. }
         ));
     }
-
 }
 
 #[cfg(test)]
