@@ -896,8 +896,7 @@ mod sentry_tests {
     fn test_append_entry_exactly_max_size_succeeds() {
         let dir = tempdir().unwrap();
         // Increase segment size to accommodate large entry
-        let config = ConcurrentWalConfig::new(dir.path())
-            .with_segment_size(MAX_WAL_ENTRY_SIZE * 2);
+        let config = ConcurrentWalConfig::new(dir.path()).with_segment_size(MAX_WAL_ENTRY_SIZE * 2);
         let wal = ConcurrentWal::new(config).unwrap();
 
         // Calculate size needed for payload
@@ -920,9 +919,7 @@ mod sentry_tests {
         // We use repeat to create it efficiently
         let big_string = "x".repeat(target_val_len);
 
-        let properties = PropertyMapBuilder::new()
-            .insert("k", big_string)
-            .build();
+        let properties = PropertyMapBuilder::new().insert("k", big_string).build();
 
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
@@ -933,11 +930,18 @@ mod sentry_tests {
 
         // Verify our math was correct
         let estimated = crate::storage::wal::estimate_entry_capacity(&op);
-        assert_eq!(estimated, MAX_WAL_ENTRY_SIZE, "Entry size calculation incorrect");
+        assert_eq!(
+            estimated, MAX_WAL_ENTRY_SIZE,
+            "Entry size calculation incorrect"
+        );
 
         // Attempt append - should succeed
         let result = wal.append_async(op);
-        assert!(result.is_ok(), "Failed to append entry of exactly MAX_WAL_ENTRY_SIZE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to append entry of exactly MAX_WAL_ENTRY_SIZE: {:?}",
+            result.err()
+        );
     }
 
     /// 🎯 Target: MAX_WAL_ENTRY_SIZE boundary check
@@ -947,8 +951,7 @@ mod sentry_tests {
     #[test]
     fn test_append_entry_exceeding_max_size_fails() {
         let dir = tempdir().unwrap();
-        let config = ConcurrentWalConfig::new(dir.path())
-            .with_segment_size(MAX_WAL_ENTRY_SIZE * 2);
+        let config = ConcurrentWalConfig::new(dir.path()).with_segment_size(MAX_WAL_ENTRY_SIZE * 2);
         let wal = ConcurrentWal::new(config).unwrap();
 
         // Use same calculation as above but +1 byte
@@ -957,9 +960,7 @@ mod sentry_tests {
 
         let big_string = "x".repeat(target_val_len);
 
-        let properties = PropertyMapBuilder::new()
-            .insert("k", big_string)
-            .build();
+        let properties = PropertyMapBuilder::new().insert("k", big_string).build();
 
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
@@ -970,7 +971,11 @@ mod sentry_tests {
 
         // Verify size
         let estimated = crate::storage::wal::estimate_entry_capacity(&op);
-        assert_eq!(estimated, MAX_WAL_ENTRY_SIZE + 1, "Entry size calculation incorrect");
+        assert_eq!(
+            estimated,
+            MAX_WAL_ENTRY_SIZE + 1,
+            "Entry size calculation incorrect"
+        );
 
         // Attempt append - should fail
         let result = wal.append_async(op);
