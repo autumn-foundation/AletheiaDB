@@ -326,7 +326,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 ### Basic Graph Operations
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps};
+use aletheiadb::{AletheiaDB, properties, WriteOps}; // WriteOps trait needed for transaction methods
 
 // Create a new database
 let db = AletheiaDB::new().unwrap();
@@ -353,6 +353,7 @@ db.write(|tx| {
 // Read current state
 let alice = db.get_node(alice_id)?;
 println!("Created Alice: {:?}", alice);
+println!("Label: {}", alice.label); // "Person"
 ```
 
 ### Time-Travel Queries
@@ -507,7 +508,10 @@ for (node_id, drift_score) in drifted_nodes {
 
 ### Narrative Generation (Experimental)
 
-> **Requires `nova` feature**
+> ⚠️ **REQUIRES FEATURE 'NOVA'**
+>
+> This feature is experimental and requires the `nova` feature flag.
+> Add `features = ["nova"]` to your `Cargo.toml`.
 >
 > Run the demo:
 > ```bash
@@ -516,8 +520,9 @@ for (node_id, drift_score) in drifted_nodes {
 
 ```rust
 use aletheiadb::{AletheiaDB, properties, WriteOps};
-// ⚠️ REQUIRES FEATURE 'NOVA'
-// Enable in Cargo.toml: features = ["nova"]
+// ⚠️ REQUIRES FEATURE 'NOVA' IN CARGO.TOML
+// [dependencies]
+// aletheiadb = { version = "0.1", features = ["nova"] }
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
 // 1. Setup database and node (for self-contained example)
