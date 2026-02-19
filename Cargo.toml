@@ -103,7 +103,6 @@ tracy = ["tracy-client/enable"]
 # Observability features
 observability = ["dep:tracing", "dep:tracing-subscriber"]
 observability-tracy = ["observability", "dep:tracing-tracy", "tracy"]
-observability-honeycomb = ["observability", "honeycomb"]
 observability-prometheus = ["observability", "dep:metrics", "dep:metrics-exporter-prometheus"]
 
 # Default features
@@ -147,13 +146,6 @@ http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "
 
 # MVCC snapshot-focused integration tests
 mvcc-snapshots-tdd = []
-
-# Custom Honeycomb client (replaces libhoney-rust git dependency)
-# This provides a minimal, security-focused client with modern dependencies
-honeycomb-client = ["dep:serde"]
-
-# Honeycomb client with HTTP transmission support
-honeycomb = ["honeycomb-client", "dep:reqwest"]
 
 [profile.dev]
 # Fast compilation for development

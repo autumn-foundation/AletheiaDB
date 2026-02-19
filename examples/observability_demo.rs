@@ -1,18 +1,8 @@
 //! Observability Demo
 //!
 //! Demonstrates AletheiaDB's production observability features including:
-//! - Honeycomb integration for distributed tracing
 //! - Error categorization and metrics
 //! - Critical error detection
-//!
-//! # Running with Honeycomb
-//!
-//! ```bash
-//! export HONEYCOMB_API_KEY="your-api-key"
-//! export HONEYCOMB_DATASET="aletheiadb-demo"
-//! export RUST_LOG=aletheiadb=info
-//! cargo run --example observability_demo --features observability-honeycomb
-//! ```
 //!
 //! # Running with Tracy (CPU profiling)
 //!
@@ -40,15 +30,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let config = observability::Config::from_env();
         observability::init(config.clone());
         println!("📊 Observability initialized");
-
-        #[cfg(feature = "observability-honeycomb")]
-        {
-            if config.honeycomb.is_some() {
-                println!("🐝 Honeycomb integration active");
-            } else {
-                println!("⚠️  HONEYCOMB_API_KEY not set - falling back to stdout logging");
-            }
-        }
 
         #[cfg(feature = "observability-prometheus")]
         {
@@ -146,9 +127,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n🎉 Demo complete!");
-
-    #[cfg(feature = "observability-honeycomb")]
-    println!("\n💡 Check your Honeycomb dashboard to see traces and metrics!");
 
     Ok(())
 }

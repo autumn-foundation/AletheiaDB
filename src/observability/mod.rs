@@ -53,22 +53,6 @@ pub mod metrics;
 // Re-export key types
 pub use metrics::{METRICS, Metrics, MetricsSnapshot};
 
-// Re-export backend configs (conditional on features)
-#[cfg(feature = "observability-honeycomb")]
-pub use backends::honeycomb::HoneycombConfig;
-
-#[cfg(not(feature = "observability-honeycomb"))]
-/// Honeycomb configuration (placeholder when feature is disabled)
-#[derive(Debug, Clone)]
-pub struct HoneycombConfig {
-    /// Honeycomb API key
-    pub api_key: String,
-    /// Dataset name
-    pub dataset: String,
-    /// Service name
-    pub service_name: String,
-}
-
 #[cfg(feature = "observability-prometheus")]
 pub use backends::prometheus::PrometheusConfig;
 
@@ -83,7 +67,7 @@ pub struct PrometheusConfig {
 use std::sync::{Mutex, Once};
 
 static INIT: Once = Once::new();
-#[allow(dead_code)] // Used only when observability-honeycomb or observability-prometheus features are enabled
+#[allow(dead_code)] // Used only when observability-prometheus feature is enabled
 static WORKER_HANDLES: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
 
 /// Observability configuration.
@@ -93,15 +77,12 @@ static WORKER_HANDLES: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec:
 /// # Backend Support
 ///
 /// - **Stdout logging**: Always available with `observability` feature
-/// - **Honeycomb**: Requires `observability-honeycomb` feature + API key
 /// - **Prometheus**: Requires `observability-prometheus` feature + bind address
 /// - **Tracy**: Requires `observability-tracy` feature
 ///
 /// # Configuration
 ///
 /// Use `Config::from_env()` to auto-configure from environment variables:
-/// - `HONEYCOMB_API_KEY`: Enable Honeycomb integration
-/// - `HONEYCOMB_DATASET`: Dataset name (default: "aletheiadb")
 /// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP endpoint (e.g., "127.0.0.1:9090")
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -114,12 +95,6 @@ pub struct Config {
     ///
     /// Default: `true` when `observability-tracy` feature is enabled.
     pub enable_tracy: bool,
-
-    /// Honeycomb configuration (optional).
-    ///
-    /// When set, spans will be sent to Honeycomb for distributed tracing.
-    /// Requires the `observability-honeycomb` feature.
-    pub honeycomb: Option<HoneycombConfig>,
 
     /// Prometheus configuration (optional).
     ///
@@ -136,7 +111,6 @@ impl Default for Config {
             enable_tracy: true,
             #[cfg(not(feature = "observability-tracy"))]
             enable_tracy: false,
-            honeycomb: None,
             prometheus: None,
         }
     }
@@ -147,8 +121,6 @@ impl Config {
     ///
     /// This automatically detects available backends based on environment variables:
     ///
-    /// - `HONEYCOMB_API_KEY`: Enables Honeycomb (requires `observability-honeycomb` feature)
-    /// - `HONEYCOMB_DATASET`: Dataset name (default: "aletheiadb")
     /// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP server address (requires `observability-prometheus` feature)
     ///
     /// # Example
@@ -157,7 +129,6 @@ impl Config {
     /// use aletheiadb::observability;
     ///
     /// // Set environment variables
-    /// std::env::set_var("HONEYCOMB_API_KEY", "your-api-key");
     /// std::env::set_var("PROMETHEUS_BIND_ADDR", "127.0.0.1:9090");
     ///
     /// // Auto-configure from environment
@@ -171,14 +142,6 @@ impl Config {
             enable_tracy: true,
             #[cfg(not(feature = "observability-tracy"))]
             enable_tracy: false,
-            honeycomb: std::env::var("HONEYCOMB_API_KEY")
-                .ok()
-                .map(|api_key| HoneycombConfig {
-                    api_key,
-                    dataset: std::env::var("HONEYCOMB_DATASET")
-                        .unwrap_or_else(|_| "aletheiadb".to_string()),
-                    service_name: "aletheiadb".to_string(),
-                }),
             prometheus: std::env::var("PROMETHEUS_BIND_ADDR")
                 .ok()
                 .map(|bind_addr| PrometheusConfig { bind_addr }),
@@ -196,7 +159,6 @@ impl Config {
 ///
 /// Based on the configuration, the following backends may be enabled:
 /// - **Stdout logging**: Structured logs to stdout (when `enable_logging` is true)
-/// - **Honeycomb**: Distributed tracing (when `honeycomb` config is set)
 /// - **Prometheus**: HTTP metrics endpoint (when `prometheus` config is set)
 /// - **Tracy**: CPU profiling (when `enable_tracy` is true)
 ///
@@ -217,11 +179,6 @@ impl Config {
 ///     let config = observability::Config {
 ///         enable_logging: true,
 ///         enable_tracy: false,
-///         honeycomb: Some(HoneycombConfig {
-///             api_key: "your-api-key".to_string(),
-///             dataset: "aletheiadb".to_string(),
-///             service_name: "aletheiadb".to_string(),
-///         }),
 ///         prometheus: None,
 ///     };
 ///     observability::init(config);
@@ -236,8 +193,6 @@ impl Config {
 /// The following environment variables control observability behavior:
 ///
 /// - `RUST_LOG`: Filter logs by level (e.g., `aletheiadb=trace`, `aletheiadb=warn`)
-/// - `HONEYCOMB_API_KEY`: Enable Honeycomb integration
-/// - `HONEYCOMB_DATASET`: Honeycomb dataset name (default: "aletheiadb")
 /// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP server address (e.g., "127.0.0.1:9090")
 ///
 /// # Panics
@@ -271,31 +226,7 @@ pub fn init(config: Config) {
             };
             let subscriber = subscriber.with(fmt_layer);
 
-            // Layer 2: Honeycomb (optional, feature-gated)
-            #[cfg(feature = "observability-honeycomb")]
-            let subscriber = if let Some(ref honeycomb_config) = config.honeycomb {
-                match backends::honeycomb::create_layer(honeycomb_config.clone()) {
-                    Ok(hc_layer) => subscriber.with(Some(hc_layer)),
-                    Err(e) => {
-                        eprintln!("Failed to initialize Honeycomb: {}", e);
-                        subscriber.with(None)
-                    }
-                }
-            } else {
-                subscriber.with(None)
-            };
-
-            #[cfg(not(feature = "observability-honeycomb"))]
-            let subscriber = {
-                if config.honeycomb.is_some() {
-                    eprintln!(
-                        "Honeycomb config provided but observability-honeycomb feature not enabled"
-                    );
-                }
-                subscriber
-            };
-
-            // Layer 3: Tracy (optional, feature-gated)
+            // Layer 2: Tracy (optional, feature-gated)
             #[cfg(feature = "observability-tracy")]
             let subscriber = {
                 let tracy_layer = if config.enable_tracy {
@@ -345,7 +276,6 @@ pub fn init(config: Config) {
 
             tracing::info!(
                 version = env!("CARGO_PKG_VERSION"),
-                honeycomb_enabled = config.honeycomb.is_some(),
                 prometheus_enabled = config.prometheus.is_some(),
                 tracy_enabled = config.enable_tracy,
                 "AletheiaDB observability initialized"
