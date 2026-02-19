@@ -98,7 +98,6 @@ impl TimeRange {
     ///
     /// # Errors
     /// Returns `TemporalError::InvalidTimeRange` if start > end.
-    #[inline]
     pub fn new(start: Timestamp, end: Timestamp) -> Result<Self, TemporalError> {
         if start > end {
             return Err(TemporalError::InvalidTimeRange { start, end });
@@ -438,7 +437,6 @@ impl BiTemporalInterval {
     /// // Not Visible: querying at T150 (before it was recorded)
     /// assert!(!interval.is_visible_at(t100, time::from_secs(150)));
     /// ```
-    #[inline]
     pub fn is_visible_at(&self, valid_time: Timestamp, tx_time: Timestamp) -> bool {
         self.valid_time.contains(valid_time) && self.transaction_time.contains(tx_time)
     }
