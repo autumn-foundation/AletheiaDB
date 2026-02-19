@@ -1846,3 +1846,90 @@ mod fuzz_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+    use crate::core::temporal::time;
+
+    #[test]
+    fn test_v0_update_node_assigns_dummy_label() {
+        let mut buffer = Vec::new();
+
+        // LSN (8 bytes)
+        buffer.extend_from_slice(&100u64.to_le_bytes());
+
+        // Timestamp (12 bytes)
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+
+        // Checksum (4 bytes) - placeholder
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        // OpType: UpdateNode (3)
+        buffer.push(3);
+
+        // NodeId (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // VersionId (8 bytes)
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // STOP - V0 has no label, properties, or valid_from
+
+        // Compute Checksum
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..checksum_offset]);
+        hasher.update(&buffer[checksum_offset + 4..]);
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        // Parse with Version 0
+        let (entry, _) = parse_entry_at(&buffer, 0, 0).expect("Should parse V0 entry");
+
+        if let WalOperation::UpdateNode { label, .. } = entry.operation {
+            assert_eq!(label.as_u32(), 0, "V0 UpdateNode should be assigned label ID 0");
+        } else {
+            panic!("Expected UpdateNode");
+        }
+    }
+
+    #[test]
+    fn test_v0_update_edge_assigns_dummy_label() {
+        let mut buffer = Vec::new();
+
+        // LSN
+        buffer.extend_from_slice(&200u64.to_le_bytes());
+        // Timestamp
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+        // Checksum placeholder
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        // OpType: UpdateEdge (4)
+        buffer.push(4);
+
+        // EdgeId
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+        // VersionId
+        buffer.extend_from_slice(&1u64.to_le_bytes());
+
+        // Compute Checksum
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..checksum_offset]);
+        hasher.update(&buffer[checksum_offset + 4..]);
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        // Parse V0
+        let (entry, _) = parse_entry_at(&buffer, 0, 0).expect("Should parse V0 entry");
+
+        if let WalOperation::UpdateEdge { label, .. } = entry.operation {
+            assert_eq!(label.as_u32(), 0, "V0 UpdateEdge should be assigned label ID 0");
+        } else {
+            panic!("Expected UpdateEdge");
+        }
+    }
+}
