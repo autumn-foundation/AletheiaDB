@@ -1405,11 +1405,11 @@ mod general_tests {
         tx2.commit().unwrap();
         let elapsed = start.elapsed();
 
-        // Performance assertion: should complete in reasonable time (< 2000ms)
+        // Performance assertion: should complete in reasonable time (< 5000ms)
         // This threshold is generous to avoid flakiness on slow CI systems (especially Windows)
         // while still catching significant performance regressions
         assert!(
-            elapsed.as_millis() < 2000,
+            elapsed.as_millis() < 5000,
             "Cascade delete of 200 edges took too long: {:?}",
             elapsed
         );

@@ -2188,6 +2188,7 @@ impl HnswIndex {
         }
 
         // Verify dimensions match what metadata reported (if any)
+        #[allow(clippy::collapsible_if)]
         if let Some(meta) = &metadata {
             if meta.dimensions != dimensions {
                 return Err(Error::Vector(VectorError::IndexError(format!(
