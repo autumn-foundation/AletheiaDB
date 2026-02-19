@@ -3,7 +3,7 @@
 //! This module provides the [`DurabilityMode`] enum which controls when data
 //! is synced to disk, and [`WriteOptions`] for per-transaction overrides.
 
-use crate::utils::error::{Result, StorageError};
+use crate::core::error::{Result, StorageError};
 use std::time::Duration;
 
 /// Durability mode controlling when data is synced to disk.

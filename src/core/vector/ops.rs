@@ -1,7 +1,7 @@
 use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
 use super::simd::{dot_and_magnitudes, dot_product_sum, scale_in_place, squared_diff_sum};
 use super::validation::check_dimensions_match;
-use crate::utils::error::Result;
+use crate::core::error::Result;
 
 // ============================================================================
 // Similarity Functions

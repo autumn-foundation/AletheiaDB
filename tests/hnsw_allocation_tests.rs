@@ -24,10 +24,10 @@
 //! 2. We can reuse the same buffer across multiple operations
 //! 3. No unnecessary cloning happens in the wrapper code
 
+use aletheiadb::core::error::Result;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::hnsw::{HnswConfig, HnswIndex};
 use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
-use aletheiadb::utils::Result;
 
 /// Test that add() accepts slices and doesn't require Vec allocation per call.
 ///

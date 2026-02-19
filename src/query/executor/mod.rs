@@ -10,9 +10,9 @@ mod results;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use crate::core::error::Result;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::utils::error::Result;
 
 use super::planner::physical::{PhysicalOp, PhysicalPlan};
 
@@ -307,8 +307,8 @@ impl QueryExecutor {
                 // 1. Validate that property_key matches the indexed property
                 let indexed_property =
                     self.current.get_indexed_property_name().ok_or_else(|| {
-                        crate::utils::error::Error::Query(
-                            crate::utils::error::QueryError::ExecutionError {
+                        crate::core::error::Error::Query(
+                            crate::core::error::QueryError::ExecutionError {
                                 message:
                                     "No vector index is enabled. Call enable_vector_index() first."
                                         .to_string(),
@@ -317,8 +317,8 @@ impl QueryExecutor {
                     })?;
 
                 if property_key != &indexed_property {
-                    return Err(crate::utils::error::Error::Query(
-                        crate::utils::error::QueryError::ExecutionError {
+                    return Err(crate::core::error::Error::Query(
+                        crate::core::error::QueryError::ExecutionError {
                             message: format!(
                                 "Property key '{}' does not match indexed property '{}'. \
                                  Vector index was built on '{}', so similar_to queries must use the same property.",
@@ -330,8 +330,8 @@ impl QueryExecutor {
 
                 // 2. Look up the source node
                 let node = self.current.get_node(*source_node).map_err(|_| {
-                    crate::utils::error::Error::Query(
-                        crate::utils::error::QueryError::ExecutionError {
+                    crate::core::error::Error::Query(
+                        crate::core::error::QueryError::ExecutionError {
                             message: format!("Source node {:?} not found", source_node),
                         },
                     )
@@ -343,8 +343,8 @@ impl QueryExecutor {
                     .get(property_key)
                     .and_then(|v: &crate::core::PropertyValue| v.as_vector())
                     .ok_or_else(|| {
-                        crate::utils::error::Error::Query(
-                            crate::utils::error::QueryError::ExecutionError {
+                        crate::core::error::Error::Query(
+                            crate::core::error::QueryError::ExecutionError {
                                 message: format!(
                                     "Node {:?} does not have a vector property '{}'",
                                     source_node, property_key
@@ -383,8 +383,8 @@ impl QueryExecutor {
             }
 
             // For unsupported operations, return error
-            _ => Err(crate::utils::error::Error::Query(
-                crate::utils::error::QueryError::SyntaxError {
+            _ => Err(crate::core::error::Error::Query(
+                crate::core::error::QueryError::SyntaxError {
                     message: format!("Unsupported physical operator: {:?}", op.name()),
                 },
             )),

@@ -2,12 +2,12 @@
 //!
 //! Defines the result types returned by query execution.
 
+use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::VersionId;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
-use crate::utils::error::Result;
 
 use super::iterators::ResultIterator;
 
@@ -607,8 +607,8 @@ impl QueryResults {
 
                     // VersionId::new validates against MAX_VALID_ID
                     let version_id = VersionId::new(ts_u64).map_err(|e| {
-                        crate::utils::error::Error::Query(
-                            crate::utils::error::QueryError::InvalidParameter {
+                        crate::core::error::Error::Query(
+                            crate::core::error::QueryError::InvalidParameter {
                                 parameter: "timestamp".to_string(),
                                 reason: format!(
                                     "Timestamp {} exceeds MAX_VALID_ID: {}",
@@ -679,14 +679,14 @@ mod tests {
             let mut results: Vec<Result<QueryRow>> = Vec::new();
             for (i, row) in rows.drain(..).enumerate() {
                 if i == error_at {
-                    results.push(Err(crate::utils::error::Error::Other(
+                    results.push(Err(crate::core::error::Error::Other(
                         "Test error".to_string(),
                     )));
                 }
                 results.push(Ok(row));
             }
             if error_at >= results.len() {
-                results.push(Err(crate::utils::error::Error::Other(
+                results.push(Err(crate::core::error::Error::Other(
                     "Test error".to_string(),
                 )));
             }

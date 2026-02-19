@@ -44,10 +44,10 @@
 //! let version = tiered.get_node_version(version_id)?;
 //! ```
 
+use crate::core::error::Result;
 use crate::core::id::VersionId;
 use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::redb_cold_storage::{ColdStorageStats, RedbColdStorage};
-use crate::utils::error::Result;
 use parking_lot::Mutex;
 use quick_cache::sync::Cache;
 use std::collections::VecDeque;

@@ -1,9 +1,9 @@
 use crate::api::transaction::{ReadTransaction, WriteTransaction};
+use crate::core::error::{Result, TransactionError};
 use crate::core::hlc::HybridTimestamp;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::storage::wal::WriteOptions;
-use crate::utils::error::{Result, TransactionError};
 use std::sync::Arc;
 
 impl AletheiaDB {
@@ -35,14 +35,16 @@ impl AletheiaDB {
             // commit so that `commit_ts < snapshot_ts` holds for all committed txns.
             // Use checked_add to handle potential overflow (theoretically requires
             // 4B+ events per microsecond, but we handle it for correctness).
-            let next_logical = last_commit.logical().checked_add(1).ok_or(
-                crate::utils::error::Error::Temporal(
-                    crate::utils::error::TemporalError::LogicalCounterOverflow {
-                        wallclock: last_commit.wallclock(),
-                        current_logical: last_commit.logical(),
-                    },
-                ),
-            )?;
+            let next_logical =
+                last_commit
+                    .logical()
+                    .checked_add(1)
+                    .ok_or(crate::core::error::Error::Temporal(
+                        crate::core::error::TemporalError::LogicalCounterOverflow {
+                            wallclock: last_commit.wallclock(),
+                            current_logical: last_commit.logical(),
+                        },
+                    ))?;
 
             // SAFETY: wallclock is copied from an existing valid HybridTimestamp,
             // and next_logical is bounded by u32::MAX via checked_add above.
@@ -130,7 +132,7 @@ impl AletheiaDB {
     pub fn read<F, T, E>(&self, f: F) -> std::result::Result<T, E>
     where
         F: FnOnce(&ReadTransaction) -> std::result::Result<T, E>,
-        E: From<crate::utils::error::Error>,
+        E: From<crate::core::error::Error>,
     {
         let tx = self.read_transaction().map_err(E::from)?;
         f(&tx)
@@ -212,7 +214,7 @@ impl AletheiaDB {
     pub fn write<F, T, E>(&self, f: F) -> std::result::Result<T, E>
     where
         F: FnOnce(&mut WriteTransaction) -> std::result::Result<T, E>,
-        E: From<crate::utils::error::Error>,
+        E: From<crate::core::error::Error>,
     {
         let mut tx = self.write_transaction().map_err(E::from)?;
         let result = f(&mut tx)?;
@@ -269,7 +271,7 @@ impl AletheiaDB {
     pub fn write_with_timestamp<F, T, E>(&self, f: F) -> std::result::Result<(T, Timestamp), E>
     where
         F: FnOnce(&mut WriteTransaction) -> std::result::Result<T, E>,
-        E: From<crate::utils::error::Error>,
+        E: From<crate::core::error::Error>,
     {
         let mut tx = self.write_transaction().map_err(E::from)?;
         let result = f(&mut tx)?;
@@ -338,7 +340,7 @@ impl AletheiaDB {
     ) -> std::result::Result<T, E>
     where
         F: FnOnce(&mut WriteTransaction) -> std::result::Result<T, E>,
-        E: From<crate::utils::error::Error>,
+        E: From<crate::core::error::Error>,
     {
         let mut tx = self
             .write_transaction_with_options(options)

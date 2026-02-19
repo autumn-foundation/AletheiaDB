@@ -3,8 +3,8 @@
 //! Propagates LIMIT operations down through the plan tree where safe,
 //! enabling early termination and reducing work.
 
+use crate::core::error::Result;
 use crate::query::plan::{LogicalOp, LogicalPlan, UnaryOp};
-use crate::utils::error::Result;
 
 use super::{OptimizationRule, Statistics};
 

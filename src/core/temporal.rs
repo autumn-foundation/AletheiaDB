@@ -29,8 +29,8 @@
 
 use std::fmt;
 
+use crate::core::error::{StorageError, TemporalError};
 use crate::core::hlc::HybridTimestamp;
-use crate::utils::error::{StorageError, TemporalError};
 
 /// Timestamp represented as Hybrid Logical Clock (HLC).
 ///
@@ -514,10 +514,10 @@ pub mod time {
     /// Returns an error if the system clock is set before Unix epoch.
     /// Most callers should use [`now`] instead, since a pre-epoch clock
     /// is an unrecoverable system-level error.
-    pub fn try_now() -> Result<Timestamp, crate::utils::error::TemporalError> {
+    pub fn try_now() -> Result<Timestamp, crate::core::error::TemporalError> {
         let wallclock = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| crate::utils::error::TemporalError::TemporalParadox {
+            .map_err(|_| crate::core::error::TemporalError::TemporalParadox {
                 reason: "System clock is before Unix epoch".to_string(),
             })?
             .as_micros() as i64;
@@ -749,7 +749,7 @@ mod tests {
         // TimeRange::new should return an error for invalid ranges (start > end)
         let result = TimeRange::new(200.into(), 100.into());
         assert!(result.is_err());
-        if let Err(crate::utils::error::TemporalError::InvalidTimeRange { start, end }) = result {
+        if let Err(crate::core::error::TemporalError::InvalidTimeRange { start, end }) = result {
             assert_eq!(start, 200.into());
             assert_eq!(end, 100.into());
         } else {

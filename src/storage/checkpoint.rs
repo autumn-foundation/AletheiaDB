@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::GLOBAL_INTERNER;
+use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
@@ -59,10 +60,9 @@ use crate::storage::index_persistence::{
 use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
-use crate::utils::error::{Result, StorageError};
 
 /// Convert IndexPersistenceError to our Result type.
-fn persistence_err(e: IndexPersistenceError) -> crate::utils::error::Error {
+fn persistence_err(e: IndexPersistenceError) -> crate::core::error::Error {
     StorageError::CheckpointError {
         reason: e.to_string(),
     }

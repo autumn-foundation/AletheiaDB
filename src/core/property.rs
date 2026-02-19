@@ -11,9 +11,9 @@ use std::fmt;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
+use crate::core::error::{Result, StorageError};
 use crate::core::interning::{GLOBAL_INTERNER, IdentityHasher, InternedString};
 use crate::core::vector::SparseVec;
-use crate::utils::error::{Result, StorageError};
 
 // ============================================================================
 // Serialization Type Tags
@@ -1195,7 +1195,7 @@ impl PropertyMap {
                     buffer.extend_from_slice(key_bytes);
                 })
                 .ok_or_else(|| {
-                    crate::utils::error::Error::Storage(StorageError::InconsistentState {
+                    crate::core::error::Error::Storage(StorageError::InconsistentState {
                         reason: format!(
                             "PropertyKey {} not found in interner - data corruption detected",
                             key.as_u32()
@@ -2527,9 +2527,7 @@ mod tests {
         );
 
         match result {
-            Err(crate::utils::error::Error::Storage(StorageError::InconsistentState {
-                reason,
-            })) => {
+            Err(crate::core::error::Error::Storage(StorageError::InconsistentState { reason })) => {
                 assert!(
                     reason.contains("not found in interner"),
                     "Error message should indicate missing key in interner"
@@ -2558,9 +2556,7 @@ mod tests {
 
         assert!(result.is_err(), "Should return error for missing key");
         match result {
-            Err(crate::utils::error::Error::Storage(StorageError::InconsistentState {
-                reason,
-            })) => {
+            Err(crate::core::error::Error::Storage(StorageError::InconsistentState { reason })) => {
                 assert!(
                     reason.contains("888888"),
                     "Error message should contain the invalid key ID"
@@ -3228,7 +3224,7 @@ mod tests {
         let result = PropertyMap::deserialize(&buffer);
         assert!(result.is_err());
         match result {
-            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
                 assert!(msg.contains("Duplicate property key"));
             }
             _ => panic!("Expected CorruptedData error"),
@@ -3256,7 +3252,7 @@ mod tests {
         // Should fail with recursion limit error
         assert!(result.is_err());
         match result {
-            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
                 assert!(msg.contains("recursion depth limit exceeded"));
             }
             _ => panic!("Expected CorruptedData error for recursion limit"),
@@ -3289,7 +3285,7 @@ mod tests {
         let result = PropertyValue::deserialize(&bytes);
         assert!(result.is_err());
         match result {
-            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
                 assert!(msg.contains("Buffer too short"));
             }
             _ => panic!("Expected CorruptedData error"),
@@ -3548,7 +3544,7 @@ mod sentry_tests {
         let result = PropertyMap::deserialize(&bytes);
         assert!(result.is_err());
         match result {
-            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
                 assert!(
                     msg.contains("exceeds maximum allowed"),
                     "Unexpected error message: {}",
@@ -3625,7 +3621,7 @@ mod sentry_tests {
         let result = PropertyMap::deserialize(&bytes);
         assert!(result.is_err());
         match result {
-            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
                 assert!(
                     msg.contains("Insufficient buffer size"),
                     "Unexpected error message: {}",

@@ -51,7 +51,7 @@
 //!     index: &impl VectorIndex,
 //!     query_embedding: &[f32],
 //!     limit: usize
-//! ) -> aletheiadb::utils::Result<Vec<(NodeId, f32)>> {
+//! ) -> aletheiadb::core::error::Result<Vec<(NodeId, f32)>> {
 //!     // Find top-k most similar documents
 //!     let results = index.search(query_embedding, limit)?;
 //!
@@ -68,7 +68,7 @@
 //!     query: &[f32],
 //!     allowed_ids: &[NodeId],
 //!     k: usize
-//! ) -> aletheiadb::utils::Result<Vec<(NodeId, f32)>> {
+//! ) -> aletheiadb::core::error::Result<Vec<(NodeId, f32)>> {
 //!     // Search only within a subset of nodes
 //!     index.search_with_filter(query, k, |id| allowed_ids.contains(id))
 //! }
@@ -86,9 +86,9 @@
 //!
 //! See [`docs/VECTOR_SEARCH_DESIGN.md`](../../docs/VECTOR_SEARCH_DESIGN.md) for complete architecture.
 
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
-use crate::utils::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -134,7 +134,7 @@ impl Quantization {
             0 => Ok(Quantization::F32),
             1 => Ok(Quantization::F16),
             2 => Ok(Quantization::I8),
-            _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
+            _ => Err(crate::core::error::StorageError::CorruptedData(format!(
                 "Invalid quantization encoding: {}",
                 value
             ))
@@ -280,7 +280,7 @@ impl DistanceMetric {
             3 => Ok(DistanceMetric::Haversine),
             4 => Ok(DistanceMetric::Hamming),
             5 => Ok(DistanceMetric::Tanimoto),
-            _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
+            _ => Err(crate::core::error::StorageError::CorruptedData(format!(
                 "Invalid distance metric encoding: {}",
                 value
             ))
@@ -353,7 +353,7 @@ pub trait VectorIndex: Send + Sync {
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::core::id::NodeId;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> aletheiadb::utils::Result<()> {
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let node_id = NodeId::new(123).unwrap();
     /// let embedding = vec![0.1, 0.2, 0.3, 0.4];
@@ -382,7 +382,7 @@ pub trait VectorIndex: Send + Sync {
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::core::id::NodeId;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> aletheiadb::utils::Result<()> {
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let node_id = NodeId::new(123).unwrap();
     /// index.remove(node_id)?;
@@ -419,7 +419,7 @@ pub trait VectorIndex: Send + Sync {
     /// ```rust
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> aletheiadb::utils::Result<()> {
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
     /// let results = index.search(&query, 10)?;
@@ -471,7 +471,7 @@ pub trait VectorIndex: Send + Sync {
     /// # use aletheiadb::core::id::NodeId;
     /// # use std::collections::HashSet;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> aletheiadb::utils::Result<()> {
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
     /// let allowed = HashSet::from([NodeId::new(1).unwrap(), NodeId::new(5).unwrap(), NodeId::new(10).unwrap()]);
@@ -497,7 +497,7 @@ pub trait VectorIndex: Send + Sync {
     /// ```rust
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> aletheiadb::utils::Result<()> {
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// println!("Index contains {} vectors", index.len());
     /// # Ok(())
@@ -515,7 +515,7 @@ pub trait VectorIndex: Send + Sync {
     /// ```rust
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> aletheiadb::utils::Result<()> {
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let dims = index.dimensions();
     /// println!("This index accepts {}-dimensional vectors", dims);
@@ -545,7 +545,7 @@ pub trait VectorIndex: Send + Sync {
     /// ```rust
     /// # use aletheiadb::index::{VectorIndex, DistanceMetric};
     /// # use aletheiadb::index::vector::HnswIndexBuilder;
-    /// # fn main() -> aletheiadb::utils::Result<()> {
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// match index.distance_metric() {
     ///     DistanceMetric::Cosine => println!("Using cosine similarity"),
@@ -570,7 +570,7 @@ pub trait VectorIndex: Send + Sync {
     /// ```rust
     /// # use aletheiadb::index::VectorIndex;
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
-    /// # fn main() -> aletheiadb::utils::Result<()> {
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
     /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// if index.is_empty() {
     ///     println!("No vectors indexed yet");
@@ -619,8 +619,8 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// Returns `Err(UnsupportedOperation)` if the implementation doesn't support persistence.
     fn save(&self, _path: &std::path::Path) -> Result<()> {
-        Err(crate::utils::Error::Vector(
-            crate::utils::error::VectorError::IndexError(
+        Err(crate::core::error::Error::Vector(
+            crate::core::error::VectorError::IndexError(
                 "save not supported by this index type".to_string(),
             ),
         ))

@@ -1267,7 +1267,7 @@ mod concurrent_tests {
                         0.0,
                     ]);
                     let results =
-                        traverse_and_rank(&db_clone, center_clone, "LINKS", &query_embedding, 5)
+                        traverse_and_rank(&*db_clone, center_clone, "LINKS", &query_embedding, 5)
                             .unwrap();
                     assert_eq!(
                         results.len(),
@@ -1330,7 +1330,7 @@ mod concurrent_tests {
                 for _ in 0..20 {
                     let query_embedding = make_embedding(&[0.5, 0.5, 0.0, 0.0]);
                     let _ =
-                        traverse_and_rank(&db_clone, center_clone, "LINKS", &query_embedding, 5);
+                        traverse_and_rank(&*db_clone, center_clone, "LINKS", &query_embedding, 5);
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
             }));
@@ -1372,7 +1372,7 @@ mod concurrent_tests {
 
         // Verify final state: 10 initial nodes + 10 added by writer thread = 20 total
         let query_embedding = make_embedding(&[0.5, 0.5, 0.0, 0.0]);
-        let results = traverse_and_rank(&db, center, "LINKS", &query_embedding, 100)
+        let results = traverse_and_rank(&*db, center, "LINKS", &query_embedding, 100)
             .expect("Failed to query final state");
         assert_eq!(
             results.len(),

@@ -9,11 +9,11 @@
 //! - `NodeVersion` / `EdgeVersion`: The version structures.
 //! - `VersionData`: Payload (Anchor or Delta).
 
+use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
 use crate::core::interning::{IdentityHasher, InternedString};
 use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
-use crate::utils::error::Result;
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;

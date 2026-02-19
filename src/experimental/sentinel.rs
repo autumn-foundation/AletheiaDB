@@ -28,9 +28,9 @@
 //! assert!(sentinel.validate(&toxic_props).is_err());
 //! ```
 
+use crate::core::error::{Error, Result, StorageError};
 use crate::core::property::PropertyMap;
 use crate::core::vector::cosine_similarity;
-use crate::utils::error::{Error, Result, StorageError};
 
 /// A rule that validates a PropertyMap.
 pub trait SemanticRule {
