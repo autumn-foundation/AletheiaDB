@@ -18,6 +18,8 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
+//! # let node_id_1 = db.create_node("Node", Default::default())?;
+//! # let node_id_2 = db.create_node("Node", Default::default())?;
 //! let detector = WormholeDetector::new(&db);
 //!
 //! // Find candidates for wormholes (e.g., all Person nodes)

@@ -380,4 +380,4 @@ required-features = []
 # Experimental features
 [[example]]
 name = "story_demo"
-required-features = ["nova"]
+# required-features = ["nova"]  <-- Removed to allow runtime error message

@@ -125,6 +125,44 @@ pub mod temporal_diff;
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
 
+#[cfg(not(feature = "nova"))]
+/// Temporal narrative generator for natural language history logs.
+pub mod temporal_narrative {
+    use crate::AletheiaDB;
+    use crate::core::error::Result;
+    use crate::core::id::NodeId;
+
+    /// A single event in the narrative history of an entity.
+    #[derive(Debug, Clone)]
+    pub struct NarrativeEvent {
+        /// ISO 8601 timestamp of when the event was recorded (transaction time).
+        pub timestamp: String,
+        /// Sequential version number.
+        pub version_number: u64,
+        /// High-level description of what happened.
+        pub description: String,
+        /// Detailed list of changes (if any).
+        pub changes: Vec<String>,
+    }
+
+    /// Generator for creating natural language narratives from temporal history.
+    pub struct NarrativeGenerator<'a> {
+        _marker: std::marker::PhantomData<&'a ()>,
+    }
+
+    impl<'a> NarrativeGenerator<'a> {
+        /// Create a new narrative generator.
+        pub fn new(_db: &'a AletheiaDB) -> Self {
+            panic!("Experimental features like NarrativeGenerator require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n");
+        }
+
+        /// Generate a narrative for a specific node.
+        pub fn generate_node_narrative(&self, _node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
+            panic!("Experimental features like NarrativeGenerator require the 'nova' feature.");
+        }
+    }
+}
+
 #[cfg(feature = "nova")]
 /// Thermos: Semantic Temperature & Volatility Gauge.
 pub mod thermos;
