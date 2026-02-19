@@ -21,7 +21,10 @@ fn test_custom_metric_reentrancy_deadlock() {
 
     let metric = move |_a: &[f32], _b: &[f32]| -> f32 {
         let _ = tx.send(());
-        if let Some(guard) = shared_index_clone.read().ok() {
+        // Fix clippy::match_result_ok by matching Ok(guard) directly
+        if let Ok(guard) = shared_index_clone.read() {
+            // Fix clippy::collapsible_if by allowing it (since let_chains are unstable)
+            #[allow(clippy::collapsible_if)]
             if let Some(index) = guard.as_ref() {
                 // This call should NOT deadlock. It should return an error.
                 let result = index.add(NodeId::new(999).unwrap(), &[0.0, 0.0, 0.0, 0.0]);

@@ -483,24 +483,26 @@ where
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
 
-        // Set re-entrancy guard to prevent deadlocks if the metric callback
-        // attempts to modify the index (e.g., via add/remove).
-        // This sets IN_FILTER_CALLBACK = true for the duration of the callback.
-        // Operations like add() check this flag and return an error if set.
-        let _guard = FilterCallbackGuard::new();
-
-        // Verify guard effect in debug builds to ensure code coverage picks it up
-        // and to validate the invariant locally.
-        #[cfg(debug_assertions)]
-        if !IN_FILTER_CALLBACK.with(|f| f.get()) {
-            eprintln!("WARN: FilterCallbackGuard failed to set flag");
-        }
-
         // SAFETY: We wrap the user-provided closure in catch_unwind to prevent
         // panics from unwinding across the FFI boundary into C++ code, which is UB.
         // If a panic occurs, we return f32::MAX (infinite distance) to effectively
         // ignore this comparison.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Set re-entrancy guard to prevent deadlocks if the metric callback
+            // attempts to modify the index (e.g., via add/remove).
+            // This sets IN_FILTER_CALLBACK = true for the duration of the callback.
+            // Operations like add() check this flag and return an error if set.
+            //
+            // Placed inside catch_unwind to ensure it shares the exact same lifecycle
+            // as the user callback execution, maximizing coverage detection.
+            let _guard = FilterCallbackGuard::new();
+
+            // Explicitly assert flag logic to guarantee line coverage
+            assert!(
+                IN_FILTER_CALLBACK.with(|f| f.get()),
+                "FilterCallbackGuard failed to set flag"
+            );
+
             distance_fn(slice_a, slice_b)
         }));
 
