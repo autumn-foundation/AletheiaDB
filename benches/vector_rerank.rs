@@ -59,13 +59,13 @@ impl BaselineVectorRerankIterator {
 }
 
 impl ResultIterator for BaselineVectorRerankIterator {
-    fn next(&mut self) -> Option<aletheiadb::core::error::Result<QueryRow>> {
+    fn next(&mut self) -> Option<aletheiadb::utils::Result<QueryRow>> {
         if self.sorted.is_none() && self.input.is_some() {
             let vector_property = match &self.vector_property {
                 Some(prop) => prop.clone(),
                 None => {
-                    return Some(Err(aletheiadb::core::error::Error::Vector(
-                        aletheiadb::core::error::VectorError::IndexError(
+                    return Some(Err(aletheiadb::utils::Error::Vector(
+                        aletheiadb::utils::error::VectorError::IndexError(
                             "VectorRerank requires a vector index to be enabled.".to_string(),
                         ),
                     )));

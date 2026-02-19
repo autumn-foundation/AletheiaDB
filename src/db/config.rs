@@ -1,6 +1,5 @@
 use crate::api::transaction::{TxIdGenerator, TxVisibilityManager};
 use crate::config::AletheiaDBConfig;
-use crate::core::error::Result;
 use crate::core::id::IdGenerator;
 use crate::core::temporal::time;
 use crate::core::version::AnchorConfig;
@@ -15,6 +14,7 @@ use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 use crate::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use crate::utils::error::Result;
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -62,7 +62,7 @@ fn bootstrap_timestamp(
 fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
     let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
     let mut current_timestamp = db.current_timestamp.lock().map_err(|_| {
-        crate::core::error::Error::other(
+        crate::utils::error::Error::other(
             "failed to seed startup current_timestamp due to lock poisoning",
         )
     })?;

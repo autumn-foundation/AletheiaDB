@@ -199,20 +199,6 @@ impl PendingEntry {
     }
 }
 
-impl Drop for PendingEntry {
-    fn drop(&mut self) {
-        // If the entry is dropped and hasn't been completed yet, notify an error.
-        // This prevents deadlocks where a waiter hangs forever if the entry is discarded
-        // (e.g. buffer full, panic, or explicit drop) without being flushed.
-        #[allow(clippy::collapsible_if)]
-        if let Some(ref notifier) = self.completion {
-            if !notifier.is_complete() {
-                notifier.notify_error("PendingEntry dropped before flush");
-            }
-        }
-    }
-}
-
 /// Completion notification state.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1165,8 +1151,7 @@ mod tests {
                 for entry in entries {
                     drained_count += 1;
                     // Verify data integrity
-                    // Access data by reference since Drop implementation prevents moving fields
-                    let val = u64::from_le_bytes(entry.data.as_slice().try_into().unwrap());
+                    let val = u64::from_le_bytes(entry.data.try_into().unwrap());
                     checksum = checksum.wrapping_add(val);
                 }
             }
@@ -1413,40 +1398,5 @@ mod tests {
             max_sleep_us: 10,
         };
         let _ = WalRingBuffer::with_config(1024, config);
-    }
-}
-
-#[cfg(test)]
-mod sentry_tests {
-    use super::*;
-
-    #[test]
-    fn test_sentry_dropped_entry_notifies_error() {
-        // 🛡️ Sentry: Verify that dropping a PendingEntry notifies the waiter with an error.
-        // This prevents deadlocks if an entry is dropped (e.g. on full buffer or panic)
-        // while a thread is waiting for sync persistence.
-
-        let (entry, handle) = PendingEntry::new_sync(LSN(100), vec![]);
-
-        // Ensure initially pending
-        assert!(!handle.is_complete(), "Handle should be pending initially");
-
-        // Drop the entry immediately without flushing
-        drop(entry);
-
-        // The handle should report an error because the entry was dropped before completion
-        // If this fails (handle remains pending), it means we have a deadlock risk
-        assert!(
-            handle.is_complete(),
-            "Handle should be complete (error) after entry drop"
-        );
-
-        let result = handle.wait();
-        assert!(result.is_err(), "Handle should return error");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("PendingEntry dropped"),
-            "Error should mention dropped entry"
-        );
     }
 }

@@ -19,7 +19,6 @@
 //! - **Tombstones**: Deletions create "tombstone" versions that close the valid time interval.
 
 use super::WriteTransaction;
-use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
@@ -27,6 +26,7 @@ use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use crate::core::version::VersionMetadata;
 use crate::storage::historical::HistoricalStorage;
+use crate::utils::error::{Result, StorageError};
 
 /// Helper function to create a bi-temporal interval with proper closing logic.
 ///

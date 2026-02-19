@@ -457,27 +457,6 @@ criterion_group!(
     bench_dot_product_openai,
     bench_dot_product_self,
     bench_dot_product_batch,
-    bench_normalize,
 );
 
 criterion_main!(benches);
-
-/// Benchmark normalization.
-fn bench_normalize(c: &mut Criterion) {
-    use aletheiadb::core::vector::normalize;
-    let mut group = c.benchmark_group("normalize");
-
-    let dimensions = [384, 768, 1024, 1536, 3072];
-
-    for dim in dimensions {
-        let a = generate_vector(dim, 42);
-
-        group.throughput(Throughput::Elements(dim as u64));
-
-        group.bench_with_input(BenchmarkId::new("normalize", dim), &dim, |bencher, _| {
-            bencher.iter(|| normalize(black_box(&a)));
-        });
-    }
-
-    group.finish();
-}

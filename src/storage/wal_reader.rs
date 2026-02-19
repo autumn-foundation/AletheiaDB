@@ -7,7 +7,7 @@ use std::path::Path;
 
 use super::wal::segment_reader;
 use super::wal::{LSN, WalEntry};
-use crate::core::error::Result;
+use crate::utils::error::Result;
 
 /// Read WAL entries from a directory, starting from the specified LSN.
 ///

@@ -448,19 +448,14 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn json_to_property_map(
-        &self,
-        json: &HashMap<String, serde_json::Value>,
-    ) -> Result<PropertyMap, String> {
+    fn json_to_property_map(&self, json: &HashMap<String, serde_json::Value>) -> PropertyMap {
         let mut builder = PropertyMapBuilder::new();
         for (key, value) in json {
             if let Some(pv) = self.json_to_property_value(value) {
-                builder = builder
-                    .try_insert(key.as_str(), pv)
-                    .map_err(|e| e.to_string())?;
+                builder = builder.insert(key.as_str(), pv);
             }
         }
-        Ok(builder.build())
+        builder.build()
     }
 
     fn json_to_property_value(&self, value: &serde_json::Value) -> Option<PropertyValue> {
@@ -610,13 +605,10 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        let properties = match req.properties {
-            Some(p) => match self.json_to_property_map(&p) {
-                Ok(map) => map,
-                Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
-            },
-            None => PropertyMap::default(),
-        };
+        let properties = req
+            .properties
+            .map(|p| self.json_to_property_map(&p))
+            .unwrap_or_default();
 
         match self.db.create_node(&req.label, properties) {
             Ok(node_id) => match self.db.get_node(node_id) {
@@ -644,10 +636,7 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        let properties = match self.json_to_property_map(&req.properties) {
-            Ok(map) => map,
-            Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
-        };
+        let properties = self.json_to_property_map(&req.properties);
 
         match self.db.write(|tx| tx.update_node(node_id, properties)) {
             Ok(()) => match self.db.get_node(node_id) {
@@ -880,13 +869,10 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&format!("Invalid target_id: {}", e)),
         };
 
-        let properties = match req.properties {
-            Some(p) => match self.json_to_property_map(&p) {
-                Ok(map) => map,
-                Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
-            },
-            None => PropertyMap::default(),
-        };
+        let properties = req
+            .properties
+            .map(|p| self.json_to_property_map(&p))
+            .unwrap_or_default();
 
         match self
             .db
@@ -917,10 +903,7 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        let properties = match self.json_to_property_map(&req.properties) {
-            Ok(map) => map,
-            Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
-        };
+        let properties = self.json_to_property_map(&req.properties);
 
         match self.db.write(|tx| tx.update_edge(edge_id, properties)) {
             Ok(()) => match self.db.get_edge(edge_id) {

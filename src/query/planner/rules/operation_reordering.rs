@@ -6,9 +6,9 @@
 //! - Reordering join operands (smaller relation as build side)
 //! - Choosing optimal operation order based on cardinality estimates
 
-use crate::core::error::Result;
 use crate::query::ir::Predicate;
 use crate::query::plan::{BinaryOp, LogicalOp, LogicalPlan, ScanOp, UnaryOp};
+use crate::utils::error::Result;
 
 use super::{OptimizationRule, Statistics};
 

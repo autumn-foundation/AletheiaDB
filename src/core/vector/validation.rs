@@ -1,4 +1,4 @@
-use crate::core::error::{Error, Result, VectorError};
+use crate::utils::error::{Error, Result, VectorError};
 
 // ============================================================================
 // Vector Validation

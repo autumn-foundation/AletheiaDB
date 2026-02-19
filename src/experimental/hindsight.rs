@@ -15,12 +15,12 @@
 #![allow(clippy::collapsible_if)]
 
 use crate::AletheiaDB;
-use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, MAX_VALID_ID, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder};
 use crate::core::temporal::Timestamp;
+use crate::utils::error::{Result, StorageError};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A scenario representing a set of hypothetical changes to the graph.
@@ -264,9 +264,7 @@ impl<'a> Hindsight<'a> {
     pub fn get_node(&self, id: NodeId) -> Result<Node> {
         // 1. Check if removed
         if self.scenario.removed_nodes.contains(&id) {
-            return Err(crate::core::error::Error::Storage(
-                StorageError::NodeNotFound(id),
-            ));
+            return Err(crate::utils::Error::Storage(StorageError::NodeNotFound(id)));
         }
 
         // 2. Check if added
@@ -310,9 +308,7 @@ impl<'a> Hindsight<'a> {
     pub fn get_edge(&self, id: EdgeId) -> Result<Edge> {
         // 1. Check if removed
         if self.scenario.removed_edges.contains(&id) {
-            return Err(crate::core::error::Error::Storage(
-                StorageError::EdgeNotFound(id),
-            ));
+            return Err(crate::utils::Error::Storage(StorageError::EdgeNotFound(id)));
         }
 
         // 2. Check if added
@@ -331,9 +327,7 @@ impl<'a> Hindsight<'a> {
         if self.scenario.removed_nodes.contains(&edge.source)
             || self.scenario.removed_nodes.contains(&edge.target)
         {
-            return Err(crate::core::error::Error::Storage(
-                StorageError::EdgeNotFound(id),
-            ));
+            return Err(crate::utils::Error::Storage(StorageError::EdgeNotFound(id)));
         }
 
         Ok(edge)

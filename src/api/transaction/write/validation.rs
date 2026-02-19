@@ -1,6 +1,6 @@
 use super::{MAX_VALID_TIME_FUTURE_OFFSET_US, WriteTransaction};
-use crate::core::error::{Result, TransactionError};
 use crate::core::temporal::{Timestamp, time};
+use crate::utils::error::{Result, TransactionError};
 
 /// Validate that valid_from is not too far in the future.
 ///
@@ -11,12 +11,14 @@ pub(crate) fn validate_valid_from_future(valid_from: Timestamp) -> Result<()> {
     let future_offset = valid_from.wallclock() as i128 - current.wallclock() as i128;
 
     if future_offset > MAX_VALID_TIME_FUTURE_OFFSET_US as i128 {
-        return Err(crate::core::error::TemporalError::ValidTimeTooFarInFuture {
-            valid_from,
-            current_time: current,
-            max_future_offset_us: MAX_VALID_TIME_FUTURE_OFFSET_US,
-        }
-        .into());
+        return Err(
+            crate::utils::error::TemporalError::ValidTimeTooFarInFuture {
+                valid_from,
+                current_time: current,
+                max_future_offset_us: MAX_VALID_TIME_FUTURE_OFFSET_US,
+            }
+            .into(),
+        );
     }
     Ok(())
 }
@@ -32,7 +34,7 @@ pub(crate) fn validate_valid_from_not_before_creation(
 ) -> Result<()> {
     if valid_from < entity_creation_time {
         return Err(
-            crate::core::error::TemporalError::ValidTimeBeforeEntityCreation {
+            crate::utils::error::TemporalError::ValidTimeBeforeEntityCreation {
                 valid_from,
                 entity_creation_time,
                 entity_id: entity_id.to_string(),

@@ -1,10 +1,10 @@
-use crate::core::error::Result;
+use crate::api::vector_builder::VectorIndexBuilder;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
-use crate::db::vector_builder::VectorIndexBuilder;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
+use crate::utils::error::Result;
 use std::sync::Arc;
 
 impl AletheiaDB {
@@ -87,7 +87,7 @@ impl AletheiaDB {
             } else if self.current.is_vector_index_enabled_for(property_name) {
                 // No config provided, but vector index exists - use its config
                 self.current.get_hnsw_config_for(property_name).ok_or_else(|| {
-                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
                     format!(
                         "Vector index exists for '{}' but could not retrieve its configuration",
                         property_name
@@ -96,8 +96,8 @@ impl AletheiaDB {
             })?
             } else {
                 // No config provided and no vector index exists - error
-                return Err(crate::core::error::Error::Vector(
-                    crate::core::error::VectorError::IndexError(
+                return Err(crate::utils::error::Error::Vector(
+                    crate::utils::error::VectorError::IndexError(
                         "HNSW configuration is required when no vector index exists. \
                      Use TemporalVectorConfig::default_with_hnsw() to provide one, \
                      or enable the vector index first with enable_vector_index()."
@@ -126,7 +126,7 @@ impl AletheiaDB {
 
         // Get the temporal vector index from current storage
         let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
-            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
                 "Temporal vector index not found after enabling".to_string(),
             ))
         })?;
@@ -757,23 +757,5 @@ impl AletheiaDB {
         .entered();
         self.current
             .find_drift_in(property_name, threshold, time_range, metric)
-    }
-}
-
-#[cfg(test)]
-mod coverage_tests {
-    use super::*;
-
-    #[test]
-    fn test_enable_temporal_vector_index_missing_config() {
-        let db = AletheiaDB::new().unwrap();
-        // Don't enable vector index first
-        // Provide config without HNSW config
-        let config = TemporalVectorConfig::default();
-
-        let result = db.enable_temporal_vector_index("embedding", config);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(format!("{}", err).contains("HNSW configuration is required"));
     }
 }

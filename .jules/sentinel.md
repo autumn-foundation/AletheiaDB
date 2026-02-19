@@ -23,15 +23,3 @@
 **Summary:** `serialize_entry` checks `estimated_capacity > MAX_WAL_ENTRY_SIZE`, but no test verified behavior at exactly `MAX_WAL_ENTRY_SIZE` or just above it.
 **Diagnosis:** **Missing Coverage**. A mutant changing `>` to `>=` (rejecting valid max-size entries) or removing the check entirely (allowing DoS) would survive.
 **Kill Shot:** Added `test_append_entry_exactly_max_size_succeeds` and `test_append_entry_exceeding_max_size_fails` in `sentry_tests` module to enforce strict boundary compliance.
-
-**[Time ISO 8601 Precision Loss]**
-**Module:** `src/core/temporal.rs`
-**Summary:** `time::to_iso8601` calculation of nanoseconds (`(wallclock % 1_000_000) * 1000`) was susceptible to arithmetic mutations (e.g. `*` to `/`).
-**Diagnosis:** **Weak Test**. Existing tests only asserted that the seconds component was present in the output string, allowing incorrect fractional parts to pass unnoticed.
-**Kill Shot:** Added `test_sentry_iso8601_precision` which inputs a timestamp with microseconds and explicitly asserts that the calculated nanoseconds appear in the output.
-
-**[MAX_VALID_TIMESTAMP Value Integrity]**
-**Module:** `src/core/temporal.rs`
-**Summary:** `MAX_VALID_TIMESTAMP` constant definition was susceptible to reduction (e.g. `replace - with /`) because existing boundary tests used the constant itself for assertions (tautological tests).
-**Diagnosis:** **Weak Test**. Tests checked `TimeRange::new(MAX_VALID_TIMESTAMP, ...)` which would pass even if `MAX_VALID_TIMESTAMP` was small, as long as it was self-consistent.
-**Kill Shot:** Added `test_sentry_max_valid_timestamp_value` which asserts that `TimeRange::new` accepts a hardcoded large timestamp (`i64::MAX - 2000`), ensuring the limit isn't drastically reduced.

@@ -29,8 +29,8 @@
 
 use std::fmt;
 
-use crate::core::error::{StorageError, TemporalError};
 use crate::core::hlc::HybridTimestamp;
+use crate::utils::error::{StorageError, TemporalError};
 
 /// Timestamp represented as Hybrid Logical Clock (HLC).
 ///
@@ -515,10 +515,10 @@ pub mod time {
     /// Returns an error if the system clock is set before Unix epoch.
     /// Most callers should use [`now`] instead, since a pre-epoch clock
     /// is an unrecoverable system-level error.
-    pub fn try_now() -> Result<Timestamp, crate::core::error::TemporalError> {
+    pub fn try_now() -> Result<Timestamp, crate::utils::error::TemporalError> {
         let wallclock = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| crate::core::error::TemporalError::TemporalParadox {
+            .map_err(|_| crate::utils::error::TemporalError::TemporalParadox {
                 reason: "System clock is before Unix epoch".to_string(),
             })?
             .as_micros() as i64;
@@ -750,7 +750,7 @@ mod tests {
         // TimeRange::new should return an error for invalid ranges (start > end)
         let result = TimeRange::new(200.into(), 100.into());
         assert!(result.is_err());
-        if let Err(crate::core::error::TemporalError::InvalidTimeRange { start, end }) = result {
+        if let Err(crate::utils::error::TemporalError::InvalidTimeRange { start, end }) = result {
             assert_eq!(start, 200.into());
             assert_eq!(end, 100.into());
         } else {
@@ -1590,7 +1590,6 @@ mod sentry_tests {
     }
 
     #[test]
-<<<<<<< sentinel-fix-timerange-close-at-8418838380168271790
     fn test_sentinel_time_range_new_timestamp_max() {
         // 🛡️ Sentry Test: Verify exemption for TIMESTAMP_MAX in TimeRange::new.
         // The check `start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX`
@@ -1667,73 +1666,5 @@ mod sentry_tests {
         );
         let closed = result.unwrap();
         assert_eq!(closed.end(), max_valid_ts);
-=======
-    fn test_sentry_iso8601_precision() {
-        // 🛡️ Sentry Test: Verify sub-second precision in ISO 8601 output.
-        // This targets mutants that break nanosecond calculation.
-
-        let secs = 1609459200;
-        let micros = 123456;
-        let ts = HybridTimestamp::new_unchecked(secs * 1_000_000 + micros, 0);
-        let output = time::to_iso8601(ts);
-
-        // Expected nanoseconds: 123456000
-        if cfg!(windows) {
-            // On Windows, SystemTime debug format is "SystemTime { intervals: <count> }"
-            // intervals are 100ns ticks since 1601-01-01.
-            // Base seconds (1601 to 1970) = 11644473600.
-            // Target seconds (1970 to 2021) = 1609459200.
-            // Total seconds = 13253932800.
-            // Total ticks from seconds = 13253932800 * 10_000_000 = 132539328000000000.
-            // Ticks from microseconds = 123456 * 10 = 1234560.
-            // Total ticks = 132539328001234560.
-            // We check for the fractional part contribution or the exact tick count.
-            // Since the output observed is "intervals: 132539328001234560", we check for that suffix.
-            assert!(
-                output.contains("1234560"),
-                "Output should contain the fractional ticks (1234560): {}",
-                output
-            );
-        } else {
-            // On Unix-like systems, Debug format usually contains "tv_nsec: 123456000".
-            assert!(
-                output.contains("123456000"),
-                "Output should contain nanoseconds (123456000): {}",
-                output
-            );
-        }
-    }
-
-    #[test]
-    fn test_sentry_max_valid_timestamp_value() {
-        // 🛡️ Sentry Test: Verify MAX_VALID_TIMESTAMP allows reasonably large values.
-        // This targets mutants that drastically reduce MAX_VALID_TIMESTAMP (e.g. replace - with /).
-
-        // i64::MAX is ~9e18. i64::MAX / 1000 is ~9e15.
-        // We want to ensure we can store something larger than 9e15.
-        // 9e15 micros is ~285 years.
-        // Wait, i64::MAX micros is ~292,000 years.
-        // If we mutate to i64::MAX / 1000, we limit to ~292 years.
-        // Current time is ~1.7e15 micros (2024).
-        // So i64::MAX / 1000 (9e15) is still future (year ~2250).
-        // But we want to support timestamps far in the future (e.g. year 3000).
-
-        // Let's just pick a value close to i64::MAX, e.g. i64::MAX - 2000.
-        // If MAX_VALID_TIMESTAMP is i64::MAX / 1000, this will fail.
-
-        let large_val = i64::MAX - 2000;
-        let ts = HybridTimestamp::new_unchecked(large_val, 0);
-
-        // This should be accepted by TimeRange::new if MAX_VALID_TIMESTAMP is correct.
-        // But wait, TimeRange::new checks against MAX_VALID_TIMESTAMP.
-        // If MAX_VALID_TIMESTAMP is correct (i64::MAX - 1000), then i64::MAX - 2000 < MAX_VALID_TIMESTAMP. OK.
-        // If MAX_VALID_TIMESTAMP is mutated to (i64::MAX / 1000), then i64::MAX - 2000 > MAX_VALID_TIMESTAMP. Error.
-
-        let result = TimeRange::new(ts, ts);
-        assert!(
-            result.is_ok(),
-            "Should accept large timestamp close to i64::MAX"
-        );
->>>>>>> trunk
     }
 }

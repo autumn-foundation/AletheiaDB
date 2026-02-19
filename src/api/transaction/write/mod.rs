@@ -13,7 +13,6 @@ use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
     WriteOps,
 };
-use crate::core::error::{Result, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
 use crate::core::hlc::{
     SendWithSelfHealError, evaluate_clock_skew, is_clock_skew_self_heal_enabled,
@@ -29,6 +28,7 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
+use crate::utils::error::{Result, StorageError, TransactionError};
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;

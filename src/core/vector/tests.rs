@@ -1,7 +1,7 @@
 use super::*;
-use crate::core::error::{Error, VectorError};
 #[allow(unused_imports)]
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
+use crate::utils::error::{Error, VectorError};
 
 #[test]
 fn test_vector_dimension_new() {
@@ -2321,7 +2321,7 @@ fn test_validate_vector_nan_rejection() {
     assert!(
         matches!(
             result.unwrap_err(),
-            crate::core::error::Error::Vector(crate::core::error::VectorError::ContainsNaN {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::ContainsNaN {
                 count: 1
             })
         ),
@@ -2342,9 +2342,9 @@ fn test_validate_vector_infinity_rejection() {
     assert!(
         matches!(
             result.unwrap_err(),
-            crate::core::error::Error::Vector(crate::core::error::VectorError::ContainsInfinity {
-                count: 1
-            })
+            crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::ContainsInfinity { count: 1 }
+            )
         ),
         "Expected ContainsInfinity error with count=1"
     );

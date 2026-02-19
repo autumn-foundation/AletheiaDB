@@ -29,7 +29,7 @@
 //! use aletheiadb::core::id::NodeId;
 //! use aletheiadb::core::vector::SparseVec;
 //!
-//! # fn example() -> aletheiadb::core::error::Result<()> {
+//! # fn example() -> aletheiadb::utils::Result<()> {
 //! // Create an index for 10,000-dimensional sparse vectors
 //! let index = SparseVectorIndex::new(SparseIndexConfig {
 //!     dimensions: 10_000,
@@ -60,10 +60,10 @@
 //! - Faster search when sparsity is high (>99%)
 //! - No approximation - exact similarity scores
 
-use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::SparseVec;
+use crate::utils::{Error, Result, error::VectorError};
 use bitcode::{Decode, Encode};
 use crc32fast::Hasher;
 use dashmap::DashMap;

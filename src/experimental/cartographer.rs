@@ -28,11 +28,7 @@ impl<'a> Cartographer<'a> {
     }
 
     /// Analyzes the graph to find clusters based on the given vector property.
-    pub fn analyze(
-        &self,
-        property: &str,
-        k: usize,
-    ) -> crate::core::error::Result<ClusteringResult> {
+    pub fn analyze(&self, property: &str, k: usize) -> crate::utils::Result<ClusteringResult> {
         // Step 1: Harvest vectors
         // We use the query engine to scan all nodes.
         let results = self
@@ -69,7 +65,7 @@ impl<'a> Cartographer<'a> {
     /// member nodes to it with a "LOCATED_IN" edge.
     ///
     /// Returns the NodeIds of the created Region nodes.
-    pub fn reify(&self, clustering: &ClusteringResult) -> crate::core::error::Result<Vec<NodeId>> {
+    pub fn reify(&self, clustering: &ClusteringResult) -> crate::utils::Result<Vec<NodeId>> {
         self.db.write(|tx| {
             let mut region_ids = Vec::new();
 

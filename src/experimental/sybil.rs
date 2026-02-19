@@ -37,7 +37,7 @@
 
 use crate::AletheiaDB;
 use crate::core::NodeId;
-use crate::core::error::Result;
+use crate::utils::error::Result;
 use std::collections::HashMap;
 
 /// Represents the state of the simulation at a given step.
