@@ -24,6 +24,9 @@
 
 use aletheiadb::AletheiaDB;
 use aletheiadb::WriteOps;
+// ⚠️ REQUIRES FEATURE 'NOVA' IN CARGO.TOML
+// [dependencies]
+// aletheiadb = { version = "0.1", features = ["nova"] }
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 use aletheiadb::properties;
 
