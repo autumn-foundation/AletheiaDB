@@ -378,4 +378,17 @@ mod sentry_tests {
         // Next allocation should fail as next_lsn is now MAX
         let _ = alloc.allocate();
     }
+
+    #[test]
+    fn test_batch_allocation_exact_fit_succeeds() {
+        // Start 10 steps before limit
+        let alloc = LsnAllocator::starting_at(LSN(u64::MAX - 10));
+
+        // Allocate exactly 10 items [MAX-10, ..., MAX-1]
+        // This MUST succeed (not panic) for the code to be correct.
+        // A mutant changing `>` to `>=` in the check would panic here.
+        let (start, end) = alloc.allocate_batch(10);
+        assert_eq!(start, LSN(u64::MAX - 10));
+        assert_eq!(end, LSN(u64::MAX - 1));
+    }
 }
