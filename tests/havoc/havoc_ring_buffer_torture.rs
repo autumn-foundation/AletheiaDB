@@ -86,7 +86,7 @@ fn test_ring_buffer_torture() {
 
             for entry in entries {
                 total_received += 1;
-                let val = u64::from_le_bytes(entry.data.try_into().unwrap());
+                let val = u64::from_le_bytes(entry.data[0..8].try_into().unwrap());
                 let p_id = (val >> 32) as usize;
                 let seq = val & 0xFFFFFFFF;
 
