@@ -86,28 +86,26 @@ impl TimeRange {
         }
 
         // Warden: Validate that timestamps don't exceed MAX_VALID_TIMESTAMP
-        // This prevents invalid timestamps from entering via unchecked constructors
-        if start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX {
-            return Err(TemporalError::InvalidTimestamp {
-                timestamp: start,
-                reason: format!(
-                    "Start timestamp exceeds MAX_VALID_TIMESTAMP ({})",
-                    MAX_VALID_TIMESTAMP
-                ),
-            });
-        }
-
-        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
-            return Err(TemporalError::InvalidTimestamp {
-                timestamp: end,
-                reason: format!(
-                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
-                    MAX_VALID_TIMESTAMP
-                ),
-            });
-        }
+        Self::validate_timestamp(start, "Start")?;
+        Self::validate_timestamp(end, "End")?;
 
         Ok(TimeRange { start, end })
+    }
+
+    /// Helper to validate timestamps against MAX_VALID_TIMESTAMP.
+    #[inline]
+    fn validate_timestamp(ts: Timestamp, name: &str) -> Result<(), TemporalError> {
+        // This prevents invalid timestamps from entering via unchecked constructors
+        if ts.wallclock() > MAX_VALID_TIMESTAMP && ts != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: ts,
+                reason: format!(
+                    "{} timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    name, MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Create a time range that starts at the given timestamp and is still current.
@@ -205,15 +203,7 @@ impl TimeRange {
             });
         }
 
-        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
-            return Err(TemporalError::InvalidTimestamp {
-                timestamp: end,
-                reason: format!(
-                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
-                    MAX_VALID_TIMESTAMP
-                ),
-            });
-        }
+        Self::validate_timestamp(end, "End")?;
 
         Ok(TimeRange {
             start: self.start,
@@ -1652,5 +1642,29 @@ mod sentry_tests {
             result,
             Err(TemporalError::InvalidTimestamp { .. })
         ));
+    }
+
+    #[test]
+    fn test_sentry_close_at_max_valid_timestamp_boundary() {
+        use crate::core::hlc::HybridTimestamp;
+
+        // 🛡️ Sentry Test: Verify close_at allows MAX_VALID_TIMESTAMP exactly.
+        // This targets the mutant that replaces > with >= in the validation logic.
+        // Logic: timestamp > MAX_VALID_TIMESTAMP
+        // Mutant: timestamp >= MAX_VALID_TIMESTAMP
+
+        let max_valid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let range = TimeRange::from(start);
+
+        // Should be OK to close exactly at MAX_VALID_TIMESTAMP
+        let result = range.close_at(max_valid_ts);
+
+        assert!(
+            result.is_ok(),
+            "Should be able to close range exactly at MAX_VALID_TIMESTAMP"
+        );
+        let closed = result.unwrap();
+        assert_eq!(closed.end(), max_valid_ts);
     }
 }
