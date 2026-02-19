@@ -402,8 +402,14 @@ impl PropertyDelta {
                             // Both are vectors - use sparse delta if beneficial
                             if let Some(vec_delta) = VectorDelta::from_diff(old_vec, new_vec) {
                                 delta.vector_deltas.insert(*key, vec_delta);
-                            } else if old_vec.len() != new_vec.len() {
-                                // If dimensions differ, treat as full replacement
+                            } else if old_vec.len() != new_vec.len()
+                                || (old_vec.len() > crate::core::property::MAX_VECTOR_DIMENSIONS
+                                    && old_vec != new_vec)
+                            {
+                                // If dimensions differ or exceed the limit for sparse/approximate delta,
+                                // treat as full replacement to ensure correctness.
+                                // We check for exact equality here because from_diff returns None for
+                                // oversized vectors even if they changed.
                                 delta.changed.insert(*key, new_value.clone());
                             }
                             // Else: Dimensions match but no changes > epsilon. Treated as no change.
@@ -2399,6 +2405,61 @@ mod sentry_tests {
 
         let delta = VectorDelta::from_diff(&old, &new);
         assert!(delta.is_none(), "Infinity == Infinity should be no change");
+    }
+
+    #[test]
+    fn test_property_delta_handles_oversized_vectors() {
+        // 🛡️ Sentry Test: Verify that PropertyDelta handles oversized vectors by performing a full replacement
+        // instead of silently ignoring changes (Bug Fix).
+
+        let len = MAX_VECTOR_DIMENSIONS + 1;
+        let old_vec = vec![0.0f32; len];
+        let mut new_vec = old_vec.clone();
+        new_vec[0] = 1.0;
+
+        // Manually construct PropertyValues to bypass creation checks
+        let old_val = PropertyValue::Vector(Arc::from(old_vec.into_boxed_slice()));
+        let new_val = PropertyValue::Vector(Arc::from(new_vec.into_boxed_slice()));
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", old_val)
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", new_val)
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        assert!(!delta.is_empty(), "Oversized vector change should be detected");
+        assert!(delta
+            .changed
+            .contains_key(&GLOBAL_INTERNER.intern("embedding").unwrap()));
+        assert!(!delta
+            .vector_deltas
+            .contains_key(&GLOBAL_INTERNER.intern("embedding").unwrap()));
+    }
+
+    #[test]
+    fn test_vector_delta_partial_eq_order_sensitivity() {
+        // 🛡️ Sentry Test: Document that VectorDelta::eq implies sorted indices.
+        // If indices are unsorted (e.g. from manual construction), equivalent deltas are not equal.
+        // This is an implementation detail that we lock in with a test.
+
+        let changes1 = vec![(1u32, 1.0f32), (2u32, 2.0f32)];
+        let changes2 = vec![(2u32, 2.0f32), (1u32, 1.0f32)]; // Same changes, different order
+
+        let delta1 = VectorDelta::Sparse {
+            dimension: 10,
+            changes: Arc::new(changes1),
+        };
+
+        let delta2 = VectorDelta::Sparse {
+            dimension: 10,
+            changes: Arc::new(changes2),
+        };
+
+        assert_ne!(delta1, delta2, "VectorDelta equality relies on index order");
     }
 }
 

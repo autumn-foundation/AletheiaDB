@@ -23,3 +23,15 @@
 **Summary:** `serialize_entry` checks `estimated_capacity > MAX_WAL_ENTRY_SIZE`, but no test verified behavior at exactly `MAX_WAL_ENTRY_SIZE` or just above it.
 **Diagnosis:** **Missing Coverage**. A mutant changing `>` to `>=` (rejecting valid max-size entries) or removing the check entirely (allowing DoS) would survive.
 **Kill Shot:** Added `test_append_entry_exactly_max_size_succeeds` and `test_append_entry_exceeding_max_size_fails` in `sentry_tests` module to enforce strict boundary compliance.
+
+**[PropertyDelta Oversized Vector Ignored]**
+**Module:** `src/core/version.rs`
+**Summary:** `PropertyDelta::from_diff` silently ignored changes to vectors exceeding `MAX_VECTOR_DIMENSIONS` because `VectorDelta::from_diff` returned `None` (correctly), but the fallback logic assumed `None` meant "no change" without checking sizes or content.
+**Diagnosis:** **Suspected Code Bug**. The implementation failed to handle the edge case where `VectorDelta` refuses to process a vector due to size limits, leading to silent data loss/inconsistency.
+**Kill Shot:** Added `test_property_delta_handles_oversized_vectors` to verify that oversized vector changes trigger a full replacement. Fixed implementation to fallback to full replacement when `len > MAX` and content differs.
+
+**[VectorDelta Equality Order Sensitivity]**
+**Module:** `src/core/version.rs`
+**Summary:** `VectorDelta::eq` compares sparse changes position-wise, making it sensitive to index order.
+**Diagnosis:** **Weakness/Implementation Detail**. While `from_diff` guarantees sorted order, manual construction does not. Documented this behavior to prevent future regression or assumptions.
+**Kill Shot:** Added `test_vector_delta_partial_eq_order_sensitivity` to enforce/document this constraint.
