@@ -2,6 +2,7 @@ use super::*;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::observer::{StorageEvent, StorageObserver};
 use crate::core::property::PropertyMapBuilder;
+use crate::core::temporal::BiTemporalInterval;
 use crate::core::temporal::TIMESTAMP_MAX;
 
 #[test]

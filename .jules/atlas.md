@@ -67,3 +67,16 @@
 1. Updated `storage/index_persistence/operations.rs` to import `TxId` from `core::id` instead of `api`.
 2. Moved `VectorIndexBuilder` from `api` to `db`, as it is a concrete helper for `AletheiaDB`.
 3. Moved `utils/error.rs` to `core/error.rs` and deleted `utils` module, consolidating core domain types.
+
+## 2026-05-24 - Refactoring HistoricalStorage Bloat
+**Tangle:** `src/storage/historical/mod.rs` was a 3000+ line "Blob" containing mixed responsibilities (config, stats, persistence, reconstruction, query, write).
+**Blueprint:** Split `mod.rs` into cohesive submodules:
+1. `config.rs`: Configuration and policies.
+2. `stats.rs`: Statistics and metrics.
+3. `persistence.rs`: Persistence integration.
+4. `tiered.rs`: Tiered storage integration.
+5. `lookup.rs`: Basic version lookups.
+6. `reconstruction.rs`: Property reconstruction logic.
+7. `query.rs`: High-level temporal queries.
+8. `write.rs`: Write operations.
+Kept `mod.rs` as a clean struct definition and facade.
