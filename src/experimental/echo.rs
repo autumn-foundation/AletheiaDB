@@ -11,10 +11,10 @@
 //! "Find me every sensor that failed with the same stuttering pattern as Sensor X."
 
 use crate::AletheiaDB;
+use crate::core::error::Result;
 use crate::core::history::EntityHistory;
 use crate::core::id::NodeId;
 use crate::core::temporal::time;
-use crate::utils::error::Result;
 
 /// A normalized representation of a node's temporal activity.
 #[derive(Debug, Clone)]

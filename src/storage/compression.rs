@@ -4,8 +4,8 @@
 //! using various algorithms with optional CRC32 checksums. It is used by all cold
 //! storage backends to ensure consistent data handling.
 
+use crate::core::error::{Result, StorageError};
 use crate::storage::redb_cold_storage::ColdStorageConfig;
-use crate::utils::error::{Result, StorageError};
 use std::io::Read;
 
 /// Compress data according to the configuration.
@@ -18,7 +18,7 @@ pub fn compress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
         Some(level) => {
             // Compress with Zstd
             let compressed =
-                zstd::encode_all(data, level).map_err(|e| -> crate::utils::error::Error {
+                zstd::encode_all(data, level).map_err(|e| -> crate::core::error::Error {
                     StorageError::io_error(e.to_string()).into()
                 })?;
 
@@ -79,11 +79,9 @@ pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
 
     // Decompress based on algorithm
     match config.compression.zstd_level() {
-        Some(_) => {
-            zstd::decode_all(data_to_decompress).map_err(|e| -> crate::utils::error::Error {
-                StorageError::io_error(e.to_string()).into()
-            })
-        }
+        Some(_) => zstd::decode_all(data_to_decompress).map_err(|e| -> crate::core::error::Error {
+            StorageError::io_error(e.to_string()).into()
+        }),
         None => Ok(data_to_decompress.to_vec()),
     }
 }
@@ -106,7 +104,7 @@ pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
 /// Returns `StorageError::IoError` if decompression fails.
 pub fn decompress_with_limit(data: &[u8], limit: usize) -> Result<Vec<u8>> {
     let mut decoder = zstd::stream::read::Decoder::new(data).map_err(|e| {
-        crate::utils::error::Error::Storage(StorageError::io_error(format!(
+        crate::core::error::Error::Storage(StorageError::io_error(format!(
             "Failed to create zstd decoder: {}",
             e
         )))
@@ -120,7 +118,7 @@ pub fn decompress_with_limit(data: &[u8], limit: usize) -> Result<Vec<u8>> {
 
     loop {
         let bytes_read = decoder.read(&mut chunk).map_err(|e| {
-            crate::utils::error::Error::Storage(StorageError::io_error(format!(
+            crate::core::error::Error::Storage(StorageError::io_error(format!(
                 "Decompression failed: {}",
                 e
             )))
@@ -133,7 +131,7 @@ pub fn decompress_with_limit(data: &[u8], limit: usize) -> Result<Vec<u8>> {
         buffer.extend_from_slice(&chunk[..bytes_read]);
 
         if buffer.len() > limit {
-            return Err(crate::utils::error::Error::Storage(
+            return Err(crate::core::error::Error::Storage(
                 StorageError::CapacityExceeded {
                     resource: "decompressed_size".to_string(),
                     current: buffer.len(),
@@ -238,7 +236,7 @@ mod tests {
         let result = decompress_with_limit(&compressed, 100);
         assert!(result.is_err());
         match result.unwrap_err() {
-            crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+            crate::core::error::Error::Storage(StorageError::CapacityExceeded {
                 resource,
                 limit,
                 ..
@@ -264,7 +262,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            crate::utils::error::Error::Storage(StorageError::CapacityExceeded { .. })
+            crate::core::error::Error::Storage(StorageError::CapacityExceeded { .. })
         ));
     }
 }

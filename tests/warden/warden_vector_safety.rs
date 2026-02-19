@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
+    use aletheiadb::core::error::Error;
     use aletheiadb::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
-    use aletheiadb::utils::error::Error;
 
     #[test]
     fn test_try_insert_vector_returns_error_on_overflow() {
@@ -12,7 +12,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(aletheiadb::utils::error::VectorError::DimensionTooLarge {
+            Err(Error::Vector(aletheiadb::core::error::VectorError::DimensionTooLarge {
                 dimension,
                 max_allowed,
             })) => {
@@ -35,7 +35,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(aletheiadb::utils::error::VectorError::DimensionTooLarge {
+            Err(Error::Vector(aletheiadb::core::error::VectorError::DimensionTooLarge {
                 dimension,
                 max_allowed,
             })) => {

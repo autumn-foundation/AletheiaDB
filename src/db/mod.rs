@@ -21,6 +21,8 @@ use std::time::Instant;
 pub mod admin;
 /// Configuration and initialization.
 pub mod config;
+/// GraphView implementation.
+pub mod graph_view;
 /// Basic graph operations (CRUD).
 pub mod ops;
 /// Query builder and executor hooks.
@@ -34,6 +36,10 @@ pub mod tests;
 pub mod transaction;
 /// Vector index operations.
 pub mod vector;
+/// Vector index builder pattern.
+pub mod vector_builder;
+
+pub use vector_builder::VectorIndexBuilder;
 
 /// Main AletheiaDB database.
 ///

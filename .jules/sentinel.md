@@ -29,3 +29,14 @@
 **Summary:** `TimeRange::new` has special handling to allow `TIMESTAMP_MAX` (infinity) as a start or end timestamp, bypassing `MAX_VALID_TIMESTAMP` checks. Removing these exemptions (e.g., `&& start != TIMESTAMP_MAX`) would cause valid infinite ranges to be rejected.
 **Diagnosis:** **Missing Coverage**. No existing test explicitly verified that `TimeRange::new` accepts `TIMESTAMP_MAX` as a start or end timestamp. A mutant removing the exemption survived the existing suite.
 **Kill Shot:** Added `test_sentry_timerange_new_allows_infinity_start` and `test_sentry_timerange_new_allows_infinity_end` in `sentry_tests` to enforce support for infinite ranges constructed via `new`.
+**[Time ISO 8601 Precision Loss]**
+**Module:** `src/core/temporal.rs`
+**Summary:** `time::to_iso8601` calculation of nanoseconds (`(wallclock % 1_000_000) * 1000`) was susceptible to arithmetic mutations (e.g. `*` to `/`).
+**Diagnosis:** **Weak Test**. Existing tests only asserted that the seconds component was present in the output string, allowing incorrect fractional parts to pass unnoticed.
+**Kill Shot:** Added `test_sentry_iso8601_precision` which inputs a timestamp with microseconds and explicitly asserts that the calculated nanoseconds appear in the output.
+
+**[MAX_VALID_TIMESTAMP Value Integrity]**
+**Module:** `src/core/temporal.rs`
+**Summary:** `MAX_VALID_TIMESTAMP` constant definition was susceptible to reduction (e.g. `replace - with /`) because existing boundary tests used the constant itself for assertions (tautological tests).
+**Diagnosis:** **Weak Test**. Tests checked `TimeRange::new(MAX_VALID_TIMESTAMP, ...)` which would pass even if `MAX_VALID_TIMESTAMP` was small, as long as it was self-consistent.
+**Kill Shot:** Added `test_sentry_max_valid_timestamp_value` which asserts that `TimeRange::new` accepts a hardcoded large timestamp (`i64::MAX - 2000`), ensuring the limit isn't drastically reduced.

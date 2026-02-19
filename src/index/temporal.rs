@@ -35,9 +35,9 @@
 //! same entity, consider batching inserts per-thread and using `insert_batch()`
 //! to amortize sorting cost.
 
+use crate::core::error::{Result, StorageError};
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
-use crate::utils::error::{Result, StorageError};
 use dashmap::DashMap;
 use smallvec::SmallVec;
 
