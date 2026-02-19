@@ -1,5 +1,7 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, HnswIndex, HnswIndexBuilder, Quantization, VectorIndex};
+use aletheiadb::index::vector::{
+    DistanceMetric, HnswIndex, HnswIndexBuilder, Quantization, VectorIndex,
+};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -44,7 +46,9 @@ fn test_custom_metric_reentrancy_deadlock() {
     let index = Arc::new(builder.build().unwrap());
 
     // Add initial data to ensure the metric is called
-    index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    index
+        .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
 
     *shared_index.write().unwrap() = Some(index.clone());
 

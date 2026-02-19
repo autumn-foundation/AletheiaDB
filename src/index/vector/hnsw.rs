@@ -497,8 +497,9 @@ where
             distance_fn(slice_a, slice_b)
         }));
 
-        // Explicitly drop the guard to ensure it lives across the callback execution
-        // and to make its usage visible to coverage tools.
+        // Use black_box to ensure the compiler doesn't optimize away the guard variable
+        // before we explicitly drop it, ensuring coverage tools can see it.
+        std::hint::black_box(&guard);
         drop(guard);
 
         match result {
