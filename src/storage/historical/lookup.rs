@@ -1,7 +1,9 @@
 use super::HistoricalStorage;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::temporal::Timestamp;
-use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
+#[cfg(test)]
+use crate::core::version::EntityVersion;
+use crate::core::version::{EdgeVersion, NodeVersion};
 use std::collections::HashMap;
 use std::sync::Arc;
 
