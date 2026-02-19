@@ -2431,13 +2431,20 @@ mod sentry_tests {
 
         let delta = PropertyDelta::from_diff(&old_props, &new_props);
 
-        assert!(!delta.is_empty(), "Oversized vector change should be detected");
-        assert!(delta
-            .changed
-            .contains_key(&GLOBAL_INTERNER.intern("embedding").unwrap()));
-        assert!(!delta
-            .vector_deltas
-            .contains_key(&GLOBAL_INTERNER.intern("embedding").unwrap()));
+        assert!(
+            !delta.is_empty(),
+            "Oversized vector change should be detected"
+        );
+        assert!(
+            delta
+                .changed
+                .contains_key(&GLOBAL_INTERNER.intern("embedding").unwrap())
+        );
+        assert!(
+            !delta
+                .vector_deltas
+                .contains_key(&GLOBAL_INTERNER.intern("embedding").unwrap())
+        );
     }
 
     #[test]
