@@ -164,6 +164,13 @@ impl VectorDelta {
             return None;
         }
 
+        let dimension = old.len();
+
+        // Calculate threshold for sparse storage (changes * 2 < dimension)
+        // If changes reach this threshold, we switch to full storage.
+        // changes >= (dimension + 1) / 2
+        let threshold = (dimension + 1) / 2;
+
         // Collect changed indices with epsilon-based comparison
         let mut changes = Vec::new();
         for (idx, (old_val, new_val)) in old.iter().zip(new.iter()).enumerate() {
@@ -172,6 +179,12 @@ impl VectorDelta {
                 // Validate index fits in u32 (should always pass given MAX_VECTOR_DIMENSIONS check)
                 let idx_u32 = u32::try_from(idx).ok()?;
                 changes.push((idx_u32, *new_val));
+
+                // Early exit optimization: if we exceed sparse threshold, use full storage
+                // This avoids allocating and iterating for the rest of the vector
+                if changes.len() >= threshold {
+                    return Some(VectorDelta::Full(Arc::from(new)));
+                }
             }
         }
 
@@ -179,23 +192,11 @@ impl VectorDelta {
             return None;
         }
 
-        let dimension = old.len();
-
-        // Use sparse storage if it's more efficient than full storage
-        // Sparse cost: changes * 8 bytes (u32 + f32)
-        // Full cost: dimension * 4 bytes (f32)
-        // Sparse is better when: changes * 8 < dimension * 4
-        // Simplifies to: changes * 2 < dimension
-        if changes.len() * 2 < dimension {
-            // Use sparse storage
-            Some(VectorDelta::Sparse {
-                dimension,
-                changes: Arc::new(changes),
-            })
-        } else {
-            // Use full storage (sparse wouldn't save space)
-            Some(VectorDelta::Full(Arc::from(new)))
-        }
+        // Use sparse storage (guaranteed to be more efficient if we didn't exit early)
+        Some(VectorDelta::Sparse {
+            dimension,
+            changes: Arc::new(changes),
+        })
     }
 
     /// Apply this delta to a base vector, producing the new vector.
@@ -2765,5 +2766,59 @@ mod mutant_kill_tests {
             VectorDelta::from_diff(&v1, &v4).is_none(),
             "Difference < EPSILON should be considered equal"
         );
+    }
+
+    #[test]
+    fn test_vector_delta_early_exit_optimization() {
+        // 🛡️ Sentry Test: Verify that the early exit optimization in from_diff works correctly.
+        // When changes >= (dimension + 1) / 2, it should return Full delta immediately.
+
+        let dimension = 10;
+        let threshold = (dimension + 1) / 2; // 5
+
+        let old = vec![0.0f32; dimension];
+        let mut new = old.clone();
+
+        // 1. Create exactly 'threshold' changes (5 changes for dim 10)
+        // This triggers the early exit condition: changes.len() >= threshold (5 >= 5)
+        for i in 0..threshold {
+            new[i] = 1.0;
+        }
+
+        let delta = VectorDelta::from_diff(&old, &new).unwrap();
+
+        // Should be Full delta
+        match delta {
+            VectorDelta::Full(v) => {
+                assert_eq!(v.len(), dimension);
+                assert_eq!(&v[..], &new[..]);
+            }
+            VectorDelta::Sparse { .. } => {
+                panic!("Should use Full delta when changes >= threshold");
+            }
+        }
+
+        // 2. Create 'threshold - 1' changes (4 changes for dim 10)
+        // This should use Sparse delta
+        let mut new_sparse = old.clone();
+        for i in 0..threshold - 1 {
+            new_sparse[i] = 1.0;
+        }
+
+        let delta_sparse = VectorDelta::from_diff(&old, &new_sparse).unwrap();
+
+        // Should be Sparse delta
+        match delta_sparse {
+            VectorDelta::Sparse {
+                dimension: d,
+                changes,
+            } => {
+                assert_eq!(d, dimension);
+                assert_eq!(changes.len(), threshold - 1);
+            }
+            VectorDelta::Full(_) => {
+                panic!("Should use Sparse delta when changes < threshold");
+            }
+        }
     }
 }
