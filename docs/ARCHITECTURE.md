@@ -446,6 +446,162 @@ sequenceDiagram
     Chronos-->>User: Path
 ```
 
+### Cognitive Architecture
+
+**Ariadne (Semantic Thread Weaver)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Ariadne
+    participant DB as AletheiaDB
+
+    User->>Ariadne: weave(start, goal)
+    loop A* Search
+        Ariadne->>DB: get_outgoing_edges(current)
+        Ariadne->>DB: find_similar(current, k)
+        Ariadne->>Ariadne: score = cost + heuristic
+    end
+    Ariadne-->>User: Path (Thread)
+```
+
+**Prophet (Link Prediction)**
+
+```mermaid
+classDiagram
+    class Prophet {
+        +predict_links(target, k)
+    }
+    class Scorer {
+        +adamic_adar()
+        +vector_similarity()
+    }
+    Prophet --> Scorer : Uses
+    Scorer --> AletheiaDB : Queries
+```
+
+**Fishing (Associative Retrieval)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Rod as FishingRod
+    participant DB as AletheiaDB
+
+    User->>Rod: cast(bait)
+    Rod->>DB: find_similar(bait)
+    DB-->>Rod: school (vectors)
+    loop Spread Net
+        Rod->>DB: get_neighbors(fish)
+        DB-->>Rod: catch (neighbors)
+    end
+    Rod-->>User: Result (Catch)
+```
+
+**Kaleidoscope (Force-Directed Layout)**
+
+```mermaid
+classDiagram
+    class LayoutEngine {
+        +run()
+        +step()
+    }
+    class Force {
+        +repulsion()
+        +attraction()
+        +gravity(semantic)
+    }
+    LayoutEngine --> Force : Applies
+```
+
+**Semantic Navigator (A* Pathfinder)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Navigator
+    participant DB as AletheiaDB
+
+    User->>Navigator: find_path(start, end)
+    loop A*
+        Navigator->>DB: get_neighbors(current)
+        Navigator->>DB: vector_similarity(neighbor, end)
+        Navigator->>Navigator: heuristic = 1.0 - similarity
+    end
+    Navigator-->>User: Semantic Path
+```
+
+**Sentinel (Semantic Firewall)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Sentinel
+    participant Rule
+
+    User->>Sentinel: validate(props)
+    loop Every Rule
+        Sentinel->>Rule: check(props)
+        alt Violation
+            Rule-->>Sentinel: Error
+            Sentinel-->>User: Blocked
+        end
+    end
+    Sentinel-->>User: Allowed
+```
+
+**Sybil (Memetic Propagation)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Sybil
+    participant Model
+
+    User->>Sybil: simulate(prop, steps)
+    loop Steps
+        Sybil->>Sybil: get_active_nodes()
+        loop Every Node
+            Sybil->>Model: next_state(current, neighbors)
+            Model-->>Sybil: new_state
+        end
+        Sybil->>Sybil: update_state()
+    end
+    Sybil-->>User: Final State
+```
+
+**Temporal Diff (State Comparator)**
+
+```mermaid
+classDiagram
+    class TemporalDiff {
+        +compute_diff(t1, t2)
+    }
+    class DiffReport {
+        +changes: Vec<Change>
+    }
+    TemporalDiff ..> DiffReport : Produces
+    TemporalDiff --> AletheiaDB : Queries (History)
+```
+
+**Narrative Generator (The Scribe)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Scribe as NarrativeGenerator
+    participant DB as AletheiaDB
+
+    User->>Scribe: generate_narrative(node_id)
+    Scribe->>DB: get_node_history(node_id)
+    DB-->>Scribe: versions
+    loop Every Version
+        Scribe->>Scribe: compute_diff(prev, curr)
+        Scribe->>Scribe: format_natural_language()
+    end
+    Scribe-->>User: List<NarrativeEvent>
+```
+
 ### Temporal Query Processing
 
 **Query Types:**
