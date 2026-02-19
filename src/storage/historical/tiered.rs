@@ -183,11 +183,15 @@ impl HistoricalStorage {
 
             // Remove migrated versions from hot storage
             for candidate in &edge_candidates[..migrated] {
-                if let Some(version) = self.edge_versions.remove(&candidate.version_id)
-                    && let Some(count) = self.edge_version_counts.get_mut(&version.edge_id)
-                {
-                    *count = count.saturating_sub(1);
+                if let Some(version) = self.edge_versions.remove(&candidate.version_id) {
+                    // Update version count
+                    if let Some(count) = self.edge_version_counts.get_mut(&version.edge_id) {
+                        *count = count.saturating_sub(1);
+                    }
+
                     // Issue #212: Update cached stats counters when migrating to cold storage
+                    // This must be done regardless of whether we found the count,
+                    // to ensure global stats remain consistent with edge_versions map.
                     if version.is_anchor() {
                         self.cached_edge_anchor_count =
                             self.cached_edge_anchor_count.saturating_sub(1);

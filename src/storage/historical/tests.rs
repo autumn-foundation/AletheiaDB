@@ -4406,3 +4406,31 @@ fn test_edge_delta_creation_caches_properties() {
         assert_eq!(props.get("strength").unwrap().as_int().unwrap(), i as i64);
     }
 }
+
+#[test]
+fn test_should_resize_cache_boundary() {
+    // Tests for mutants: verify boundary conditions for should_resize_cache
+    let storage = HistoricalStorage::new();
+
+    // Simulate operations: 80 hits, 20 misses = 100 total, 0.8 hit rate
+    storage.primary_cache_hits.store(80, Ordering::Relaxed);
+    storage.anchor_cache_hits.store(0, Ordering::Relaxed);
+    storage.full_reconstructions.store(20, Ordering::Relaxed);
+
+    // Total = 100. Hit rate = 0.8.
+
+    // Threshold 0.8. Hit rate 0.8. 0.8 < 0.8 is false. Should return None.
+    // This catches mutants replacing < with <=
+    assert_eq!(storage.should_resize_cache(0.8, 100), None);
+
+    // Threshold 0.81. Hit rate 0.8. 0.8 < 0.81 is true. Should return Some(0.8).
+    assert_eq!(storage.should_resize_cache(0.81, 100), Some(0.8));
+
+    // Min operations boundary
+    // Total 100. Min 101. 100 < 101 is true (not enough ops). Should return None.
+    // This catches mutants replacing < with <= for total < min_operations
+    assert_eq!(storage.should_resize_cache(0.9, 101), None);
+
+    // Total 100. Min 100. 100 < 100 is false. Should return result.
+    assert_eq!(storage.should_resize_cache(0.81, 100), Some(0.8));
+}
