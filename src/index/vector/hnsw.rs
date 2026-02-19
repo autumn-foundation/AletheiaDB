@@ -94,7 +94,7 @@ use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -446,6 +446,103 @@ const MAX_SEARCH_ATTEMPTS: u32 = 4; // 1 initial attempt + 3 retries
 fn is_retryable_usearch_error(error_msg: &str) -> bool {
     // Thread pool exhaustion is a transient error that resolves when threads become available
     error_msg.contains("No available threads to lock")
+}
+
+/// Validate that a usearch index file matches the expected quantization.
+///
+/// This function manually parses the usearch file header to verify the quantization mode.
+/// This is a security measure to prevent type confusion vulnerabilities where a malicious
+/// actor provides an index with low-precision data (e.g. I8) that is interpreted as
+/// high-precision (F32) by a custom metric, leading to buffer over-reads.
+fn validate_usearch_file(path: &Path, expected_quantization: Quantization) -> Result<()> {
+    // Open file
+    let mut file = File::open(path).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to open index file for validation: {}",
+            e
+        )))
+    })?;
+
+    let file_len = file.metadata()?.len();
+
+    // Read first 64 bytes (potential header or vectors start)
+    let mut buffer = [0u8; 64];
+    // Use read, not read_exact, in case file is small (though valid index > 64 bytes)
+    // But for validation we need at least enough bytes.
+    if file.read(&mut buffer)? < 64 {
+        return Err(Error::Vector(VectorError::IndexError(
+            "Index file too small".to_string(),
+        )));
+    }
+
+    // Helper to validate content once found
+    let verify_header_content = |header: &[u8]| -> Result<()> {
+        // Scalar is at offset 14 relative to header start
+        let scalar_kind_raw = header[14];
+
+        // Observed values for usearch v2.x binary format:
+        // F32 = 11
+        // F16 = 12
+        // I8  = 23
+        // Note: These do not match the C++ enum values directly in some versions,
+        // but are consistent in the binary format.
+        let expected_raw = match expected_quantization {
+            Quantization::F32 => 11,
+            Quantization::F16 => 12,
+            Quantization::I8 => 23,
+        };
+
+        if scalar_kind_raw != expected_raw {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Index quantization mismatch in file header. Expected {:?} (id {}), found raw id {}",
+                expected_quantization, expected_raw, scalar_kind_raw
+            ))));
+        }
+        Ok(())
+    };
+
+    // Strategy 1: Check start of file
+    if &buffer[0..7] == b"usearch" {
+        return verify_header_content(&buffer);
+    }
+
+    // Strategy 2: Check after 32-bit dimensions
+    // Format: [rows: u32][cols: u32][data...]
+    let rows_32 = u32::from_le_bytes(buffer[0..4].try_into().unwrap()) as u64;
+    let cols_32 = u32::from_le_bytes(buffer[4..8].try_into().unwrap()) as u64;
+    // Checked multiplication to prevent overflow
+    if let Some(data_size) = rows_32.checked_mul(cols_32) {
+        let offset_32 = data_size + 8; // 8 bytes for dims
+        if offset_32 + 64 <= file_len {
+            file.seek(std::io::SeekFrom::Start(offset_32))?;
+            file.read_exact(&mut buffer)?;
+            if &buffer[0..7] == b"usearch" {
+                return verify_header_content(&buffer);
+            }
+        }
+    }
+
+    // Strategy 3: Check after 64-bit dimensions
+    // We must re-read start because we overwrote buffer in step 2 (if seek succeeded)
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.read_exact(&mut buffer)?;
+
+    let rows_64 = u64::from_le_bytes(buffer[0..8].try_into().unwrap());
+    let cols_64 = u64::from_le_bytes(buffer[8..16].try_into().unwrap());
+    if let Some(data_size) = rows_64.checked_mul(cols_64) {
+        let offset_64 = data_size + 16; // 16 bytes for dims
+        if offset_64 + 64 <= file_len {
+            file.seek(std::io::SeekFrom::Start(offset_64))?;
+            file.read_exact(&mut buffer)?;
+            if &buffer[0..7] == b"usearch" {
+                return verify_header_content(&buffer);
+            }
+        }
+    }
+
+    Err(Error::Vector(VectorError::IndexError(
+        "Invalid index file: missing 'usearch' magic".to_string(),
+    )))
 }
 
 // Helper to create the metric wrapper - extracted for testing
@@ -1977,6 +2074,10 @@ impl HnswIndex {
             )))
         })?;
 
+        // Security Check: Validate file header before loading
+        // This prevents type confusion vulnerabilities (I8 loaded as F32).
+        validate_usearch_file(path, config.quantization)?;
+
         index
             .load(path.to_str().ok_or_else(|| {
                 Error::Vector(VectorError::IndexError(
@@ -2044,6 +2145,23 @@ impl HnswIndex {
             )))
         })?;
 
+        // Load mappings from companion file with integrity verification
+        // We do this BEFORE view() to get the expected quantization.
+        let mappings_path = path.with_extension("usearch.mappings");
+        let (id_mapping, reverse_mapping, max_key, metadata) =
+            load_mappings_with_integrity(&mappings_path)?;
+
+        // Restore configuration from metadata if available
+        let (quantization, metric) = if let Some(meta) = &metadata {
+            (meta.quantization, meta.metric)
+        } else {
+            // Legacy index: fallback to defaults
+            (Quantization::default(), DistanceMetric::Cosine)
+        };
+
+        // Security Check: Validate file header before viewing
+        validate_usearch_file(path, quantization)?;
+
         index
             .view(path.to_str().ok_or_else(|| {
                 Error::Vector(VectorError::IndexError(
@@ -2069,25 +2187,15 @@ impl HnswIndex {
             }));
         }
 
-        // Load mappings from companion file with integrity verification
-        let mappings_path = path.with_extension("usearch.mappings");
-        let (id_mapping, reverse_mapping, max_key, metadata) =
-            load_mappings_with_integrity(&mappings_path)?;
-
-        // Restore configuration from metadata if available
-        let (quantization, metric) = if let Some(meta) = metadata {
-            // Verify dimensions match what usearch reports
+        // Verify dimensions match what metadata reported (if any)
+        if let Some(meta) = &metadata {
             if meta.dimensions != dimensions {
                 return Err(Error::Vector(VectorError::IndexError(format!(
                     "Index dimension mismatch: usearch reported {}, metadata says {}",
                     dimensions, meta.dimensions
                 ))));
             }
-            (meta.quantization, meta.metric)
-        } else {
-            // Legacy index: fallback to defaults
-            (Quantization::default(), DistanceMetric::Cosine)
-        };
+        }
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),

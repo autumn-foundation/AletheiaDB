@@ -47,3 +47,7 @@
 **2026-02-18 - Silent Data Loss in Property Interning**
 **Threat:** `PropertyMapBuilder::try_insert` silently swallowed errors when the string interner was full (e.g. DoS attack filling capacity). This resulted in properties being silently dropped during node/edge creation or updates, potentially leading to security bypasses (e.g. missing "role: admin" or "acl" properties) or data integrity issues.
 **Defense:** Modified `try_insert` to propagate the `CapacityExceeded` error instead of returning `Ok(self)`. Added regression test `tests/security_interner_dos.rs` which verifies that insertion fails when the interner is full.
+
+**2026-02-19 - Type Confusion in HNSW Index Loading**
+**Threat:** A malicious actor could supply an index file with low-precision quantization (I8) but a configuration claiming high-precision (F32). The `usearch` library would load the I8 data, but the custom metric callback (expecting F32) would interpret the pointers as F32, causing a buffer over-read (reading 4x memory) and potential information leakage or crash.
+**Defense:** Implemented `validate_usearch_file` in `src/index/vector/hnsw.rs` to parses the binary file header and verify the `scalar_kind` matches the expected quantization before loading. This prevents the type confusion.
