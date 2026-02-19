@@ -2412,6 +2412,56 @@ mod sentry_tests {
         let delta = VectorDelta::from_diff(&old, &new);
         assert!(delta.is_none(), "Infinity == Infinity should be no change");
     }
+
+    #[test]
+    fn test_materialize_vector_deltas_success() {
+        // 🛡️ Sentry Test: Verify success path of materialize_vector_deltas.
+        // This targets mutants that might empty the function body or loop, causing data loss.
+        // If materialization fails silently, sparse deltas are not persisted!
+
+        let mut delta = PropertyDelta::new();
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        // Create a sparse delta: change index 0 to 1.0
+        // Base vector size: 10
+        let changes = std::sync::Arc::new(vec![(0, 1.0f32)]);
+        let vec_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes,
+        };
+
+        delta.vector_deltas.insert(key, vec_delta);
+
+        // Base property map with valid vector
+        let base_vec = vec![0.0f32; 10];
+        let base = PropertyMapBuilder::new()
+            .insert_vector("embedding", &base_vec)
+            .build();
+
+        // Perform materialization
+        let result = delta.materialize_vector_deltas(&base);
+        assert!(result.is_ok(), "Materialization should succeed");
+
+        // Verify side effects
+        assert!(
+            delta.vector_deltas.is_empty(),
+            "vector_deltas should be empty after materialization"
+        );
+        assert!(
+            delta.changed.contains_key(&key),
+            "changed should contain the materialized vector"
+        );
+
+        // Verify the value in changed is correct (should be full vector)
+        let materialized = delta.changed.get(&key).unwrap();
+        if let PropertyValue::Vector(v) = materialized {
+            assert_eq!(v.len(), 10);
+            assert_eq!(v[0], 1.0f32); // Applied change
+            assert_eq!(v[1], 0.0f32); // Unchanged
+        } else {
+            panic!("Materialized value should be a Vector");
+        }
+    }
 }
 
 #[cfg(test)]
