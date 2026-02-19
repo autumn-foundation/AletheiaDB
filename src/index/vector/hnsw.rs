@@ -487,7 +487,7 @@ where
         // attempts to modify the index (e.g., via add/remove).
         // This sets IN_FILTER_CALLBACK = true for the duration of the callback.
         // Operations like add() check this flag and return an error if set.
-        let _guard = FilterCallbackGuard::new();
+        let guard = FilterCallbackGuard::new();
 
         // SAFETY: We wrap the user-provided closure in catch_unwind to prevent
         // panics from unwinding across the FFI boundary into C++ code, which is UB.
@@ -496,6 +496,10 @@ where
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             distance_fn(slice_a, slice_b)
         }));
+
+        // Explicitly drop the guard to ensure it lives across the callback execution
+        // and to make its usage visible to coverage tools.
+        drop(guard);
 
         match result {
             Ok(val) => val,
