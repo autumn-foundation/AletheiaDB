@@ -237,6 +237,9 @@ mod sentry_tests {
 
         // Verify checksum
         // This is the CRITICAL missing test: positive verification
-        assert!(entry.verify_checksum(&buffer), "Checksum verification failed for valid entry");
+        assert!(
+            entry.verify_checksum(&buffer),
+            "Checksum verification failed for valid entry"
+        );
     }
 }
