@@ -3288,6 +3288,13 @@ mod tests {
         // This test ensures that the custom metric wrapper and its guard logic are executed,
         // satisfying code coverage requirements for the new lines added in create_metric_wrapper.
         let metric_fn = |a: &[f32], b: &[f32]| -> f32 {
+            // Explicitly verify that the re-entrancy guard is active.
+            // This assertion ensures that the line `let _guard = FilterCallbackGuard::new();`
+            // in `create_metric_wrapper` is executed and working.
+            assert!(
+                super::IN_FILTER_CALLBACK.with(|flag| flag.get()),
+                "Re-entrancy guard should be active during metric execution"
+            );
             a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
         };
 
