@@ -478,6 +478,44 @@ where
     distance_fn(slice_a, slice_b)
 }
 
+/// Helper to validate raw pointers from usearch and convert to slices.
+///
+/// Returns `None` if pointers are null or unaligned.
+///
+/// # Safety
+///
+/// Caller must ensure pointers are valid for `dims` elements if they are not null/unaligned.
+#[inline(always)]
+unsafe fn validate_raw_pointers<'a>(
+    a: *const f32,
+    b: *const f32,
+    dims: usize,
+) -> Option<(&'a [f32], &'a [f32])> { unsafe {
+    // Check for null pointers to prevent UB
+    if a.is_null() || b.is_null() {
+        // This should never happen with a correct usearch implementation.
+        eprintln!("usearch passed null pointer to metric function - returning max distance");
+        return None;
+    }
+
+    // Check for alignment to prevent UB
+    // Use bitwise check for power-of-2 alignment (f32 align is 4)
+    let align_mask = std::mem::align_of::<f32>() - 1;
+    if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
+        eprintln!(
+            "usearch passed unaligned pointer to metric function (expected alignment {}) - returning max distance",
+            std::mem::align_of::<f32>()
+        );
+        return None;
+    }
+
+    // SAFETY: caller guarantees validity if checks pass
+    Some((
+        std::slice::from_raw_parts(a, dims),
+        std::slice::from_raw_parts(b, dims),
+    ))
+}}
+
 // Helper to create the metric wrapper - extracted for testing
 fn create_metric_wrapper<F>(
     dims: usize,
@@ -487,30 +525,12 @@ where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
 {
     Box::new(move |a: *const f32, b: *const f32| {
-        // Check for null pointers to prevent UB
-        if a.is_null() || b.is_null() {
-            // This should never happen with a correct usearch implementation.
-            // If it does, we return f32::MAX to avoid crashing/UB.
-            // We cannot return an error here because the signature is fixed by usearch trait.
-            eprintln!("usearch passed null pointer to metric function - returning max distance");
-            return f32::MAX;
-        }
-
-        // Check for alignment to prevent UB
-        // Use bitwise check for power-of-2 alignment (f32 align is 4)
-        let align_mask = std::mem::align_of::<f32>() - 1;
-        if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
-            eprintln!(
-                "usearch passed unaligned pointer to metric function (expected alignment {}) - returning max distance",
-                std::mem::align_of::<f32>()
-            );
-            return f32::MAX;
-        }
-
+        // Validate pointers and convert to slices
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
-        // We verified they are not null above.
-        let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
-        let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+        let (slice_a, slice_b) = match unsafe { validate_raw_pointers(a, b, dims) } {
+            Some(slices) => slices,
+            None => return f32::MAX,
+        };
 
         // SAFETY: We wrap the user-provided closure in catch_unwind to prevent
         // panics from unwinding across the FFI boundary into C++ code, which is UB.
@@ -3594,6 +3614,26 @@ mod warden_tests {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    #[test]
+    fn test_validate_raw_pointers() {
+        // Test null detection
+        let null_ptr: *const f32 = std::ptr::null();
+        let valid_data = [0.0f32; 4];
+        let valid_ptr = valid_data.as_ptr();
+
+        assert!(unsafe { validate_raw_pointers(null_ptr, valid_ptr, 4) }.is_none());
+        assert!(unsafe { validate_raw_pointers(valid_ptr, null_ptr, 4) }.is_none());
+
+        // Test alignment detection
+        let data = [0u8; 32];
+        let unaligned_ptr = unsafe { data.as_ptr().add(1) as *const f32 };
+        assert!(unsafe { validate_raw_pointers(unaligned_ptr, valid_ptr, 4) }.is_none());
+
+        // Test valid pointers
+        let res = unsafe { validate_raw_pointers(valid_ptr, valid_ptr, 4) };
+        assert!(res.is_some());
+    }
 
     #[test]
     fn test_metric_wrapper_null_pointer() {
