@@ -4,8 +4,8 @@
 //! efficient forms. Rules are applied iteratively until no more
 //! transformations are possible.
 
-use crate::core::error::Result;
 use crate::query::plan::LogicalPlan;
+use crate::utils::error::Result;
 
 use super::stats::Statistics;
 

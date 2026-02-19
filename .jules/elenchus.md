@@ -238,17 +238,3 @@
 **Severity:** 🟢 Acquitted
 **Finding:** Module contains robust concurrency tests including `test_intern_concurrent_capacity_race` and `test_concurrent_interning`.
 **Evidence:** Code inspection.
-
-**[LSN Allocator Boundary Gap]**
-**Module:** `src/storage/wal/lsn_allocator.rs`
-**Severity:** 🟡 Suspect
-**Finding:** The theoretical `u64::MAX` overflow limit and batch allocation near the limit were not explicitly tested, relying on implicit behavior.
-**Evidence:** No tests verified behavior when initializing with `starting_at(u64::MAX - 1)`.
-**Recommendation:** Added `test_allocator_overflow_boundary` and `test_batch_allocation_boundary` to strictly enforce panic behavior at the limit.
-
-**[WAL Entry Checksum Verification Gap]**
-**Module:** `src/storage/wal/entry.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `WalEntry::verify_checksum` only had a negative test case (short buffer). There was no positive confirmation that a validly serialized entry passes verification.
-**Evidence:** Only `test_verify_checksum_short_data` existed.
-**Recommendation:** Added `test_verify_checksum_success` which performs a full round-trip serialization and verification.

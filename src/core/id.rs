@@ -4,7 +4,7 @@
 //! mix-ups at compile time. For example, you cannot accidentally pass a `NodeId` where
 //! an `EdgeId` is expected.
 
-use crate::core::error::StorageError;
+use crate::utils::error::StorageError;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 

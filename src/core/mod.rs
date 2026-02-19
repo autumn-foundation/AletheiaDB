@@ -13,7 +13,6 @@
 //! - **[`interning`]**: String interning for memory-efficient storage of labels and keys.
 //! - **[`hlc`]**: Hybrid Logical Clock implementation for distributed timekeeping.
 
-pub mod error;
 pub mod graph;
 pub mod history;
 pub mod hlc;
@@ -25,7 +24,6 @@ pub mod temporal;
 pub mod vector;
 
 // Re-export commonly used types for convenience
-pub use error::{Error, Result, StorageError, TemporalError};
 pub use graph::{Edge, Node};
 pub use id::{EdgeId, EntityId, IdGenerator, NodeId, VersionId};
 pub use interning::{

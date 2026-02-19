@@ -7,13 +7,13 @@
 //! - Time-range vector queries
 //! - Snapshot pruning with retention policies
 
-use aletheiadb::core::error::Result;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::temporal::{TimeRange, time};
 use aletheiadb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::utils::Result;
 use std::time::Duration;
 
 /// Helper to create a test temporal vector index with default config

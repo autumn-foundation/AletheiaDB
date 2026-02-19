@@ -73,7 +73,6 @@
 //! ✅ Manual recovery completed with full statistics!
 //! ```
 
-use aletheiadb::core::error::Result;
 use aletheiadb::core::{
     id::{EdgeId, NodeId},
     interning::GLOBAL_INTERNER,
@@ -87,6 +86,7 @@ use aletheiadb::storage::{
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
+use aletheiadb::utils::error::Result;
 use std::path::Path;
 use tempfile::TempDir;
 

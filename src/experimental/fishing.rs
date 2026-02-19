@@ -13,9 +13,9 @@
 //! - **Freshness**: Preferring recently updated information.
 
 use crate::AletheiaDB;
-use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::temporal::time;
+use crate::utils::{Error, Result};
 use std::collections::HashMap;
 
 /// Configuration for a fishing trip.
@@ -122,8 +122,8 @@ impl<'a> FishingRod<'a> {
                     if let Some(idx_info) = indexes.first() {
                         idx_info.property_name.clone()
                     } else {
-                        return Err(crate::core::error::Error::Vector(
-                            crate::core::error::VectorError::IndexError(
+                        return Err(crate::utils::error::Error::Vector(
+                            crate::utils::error::VectorError::IndexError(
                                 "No vector indexes configured. Call enable_vector_index() first."
                                     .to_string(),
                             ),
@@ -406,8 +406,8 @@ mod tests {
         let result = rod.cast(bait, trip);
         assert!(result.is_err());
 
-        if let Err(crate::core::error::Error::Vector(
-            crate::core::error::VectorError::IndexError(msg),
+        if let Err(crate::utils::error::Error::Vector(
+            crate::utils::error::VectorError::IndexError(msg),
         )) = result
         {
             assert!(msg.contains("No vector indexes configured"));

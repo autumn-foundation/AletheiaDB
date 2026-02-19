@@ -4,9 +4,9 @@
 //! fuse them into a single `Scan(PropertyScan { label, key, value })`. This avoids the full
 //! scan + per-node predicate evaluation by delegating to `CurrentStorage::find_nodes_by_property`.
 
-use crate::core::error::Result;
 use crate::query::ir::Predicate;
 use crate::query::plan::{LogicalOp, LogicalPlan, ScanOp, UnaryOp};
+use crate::utils::error::Result;
 
 use super::{OptimizationRule, Statistics};
 

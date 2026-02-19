@@ -27,10 +27,10 @@
 //! }
 //! ```
 
-use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
-use crate::query::traits::GraphView;
+use crate::db::AletheiaDB;
+use crate::utils::Result;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -112,8 +112,8 @@ impl Ord for ScoredCandidate {
 /// let bob_embedding = db.get_node(bob_id)?.get_property("embedding")?.as_vector()?;
 /// let similar_friends = traverse_and_rank(&db, alice_id, "KNOWS", bob_embedding, 5)?;
 /// ```
-pub fn traverse_and_rank<G: GraphView + ?Sized>(
-    db: &G,
+pub fn traverse_and_rank(
+    db: &AletheiaDB,
     start: NodeId,
     edge_label: &str,
     target_embedding: &[f32],
@@ -245,8 +245,8 @@ pub fn traverse_and_rank<G: GraphView + ?Sized>(
 ///     println!("Document {:?} was similar at that time: {:.3}", node_id, similarity);
 /// }
 /// ```
-pub fn find_similar_as_of<G: GraphView + ?Sized>(
-    db: &G,
+pub fn find_similar_as_of(
+    db: &AletheiaDB,
     embedding: &[f32],
     k: usize,
     timestamp: crate::core::temporal::Timestamp,
@@ -261,10 +261,9 @@ pub fn find_similar_as_of<G: GraphView + ?Sized>(
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
-    use crate::core::error::VectorError;
     use crate::core::property::PropertyMapBuilder;
-    use crate::db::AletheiaDB;
     use crate::index::vector::{DistanceMetric, HnswConfig};
+    use crate::utils::error::VectorError;
 
     /// Helper to create a test database with vector indexing enabled.
     fn create_test_db() -> AletheiaDB {
@@ -424,9 +423,9 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::core::error::Error::Storage(crate::core::error::StorageError::NodeNotFound(
-                    _
-                ))
+                crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::NodeNotFound(_)
+                )
             ),
             "Should return NodeNotFound error"
         );
@@ -444,7 +443,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::core::error::Error::Vector(VectorError::ContainsNaN { .. })
+                crate::utils::error::Error::Vector(VectorError::ContainsNaN { .. })
             ),
             "Should return ContainsNaN error"
         );
@@ -456,7 +455,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::core::error::Error::Vector(VectorError::ContainsInfinity { .. })
+                crate::utils::error::Error::Vector(VectorError::ContainsInfinity { .. })
             ),
             "Should return ContainsInfinity error"
         );
@@ -889,7 +888,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::core::error::Error::Vector(VectorError::ContainsNaN { .. })
+                crate::utils::error::Error::Vector(VectorError::ContainsNaN { .. })
             ),
             "Should return ContainsNaN error"
         );
@@ -901,7 +900,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::core::error::Error::Vector(VectorError::ContainsInfinity { .. })
+                crate::utils::error::Error::Vector(VectorError::ContainsInfinity { .. })
             ),
             "Should return ContainsInfinity error"
         );
@@ -934,7 +933,7 @@ mod tests {
         assert!(
             matches!(
                 result.unwrap_err(),
-                crate::core::error::Error::Vector(VectorError::IndexError(_))
+                crate::utils::error::Error::Vector(VectorError::IndexError(_))
             ),
             "Should return IndexError"
         );

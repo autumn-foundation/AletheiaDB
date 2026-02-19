@@ -62,6 +62,7 @@ pub mod db;
 pub mod index;
 pub mod query;
 pub mod storage;
+pub mod utils;
 // Experimental features ("Nova")
 #[cfg(any(feature = "nova", test))] // Allow in tests for verification
 pub mod experimental;
@@ -100,15 +101,17 @@ pub use core::{
     Timestamp, VersionId,
 };
 
-pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
-pub use core::error::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
-pub use db::{AletheiaDB, VectorIndexBuilder};
+pub use api::{
+    ReadOps, ReadTransaction, TxId, TxState, VectorIndexBuilder, WriteOps, WriteTransaction,
+};
+pub use db::AletheiaDB;
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
     vector::{DistanceMetric, HnswConfig},
 };
 pub use storage::CurrentStorage;
 pub use storage::wal::{DurabilityMode, WriteOptions};
+pub use utils::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
 
 // Query planner re-exports (VS-060)
 pub use query::{

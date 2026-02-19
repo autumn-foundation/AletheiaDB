@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use super::LSN;
 use super::ring_buffer::PendingEntry;
 
-use crate::core::error::{Error, Result, StorageError};
+use crate::utils::error::{Error, Result, StorageError};
 
 /// Magic bytes identifying a AletheiaDB WAL segment file.
 const WAL_MAGIC: [u8; 4] = *b"GWAL";

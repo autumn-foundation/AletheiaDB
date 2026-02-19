@@ -45,7 +45,7 @@
 //! use aletheiadb::index::vector::{HnswConfig, DistanceMetric, VectorIndex};
 //! use aletheiadb::core::id::NodeId;
 //!
-//! # fn example() -> aletheiadb::core::error::Result<()> {
+//! # fn example() -> aletheiadb::utils::Result<()> {
 //! // Create a sharded index with 4 shards
 //! let config = ShardedVectorConfig::new(4)
 //!     .with_hnsw_config(HnswConfig::new(384, DistanceMetric::Cosine))
@@ -72,10 +72,10 @@
 //! - Multiple threads can search simultaneously
 //! - Searches can run concurrently with additions
 
-use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, Quantization, VectorIndex};
+use crate::utils::{Error, Result, error::VectorError};
 use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -367,7 +367,7 @@ impl ShardedVectorIndex {
     /// ```rust,no_run
     /// # use aletheiadb::index::vector::sharded::ShardedVectorIndex;
     /// # use aletheiadb::index::vector::DistanceMetric;
-    /// # fn example() -> aletheiadb::core::error::Result<()> {
+    /// # fn example() -> aletheiadb::utils::Result<()> {
     /// let index = ShardedVectorIndex::with_defaults(128, DistanceMetric::Cosine, 4)?;
     /// // ... add vectors ...
     /// let vectors_to_move = index.estimate_rebalance_cost()?;

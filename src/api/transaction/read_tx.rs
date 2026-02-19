@@ -7,7 +7,6 @@
 //! - No commit overhead
 
 use super::{ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager};
-use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyValue;
@@ -15,6 +14,7 @@ use crate::core::temporal::time;
 use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
+use crate::utils::error::{Result, StorageError};
 use parking_lot::RwLock;
 use std::sync::Arc;
 

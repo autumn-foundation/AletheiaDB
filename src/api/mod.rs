@@ -90,6 +90,9 @@
 //! - **[`crate::query`]**: The fluent query builder API.
 
 pub mod transaction;
+/// Builder pattern for configuring vector indexes.
+pub mod vector_builder;
 
 // Re-export commonly used types
 pub use transaction::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
+pub use vector_builder::VectorIndexBuilder;

@@ -10,7 +10,6 @@
 
 use aletheiadb::{
     GLOBAL_INTERNER,
-    core::error::Result,
     core::{
         id::{EdgeId, NodeId},
         property::{PropertyMap, PropertyMapBuilder},
@@ -23,6 +22,7 @@ use aletheiadb::{
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
         },
     },
+    utils::error::Result,
 };
 use tempfile::TempDir;
 

@@ -1,5 +1,5 @@
 use super::ops::{cosine_similarity, dot_product, euclidean_distance};
-use crate::core::error::Result;
+use crate::utils::error::Result;
 use std::fmt;
 
 // ============================================================================

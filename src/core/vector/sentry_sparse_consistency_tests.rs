@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::error::{Error, VectorError};
+use crate::utils::error::{Error, VectorError};
 
 // This file documents and tests the consistency (or lack thereof) of sparse vector operations
 // regarding dimension mismatch handling.

@@ -16,7 +16,7 @@
 //! greater than our `snapshot_timestamp`, a conflict has occurred.
 
 use super::WriteTransaction;
-use crate::core::error::{Result, TransactionError};
+use crate::utils::error::{Result, TransactionError};
 
 /// Detect write-write conflicts for Snapshot Isolation.
 ///

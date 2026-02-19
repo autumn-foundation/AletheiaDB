@@ -53,7 +53,7 @@
 //! use aletheiadb::index::VectorIndex;
 //! use aletheiadb::core::id::NodeId;
 //!
-//! # fn example() -> aletheiadb::core::error::Result<()> {
+//! # fn example() -> aletheiadb::utils::Result<()> {
 //! // Create an index for 384-dimensional embeddings using cosine similarity
 //! let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine)
 //!     .m(16)                    // 16 connections per node
@@ -85,11 +85,11 @@
 //! - Multiple threads can search simultaneously
 //! - Searches can run concurrently with additions
 
-use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
+use crate::utils::{Error, Result, error::VectorError};
 use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};

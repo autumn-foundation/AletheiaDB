@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::constants::{MAX_VECTOR_DIMENSIONS, TAG_SPARSE_VECTOR, TAG_VECTOR};
 use super::sparse::SparseVec;
-use crate::core::error::{Error, Result, StorageError, VectorError};
+use crate::utils::error::{Error, Result, StorageError, VectorError};
 
 /// Validates that a vector dimension does not exceed the maximum allowed.
 /// Returns Ok(()) if valid, Err(VectorError::DimensionTooLarge) otherwise.

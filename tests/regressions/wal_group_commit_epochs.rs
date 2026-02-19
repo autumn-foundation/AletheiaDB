@@ -1,6 +1,6 @@
-use aletheiadb::core::error::Error;
-use aletheiadb::core::error::StorageError;
 use aletheiadb::storage::wal::group_commit::{GroupCommitConfig, GroupCommitCoordinator};
+use aletheiadb::utils::Error;
+use aletheiadb::utils::StorageError;
 use std::sync::{Arc, Barrier};
 use std::thread;
 

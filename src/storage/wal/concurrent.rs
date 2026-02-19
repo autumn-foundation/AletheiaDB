@@ -75,7 +75,7 @@ use super::ring_buffer::{CompletionHandle, PendingEntry};
 use super::stripe::{StripeMetrics, WalStripe};
 use super::{LSN, WalOperation};
 
-use crate::core::error::{Error, Result, StorageError};
+use crate::utils::error::{Error, Result, StorageError};
 
 /// Default number of stripes (should be power of 2).
 pub const DEFAULT_NUM_STRIPES: usize = 16;

@@ -1,7 +1,7 @@
 use super::WriteTransaction;
-use crate::core::error::Result;
 use crate::core::temporal::Timestamp;
 use crate::storage::wal::WalOperation;
+use crate::utils::error::Result;
 
 /// Log all buffered operations to WAL.
 ///
