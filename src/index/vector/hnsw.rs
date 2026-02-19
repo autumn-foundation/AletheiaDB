@@ -458,8 +458,8 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
 /// * `slice_a` - The first vector slice
 /// * `slice_b` - The second vector slice
 /// * `distance_fn` - The user-provided distance function
-#[inline(never)]
-fn run_metric_protected<F>(slice_a: &[f32], slice_b: &[f32], distance_fn: &F) -> f32
+#[allow(dead_code)] // Ensure not flagged as unused even if specialized usage confuses linter
+pub(crate) fn run_metric_protected<F>(slice_a: &[f32], slice_b: &[f32], distance_fn: &F) -> f32
 where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + ?Sized,
 {
@@ -3345,6 +3345,21 @@ mod tests {
         // Search for k=5 to force more comparisons
         let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results.len(), 5);
+
+        // Also explicitly call is_retryable_usearch_error to ensure coverage even if not hit in search
+        assert!(!super::is_retryable_usearch_error("Some random error"));
+    }
+
+    #[test]
+    fn test_run_metric_protected_direct() {
+        // Directly call the protected metric runner to guarantee coverage,
+        // bypassing any potential FFI/inline/optimization confusion.
+        let a = [1.0, 2.0];
+        let b = [3.0, 4.0];
+        let dist = super::run_metric_protected(&a, &b, &|x, y| {
+            x.iter().zip(y.iter()).map(|(v1, v2)| (v1 - v2).abs()).sum()
+        });
+        assert_eq!(dist, 4.0);
     }
 
     #[test]
