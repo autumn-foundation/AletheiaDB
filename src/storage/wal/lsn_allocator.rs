@@ -345,3 +345,37 @@ mod tests {
         assert_eq!(alloc.current(), LSN(1));
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "LSN Allocator Overflow")]
+    fn test_allocator_overflow_boundary() {
+        // Start just before the limit
+        let alloc = LsnAllocator::starting_at(LSN(u64::MAX - 1));
+
+        // This should succeed and return MAX-1
+        let lsn = alloc.allocate();
+        assert_eq!(lsn, LSN(u64::MAX - 1));
+
+        // This should panic because next_lsn is now MAX (reserved/invalid)
+        let _ = alloc.allocate();
+    }
+
+    #[test]
+    #[should_panic(expected = "LSN Allocator Overflow")]
+    fn test_batch_allocation_boundary() {
+        // Start 10 steps before limit
+        let alloc = LsnAllocator::starting_at(LSN(u64::MAX - 10));
+
+        // Allocate exactly 10 items [MAX-10, ..., MAX-1]
+        let (start, end) = alloc.allocate_batch(10);
+        assert_eq!(start, LSN(u64::MAX - 10));
+        assert_eq!(end, LSN(u64::MAX - 1));
+
+        // Next allocation should fail as next_lsn is now MAX
+        let _ = alloc.allocate();
+    }
+}
