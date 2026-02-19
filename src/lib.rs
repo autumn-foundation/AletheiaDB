@@ -37,6 +37,10 @@
 //!     "age" => 30,
 //! })?;
 //!
+//! // Ensure the transaction clock advances so the next timestamp is strictly greater.
+//! // This prevents "NodeNotFound" if the next operation happens in the same microsecond.
+//! std::thread::sleep(std::time::Duration::from_millis(1));
+//!
 //! // Capture the time when Alice was 30
 //! let time_at_30 = time::now();
 //!
