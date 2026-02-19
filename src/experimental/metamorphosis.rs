@@ -109,15 +109,20 @@ impl<'a, T: WriteOps> MetamorphosisEngine<'a, T> {
 
         for mapping in &rule.mappings {
             match mapping {
-                PropertyMapping::Drop(k) => { drops.insert(k.clone()); },
-                PropertyMapping::Rename { old, new } => { renames.insert(old.clone(), new.clone()); },
-                PropertyMapping::Keep(_) => {}, // Implicit default
+                PropertyMapping::Drop(k) => {
+                    drops.insert(k.clone());
+                }
+                PropertyMapping::Rename { old, new } => {
+                    renames.insert(old.clone(), new.clone());
+                }
+                PropertyMapping::Keep(_) => {} // Implicit default
             }
         }
 
         // Iterate old properties
         for (key_id, val) in old_node.properties.iter() {
-            let key = GLOBAL_INTERNER.resolve_with(*key_id, |s| s.to_string())
+            let key = GLOBAL_INTERNER
+                .resolve_with(*key_id, |s| s.to_string())
                 .unwrap_or_else(|| "unknown".to_string()); // Should never happen
 
             if drops.contains(&key) {
@@ -143,10 +148,13 @@ impl<'a, T: WriteOps> MetamorphosisEngine<'a, T> {
         // 4a. Outgoing Edges (Old -> Target)
         let outgoing = self.tx.get_outgoing_edges(node_id);
         for edge_id in outgoing {
-            if processed_edges.contains(&edge_id) { continue; }
+            if processed_edges.contains(&edge_id) {
+                continue;
+            }
 
             let edge = self.tx.get_edge(edge_id)?;
-            let label = GLOBAL_INTERNER.resolve_with(edge.label, |s| s.to_string())
+            let label = GLOBAL_INTERNER
+                .resolve_with(edge.label, |s| s.to_string())
                 .unwrap_or_default();
 
             // If target is old_node (Self-loop), point to new_node
@@ -156,7 +164,8 @@ impl<'a, T: WriteOps> MetamorphosisEngine<'a, T> {
                 edge.target
             };
 
-            self.tx.create_edge(new_node_id, target, &label, edge.properties.clone())?;
+            self.tx
+                .create_edge(new_node_id, target, &label, edge.properties.clone())?;
             self.tx.delete_edge(edge_id)?;
             processed_edges.insert(edge_id);
         }
@@ -164,10 +173,13 @@ impl<'a, T: WriteOps> MetamorphosisEngine<'a, T> {
         // 4b. Incoming Edges (Source -> Old)
         let incoming = self.tx.get_incoming_edges(node_id);
         for edge_id in incoming {
-            if processed_edges.contains(&edge_id) { continue; }
+            if processed_edges.contains(&edge_id) {
+                continue;
+            }
 
             let edge = self.tx.get_edge(edge_id)?;
-            let label = GLOBAL_INTERNER.resolve_with(edge.label, |s| s.to_string())
+            let label = GLOBAL_INTERNER
+                .resolve_with(edge.label, |s| s.to_string())
                 .unwrap_or_default();
 
             // If source is old_node (Self-loop), point from new_node
@@ -179,7 +191,8 @@ impl<'a, T: WriteOps> MetamorphosisEngine<'a, T> {
                 edge.source
             };
 
-            self.tx.create_edge(source, new_node_id, &label, edge.properties.clone())?;
+            self.tx
+                .create_edge(source, new_node_id, &label, edge.properties.clone())?;
             self.tx.delete_edge(edge_id)?;
             processed_edges.insert(edge_id);
         }
@@ -203,35 +216,43 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
 
         // Setup: Create User and Commit
-        let old_id = db.write(|tx| {
-            let props = PropertyMapBuilder::new()
-                .insert("name", "Alice")
-                .insert("age", 30i64)
-                .build();
-            tx.create_node("User", props)
-        }).unwrap();
+        let old_id = db
+            .write(|tx| {
+                let props = PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build();
+                tx.create_node("User", props)
+            })
+            .unwrap();
 
         // Migrate to Customer in new transaction
         let rule = TransformationRule::new("User", "Customer")
             .rename("name", "full_name")
             .drop("age");
 
-        let new_id = db.write(|tx| {
-            let mut engine = MetamorphosisEngine::new(tx);
-            engine.migrate_node(old_id, &rule)
-        }).unwrap();
+        let new_id = db
+            .write(|tx| {
+                let mut engine = MetamorphosisEngine::new(tx);
+                engine.migrate_node(old_id, &rule)
+            })
+            .unwrap();
 
         // Verify
         db.read(|tx| {
             let new_node = tx.get_node(new_id)?;
             assert_eq!(new_node.has_label_str("Customer"), true);
-            assert_eq!(new_node.get_property("full_name").unwrap().as_str(), Some("Alice"));
+            assert_eq!(
+                new_node.get_property("full_name").unwrap().as_str(),
+                Some("Alice")
+            );
             assert_eq!(new_node.get_property("age"), None);
 
             // Verify old node is gone
             assert!(tx.get_node(old_id).is_err());
             Ok::<(), crate::core::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -239,20 +260,30 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
 
         // Setup
-        let (alice, bob) = db.write(|tx| {
-            let alice = tx.create_node("User", PropertyMapBuilder::new().insert("name", "Alice").build())?;
-            let bob = tx.create_node("User", PropertyMapBuilder::new().insert("name", "Bob").build())?;
-            // Alice -> Bob
-            tx.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())?;
-            Ok::<_, crate::core::error::Error>((alice, bob))
-        }).unwrap();
+        let (alice, bob) = db
+            .write(|tx| {
+                let alice = tx.create_node(
+                    "User",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )?;
+                let bob = tx.create_node(
+                    "User",
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
+                )?;
+                // Alice -> Bob
+                tx.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())?;
+                Ok::<_, crate::core::error::Error>((alice, bob))
+            })
+            .unwrap();
 
         // Migrate Alice -> Customer
         let rule = TransformationRule::new("User", "Customer");
-        let new_alice = db.write(|tx| {
-            let mut engine = MetamorphosisEngine::new(tx);
-            engine.migrate_node(alice, &rule)
-        }).unwrap();
+        let new_alice = db
+            .write(|tx| {
+                let mut engine = MetamorphosisEngine::new(tx);
+                engine.migrate_node(alice, &rule)
+            })
+            .unwrap();
 
         // Verify Edge: NewAlice -> Bob
         db.read(|tx| {
@@ -262,27 +293,38 @@ mod tests {
             assert_eq!(edge.target, bob);
             assert_eq!(edge.has_label_str("KNOWS"), true);
             Ok::<(), crate::core::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_incoming_edge_migration() {
         let db = AletheiaDB::new().unwrap();
 
-        let (alice, bob) = db.write(|tx| {
-            let alice = tx.create_node("User", PropertyMapBuilder::new().insert("name", "Alice").build())?;
-            let bob = tx.create_node("User", PropertyMapBuilder::new().insert("name", "Bob").build())?;
-            // Bob -> Alice
-            tx.create_edge(bob, alice, "LIKES", PropertyMapBuilder::new().build())?;
-            Ok::<_, crate::core::error::Error>((alice, bob))
-        }).unwrap();
+        let (alice, bob) = db
+            .write(|tx| {
+                let alice = tx.create_node(
+                    "User",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )?;
+                let bob = tx.create_node(
+                    "User",
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
+                )?;
+                // Bob -> Alice
+                tx.create_edge(bob, alice, "LIKES", PropertyMapBuilder::new().build())?;
+                Ok::<_, crate::core::error::Error>((alice, bob))
+            })
+            .unwrap();
 
         // Migrate Alice -> Customer
         let rule = TransformationRule::new("User", "Customer");
-        let new_alice = db.write(|tx| {
-            let mut engine = MetamorphosisEngine::new(tx);
-            engine.migrate_node(alice, &rule)
-        }).unwrap();
+        let new_alice = db
+            .write(|tx| {
+                let mut engine = MetamorphosisEngine::new(tx);
+                engine.migrate_node(alice, &rule)
+            })
+            .unwrap();
 
         // Verify Edge: Bob -> NewAlice
         db.read(|tx| {
@@ -292,26 +334,31 @@ mod tests {
             assert_eq!(edge.source, bob);
             assert_eq!(edge.has_label_str("LIKES"), true);
             Ok::<(), crate::core::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_self_loop_migration() {
         let db = AletheiaDB::new().unwrap();
 
-        let node = db.write(|tx| {
-            let node = tx.create_node("Node", PropertyMapBuilder::new().build())?;
-            // Node -> Node
-            tx.create_edge(node, node, "SELF", PropertyMapBuilder::new().build())?;
-            Ok::<_, crate::core::error::Error>(node)
-        }).unwrap();
+        let node = db
+            .write(|tx| {
+                let node = tx.create_node("Node", PropertyMapBuilder::new().build())?;
+                // Node -> Node
+                tx.create_edge(node, node, "SELF", PropertyMapBuilder::new().build())?;
+                Ok::<_, crate::core::error::Error>(node)
+            })
+            .unwrap();
 
         // Migrate
         let rule = TransformationRule::new("Node", "NewNode");
-        let new_node = db.write(|tx| {
-            let mut engine = MetamorphosisEngine::new(tx);
-            engine.migrate_node(node, &rule)
-        }).unwrap();
+        let new_node = db
+            .write(|tx| {
+                let mut engine = MetamorphosisEngine::new(tx);
+                engine.migrate_node(node, &rule)
+            })
+            .unwrap();
 
         // Verify: NewNode -> NewNode
         db.read(|tx| {
@@ -322,7 +369,8 @@ mod tests {
             assert_eq!(edge.target, new_node);
             assert_eq!(edge.has_label_str("SELF"), true);
             Ok::<(), crate::core::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -330,7 +378,9 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
         let mut tx = db.write_transaction().unwrap();
 
-        let node = tx.create_node("User", PropertyMapBuilder::new().build()).unwrap();
+        let node = tx
+            .create_node("User", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Rule expects "Customer"
         let rule = TransformationRule::new("Customer", "User");
