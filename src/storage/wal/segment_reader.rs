@@ -1850,11 +1850,11 @@ mod fuzz_tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use crate::storage::wal::serialization::serialize_entry_into;
+    use crate::core::id::NodeId;
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
-    use crate::core::interning::GLOBAL_INTERNER;
-    use crate::core::id::NodeId;
+    use crate::storage::wal::serialization::serialize_entry_into;
 
     #[test]
     fn test_wal_entry_round_trip_correctness() {
@@ -1894,12 +1894,20 @@ mod sentry_tests {
 
         // 3. Deserialize
         // Note: version 1 is hardcoded here matching WAL_VERSION
-        let (deserialized_entry, consumed) = parse_entry_at(&buffer, 0, 1).expect("Deserialization failed");
+        let (deserialized_entry, consumed) =
+            parse_entry_at(&buffer, 0, 1).expect("Deserialization failed");
 
         // 4. Verify Fidelity
-        assert_eq!(consumed, buffer.len(), "Deserialization should consume entire buffer");
+        assert_eq!(
+            consumed,
+            buffer.len(),
+            "Deserialization should consume entire buffer"
+        );
         assert_eq!(deserialized_entry.lsn, lsn, "LSN mismatch");
-        assert_eq!(deserialized_entry.timestamp, original_entry.timestamp, "Timestamp mismatch");
+        assert_eq!(
+            deserialized_entry.timestamp, original_entry.timestamp,
+            "Timestamp mismatch"
+        );
         // Checksum in deserialized entry is the one read from disk/buffer
         // original_entry.checksum is 0 because it wasn't set by new() (it's computed during serialization)
         // So we can't compare checksums directly unless we update original_entry's checksum.
@@ -1919,7 +1927,10 @@ mod sentry_tests {
                 // Check properties
                 assert_eq!(d_props.len(), properties.len());
                 assert_eq!(d_props.get("name").and_then(|v| v.as_str()), Some("Sentry"));
-                assert_eq!(d_props.get("purpose").and_then(|v| v.as_str()), Some("Correctness"));
+                assert_eq!(
+                    d_props.get("purpose").and_then(|v| v.as_str()),
+                    Some("Correctness")
+                );
                 assert_eq!(d_props.get("active").and_then(|v| v.as_bool()), Some(true));
                 assert_eq!(d_props.get("score").and_then(|v| v.as_float()), Some(100.0));
             }

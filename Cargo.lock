@@ -252,7 +252,6 @@ dependencies = [
  "memmap2",
  "metrics",
  "metrics-exporter-prometheus",
- "native-tls",
  "num_cpus",
  "ort",
  "parking_lot",
