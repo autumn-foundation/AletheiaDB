@@ -1618,4 +1618,20 @@ mod sentry_tests {
             "Should contain range ending at exact same time"
         );
     }
+
+    #[test]
+    fn test_is_visible_at_doctest_scenario() {
+        // Explicitly cover the scenario from the doctest to ensure coverage
+        let t100 = time::from_secs(100);
+        let t200 = time::from_secs(200);
+
+        // Fact valid from T100, recorded at T200
+        let interval = BiTemporalInterval::with_valid_time(t100, t200);
+
+        // Visible: querying at T200 (tx time) about T100 (valid time)
+        assert!(interval.is_visible_at(t100, t200));
+
+        // Not Visible: querying at T150 (before it was recorded)
+        assert!(!interval.is_visible_at(t100, time::from_secs(150)));
+    }
 }
