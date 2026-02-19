@@ -1924,15 +1924,8 @@ mod sentry_tests {
                 assert_eq!(d_label, label, "Label mismatch");
                 assert_eq!(d_valid, valid_from, "valid_from mismatch");
 
-                // Check properties
-                assert_eq!(d_props.len(), properties.len());
-                assert_eq!(d_props.get("name").and_then(|v| v.as_str()), Some("Sentry"));
-                assert_eq!(
-                    d_props.get("purpose").and_then(|v| v.as_str()),
-                    Some("Correctness")
-                );
-                assert_eq!(d_props.get("active").and_then(|v| v.as_bool()), Some(true));
-                assert_eq!(d_props.get("score").and_then(|v| v.as_float()), Some(100.0));
+                // Use direct PropertyMap equality (derived PartialEq)
+                assert_eq!(d_props, properties, "PropertyMap mismatch");
             }
             _ => panic!("Deserialized operation type mismatch"),
         }

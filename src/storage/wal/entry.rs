@@ -253,37 +253,39 @@ mod tests {
         // Sanity check: valid initially
         assert!(entry.verify_checksum(&buffer));
 
+        // Clone once for corruption tests
+        let mut corrupt_buffer = buffer.clone();
+
         // Corrupt LSN (byte 0)
-        let mut corrupt_lsn = buffer.clone();
-        corrupt_lsn[0] ^= 0xFF;
+        corrupt_buffer[0] ^= 0xFF;
         assert!(
-            !entry.verify_checksum(&corrupt_lsn),
+            !entry.verify_checksum(&corrupt_buffer),
             "Checksum should fail when LSN is corrupted"
         );
+        corrupt_buffer[0] ^= 0xFF; // Restore
 
         // Corrupt Timestamp (byte 8)
-        let mut corrupt_ts = buffer.clone();
-        corrupt_ts[8] ^= 0xFF;
+        corrupt_buffer[8] ^= 0xFF;
         assert!(
-            !entry.verify_checksum(&corrupt_ts),
+            !entry.verify_checksum(&corrupt_buffer),
             "Checksum should fail when Timestamp is corrupted"
         );
+        corrupt_buffer[8] ^= 0xFF; // Restore
 
         // Corrupt Operation Data (last byte)
-        let mut corrupt_data = buffer.clone();
-        let last_idx = corrupt_data.len() - 1;
-        corrupt_data[last_idx] ^= 0xFF;
+        let last_idx = corrupt_buffer.len() - 1;
+        corrupt_buffer[last_idx] ^= 0xFF;
         assert!(
-            !entry.verify_checksum(&corrupt_data),
+            !entry.verify_checksum(&corrupt_buffer),
             "Checksum should fail when Operation Data is corrupted"
         );
+        corrupt_buffer[last_idx] ^= 0xFF; // Restore
 
         // Corrupt Checksum Field itself (byte 20)
         // This ensures verify_checksum isn't just ignoring the stored checksum
-        let mut corrupt_sum = buffer.clone();
-        corrupt_sum[20] ^= 0xFF;
+        corrupt_buffer[20] ^= 0xFF;
         assert!(
-            !entry.verify_checksum(&corrupt_sum),
+            !entry.verify_checksum(&corrupt_buffer),
             "Checksum should fail when stored checksum is corrupted"
         );
     }
