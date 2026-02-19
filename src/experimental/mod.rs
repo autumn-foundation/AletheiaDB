@@ -38,6 +38,7 @@
 //! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
 //! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
+//! | [`metamorphosis`] | **Metamorphosis** | Schema Evolution via Graph Transformation. |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -103,6 +104,9 @@ pub mod hindsight;
 #[cfg(feature = "nova")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
+#[cfg(feature = "nova")]
+/// Metamorphosis: Schema Evolution via Graph Transformation.
+pub mod metamorphosis;
 #[cfg(feature = "nova")]
 /// Prism: Semantic Spectroscopy for Vectors.
 pub mod prism;
