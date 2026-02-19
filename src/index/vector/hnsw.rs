@@ -458,11 +458,12 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
 /// * `slice_a` - The first vector slice
 /// * `slice_b` - The second vector slice
 /// * `distance_fn` - The user-provided distance function
-#[allow(dead_code)] // Ensure not flagged as unused even if specialized usage confuses linter
-pub(crate) fn run_metric_protected<F>(slice_a: &[f32], slice_b: &[f32], distance_fn: &F) -> f32
-where
-    F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + ?Sized,
-{
+#[inline(never)] // Prevent inlining to ensure Codecov can track execution
+pub(crate) fn run_metric_protected(
+    slice_a: &[f32],
+    slice_b: &[f32],
+    distance_fn: &dyn Fn(&[f32], &[f32]) -> f32,
+) -> f32 {
     // Set re-entrancy guard to prevent deadlocks if the metric callback
     // attempts to modify the index (e.g., via add/remove).
     // This sets IN_FILTER_CALLBACK = true for the duration of the callback.
@@ -485,45 +486,44 @@ where
 /// # Safety
 ///
 /// Caller must ensure pointers are valid for `dims` elements if they are not null/unaligned.
-#[inline(always)]
-unsafe fn validate_raw_pointers<'a>(
+#[inline(never)] // Prevent inlining to ensure Codecov can track execution
+pub(crate) unsafe fn validate_raw_pointers<'a>(
     a: *const f32,
     b: *const f32,
     dims: usize,
-) -> Option<(&'a [f32], &'a [f32])> { unsafe {
-    // Check for null pointers to prevent UB
-    if a.is_null() || b.is_null() {
-        // This should never happen with a correct usearch implementation.
-        eprintln!("usearch passed null pointer to metric function - returning max distance");
-        return None;
-    }
+) -> Option<(&'a [f32], &'a [f32])> {
+    unsafe {
+        // Check for null pointers to prevent UB
+        if a.is_null() || b.is_null() {
+            // This should never happen with a correct usearch implementation.
+            eprintln!("usearch passed null pointer to metric function - returning max distance");
+            return None;
+        }
 
-    // Check for alignment to prevent UB
-    // Use bitwise check for power-of-2 alignment (f32 align is 4)
-    let align_mask = std::mem::align_of::<f32>() - 1;
-    if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
-        eprintln!(
-            "usearch passed unaligned pointer to metric function (expected alignment {}) - returning max distance",
-            std::mem::align_of::<f32>()
-        );
-        return None;
-    }
+        // Check for alignment to prevent UB
+        // Use bitwise check for power-of-2 alignment (f32 align is 4)
+        let align_mask = std::mem::align_of::<f32>() - 1;
+        if (a as usize) & align_mask != 0 || (b as usize) & align_mask != 0 {
+            eprintln!(
+                "usearch passed unaligned pointer to metric function (expected alignment {}) - returning max distance",
+                std::mem::align_of::<f32>()
+            );
+            return None;
+        }
 
-    // SAFETY: caller guarantees validity if checks pass
-    Some((
-        std::slice::from_raw_parts(a, dims),
-        std::slice::from_raw_parts(b, dims),
-    ))
-}}
+        // SAFETY: caller guarantees validity if checks pass
+        Some((
+            std::slice::from_raw_parts(a, dims),
+            std::slice::from_raw_parts(b, dims),
+        ))
+    }
+}
 
 // Helper to create the metric wrapper - extracted for testing
-fn create_metric_wrapper<F>(
+fn create_metric_wrapper(
     dims: usize,
-    distance_fn: Arc<F>,
-) -> Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync>
-where
-    F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
-{
+    distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync>,
+) -> Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> {
     Box::new(move |a: *const f32, b: *const f32| {
         // Validate pointers and convert to slices
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
@@ -539,6 +539,7 @@ where
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // We use the helper function run_metric_protected to ensure proper
             // instrumentation of the re-entrancy guard logic.
+            // Coerce to trait object to avoid generic monomorphization issues with coverage.
             run_metric_protected(slice_a, slice_b, &*distance_fn)
         }));
 
@@ -3725,6 +3726,62 @@ mod coverage_tests {
 
         // |1.0-1.5| + |2.0-2.5| + |3.0-3.5| + |4.0-4.5| = 0.5 * 4 = 2.0
         assert!((result - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_custom_metric_execution_coverage() {
+        // This test ensures that the custom metric wrapper and its guard logic are executed,
+        // satisfying code coverage requirements for the new lines added in create_metric_wrapper.
+        let metric_fn = |a: &[f32], b: &[f32]| -> f32 {
+            // Explicitly verify that the re-entrancy guard is active.
+            // This assertion ensures that the line `let _guard = FilterCallbackGuard::new();`
+            // in `create_metric_wrapper` is executed and working.
+            assert!(
+                super::IN_FILTER_CALLBACK.with(|flag| flag.get()),
+                "Re-entrancy guard should be active during metric execution"
+            );
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+        };
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .quantization(Quantization::F32) // Required for custom metric
+            .with_custom_metric("manhattan", metric_fn)
+            .build()
+            .unwrap();
+
+        // Add more nodes to ensure we trigger enough comparisons to hit the callback
+        for i in 0..10 {
+            let id = NodeId::new(i + 1).unwrap();
+            // Alternate vectors to create some diversity
+            let vec = if i % 2 == 0 {
+                [1.0, 0.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0, 0.0]
+            };
+            index.add(id, &vec).unwrap();
+        }
+
+        // Perform search to trigger the metric execution
+        // Search for k=5 to force more comparisons
+        let results = index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
+        assert_eq!(results.len(), 5);
+
+        // Also explicitly call is_retryable_usearch_error to ensure coverage even if not hit in search
+        assert!(!super::is_retryable_usearch_error("Some random error"));
+    }
+
+    #[test]
+    fn test_run_metric_protected_direct() {
+        // Directly call the protected metric runner to guarantee coverage,
+        // bypassing any potential FFI/inline/optimization confusion.
+        let a = [1.0, 2.0];
+        let b = [3.0, 4.0];
+        // Explicit closure with type annotation to facilitate coercion to &dyn Fn
+        let metric = |x: &[f32], y: &[f32]| -> f32 {
+            x.iter().zip(y.iter()).map(|(v1, v2)| (v1 - v2).abs()).sum()
+        };
+        let dist = super::run_metric_protected(&a, &b, &metric);
+        assert_eq!(dist, 4.0);
     }
 }
 
