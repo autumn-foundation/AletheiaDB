@@ -1,7 +1,7 @@
 //! Group commit coordination for batched WAL flushes.
 //!
 //! This module provides [`GroupCommitCoordinator`], which manages the epoch-based
-//! waiting mechanism for [`GroupCommit`](super::DurabilityMode::GroupCommit) mode.
+//! waiting mechanism for [`GroupCommit`](crate::storage::wal::DurabilityMode::GroupCommit) mode.
 //!
 //! # Error Handling Strategy
 //!

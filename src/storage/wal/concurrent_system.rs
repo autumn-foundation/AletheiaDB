@@ -1,6 +1,6 @@
 //! Unified Concurrent WAL System.
 //!
-//! This module provides [`ConcurrentWalSystem`], which combines the concurrent
+//! This module provides [`crate::storage::wal::concurrent_system::ConcurrentWalSystem`], which combines the concurrent
 //! WAL striped architecture with the flush coordinator into a single, cohesive
 //! component that can be used as a drop-in replacement for the old `WriteAheadLog`.
 //!

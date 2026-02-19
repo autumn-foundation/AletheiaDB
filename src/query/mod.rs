@@ -86,17 +86,29 @@
 //! - [`ir`]: Intermediate Representation types ([`QueryOp`], [`Predicate`]).
 //! - [`ast`]: Abstract Syntax Tree for parsed AQL queries.
 
+/// Abstract Syntax Tree for AQL.
 pub mod ast;
+/// Fluent API for building queries.
 pub mod builder;
+/// Converter from AST to Logical Plan.
 pub mod converter;
+/// Query executor engine.
 pub mod executor;
+/// Hybrid query execution strategies.
 pub mod hybrid;
+/// Intermediate Representation for queries.
 pub mod ir;
+/// Lexer for AQL.
 pub mod lexer;
+/// Parser for AQL.
 pub mod parser;
+/// Logical query plan definitions.
 pub mod plan;
+/// Query planner and optimizer.
 pub mod planner;
+/// Query result types.
 pub mod result;
+/// Semantic pathfinding algorithms.
 pub mod semantic_pathfinding;
 /// Query execution traits.
 pub mod traits;

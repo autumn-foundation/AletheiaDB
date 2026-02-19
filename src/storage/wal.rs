@@ -101,21 +101,31 @@
 //! - Reduced stripe buffer contention
 //! - **20-50% throughput improvement** for batch sizes > 10
 
-// Durability mode support
+/// Durability configuration and modes.
 pub mod durability;
+/// Group commit coordination.
 pub mod group_commit;
 
 // Concurrent WAL modules
+/// Concurrent WAL implementation details.
 pub mod concurrent;
+/// High-level Concurrent WAL system.
 pub mod concurrent_system;
+/// WAL flush coordination.
 pub mod flush_coordinator;
+/// Lock-free LSN allocator.
 pub mod lsn_allocator;
+/// Lock-free ring buffer implementation.
 pub mod ring_buffer;
+/// WAL segment reader.
 pub mod segment_reader;
+/// WAL stripe implementation.
 pub mod stripe;
 
 // New modules for data structures and serialization
+/// WAL entry types.
 pub mod entry;
+/// WAL serialization utilities.
 pub mod serialization;
 
 // Re-export key types

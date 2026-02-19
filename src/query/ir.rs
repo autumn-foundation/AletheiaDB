@@ -1,7 +1,7 @@
 //! Query Intermediate Representation (IR)
 //!
 //! Defines the core types for representing hybrid queries before planning.
-//! These types are used by the [`QueryBuilder`](super::builder::QueryBuilder)
+//! These types are used by the [`QueryBuilder`](crate::query::builder::QueryBuilder)
 //! and transformed into logical plans by the planner.
 
 use std::ops::Not;

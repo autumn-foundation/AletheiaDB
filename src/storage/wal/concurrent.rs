@@ -1,6 +1,6 @@
 //! Concurrent Write-Ahead Log implementation.
 //!
-//! This module provides [`ConcurrentWal`], a high-performance WAL that supports
+//! This module provides [`crate::storage::wal::concurrent::ConcurrentWal`], a high-performance WAL that supports
 //! concurrent appends from multiple threads with minimal contention.
 //!
 //! # Architecture
