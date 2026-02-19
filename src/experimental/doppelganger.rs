@@ -61,8 +61,12 @@ impl<'a> DoppelgangerEngine<'a> {
         let mut props: Vec<_> = node.properties.iter().collect();
         // Sort by resolved key string for deterministic order
         props.sort_by(|(k1, _), (k2, _)| {
-            let s1 = GLOBAL_INTERNER.resolve_with(**k1, |s| s.to_string()).unwrap_or_default();
-            let s2 = GLOBAL_INTERNER.resolve_with(**k2, |s| s.to_string()).unwrap_or_default();
+            let s1 = GLOBAL_INTERNER
+                .resolve_with(**k1, |s| s.to_string())
+                .unwrap_or_default();
+            let s2 = GLOBAL_INTERNER
+                .resolve_with(**k2, |s| s.to_string())
+                .unwrap_or_default();
             s1.cmp(&s2)
         });
 
@@ -193,23 +197,13 @@ mod tests {
         // Create Node A
         let props = PropertyMapBuilder::new().insert("name", "Clone").build();
         let node_a = db.create_node("Person", props.clone()).unwrap();
-        db.create_edge(
-            node_a,
-            neighbor,
-            "KNOWS",
-            PropertyMapBuilder::new().build(),
-        )
-        .unwrap();
+        db.create_edge(node_a, neighbor, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Create Node B (Identical)
         let node_b = db.create_node("Person", props).unwrap();
-        db.create_edge(
-            node_b,
-            neighbor,
-            "KNOWS",
-            PropertyMapBuilder::new().build(),
-        )
-        .unwrap();
+        db.create_edge(node_b, neighbor, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
 
         let engine = DoppelgangerEngine::new(&db);
 
@@ -234,10 +228,16 @@ mod tests {
 
         // Create different neighbors
         let neighbor_1 = db
-            .create_node("Neighbor", PropertyMapBuilder::new().insert("id", 1).build())
+            .create_node(
+                "Neighbor",
+                PropertyMapBuilder::new().insert("id", 1).build(),
+            )
             .unwrap();
         let neighbor_2 = db
-            .create_node("Neighbor", PropertyMapBuilder::new().insert("id", 2).build())
+            .create_node(
+                "Neighbor",
+                PropertyMapBuilder::new().insert("id", 2).build(),
+            )
             .unwrap();
 
         // Create Node A -> Neighbor 1
