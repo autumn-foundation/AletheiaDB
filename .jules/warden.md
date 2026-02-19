@@ -51,3 +51,9 @@
 **2026-02-19 - Type Confusion in HNSW Index Loading**
 **Threat:** A malicious actor could supply an index file with low-precision quantization (I8) but a configuration claiming high-precision (F32). The `usearch` library would load the I8 data, but the custom metric callback (expecting F32) would interpret the pointers as F32, causing a buffer over-read (reading 4x memory) and potential information leakage or crash.
 **Defense:** Implemented `validate_usearch_file` in `src/index/vector/hnsw.rs` to parses the binary file header and verify the `scalar_kind` matches the expected quantization before loading. This prevents the type confusion.
+**2026-02-19 - Type Confusion in HNSW Index Loading
+**Threat:** Malicious usearch index file with I8 scalar kind loaded as F32, leading to buffer over-read in custom metric.
+**Defense:** Added  to verify file header matches expected quantization before loading.**
+**2026-02-19 - Type Confusion in HNSW Index Loading
+**Threat:** Malicious usearch index file with I8 scalar kind loaded as F32, leading to buffer over-read in custom metric.
+**Defense:** Added `validate_usearch_file` to verify file header matches expected quantization before loading.**

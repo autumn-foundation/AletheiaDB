@@ -3895,3 +3895,177 @@ mod race_recovery_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    /// Helper to create a dummy usearch header with specific scalar kind.
+    /// Returns a 64-byte buffer starting with "usearch".
+    fn create_header(quantization: Quantization) -> Vec<u8> {
+        let mut header = vec![0u8; 64];
+        header[0..7].copy_from_slice(b"usearch");
+
+        // Scalar kind at offset 14
+        // F32 = 11, F16 = 12, I8 = 23
+        let kind = match quantization {
+            Quantization::F32 => 11,
+            Quantization::F16 => 12,
+            Quantization::I8 => 23,
+        };
+        header[14] = kind;
+        header
+    }
+
+    #[test]
+    fn test_validate_file_not_found() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent.usearch");
+
+        let result = validate_usearch_file(&path, Quantization::F32);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to open index file")
+        );
+    }
+
+    #[test]
+    fn test_validate_file_too_small() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("small.usearch");
+
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&[0u8; 10]).unwrap(); // Only 10 bytes
+
+        let result = validate_usearch_file(&path, Quantization::F32);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Index file too small")
+        );
+    }
+
+    #[test]
+    fn test_validate_strategy_1_valid() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("strat1.usearch");
+
+        let header = create_header(Quantization::F32);
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&header).unwrap();
+
+        // Should pass
+        assert!(validate_usearch_file(&path, Quantization::F32).is_ok());
+    }
+
+    #[test]
+    fn test_validate_strategy_1_mismatch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("strat1_mismatch.usearch");
+
+        // File says I8
+        let header = create_header(Quantization::I8);
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&header).unwrap();
+
+        // We expect F32 -> Error
+        let result = validate_usearch_file(&path, Quantization::F32);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Index quantization mismatch")
+        );
+    }
+
+    #[test]
+    fn test_validate_strategy_2_valid() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("strat2.usearch");
+
+        let mut file = File::create(&path).unwrap();
+
+        // 32-bit dims: rows=0, cols=0 -> 8 bytes of zeros
+        // This implies data_size = 0.
+        // Offset = data_size + 8 = 8.
+        file.write_all(&[0u8; 8]).unwrap();
+
+        // Write header at offset 8
+        let header = create_header(Quantization::F16);
+        file.write_all(&header).unwrap();
+
+        // Should pass for F16
+        assert!(validate_usearch_file(&path, Quantization::F16).is_ok());
+    }
+
+    #[test]
+    fn test_validate_strategy_3_valid() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("strat3.usearch");
+
+        let mut file = File::create(&path).unwrap();
+
+        // 64-bit dims: rows=0, cols=0 -> 16 bytes of zeros
+        // This implies data_size = 0.
+        // Strategy 2 checks offset 8 (which is 0s from cols_64), finds no magic.
+        // Strategy 3 checks offset 16 (data_size + 16).
+        file.write_all(&[0u8; 16]).unwrap();
+
+        // Write header at offset 16
+        let header = create_header(Quantization::I8);
+        file.write_all(&header).unwrap();
+
+        // Should pass for I8
+        assert!(validate_usearch_file(&path, Quantization::I8).is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_magic() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nomagic.usearch");
+
+        let mut file = File::create(&path).unwrap();
+        // Write random data, large enough but no magic
+        file.write_all(&[0u8; 100]).unwrap();
+
+        let result = validate_usearch_file(&path, Quantization::F32);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing 'usearch' magic")
+        );
+    }
+
+    #[test]
+    fn test_validate_strategy_2_mismatch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("strat2_mismatch.usearch");
+
+        let mut file = File::create(&path).unwrap();
+        // Offset 8
+        file.write_all(&[0u8; 8]).unwrap();
+        // Header says F32
+        let header = create_header(Quantization::F32);
+        file.write_all(&header).unwrap();
+
+        // Expect I8 -> Error
+        let result = validate_usearch_file(&path, Quantization::I8);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Index quantization mismatch")
+        );
+    }
+}
