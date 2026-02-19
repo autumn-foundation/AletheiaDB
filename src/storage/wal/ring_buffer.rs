@@ -207,7 +207,9 @@ impl Drop for PendingEntry {
             // If it's already complete (success or error), this is a no-op.
             // If it's Pending, we must signal Error.
             if !notifier.is_complete() {
-                notifier.notify_error("PendingEntry dropped without being processed (buffer clear or shutdown)");
+                notifier.notify_error(
+                    "PendingEntry dropped without being processed (buffer clear or shutdown)",
+                );
             }
         }
     }

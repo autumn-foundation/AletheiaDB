@@ -1,5 +1,5 @@
-use aletheiadb::storage::wal::ring_buffer::PendingEntry;
 use aletheiadb::storage::wal::LSN;
+use aletheiadb::storage::wal::ring_buffer::PendingEntry;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -41,7 +41,11 @@ fn test_deadlock_on_dropped_pending_entry() {
             // If we get a result, verify it's the expected error
             assert!(res.is_err(), "Expected error from dropped entry, got Ok");
             let err = res.unwrap_err();
-            assert!(err.contains("dropped"), "Expected 'dropped' error, got: {}", err);
+            assert!(
+                err.contains("dropped"),
+                "Expected 'dropped' error, got: {}",
+                err
+            );
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             // Timeout occurred! This confirms the deadlock.
