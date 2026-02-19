@@ -1,10 +1,10 @@
-use crate::index::vector::{HnswConfig, DistanceMetric, Quantization, HnswIndexBuilder, HnswIndex};
 use crate::core::id::NodeId;
 use crate::index::VectorIndex;
+use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, Quantization};
 use proptest::prelude::*;
 use std::io::Cursor;
-use tempfile::tempdir;
 use std::sync::{Arc, Mutex, Weak};
+use tempfile::tempdir;
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(1000))]
@@ -66,7 +66,9 @@ fn test_deadlock_custom_metric_reentrancy() {
     struct Shared {
         index: Mutex<Option<Weak<HnswIndex>>>,
     }
-    let shared = Arc::new(Shared { index: Mutex::new(None) });
+    let shared = Arc::new(Shared {
+        index: Mutex::new(None),
+    });
     let shared_clone = shared.clone();
 
     // Define metric that tries to add to index
@@ -94,8 +96,12 @@ fn test_deadlock_custom_metric_reentrancy() {
     *shared.index.lock().unwrap() = Some(Arc::downgrade(&index));
 
     // Add some data to enable search
-    index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-    index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+    index
+        .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    index
+        .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+        .unwrap();
 
     // Trigger search which calls metric
     // Use a timeout to detect deadlock

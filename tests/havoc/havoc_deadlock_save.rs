@@ -53,7 +53,7 @@ fn run_havoc_deadlock_save_vs_add() {
                 if let Err(e) = &result {
                     let err_msg = e.to_string();
                     if !err_msg
-                        .contains("Cannot save index from within a search_with_filter callback")
+                        .contains("Cannot save index from within a search callback")
                     {
                         // Print error but try not to panic inside FFI if possible?
                         // But for test, panic is the way to signal failure.
