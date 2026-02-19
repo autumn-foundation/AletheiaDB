@@ -1583,4 +1583,27 @@ mod sentry_tests {
             "Should contain range ending at exact same time"
         );
     }
+
+    #[test]
+    fn test_sentry_timerange_new_allows_infinity_start() {
+        // 🛡️ Sentry Test: Verify TimeRange::new allows TIMESTAMP_MAX as start.
+        // This targets the mutant that removes `&& start != TIMESTAMP_MAX` from the validation check.
+        // This corresponds to an empty range at the end of time, which is valid.
+        let range = TimeRange::new(TIMESTAMP_MAX, TIMESTAMP_MAX).unwrap();
+        assert_eq!(range.start(), TIMESTAMP_MAX);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+        assert!(range.is_current());
+    }
+
+    #[test]
+    fn test_sentry_timerange_new_allows_infinity_end() {
+        // 🛡️ Sentry Test: Verify TimeRange::new allows TIMESTAMP_MAX as end.
+        // This targets the mutant that removes `&& end != TIMESTAMP_MAX` from the validation check.
+        // While TimeRange::from() is typically used for open ranges, TimeRange::new() must also support it.
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let range = TimeRange::new(start, TIMESTAMP_MAX).unwrap();
+        assert_eq!(range.start(), start);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+        assert!(range.is_current());
+    }
 }

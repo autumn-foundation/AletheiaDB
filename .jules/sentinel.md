@@ -23,3 +23,9 @@
 **Summary:** `serialize_entry` checks `estimated_capacity > MAX_WAL_ENTRY_SIZE`, but no test verified behavior at exactly `MAX_WAL_ENTRY_SIZE` or just above it.
 **Diagnosis:** **Missing Coverage**. A mutant changing `>` to `>=` (rejecting valid max-size entries) or removing the check entirely (allowing DoS) would survive.
 **Kill Shot:** Added `test_append_entry_exactly_max_size_succeeds` and `test_append_entry_exceeding_max_size_fails` in `sentry_tests` module to enforce strict boundary compliance.
+
+**[TimeRange Infinity Boundaries]**
+**Module:** `src/core/temporal.rs`
+**Summary:** `TimeRange::new` has special handling to allow `TIMESTAMP_MAX` (infinity) as a start or end timestamp, bypassing `MAX_VALID_TIMESTAMP` checks. Removing these exemptions (e.g., `&& start != TIMESTAMP_MAX`) would cause valid infinite ranges to be rejected.
+**Diagnosis:** **Missing Coverage**. No existing test explicitly verified that `TimeRange::new` accepts `TIMESTAMP_MAX` as a start or end timestamp. A mutant removing the exemption survived the existing suite.
+**Kill Shot:** Added `test_sentry_timerange_new_allows_infinity_start` and `test_sentry_timerange_new_allows_infinity_end` in `sentry_tests` to enforce support for infinite ranges constructed via `new`.
