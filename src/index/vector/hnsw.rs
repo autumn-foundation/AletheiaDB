@@ -509,30 +509,17 @@ where
 
         // SAFETY: usearch guarantees pointers are valid for `dims` elements.
         // We verified they are not null above.
-
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-
-        // Set re-entrancy guard to prevent deadlocks if the metric callback
-        // attempts to modify the index (e.g., via add/remove).
-        // This sets IN_FILTER_CALLBACK = true for the duration of the callback.
-        // Operations like add() check this flag and return an error if set.
-        let _guard = FilterCallbackGuard::new();
-
-        // Explicitly assert flag logic to guarantee line coverage.
-        // This assertion creates a hard dependency on the guard's side effect,
-        // ensuring that the coverage tool registers this block as executed.
-        assert!(
-            IN_FILTER_CALLBACK.with(|f| f.get()),
-            "FilterCallbackGuard failed to set flag"
-        );
 
         // SAFETY: We wrap the user-provided closure in catch_unwind to prevent
         // panics from unwinding across the FFI boundary into C++ code, which is UB.
         // If a panic occurs, we return f32::MAX (infinite distance) to effectively
         // ignore this comparison.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            distance_fn(slice_a, slice_b)
+            // We use the helper function run_metric_protected to ensure proper
+            // instrumentation of the re-entrancy guard logic.
+            run_metric_protected(slice_a, slice_b, &*distance_fn)
         }));
 
         match result {
