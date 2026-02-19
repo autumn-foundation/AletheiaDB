@@ -1584,3 +1584,40 @@ mod sentry_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+
+    #[test]
+    fn test_timestamp_limit_hardcoded_behavior() {
+        // Sentinel Test: Verify enforcement uses the correct hardcoded limit.
+        // This ensures the implementation respects the protocol limit (i64::MAX - 1000)
+        // and hasn't been accidentally lowered or raised (e.g. by mutating the constant definition).
+
+        let limit = i64::MAX - 1000;
+        let valid = Timestamp::new_unchecked(limit, 0);
+        let invalid = Timestamp::new_unchecked(limit + 1, 0);
+
+        // Boundary check: limit should be accepted
+        assert!(
+            TimeRange::new(valid, valid).is_ok(),
+            "TimeRange should accept timestamps up to the hardcoded limit"
+        );
+
+        // Boundary check: limit + 1 should be rejected
+        // Note: We intentionally avoid using MAX_VALID_TIMESTAMP constant here to verify
+        // the *value* is correct, not just self-consistent.
+        let result = TimeRange::new(invalid, invalid);
+        assert!(
+            result.is_err(),
+            "TimeRange should reject timestamps exceeding the hardcoded limit"
+        );
+
+        if let Err(TemporalError::InvalidTimestamp { timestamp, .. }) = result {
+            assert_eq!(timestamp, invalid);
+        } else {
+            panic!("Expected InvalidTimestamp error");
+        }
+    }
+}

@@ -1241,3 +1241,53 @@ mod mutant_kill_tests {
         writer.join().unwrap();
     }
 }
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+
+    #[test]
+    fn test_common_strings_content() {
+        // Sentinel Test: Ensure COMMON_STRINGS contains critical keys.
+        // This prevents accidental removal of these strings, which would degrade performance
+        // or break code relying on them being pre-interned.
+        let common = COMMON_STRINGS;
+        assert!(
+            common.contains(&"name"),
+            "COMMON_STRINGS must contain 'name'"
+        );
+        assert!(common.contains(&"id"), "COMMON_STRINGS must contain 'id'");
+        assert!(
+            common.contains(&"type"),
+            "COMMON_STRINGS must contain 'type'"
+        );
+        assert!(
+            common.contains(&"label"),
+            "COMMON_STRINGS must contain 'label'"
+        );
+        assert!(
+            common.contains(&"created_at"),
+            "COMMON_STRINGS must contain 'created_at'"
+        );
+        assert!(
+            common.contains(&"updated_at"),
+            "COMMON_STRINGS must contain 'updated_at'"
+        );
+        assert!(
+            common.contains(&"valid_from"),
+            "COMMON_STRINGS must contain 'valid_from'"
+        );
+        assert!(
+            common.contains(&"valid_to"),
+            "COMMON_STRINGS must contain 'valid_to'"
+        );
+        assert!(
+            common.contains(&"tx_from"),
+            "COMMON_STRINGS must contain 'tx_from'"
+        );
+        assert!(
+            common.contains(&"tx_to"),
+            "COMMON_STRINGS must contain 'tx_to'"
+        );
+    }
+}
