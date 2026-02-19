@@ -225,11 +225,12 @@ mod sentry_tests {
     #[test]
     fn test_verify_checksum_success() {
         let lsn = LSN(123);
+        let fixed_timestamp = crate::core::hlc::HybridTimestamp::new_unchecked(1_000_000, 0);
         let op = WalOperation::Checkpoint {
             lsn: LSN(456),
-            timestamp: crate::core::temporal::time::now(),
+            timestamp: fixed_timestamp,
         };
-        let entry = WalEntry::new(lsn, op);
+        let entry = WalEntry { lsn, timestamp: fixed_timestamp, operation: op, checksum: 0 };
 
         // Serialize
         let mut buffer = Vec::new();
