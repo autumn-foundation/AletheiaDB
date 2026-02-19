@@ -10,12 +10,19 @@
 //! - `VersionData`: Payload (Anchor or Delta).
 
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
-use crate::core::interning::InternedString;
+use crate::core::interning::{IdentityHasher, InternedString};
 use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use crate::utils::error::Result;
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
+
+/// Fast HashMap using IdentityHasher for interned keys.
+pub type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
+
+/// Fast HashSet using IdentityHasher for interned keys.
+pub type FastHashSet<T> = HashSet<T, BuildHasherDefault<IdentityHasher>>;
 
 /// Metadata about version creation for Snapshot Isolation.
 ///
@@ -352,20 +359,20 @@ impl Default for AnchorConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDelta {
     /// Properties that were added or modified (non-vector)
-    pub changed: HashMap<PropertyKey, PropertyValue>,
+    pub changed: FastHashMap<PropertyKey, PropertyValue>,
     /// Vector properties with sparse delta optimization
-    pub vector_deltas: HashMap<PropertyKey, VectorDelta>,
+    pub vector_deltas: FastHashMap<PropertyKey, VectorDelta>,
     /// Properties that were removed
-    pub removed: HashSet<PropertyKey>,
+    pub removed: FastHashSet<PropertyKey>,
 }
 
 impl PropertyDelta {
     /// Create a new empty delta.
     pub fn new() -> Self {
         PropertyDelta {
-            changed: HashMap::new(),
-            vector_deltas: HashMap::new(),
-            removed: HashSet::new(),
+            changed: FastHashMap::with_hasher(BuildHasherDefault::default()),
+            vector_deltas: FastHashMap::with_hasher(BuildHasherDefault::default()),
+            removed: FastHashSet::with_hasher(BuildHasherDefault::default()),
         }
     }
 
@@ -469,7 +476,12 @@ impl PropertyDelta {
             .saturating_sub(self.removed.len())
             .max(self.changed.len() + self.vector_deltas.len());
 
-        let mut result = HashMap::with_capacity(estimated_capacity);
+        // Use standard HashMap for construction, PropertyMap::from_iter will handle internal structure
+        // PropertyMap uses IdentityHasher internally too
+        let mut result = FastHashMap::with_capacity_and_hasher(
+            estimated_capacity,
+            BuildHasherDefault::<IdentityHasher>::default(),
+        );
 
         // Copy all base properties except removed ones (single lookup per property)
         // This is optimal when changes << base (typical case: ~1-10% change rate)
