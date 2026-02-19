@@ -35,7 +35,7 @@ impl LSN {
 }
 
 /// WAL operation types
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WalOperation {
     /// Create a new node
     CreateNode {
@@ -131,7 +131,7 @@ pub enum WalOperation {
 /// - **Operation Data**: Variable-length data specific to the operation type.
 ///
 /// See `src/storage/wal/serialization.rs` for detailed serialization logic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WalEntry {
     /// Log sequence number - unique, monotonically increasing identifier.
     pub lsn: LSN,
@@ -220,7 +220,68 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::storage::wal::segment_reader::parse_entry_at;
     use crate::storage::wal::serialization::serialize_entry_into;
+
+    #[test]
+    fn test_wal_entry_round_trip_correctness() {
+        // 🛡️ Sentry Test: Verify complete serialization round-trip fidelity
+        // This test ensures that a complex WAL entry (with properties, vectors, etc.)
+        // is preserved exactly bit-for-bit after serialization and deserialization.
+        // It catches regression in serialization logic, property handling, and timestamp precision.
+
+        let lsn = LSN(12345);
+        let valid_from = crate::core::hlc::HybridTimestamp::new(1_000_000, 10).unwrap();
+
+        // Create complex properties including vector
+        let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
+        let properties = PropertyMapBuilder::new()
+            .insert("name", "Complex Node")
+            .insert("score", 99.5)
+            .insert("active", true)
+            .insert_vector("embedding", &embedding)
+            .build();
+
+        let op = WalOperation::CreateNode {
+            node_id: crate::core::NodeId::new(42).unwrap(),
+            label: GLOBAL_INTERNER.intern("TestLabel").unwrap(),
+            properties,
+            valid_from,
+        };
+
+        // Create the original entry
+        // checksum is initially 0
+        let mut original_entry = WalEntry::new(lsn, op);
+        // Fix the timestamp to something deterministic for the test
+        original_entry.timestamp = crate::core::hlc::HybridTimestamp::new(2_000_000, 20).unwrap();
+
+        // Serialize
+        let mut buffer = Vec::new();
+        serialize_entry_into(&original_entry, &mut buffer).expect("Serialization failed");
+
+        // Deserialize
+        // version 1 is current
+        let (parsed_entry, consumed) =
+            parse_entry_at(&buffer, 0, 1).expect("Deserialization failed");
+
+        // Verify bytes consumed
+        assert_eq!(consumed, buffer.len(), "Should consume entire buffer");
+
+        // CRITICAL: The parsed entry has a valid checksum computed from the buffer.
+        // The original entry has checksum=0.
+        // We must update original entry's checksum to match before comparison.
+        // This validates that the checksum in the buffer is indeed what we expect
+        // for this data (since parse_entry_at verifies it).
+        original_entry.checksum = parsed_entry.checksum;
+
+        // Now assert strict equality
+        assert_eq!(
+            original_entry, parsed_entry,
+            "Round-trip failed: parsed entry does not match original"
+        );
+    }
 
     #[test]
     fn test_verify_checksum_success() {
