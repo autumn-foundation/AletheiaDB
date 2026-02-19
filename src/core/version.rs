@@ -2095,6 +2095,73 @@ mod sentry_tests {
     use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
 
     #[test]
+    fn test_materialize_vector_deltas_success() {
+        // 🧪 Strategy: Verify materialize_vector_deltas correctly moves sparse and full
+        // vector deltas to the changed map on success.
+
+        let mut delta = PropertyDelta::new();
+        let key_sparse = GLOBAL_INTERNER.intern("embedding_sparse").unwrap();
+        let key_full = GLOBAL_INTERNER.intern("embedding_full").unwrap();
+
+        // 1. Setup Base Properties
+        let base_sparse_vec = vec![0.0f32; 10];
+        // Full replacement doesn't need base, but we provide it to ensure no interference
+        let base_full_vec = vec![0.0f32; 5];
+
+        let base = PropertyMapBuilder::new()
+            .insert("embedding_sparse", PropertyValue::vector(&base_sparse_vec))
+            .insert("embedding_full", PropertyValue::vector(&base_full_vec))
+            .build();
+
+        // 2. Setup Deltas
+        // Sparse: Change index 0 to 1.0
+        let sparse_changes = Arc::new(vec![(0, 1.0f32)]);
+        let sparse_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes: sparse_changes,
+        };
+        delta.vector_deltas.insert(key_sparse, sparse_delta);
+
+        // Full: Replace with new vector
+        let new_full_vec = vec![1.0f32; 5];
+        let full_delta = VectorDelta::Full(Arc::from(new_full_vec.clone()));
+        delta.vector_deltas.insert(key_full, full_delta);
+
+        // 3. Execute
+        let result = delta.materialize_vector_deltas(&base);
+
+        // 4. Verify Success
+        assert!(result.is_ok(), "Materialization should succeed");
+
+        // 5. Verify vector_deltas is empty (moved)
+        assert!(
+            delta.vector_deltas.is_empty(),
+            "All vector deltas should be moved to changed"
+        );
+
+        // 6. Verify changed contains materialized vectors
+        // Check Sparse -> Full Materialization
+        let materialized_sparse = delta
+            .changed
+            .get(&key_sparse)
+            .expect("Sparse delta should be in changed")
+            .as_vector()
+            .expect("Should be a vector");
+        assert_eq!(materialized_sparse.len(), 10);
+        assert_eq!(materialized_sparse[0], 1.0); // Changed
+        assert_eq!(materialized_sparse[1], 0.0); // Unchanged
+
+        // Check Full -> Full Move
+        let moved_full = delta
+            .changed
+            .get(&key_full)
+            .expect("Full delta should be in changed")
+            .as_vector()
+            .expect("Should be a vector");
+        assert_eq!(moved_full, &new_full_vec[..]);
+    }
+
+    #[test]
     fn test_materialize_vector_deltas_missing_base_property() {
         let key = GLOBAL_INTERNER.intern("embedding").unwrap();
         let mut delta = PropertyDelta::new();
