@@ -184,6 +184,7 @@ impl WalEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::wal::serialization::serialize_entry_into;
 
     #[test]
     fn test_lsn() {
@@ -214,5 +215,76 @@ mod tests {
         };
         let entry = WalEntry::new(lsn, op);
         assert!(!entry.verify_checksum(&[0u8; 10])); // Less than 24 bytes
+    }
+
+    #[test]
+    fn test_verify_checksum_success() {
+        // 🛡️ Sentry Test: Verify that a valid serialized entry passes checksum verification.
+        // This covers the "happy path" which was previously missing.
+        let lsn = LSN(100);
+        let op = WalOperation::Checkpoint {
+            lsn: LSN(50),
+            timestamp: time::now(),
+        };
+        let entry = WalEntry::new(lsn, op);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        assert!(
+            entry.verify_checksum(&buffer),
+            "Checksum verification failed for valid entry"
+        );
+    }
+
+    #[test]
+    fn test_checksum_integrity() {
+        // 🛡️ Sentry Test: Verify that data corruption is detected.
+        let lsn = LSN(100);
+        let op = WalOperation::Checkpoint {
+            lsn: LSN(50),
+            timestamp: time::now(),
+        };
+        let entry = WalEntry::new(lsn, op);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Sanity check: valid initially
+        assert!(entry.verify_checksum(&buffer));
+
+        // Corrupt LSN (byte 0)
+        let mut corrupt_lsn = buffer.clone();
+        corrupt_lsn[0] ^= 0xFF;
+        assert!(
+            !entry.verify_checksum(&corrupt_lsn),
+            "Checksum should fail when LSN is corrupted"
+        );
+
+        // Corrupt Timestamp (byte 8)
+        let mut corrupt_ts = buffer.clone();
+        corrupt_ts[8] ^= 0xFF;
+        assert!(
+            !entry.verify_checksum(&corrupt_ts),
+            "Checksum should fail when Timestamp is corrupted"
+        );
+
+        // Corrupt Operation Data (last byte)
+        let mut corrupt_data = buffer.clone();
+        let last_idx = corrupt_data.len() - 1;
+        corrupt_data[last_idx] ^= 0xFF;
+        assert!(
+            !entry.verify_checksum(&corrupt_data),
+            "Checksum should fail when Operation Data is corrupted"
+        );
+
+        // Corrupt Checksum Field itself (byte 20)
+        // This ensures verify_checksum isn't just ignoring the stored checksum
+        let mut corrupt_sum = buffer.clone();
+        corrupt_sum[20] ^= 0xFF;
+        assert!(
+            !entry.verify_checksum(&corrupt_sum),
+            "Checksum should fail when stored checksum is corrupted"
+        );
     }
 }

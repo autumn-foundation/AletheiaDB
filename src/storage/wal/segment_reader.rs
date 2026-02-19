@@ -1846,3 +1846,84 @@ mod fuzz_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::storage::wal::serialization::serialize_entry_into;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::id::NodeId;
+
+    #[test]
+    fn test_wal_entry_round_trip_correctness() {
+        // 🛡️ Sentry Test: Verify complete round-trip fidelity for a complex WAL entry.
+        // This ensures that serialization -> deserialization preserves all data exactly,
+        // including LSN, Timestamp, Operation type, and payload (properties).
+
+        let node_id = NodeId::new(999).unwrap();
+        let label = GLOBAL_INTERNER.intern("RoundTripNode").unwrap();
+        let properties = PropertyMapBuilder::new()
+            .insert("name", "Sentry")
+            .insert("purpose", "Correctness")
+            .insert("active", true)
+            .insert("score", 100.0)
+            .build();
+        let valid_from = time::now();
+
+        let operation = WalOperation::CreateNode {
+            node_id,
+            label,
+            properties: properties.clone(),
+            valid_from,
+        };
+
+        let lsn = LSN(12345);
+        let original_entry = WalEntry::new(lsn, operation);
+
+        // 1. Serialize
+        let mut buffer = Vec::new();
+        serialize_entry_into(&original_entry, &mut buffer).expect("Serialization failed");
+
+        // 2. Verify Checksum (Self-check)
+        assert!(
+            original_entry.verify_checksum(&buffer),
+            "Serialized buffer failed checksum verification against original entry"
+        );
+
+        // 3. Deserialize
+        // Note: version 1 is hardcoded here matching WAL_VERSION
+        let (deserialized_entry, consumed) = parse_entry_at(&buffer, 0, 1).expect("Deserialization failed");
+
+        // 4. Verify Fidelity
+        assert_eq!(consumed, buffer.len(), "Deserialization should consume entire buffer");
+        assert_eq!(deserialized_entry.lsn, lsn, "LSN mismatch");
+        assert_eq!(deserialized_entry.timestamp, original_entry.timestamp, "Timestamp mismatch");
+        // Checksum in deserialized entry is the one read from disk/buffer
+        // original_entry.checksum is 0 because it wasn't set by new() (it's computed during serialization)
+        // So we can't compare checksums directly unless we update original_entry's checksum.
+        // But verify_checksum passed, so the buffer is valid.
+
+        match deserialized_entry.operation {
+            WalOperation::CreateNode {
+                node_id: d_id,
+                label: d_label,
+                properties: d_props,
+                valid_from: d_valid,
+            } => {
+                assert_eq!(d_id, node_id, "Node ID mismatch");
+                assert_eq!(d_label, label, "Label mismatch");
+                assert_eq!(d_valid, valid_from, "valid_from mismatch");
+
+                // Check properties
+                assert_eq!(d_props.len(), properties.len());
+                assert_eq!(d_props.get("name").and_then(|v| v.as_str()), Some("Sentry"));
+                assert_eq!(d_props.get("purpose").and_then(|v| v.as_str()), Some("Correctness"));
+                assert_eq!(d_props.get("active").and_then(|v| v.as_bool()), Some(true));
+                assert_eq!(d_props.get("score").and_then(|v| v.as_float()), Some(100.0));
+            }
+            _ => panic!("Deserialized operation type mismatch"),
+        }
+    }
+}
