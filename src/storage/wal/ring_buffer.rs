@@ -203,14 +203,13 @@ impl Drop for PendingEntry {
     fn drop(&mut self) {
         // Safety Check: If the entry is being dropped and completion hasn't been signaled,
         // we must notify error to prevent the waiter from deadlocking.
+        //
+        // Note: notify_error is now atomic (CAS). If the entry was concurrently
+        // completed (race condition), notify_error will fail gracefully and do nothing.
         if let Some(ref notifier) = self.completion {
-            // If it's already complete (success or error), this is a no-op.
-            // If it's Pending, we must signal Error.
-            if !notifier.is_complete() {
-                notifier.notify_error(
-                    "PendingEntry dropped without being processed (buffer clear or shutdown)",
-                );
-            }
+            notifier.notify_error(
+                "PendingEntry dropped without being processed (buffer clear or shutdown)",
+            );
         }
     }
 }
@@ -283,20 +282,38 @@ impl CompletionNotifier {
 
     /// Notify successful completion.
     pub fn notify_success(&self) {
-        self.state
-            .store(CompletionState::Complete as u64, Ordering::Release);
-        self.condvar.notify_all();
+        if self
+            .state
+            .compare_exchange(
+                CompletionState::Pending as u64,
+                CompletionState::Complete as u64,
+                Ordering::Release,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            self.condvar.notify_all();
+        }
     }
 
     /// Notify completion with error.
     pub fn notify_error(&self, error: &str) {
+        if self
+            .state
+            .compare_exchange(
+                CompletionState::Pending as u64,
+                CompletionState::Error as u64,
+                Ordering::Release,
+                Ordering::Relaxed,
+            )
+            .is_ok()
         {
-            let mut err = self.error.lock().unwrap_or_else(|e| e.into_inner());
-            *err = Some(error.to_string());
+            {
+                let mut err = self.error.lock().unwrap_or_else(|e| e.into_inner());
+                *err = Some(error.to_string());
+            }
+            self.condvar.notify_all();
         }
-        self.state
-            .store(CompletionState::Error as u64, Ordering::Release);
-        self.condvar.notify_all();
     }
 
     /// Wait for completion, blocking the current thread.
