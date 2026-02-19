@@ -158,6 +158,13 @@ pub mod temporal_narrative {
             );
         }
 
+        #[cfg(test)]
+        fn new_internal() -> Self {
+            Self {
+                _marker: std::marker::PhantomData,
+            }
+        }
+
         /// Generate a narrative for a specific node.
         pub fn generate_node_narrative(&self, _node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
             panic!("Experimental features like NarrativeGenerator require the 'nova' feature.");
@@ -168,14 +175,27 @@ pub mod temporal_narrative {
     mod tests {
         use super::*;
         use crate::AletheiaDB;
+        use crate::core::id::NodeId;
 
         #[test]
         #[should_panic(
             expected = "Experimental features like NarrativeGenerator require the 'nova' feature. Please enable it in your Cargo.toml"
         )]
-        fn test_stub_panics() {
+        fn test_stub_new_panics() {
             let db = AletheiaDB::new().unwrap();
             let _ = NarrativeGenerator::new(&db);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "Experimental features like NarrativeGenerator require the 'nova' feature."
+        )]
+        fn test_stub_generate_panics() {
+            let generator = NarrativeGenerator::new_internal();
+            // NodeId::from(0) is a valid way to create a NodeId in tests if implemented,
+            // or use new_unchecked if available to crate. Since we are in the crate, we might have access?
+            // Actually, NodeId::new(0) is public safe constructor.
+            let _ = generator.generate_node_narrative(NodeId::new(0).unwrap());
         }
     }
 }
