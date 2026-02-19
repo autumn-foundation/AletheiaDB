@@ -457,6 +457,11 @@ where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
 {
     Box::new(move |a: *const f32, b: *const f32| {
+        // Prevent re-entrant index access (deadlock prevention)
+        // This sets a thread-local flag that causes add/remove/search/save to fail immediately
+        // rather than deadlocking on the lock held by the outer search.
+        let _guard = FilterCallbackGuard::new();
+
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
             // This should never happen with a correct usearch implementation.
@@ -794,15 +799,12 @@ impl std::fmt::Debug for HnswIndex {
 
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
-            return Err(Error::Vector(VectorError::IndexError(
-                "Cannot modify index from within a search_with_filter callback. \
-                 This would cause a deadlock due to lock re-entrancy. \
-                 Consider collecting modifications and applying them after the search completes."
-                    .to_string(),
-            )));
-        }
+        // Check for re-entrant modification during search callback (prevents deadlock)
+        self.check_reentrancy(
+            "Cannot modify index from within a search callback (filter or custom metric). \
+             This would cause a deadlock due to lock re-entrancy. \
+             Consider collecting modifications and applying them after the search completes.",
+        )?;
 
         // Check if index is read-only (memory-mapped)
         if self.is_mmap {
@@ -1035,15 +1037,12 @@ impl VectorIndex for HnswIndex {
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
-            return Err(Error::Vector(VectorError::IndexError(
-                "Cannot modify index from within a search_with_filter callback. \
-                 This would cause a deadlock due to lock re-entrancy. \
-                 Consider collecting modifications and applying them after the search completes."
-                    .to_string(),
-            )));
-        }
+        // Check for re-entrant modification during search callback (prevents deadlock)
+        self.check_reentrancy(
+            "Cannot modify index from within a search callback (filter or custom metric). \
+             This would cause a deadlock due to lock re-entrancy. \
+             Consider collecting modifications and applying them after the search completes.",
+        )?;
 
         // Check if index is read-only (memory-mapped)
         if self.is_mmap {
@@ -1074,14 +1073,11 @@ impl VectorIndex for HnswIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
-        // Check for re-entrant access during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
-            return Err(Error::Vector(VectorError::IndexError(
-                "Cannot perform search from within a search_with_filter callback. \
-                 This prevents deadlocks when concurrent writers are pending."
-                    .to_string(),
-            )));
-        }
+        // Check for re-entrant access during search callback (prevents deadlock)
+        self.check_reentrancy(
+            "Cannot perform search from within a search callback (filter or custom metric). \
+             This prevents deadlocks when concurrent writers are pending.",
+        )?;
 
         // Validate query vector
         validate_vector(query)?;
@@ -1153,14 +1149,11 @@ impl VectorIndex for HnswIndex {
     where
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
-        // Check for re-entrant access during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
-            return Err(Error::Vector(VectorError::IndexError(
-                "Cannot perform search_with_filter from within a search_with_filter callback. \
-                 This prevents deadlocks when concurrent writers are pending."
-                    .to_string(),
-            )));
-        }
+        // Check for re-entrant access during search callback (prevents deadlock)
+        self.check_reentrancy(
+            "Cannot perform search_with_filter from within a search callback (filter or custom metric). \
+             This prevents deadlocks when concurrent writers are pending.",
+        )?;
 
         // Validate query vector
         validate_vector(query)?;
@@ -1299,15 +1292,12 @@ impl VectorIndex for HnswIndex {
     /// If executed outside a Tokio runtime, or in a single-threaded runtime (where `block_in_place`
     /// would panic), it falls back to standard synchronous execution.
     fn save(&self, path: &Path) -> Result<()> {
-        // Check for re-entrant modification during filtered search (prevents deadlock)
-        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
-            return Err(Error::Vector(VectorError::IndexError(
-                "Cannot save index from within a search_with_filter callback. \
-                 This would cause a deadlock due to lock re-entrancy. \
-                 Consider saving after the search completes."
-                    .to_string(),
-            )));
-        }
+        // Check for re-entrant modification during search callback (prevents deadlock)
+        self.check_reentrancy(
+            "Cannot save index from within a search callback (filter or custom metric). \
+             This would cause a deadlock due to lock re-entrancy. \
+             Consider saving after the search completes.",
+        )?;
 
         #[cfg(any(feature = "tokio", feature = "embeddings"))]
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -1337,6 +1327,16 @@ impl VectorIndex for HnswIndex {
 
 // Private helper methods for HnswIndex
 impl HnswIndex {
+    /// Check for re-entrant access to prevent deadlocks.
+    fn check_reentrancy(&self, error_message: &str) -> Result<()> {
+        if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
+            return Err(Error::Vector(VectorError::IndexError(
+                error_message.to_string(),
+            )));
+        }
+        Ok(())
+    }
+
     /// Helper to retry usearch operations on transient errors (like thread pool exhaustion).
     fn retry_usearch<F, T, E>(&self, mut op: F, context: &str) -> Result<T>
     where
@@ -3786,3 +3786,6 @@ mod race_recovery_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod havoc;
