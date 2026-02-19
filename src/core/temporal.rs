@@ -1609,15 +1609,11 @@ mod additional_tests {
         // Note: We intentionally avoid using MAX_VALID_TIMESTAMP constant here to verify
         // the *value* is correct, not just self-consistent.
         let result = TimeRange::new(invalid, invalid);
-        assert!(
-            result.is_err(),
-            "TimeRange should reject timestamps exceeding the hardcoded limit"
-        );
 
         if let Err(TemporalError::InvalidTimestamp { timestamp, .. }) = result {
             assert_eq!(timestamp, invalid);
         } else {
-            panic!("Expected InvalidTimestamp error");
+            panic!("Expected InvalidTimestamp error, got {:?}", result);
         }
     }
 }
