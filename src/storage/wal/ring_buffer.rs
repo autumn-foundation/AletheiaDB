@@ -1435,11 +1435,17 @@ mod sentry_tests {
 
         // The handle should report an error because the entry was dropped before completion
         // If this fails (handle remains pending), it means we have a deadlock risk
-        assert!(handle.is_complete(), "Handle should be complete (error) after entry drop");
+        assert!(
+            handle.is_complete(),
+            "Handle should be complete (error) after entry drop"
+        );
 
         let result = handle.wait();
         assert!(result.is_err(), "Handle should return error");
         let err = result.unwrap_err();
-        assert!(err.contains("PendingEntry dropped"), "Error should mention dropped entry");
+        assert!(
+            err.contains("PendingEntry dropped"),
+            "Error should mention dropped entry"
+        );
     }
 }
