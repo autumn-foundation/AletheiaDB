@@ -204,6 +204,7 @@ impl Drop for PendingEntry {
         // If the entry is dropped and hasn't been completed yet, notify an error.
         // This prevents deadlocks where a waiter hangs forever if the entry is discarded
         // (e.g. buffer full, panic, or explicit drop) without being flushed.
+        #[allow(clippy::collapsible_if)]
         if let Some(ref notifier) = self.completion {
             if !notifier.is_complete() {
                 notifier.notify_error("PendingEntry dropped before flush");
