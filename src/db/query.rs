@@ -1,9 +1,9 @@
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::query::builder::state::Initial;
 use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults};
-use crate::utils::error::Result;
 use std::sync::Arc;
 
 impl AletheiaDB {

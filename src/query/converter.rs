@@ -171,9 +171,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::core::NodeId;
+use crate::core::error::{Error, QueryError, Result};
 use crate::core::temporal::{TimeRange, Timestamp, time};
 use crate::index::vector::DistanceMetric;
-use crate::utils::error::{Error, QueryError, Result};
 
 use super::ast::{
     ComparisonOp, DepthSpec, EmbeddingRef, Expression, NodePattern, NodeRef, OrderClause, Pattern,

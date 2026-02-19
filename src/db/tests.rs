@@ -1,9 +1,9 @@
 use super::*;
 use crate::api::transaction::{ReadOps, WriteOps};
 use crate::core::GLOBAL_INTERNER;
+use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::property::{PropertyMapBuilder, PropertyValue};
-use crate::utils::error::{Error, Result};
 
 #[test]
 fn test_create_node() {
@@ -287,8 +287,8 @@ fn test_transaction_rollback_on_error() {
         tx.create_node("Person", PropertyMapBuilder::new().build())?;
         tx.create_node("Person", PropertyMapBuilder::new().build())?;
         // Manually return an error
-        Err(crate::utils::error::Error::Storage(
-            crate::utils::error::StorageError::InconsistentState {
+        Err(crate::core::error::Error::Storage(
+            crate::core::error::StorageError::InconsistentState {
                 reason: "test error".to_string(),
             },
         ))
@@ -1444,7 +1444,7 @@ fn test_write_closure_error_propagation() {
     // Custom error from closure should propagate
     let result: Result<()> = db.write(|_tx| {
         Err(Error::Storage(
-            crate::utils::error::StorageError::InconsistentState {
+            crate::core::error::StorageError::InconsistentState {
                 reason: "custom test error".to_string(),
             },
         ))
@@ -1465,7 +1465,7 @@ fn test_read_closure_error_propagation() {
 
     let result: Result<()> = db.read(|_tx| {
         Err(Error::Storage(
-            crate::utils::error::StorageError::InconsistentState {
+            crate::core::error::StorageError::InconsistentState {
                 reason: "read error".to_string(),
             },
         ))

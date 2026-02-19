@@ -1,7 +1,7 @@
+use crate::core::error::Result;
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::TemporalVectorConfig;
-use crate::utils::error::Result;
 
 /// Builder for configuring and enabling a vector index on a property.
 ///
@@ -145,7 +145,7 @@ impl<'a> VectorIndexBuilder<'a> {
     /// ```
     pub fn enable(self) -> Result<()> {
         let hnsw_config = self.hnsw_config.ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                 "HNSW configuration is required. Call .hnsw() before .enable()".to_string(),
             ))
         })?;

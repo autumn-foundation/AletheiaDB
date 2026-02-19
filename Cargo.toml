@@ -24,6 +24,9 @@ thiserror = "2.0"
 smallvec = "1.13"
 chrono = "0.4"
 
+# Force native-tls to 0.2.16 to avoid build breakage in 0.2.17
+native-tls = "=0.2.16"
+
 # Configuration support (optional TOML config files)
 serde = { version = "1.0", features = ["derive"], optional = true }
 toml = { version = "0.8", optional = true }
@@ -56,7 +59,7 @@ tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional =
 async-trait = { version = "0.1", optional = true }
 
 # HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
-reqwest = { version = "0.11", features = ["json", "blocking"], optional = true }
+reqwest = { version = "0.11", features = ["json", "blocking", "rustls-tls"], default-features = false, optional = true }
 serde_json = { version = "1.0", optional = false }
 
 # Pin native-tls to avoid 0.2.17 compilation error with openssl (Tlsv13)
@@ -92,7 +95,7 @@ lazy_static = "1.4"
 # Readline with auto-complete for examples
 rustyline = "17.0"
 # Loom for concurrency testing
-loom = { version = "0.7", features = ["checkpoint"] }
+loom = { version = "0.7.2", features = ["checkpoint"] }
 
 [features]
 # Nova experimental features

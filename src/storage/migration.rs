@@ -27,7 +27,7 @@
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
-//! # fn example() -> aletheiadb::utils::error::Result<()> {
+//! # fn example() -> aletheiadb::core::error::Result<()> {
 //! // 1. Configure the cold storage backend
 //! let cold_storage = Arc::new(RedbColdStorage::new("data/cold.redb", RedbConfig::default())?);
 //!
@@ -61,12 +61,12 @@
 //! This invariant (`WAL_truncation_lsn <= cold_storage.get_flushed_lsn()`) ensures that
 //! data is never removed from the WAL before it is safely persisted in cold storage.
 
+use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
 use crate::storage::wal::flush_coordinator::FlushCoordinator;
-use crate::utils::error::Result;
 use quick_cache::sync::Cache;
 use std::collections::HashMap;
 use std::panic;

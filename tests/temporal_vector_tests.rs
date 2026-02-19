@@ -1,9 +1,9 @@
+use aletheiadb::core::error::Result;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::temporal::TimeRange;
 use aletheiadb::index::VectorIndex;
 use aletheiadb::index::vector::temporal::*;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
-use aletheiadb::utils::Result;
 
 fn create_test_index() -> Result<TemporalVectorIndex> {
     let config = TemporalVectorConfig {

@@ -1282,7 +1282,7 @@ fn test_query_with_missing_vector_index() {
 
 #[test]
 fn test_query_with_invalid_node_id() {
-    use aletheiadb::utils::error::{Error, StorageError};
+    use aletheiadb::core::error::{Error, StorageError};
 
     let db = create_test_db();
 

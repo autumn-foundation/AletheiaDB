@@ -29,6 +29,7 @@
 
 use aletheiadb::{
     GLOBAL_INTERNER,
+    core::error::Result,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMapBuilder,
@@ -43,7 +44,6 @@ use aletheiadb::{
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
         },
     },
-    utils::error::Result,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -187,7 +187,7 @@ struct RecoveryTestHarness {
 impl RecoveryTestHarness {
     fn new() -> Result<Self> {
         let temp_dir = TempDir::new().map_err(|e| {
-            aletheiadb::utils::error::Error::other(format!("Failed to create temp dir: {}", e))
+            aletheiadb::core::error::Error::other(format!("Failed to create temp dir: {}", e))
         })?;
         let wal_dir = temp_dir.path().join("wal");
         let checkpoint_dir = temp_dir.path().join("checkpoints");

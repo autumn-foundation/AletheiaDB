@@ -38,7 +38,7 @@
 //! use aletheiadb::core::id::NodeId;
 //! use aletheiadb::core::temporal::TimeRange;
 //!
-//! # fn example() -> aletheiadb::utils::Result<()> {
+//! # fn example() -> aletheiadb::core::error::Result<()> {
 //! // Create temporal index configuration
 //! let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
 //! let config = TemporalVectorConfig {
@@ -79,12 +79,12 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 
+use crate::core::error::{Error, Result, TemporalError, VectorError};
 use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::{cosine_similarity, euclidean_distance};
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
-use crate::utils::{Error, Result, TemporalError, VectorError};
 
 // Submodules
 /// Configuration types for temporal vector indexing.
@@ -755,7 +755,7 @@ impl TemporalVectorIndex {
     /// ```no_run
     /// # use aletheiadb::index::vector::temporal::TemporalVectorIndex;
     /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # fn example() -> aletheiadb::utils::Result<()> {
+    /// # fn example() -> aletheiadb::core::error::Result<()> {
     /// # let config = aletheiadb::index::vector::temporal::TemporalVectorConfig::default_with_hnsw(
     /// #     HnswConfig::new(384, DistanceMetric::Cosine)
     /// # );
@@ -874,7 +874,7 @@ impl TemporalVectorIndex {
     /// ```rust
     /// use aletheiadb::index::vector::temporal::TemporalVectorIndex;
     ///
-    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::utils::Result<()> {
+    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::core::error::Result<()> {
     /// let query = vec![0.1f32; 384];
     /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
     ///
@@ -964,7 +964,7 @@ impl TemporalVectorIndex {
     /// use aletheiadb::index::vector::temporal::TemporalVectorIndex;
     /// use aletheiadb::core::temporal::TimeRange;
     ///
-    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::utils::Result<()> {
+    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::core::error::Result<()> {
     /// let query = vec![0.1f32; 384];
     /// let time_range = TimeRange::new(1672531200000000.into(), 1704067200000000.into()).unwrap(); // 2023-2024
     ///
@@ -1077,7 +1077,7 @@ impl TemporalVectorIndex {
     /// use aletheiadb::core::temporal::TimeRange;
     /// use aletheiadb::core::id::NodeId;
     ///
-    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::utils::Result<()> {
+    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::core::error::Result<()> {
     /// let node_id = NodeId::new(42).unwrap();
     /// let reference = vec![0.5f32; 384];
     /// let time_range = TimeRange::new(1000000.into(), 2000000.into()).unwrap();
@@ -1173,7 +1173,7 @@ impl TemporalVectorIndex {
     /// use aletheiadb::index::vector::temporal::{TemporalVectorIndex, DriftMetric};
     /// use aletheiadb::core::temporal::TimeRange;
     ///
-    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::utils::Result<()> {
+    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::core::error::Result<()> {
     /// let time_range = TimeRange::new(1000000.into(), 2000000.into()).unwrap();
     ///
     /// // Find documents that changed significantly (cosine distance > 0.3)

@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use crate::utils::{Error, StorageError};
+use crate::core::error::{Error, StorageError};
 
 /// Coordinates group commit batching and waiting.
 ///
