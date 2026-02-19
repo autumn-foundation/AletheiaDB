@@ -483,6 +483,12 @@ where
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
 
+        // Set re-entrancy guard to prevent deadlocks if the metric callback
+        // attempts to modify the index (e.g., via add/remove).
+        // This sets IN_FILTER_CALLBACK = true for the duration of the callback.
+        // Operations like add() check this flag and return an error if set.
+        let _guard = FilterCallbackGuard::new();
+
         // SAFETY: We wrap the user-provided closure in catch_unwind to prevent
         // panics from unwinding across the FFI boundary into C++ code, which is UB.
         // If a panic occurs, we return f32::MAX (infinite distance) to effectively
