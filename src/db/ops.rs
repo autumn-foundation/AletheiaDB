@@ -71,7 +71,7 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId};
+    /// # use aletheiadb::{AletheiaDB, properties, NodeId};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
     /// # let node_id = NodeId::new(1)?;
@@ -90,6 +90,21 @@ impl AletheiaDB {
     ///
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, EdgeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// db.update_edge(
+    ///     edge_id,
+    ///     properties! { "strength" => 0.9 }
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn update_edge(&self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
         self.write(|tx| tx.update_edge(edge_id, properties))
     }
@@ -100,6 +115,18 @@ impl AletheiaDB {
     /// for safe deletion.
     ///
     /// This is a convenience method that internally uses a write transaction.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// db.delete_node(node_id)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn delete_node(&self, node_id: NodeId) -> Result<()> {
         self.write(|tx| tx.delete_node(node_id))
     }
@@ -111,6 +138,18 @@ impl AletheiaDB {
     /// and maintains referential integrity in the graph.
     ///
     /// This is a convenience method that internally uses a write transaction.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// db.delete_node_cascade(node_id)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn delete_node_cascade(&self, node_id: NodeId) -> Result<()> {
         self.write(|tx| tx.delete_node_cascade(node_id))
     }
@@ -118,6 +157,18 @@ impl AletheiaDB {
     /// Delete an edge.
     ///
     /// This is a convenience method that internally uses a write transaction.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, EdgeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// db.delete_edge(edge_id)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn delete_edge(&self, edge_id: EdgeId) -> Result<()> {
         self.write(|tx| tx.delete_edge(edge_id))
     }

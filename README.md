@@ -527,10 +527,8 @@ use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
 // 1. Setup database and node (for self-contained example)
 let db = AletheiaDB::new().unwrap();
-let node_id = db.write(|tx| {
-    tx.create_node("Person", properties! {
-        "name" => "Alice"
-    })
+let node_id = db.create_node("Person", properties! {
+    "name" => "Alice"
 })?;
 
 // 2. Generate natural language history of a node
