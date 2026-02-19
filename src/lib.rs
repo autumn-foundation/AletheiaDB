@@ -21,33 +21,37 @@
 //! - Detect contradictions through provenance
 //! - Reason about temporal causality
 //!
-//! # Example
+//! # Quick Start
 //!
-//! ```rust,no_run
+//! ```rust
 //! use aletheiadb::{AletheiaDB, properties, WriteOps};
 //! use aletheiadb::core::temporal::time;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 1. Initialize the database
 //! let db = AletheiaDB::new()?;
 //!
-//! // Create a node
+//! // 2. Create a node with initial properties
 //! let alice = db.create_node("Person", properties! {
 //!     "name" => "Alice",
 //!     "age" => 30,
 //! })?;
 //!
-//! // Later, update a property
+//! // Capture the time when Alice was 30
+//! let time_at_30 = time::now();
+//!
+//! // 3. Update the node (creates a new version)
 //! db.write(|tx| tx.update_node(alice, properties! {
 //!     "age" => 31,
 //! }))?;
 //!
-//! // Query current state
+//! // 4. Query current state (Alice is 31)
 //! let current = db.get_node(alice)?;
+//! assert_eq!(current.properties.get("age").unwrap().as_int(), Some(31));
 //!
-//! // Time-travel to see historical state
-//! // Use current time as a placeholder for the point in time we want to query
-//! let now = time::now();
-//! let historical = db.get_node_at_time(alice, now, now)?;
+//! // 5. Time-travel query (Alice was 30)
+//! let historical = db.get_node_at_time(alice, time_at_30, time_at_30)?;
+//! assert_eq!(historical.properties.get("age").unwrap().as_int(), Some(30));
 //! # Ok(())
 //! # }
 //! ```

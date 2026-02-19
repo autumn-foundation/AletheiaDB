@@ -77,6 +77,25 @@ pub struct TimeRange {
 impl TimeRange {
     /// Create a new time range.
     ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::temporal::{TimeRange, Timestamp};
+    /// use aletheiadb::core::temporal::time;
+    ///
+    /// let start = time::from_secs(100);
+    /// let end = time::from_secs(200);
+    ///
+    /// // Valid range [100, 200)
+    /// let range = TimeRange::new(start, end).unwrap();
+    /// assert!(range.contains(start));
+    /// assert!(!range.contains(end));
+    ///
+    /// // Invalid range (start > end)
+    /// let result = TimeRange::new(end, start);
+    /// assert!(result.is_err());
+    /// ```
+    ///
     /// # Errors
     /// Returns `TemporalError::InvalidTimeRange` if start > end.
     #[inline]
@@ -401,6 +420,24 @@ impl BiTemporalInterval {
     ///
     /// This answers: "At transaction time T1, did we believe this fact was true at valid time T2?"
     /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange, time};
+    ///
+    /// let t100 = time::from_secs(100);
+    /// let t200 = time::from_secs(200);
+    ///
+    /// // Fact valid from T100, recorded at T200
+    /// let interval = BiTemporalInterval::with_valid_time(t100, t200);
+    ///
+    /// // Visible: querying at T200 (tx time) about T100 (valid time)
+    /// assert!(interval.is_visible_at(t100, t200));
+    ///
+    /// // Not Visible: querying at T150 (before it was recorded)
+    /// assert!(!interval.is_visible_at(t100, time::from_secs(150)));
+    /// ```
     #[inline]
     pub fn is_visible_at(&self, valid_time: Timestamp, tx_time: Timestamp) -> bool {
         self.valid_time.contains(valid_time) && self.transaction_time.contains(tx_time)

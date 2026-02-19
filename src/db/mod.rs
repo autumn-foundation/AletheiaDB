@@ -58,10 +58,18 @@ pub use vector_builder::VectorIndexBuilder;
 /// Use [`with_wal_config`](Self::with_wal_config) to configure the default mode,
 /// or [`write_with_options`](Self::write_with_options) for per-transaction overrides.
 ///
+/// # Usage
+///
+/// The primary way to interact with the database is through:
+/// - [`write`](Self::write) or [`write_transaction`](Self::write_transaction) for mutations.
+/// - [`read`](Self::read) or [`read_transaction`](Self::read_transaction) for consistent reads.
+/// - [`get_node`](Self::get_node) / [`get_edge`](Self::get_edge) for fast current-state lookups.
+/// - [`get_node_at_time`](Self::get_node_at_time) for time-travel queries.
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+/// ```rust
+/// use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,10 +78,11 @@ pub use vector_builder::VectorIndexBuilder;
 ///
 /// // 2. Enable vector indexing (optional)
 /// db.vector_index("embedding")
-///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+///     .hnsw(HnswConfig::new(3, DistanceMetric::Cosine))
 ///     .enable()?;
 ///
 /// // 3. Create nodes
+/// // Note: create_node is a convenience wrapper around db.write()
 /// let alice_id = db.create_node(
 ///     "Person",
 ///     PropertyMapBuilder::new()
@@ -100,6 +109,7 @@ pub use vector_builder::VectorIndexBuilder;
 ///
 /// // 5. Query
 /// let alice = db.get_node(alice_id)?;
+/// assert_eq!(alice.properties.get("name").unwrap().as_str(), Some("Alice"));
 /// println!("Found: {:?}", alice.properties.get("name"));
 /// # Ok(())
 /// # }

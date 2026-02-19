@@ -1,14 +1,36 @@
 //! Storage subsystem for graph data.
 //!
-//! This module contains storage engines for both current and historical data:
-//! - Current storage: Optimized for fast current-state queries (hot path)
-//! - Historical storage: Anchor+delta compression for temporal queries
-//! - Cold storage: Disk-based tiered storage for historical versions
-//! - Tiered storage: Transparent hot/warm/cold data access
-//! - Version management: Version chain structures and compression
-//! - WAL: Write-ahead log for durability and crash recovery
-//! - Checkpoint: Full state snapshots via index persistence
-//! - Sharding: Horizontal scaling via domain-based partitioning (ADR-0014)
+//! # Architecture
+//!
+//! AletheiaDB uses a hybrid storage architecture to optimize for both fast current-state queries
+//! and efficient historical reconstruction:
+//!
+//! 1.  **Current Storage** ([`current`]):
+//!     - Stores the latest version of every node and edge.
+//!     - Optimized for O(1) lookups and fast traversals.
+//!     - Uses CSR (Compressed Sparse Row) adjacency indexes.
+//!
+//! 2.  **Historical Storage** ([`historical`]):
+//!     - Stores all previous versions of data.
+//!     - Uses **Anchor+Delta** compression to reduce storage overhead by 5-6X.
+//!     - Optimized for temporal queries (point-in-time reconstruction).
+//!
+//! 3.  **Tiered Storage** ([`tiered_storage`]):
+//!     - Manages the lifecycle of data across Hot (RAM), Warm (RAM/Disk), and Cold (Disk) tiers.
+//!     - Automatically migrates older versions to cheaper storage (Redb).
+//!
+//! 4.  **Write-Ahead Log (WAL)** ([`wal`]):
+//!     - Ensures durability and atomicity of transactions.
+//!     - Uses a concurrent, lock-free ring buffer design.
+//!
+//! # Data Flow
+//!
+//! 1.  **Write**: Transaction writes to WAL (for durability) and updates Current Storage (in-memory).
+//! 2.  **Version**: The previous version from Current Storage is moved to Historical Storage.
+//! 3.  **Query**:
+//!     - `get_node()` hits Current Storage (fast).
+//!     - `get_node_at_time()` hits Historical Storage (reconstructs state).
+//! 4.  **Migration**: Background tasks move old historical versions to Cold Storage.
 
 pub mod checkpoint;
 pub mod compression;
