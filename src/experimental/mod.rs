@@ -38,6 +38,7 @@
 //! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
 //! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
+//! | [`doppelganger`] | **Doppelganger** | Semantic-Structural Identity Detection. "Are these two nodes identical?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -85,6 +86,9 @@ pub mod chronos;
 #[cfg(feature = "nova")]
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
+#[cfg(feature = "nova")]
+/// Doppelganger: Semantic-Structural Identity Detection.
+pub mod doppelganger;
 #[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
