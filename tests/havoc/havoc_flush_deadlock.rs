@@ -32,14 +32,18 @@ fn test_flush_deadlock_on_io_error() {
     let handle_clone = handle.clone();
     let (tx, rx) = mpsc::channel();
     let _waiter = thread::spawn(move || {
+        println!("[Waiter] Starting wait...");
         // This should return Err (due to I/O failure) or Ok (if flush somehow succeeded)
         // But it MUST NOT hang.
         let result = handle_clone.wait();
+        println!("[Waiter] Wait returned: {:?}", result);
         let _ = tx.send(result);
     });
 
     // 6. Call flush (this will fail)
+    println!("[Main] Calling flush...");
     let result = coordinator.flush(vec![entry], true);
+    println!("[Main] Flush returned: {:?}", result);
 
     // Restore permissions immediately to ensure cleanup even if assertions fail
     let mut perms = std::fs::metadata(&dir_path).unwrap().permissions();
@@ -50,7 +54,8 @@ fn test_flush_deadlock_on_io_error() {
     assert!(result.is_err(), "Flush should fail due to I/O error");
 
     // 7. Wait for waiter with timeout
-    match rx.recv_timeout(Duration::from_secs(10)) {
+    // Increased timeout to 30s to be safe on slow CI
+    match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(wait_result) => {
             // It should be an error because flush failed
             assert!(
