@@ -199,6 +199,17 @@ impl PendingEntry {
     }
 }
 
+impl Drop for PendingEntry {
+    fn drop(&mut self) {
+        if let Some(ref notifier) = self.completion {
+            // Only notify if still pending (avoid overwriting success)
+            if !notifier.is_complete() {
+                notifier.notify_error("Entry dropped before completion");
+            }
+        }
+    }
+}
+
 /// Completion notification state.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1151,7 +1162,8 @@ mod tests {
                 for entry in entries {
                     drained_count += 1;
                     // Verify data integrity
-                    let val = u64::from_le_bytes(entry.data.try_into().unwrap());
+                    // Access data as slice to avoid moving out of Drop-implementing type
+                    let val = u64::from_le_bytes(entry.data[0..8].try_into().unwrap());
                     checksum = checksum.wrapping_add(val);
                 }
             }
@@ -1398,5 +1410,26 @@ mod tests {
             max_sleep_us: 10,
         };
         let _ = WalRingBuffer::with_config(1024, config);
+    }
+
+    #[test]
+    fn test_pending_entry_drop_notify() {
+        // Create a sync entry
+        let (entry, handle) = PendingEntry::new_sync(LSN(1), vec![]);
+
+        // Assert it's initially incomplete
+        assert!(!handle.is_complete());
+
+        // Drop the entry without notifying completion
+        drop(entry);
+
+        // The handle should now be complete (with an error) because Drop should notify
+        // Since we haven't implemented Drop yet, this assertion should fail
+        assert!(handle.is_complete(), "Entry should notify on drop");
+
+        // Verify it's an error
+        let result = handle.wait();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Entry dropped before completion");
     }
 }
