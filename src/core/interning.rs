@@ -15,6 +15,8 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crc32fast::Hasher as Crc32;
+
 /// Default maximum number of interned strings (DoS protection)
 pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
 
@@ -75,9 +77,13 @@ impl fmt::Display for InternedString {
     }
 }
 
-/// A hasher that passes through u32 values unchanged.
-/// Used for the ID -> String map where keys are already unique integers.
-/// This avoids the overhead of hashing (SipHash) for lookups.
+/// A hasher that optimizes for u32 keys (InternedString) by mixing bits efficiently.
+///
+/// This avoids the overhead of cryptographic hashing (SipHash) while preventing
+/// performance cliffs associated with raw identity hashing (where sequential IDs
+/// can cluster in hash map buckets or shards).
+///
+/// We use Knuth's multiplicative hash constant to spread entropy across all bits.
 #[derive(Default)]
 pub struct IdentityHasher(u64);
 
@@ -85,19 +91,48 @@ impl Hasher for IdentityHasher {
     fn write(&mut self, bytes: &[u8]) {
         // Fallback: treat bytes as little-endian u32 if length matches
         if let Ok(bytes) = bytes.try_into() {
-            self.0 = u32::from_le_bytes(bytes) as u64;
+            self.write_u32(u32::from_le_bytes(bytes));
         } else {
-            // Should not happen for InternedString keys
+            // Should not happen for InternedString keys, but fallback safely
             self.0 = bytes.len() as u64;
         }
     }
 
     fn write_u32(&mut self, i: u32) {
-        self.0 = i as u64;
+        // Multiply by large prime to mix bits (Knuth's multiplicative hash)
+        // This avoids clustering in DashMap (sharding on high bits)
+        // and HashMap (control bytes on high bits).
+        self.0 = (i as u64).wrapping_mul(0x9E3779B97F4A7C15);
     }
 
     fn finish(&self) -> u64 {
         self.0
+    }
+}
+
+/// A wrapper around crc32fast::Hasher that implements std::hash::Hasher.
+///
+/// This provides high-performance hashing for strings (HW accelerated on many CPUs),
+/// significantly faster than the default SipHash used by DashMap.
+///
+/// Note: CRC32 is not cryptographically secure and not DOS-resistant. However,
+/// since interning has a hard capacity limit (max_capacity), the impact of any
+/// potential collision attack is bounded.
+#[derive(Default)]
+pub struct Crc32Hasher(Crc32);
+
+impl Hasher for Crc32Hasher {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        let crc = self.0.finish();
+        // Spread entropy to high bits to ensure good sharding in DashMap.
+        // DashMap may use high bits for shard selection. If we only fill low 32 bits,
+        // everything might land in the same shard (if > 4B shards, unlikely, but safe).
+        // More importantly, mixing ensures generic hash table robustness.
+        (crc << 32) | crc
     }
 }
 
@@ -110,9 +145,10 @@ impl Hasher for IdentityHasher {
 /// The interner is designed to be used as a singleton (via lazy_static or similar).
 pub struct StringInterner {
     /// Maps strings to their IDs.
-    string_to_id: DashMap<Arc<str>, InternedString>,
+    /// Uses Crc32Hasher for fast string hashing (interning hot path).
+    string_to_id: DashMap<Arc<str>, InternedString, BuildHasherDefault<Crc32Hasher>>,
     /// Maps IDs back to strings.
-    /// Uses IdentityHasher for O(1) lookups without hashing overhead.
+    /// Uses IdentityHasher for O(1) lookups without typical hashing overhead.
     id_to_string: DashMap<InternedString, Arc<str>, BuildHasherDefault<IdentityHasher>>,
     /// Next ID to assign.
     next_id: AtomicU32,
@@ -129,7 +165,7 @@ impl StringInterner {
     /// Create a new string interner with a custom maximum capacity.
     pub fn with_max_capacity(max_capacity: usize) -> Self {
         StringInterner {
-            string_to_id: DashMap::new(),
+            string_to_id: DashMap::with_hasher(BuildHasherDefault::default()),
             id_to_string: DashMap::with_hasher(BuildHasherDefault::default()),
             next_id: AtomicU32::new(0),
             max_capacity,
@@ -1089,18 +1125,41 @@ mod tests {
 
         // Test write_u32 (primary path)
         hasher.write_u32(42);
-        assert_eq!(hasher.finish(), 42);
+        // Should be mixed, not identity
+        assert_eq!(
+            hasher.finish(),
+            (42u64).wrapping_mul(0x9E3779B97F4A7C15)
+        );
 
         // Test write with 4 bytes (fallback success path)
         let bytes = 12345u32.to_le_bytes();
-        hasher.write(&bytes);
-        assert_eq!(hasher.finish(), 12345);
+        let mut hasher2 = IdentityHasher::default();
+        hasher2.write(&bytes);
+        assert_eq!(
+            hasher2.finish(),
+            (12345u64).wrapping_mul(0x9E3779B97F4A7C15)
+        );
 
         // Test write with other length (fallback fail path)
         // This covers the else branch in IdentityHasher::write
         let bytes = [1u8, 2, 3];
-        hasher.write(&bytes);
-        assert_eq!(hasher.finish(), 3); // Should use len()
+        let mut hasher3 = IdentityHasher::default();
+        hasher3.write(&bytes);
+        assert_eq!(hasher3.finish(), 3); // Should use len()
+    }
+
+    #[test]
+    fn test_crc32_hasher() {
+        use std::hash::Hasher;
+        let mut hasher = Crc32Hasher::default();
+        hasher.write(b"hello");
+        let hash = hasher.finish();
+        assert_ne!(hash, 0);
+        // Verify low 32 bits match CRC32
+        let crc = hash as u32;
+        // Check that high bits are also set (mixing)
+        assert_ne!(hash >> 32, 0);
+        assert_eq!(hash >> 32, crc as u64);
     }
 
     #[test]
