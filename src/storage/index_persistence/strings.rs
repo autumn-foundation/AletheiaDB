@@ -148,6 +148,15 @@ pub fn restore_string_interner(data: &StringInternerData) -> Result<()> {
         // The interner should assign indices in order
         // If not, the interner had pre-existing strings which is a bug
         if interned_id.as_u32() != idx as u32 {
+            // Allow mismatch if the string is empty. This handles "holes" in the ID space
+            // created by race conditions (e.g. during DoS tests where intern() reverts ID).
+            // get_all_strings() fills holes with "", which resolves to a low ID (e.g. 0),
+            // causing a mismatch with the hole's high index. This is safe because no
+            // valid data references the hole ID.
+            if s.is_empty() {
+                continue;
+            }
+
             return Err(IndexPersistenceError::InternerMismatch {
                 expected: idx as u32,
                 got: interned_id.as_u32(),

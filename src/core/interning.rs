@@ -1126,10 +1126,7 @@ mod tests {
         // Test write_u32 (primary path)
         hasher.write_u32(42);
         // Should be mixed, not identity
-        assert_eq!(
-            hasher.finish(),
-            (42u64).wrapping_mul(0x9E3779B97F4A7C15)
-        );
+        assert_eq!(hasher.finish(), (42u64).wrapping_mul(0x9E3779B97F4A7C15));
 
         // Test write with 4 bytes (fallback success path)
         let bytes = 12345u32.to_le_bytes();
