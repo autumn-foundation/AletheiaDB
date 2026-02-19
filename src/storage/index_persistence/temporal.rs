@@ -694,19 +694,12 @@ mod tests {
         // RED: This test will fail because convert_node_version doesn't exist yet
         use crate::core::GLOBAL_INTERNER;
         use crate::core::version::PropertyDelta;
-        use std::collections::HashMap;
 
-        let mut changed = HashMap::new();
-        changed.insert(
+        let mut delta = PropertyDelta::new();
+        delta.changed.insert(
             GLOBAL_INTERNER.intern("age").unwrap(),
             crate::core::property::PropertyValue::Int(31),
         );
-
-        let delta = PropertyDelta {
-            changed,
-            vector_deltas: Default::default(),
-            removed: Default::default(),
-        };
 
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
 
@@ -1212,7 +1205,6 @@ mod tests {
         use crate::core::GLOBAL_INTERNER;
         use crate::core::hlc::HybridTimestamp;
         use crate::core::version::PropertyDelta;
-        use std::collections::HashMap;
 
         let wallclock = 2_000_000_000;
         let logical = 99;
@@ -1222,17 +1214,11 @@ mod tests {
 
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
 
-        let mut changed = HashMap::new();
-        changed.insert(
+        let mut delta = PropertyDelta::new();
+        delta.changed.insert(
             GLOBAL_INTERNER.intern("age").unwrap(),
             crate::core::property::PropertyValue::Int(31),
         );
-
-        let delta = PropertyDelta {
-            changed,
-            vector_deltas: Default::default(),
-            removed: Default::default(),
-        };
 
         let version = NodeVersion {
             id: VersionId::new(2).unwrap(),
