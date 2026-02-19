@@ -1889,7 +1889,11 @@ mod sentinel_tests {
         let (entry, _) = parse_entry_at(&buffer, 0, 0).expect("Should parse V0 entry");
 
         if let WalOperation::UpdateNode { label, .. } = entry.operation {
-            assert_eq!(label.as_u32(), 0, "V0 UpdateNode should be assigned label ID 0");
+            assert_eq!(
+                label.as_u32(),
+                0,
+                "V0 UpdateNode should be assigned label ID 0"
+            );
         } else {
             panic!("Expected UpdateNode");
         }
@@ -1927,7 +1931,11 @@ mod sentinel_tests {
         let (entry, _) = parse_entry_at(&buffer, 0, 0).expect("Should parse V0 entry");
 
         if let WalOperation::UpdateEdge { label, .. } = entry.operation {
-            assert_eq!(label.as_u32(), 0, "V0 UpdateEdge should be assigned label ID 0");
+            assert_eq!(
+                label.as_u32(),
+                0,
+                "V0 UpdateEdge should be assigned label ID 0"
+            );
         } else {
             panic!("Expected UpdateEdge");
         }
