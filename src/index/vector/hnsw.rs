@@ -519,10 +519,13 @@ pub(crate) unsafe fn validate_raw_pointers<'a>(
     }
 }
 
+/// Type alias to satisfy clippy::type_complexity
+type MetricFn = dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync;
+
 // Helper to create the metric wrapper - extracted for testing
 fn create_metric_wrapper(
     dims: usize,
-    distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync>,
+    distance_fn: Arc<MetricFn>,
 ) -> Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> {
     Box::new(move |a: *const f32, b: *const f32| {
         // Validate pointers and convert to slices
