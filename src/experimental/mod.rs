@@ -41,7 +41,7 @@
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
-//! ```rust
+//! ```rust,ignore
 //! // Requires features = ["nova"]
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
@@ -153,12 +153,29 @@ pub mod temporal_narrative {
     impl<'a> NarrativeGenerator<'a> {
         /// Create a new narrative generator.
         pub fn new(_db: &'a AletheiaDB) -> Self {
-            panic!("Experimental features like NarrativeGenerator require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n");
+            panic!(
+                "Experimental features like NarrativeGenerator require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n"
+            );
         }
 
         /// Generate a narrative for a specific node.
         pub fn generate_node_narrative(&self, _node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
             panic!("Experimental features like NarrativeGenerator require the 'nova' feature.");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::AletheiaDB;
+
+        #[test]
+        #[should_panic(
+            expected = "Experimental features like NarrativeGenerator require the 'nova' feature. Please enable it in your Cargo.toml"
+        )]
+        fn test_stub_panics() {
+            let db = AletheiaDB::new().unwrap();
+            let _ = NarrativeGenerator::new(&db);
         }
     }
 }
