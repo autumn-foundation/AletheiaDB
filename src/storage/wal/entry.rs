@@ -216,3 +216,27 @@ mod tests {
         assert!(!entry.verify_checksum(&[0u8; 10])); // Less than 24 bytes
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::storage::wal::serialization::serialize_entry_into;
+
+    #[test]
+    fn test_verify_checksum_success() {
+        let lsn = LSN(123);
+        let op = WalOperation::Checkpoint {
+            lsn: LSN(456),
+            timestamp: crate::core::temporal::time::now(),
+        };
+        let entry = WalEntry::new(lsn, op);
+
+        // Serialize
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).expect("Serialization failed");
+
+        // Verify checksum
+        // This is the CRITICAL missing test: positive verification
+        assert!(entry.verify_checksum(&buffer), "Checksum verification failed for valid entry");
+    }
+}
