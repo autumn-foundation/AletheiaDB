@@ -75,6 +75,7 @@
 //! - **Versioning**: All files include a version byte to support future schema evolution.
 
 pub mod api;
+pub(crate) mod common;
 mod error;
 pub mod formats;
 pub mod graph;

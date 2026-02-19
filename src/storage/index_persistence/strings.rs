@@ -1,20 +1,13 @@
 //! String interner persistence.
 
 use crate::core::GLOBAL_INTERNER;
-use std::fs;
 use std::path::Path;
-
-use crc32fast::Hasher;
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::StringInternerData;
 use super::{INTERNER_MAGIC, MANIFEST_VERSION};
 
 /// Save the global string interner to disk with CRC32 checksum using atomic write.
-///
-/// Format: `[bitcode_data][crc32_checksum_4_bytes]`
-///
-/// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_string_interner(path: &Path) -> Result<()> {
     let strings = GLOBAL_INTERNER.get_all_strings();
 
@@ -25,72 +18,16 @@ pub fn save_string_interner(path: &Path) -> Result<()> {
         strings,
     };
 
-    let encoded = bitcode::encode(&data);
-
-    // Calculate CRC32 of the encoded data
-    let mut hasher = Hasher::new();
-    hasher.update(&encoded);
-    let checksum = hasher.finalize();
-
-    // Write data + checksum
-    let mut data_with_checksum = encoded;
-    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
-
-    super::atomic_write(path, &data_with_checksum)?;
-
-    Ok(())
+    super::common::save_encoded_with_crc(&data, path)
 }
 
 /// Load the string interner from disk and validate CRC32 checksum.
 pub fn load_string_interner(path: &Path) -> Result<StringInternerData> {
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > super::MAX_STRING_INTERNER_FILE_SIZE {
-        return Err(IndexPersistenceError::SizeLimitExceeded {
-            message: format!(
-                "String interner file size {} exceeds limit {}",
-                metadata.len(),
-                super::MAX_STRING_INTERNER_FILE_SIZE
-            ),
-        });
-    }
-
-    let bytes = fs::read(path)?;
-
-    // Check minimum size (must have at least 4 bytes for CRC)
-    if bytes.len() < 4 {
-        return Err(IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: "File too small to contain CRC32 checksum".into(),
-        });
-    }
-
-    // Split data and checksum
-    let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
-    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
-        IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: "Invalid CRC32 checksum format".into(),
-        }
-    })?);
-
-    // Verify checksum
-    let mut hasher = Hasher::new();
-    hasher.update(data);
-    let computed_checksum = hasher.finalize();
-
-    if computed_checksum != stored_checksum {
-        return Err(IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: format!(
-                "CRC32 checksum mismatch: expected {}, got {}",
-                stored_checksum, computed_checksum
-            )
-            .into(),
-        });
-    }
-
-    // Decode and validate
-    let data: StringInternerData = bitcode::decode(data)?;
+    let data: StringInternerData = super::common::load_encoded_with_crc(
+        path,
+        super::MAX_STRING_INTERNER_FILE_SIZE,
+        "String interner",
+    )?;
 
     // Validate magic bytes
     if data.magic != INTERNER_MAGIC {
@@ -160,6 +97,8 @@ pub fn restore_string_interner(data: &StringInternerData) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crc32fast::Hasher;
+    use std::fs;
     use tempfile::tempdir;
 
     #[test]

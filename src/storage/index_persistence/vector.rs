@@ -4,11 +4,8 @@
 //! - usearch native format for the HNSW index itself
 //! - bitcode for metadata and ID mappings
 
-use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use crc32fast::Hasher;
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
@@ -16,85 +13,19 @@ use super::formats::{
 };
 use super::{MANIFEST_VERSION, VECTOR_META_MAGIC};
 
-/// Helper function to save data with CRC32 checksum using atomic write.
-///
-/// Uses write-temp-then-rename to prevent corruption on crash.
-fn save_with_crc(data: &[u8], path: &Path) -> Result<()> {
-    let mut hasher = Hasher::new();
-    hasher.update(data);
-    let checksum = hasher.finalize();
-
-    let mut data_with_checksum = data.to_vec();
-    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
-
-    super::atomic_write(path, &data_with_checksum)?;
-    Ok(())
-}
-
-/// Helper function to load data and validate CRC32 checksum.
-///
-/// # Arguments
-///
-/// * `path` - The file path to read from
-/// * `max_size` - Maximum allowed file size (DoS protection)
-fn load_with_crc(path: &Path, max_size: u64) -> Result<Vec<u8>> {
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > max_size {
-        return Err(IndexPersistenceError::SizeLimitExceeded {
-            message: format!(
-                "Vector index file size {} exceeds limit {}",
-                metadata.len(),
-                max_size
-            ),
-        });
-    }
-
-    let bytes = fs::read(path)?;
-
-    if bytes.len() < 4 {
-        return Err(IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: "File too small to contain CRC32 checksum".into(),
-        });
-    }
-
-    let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
-    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
-        IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: "Invalid CRC32 checksum format".into(),
-        }
-    })?);
-
-    let mut hasher = Hasher::new();
-    hasher.update(data);
-    let computed_checksum = hasher.finalize();
-
-    if computed_checksum != stored_checksum {
-        return Err(IndexPersistenceError::Corrupted {
-            path: path.to_path_buf(),
-            source: format!(
-                "CRC32 checksum mismatch: expected {}, got {}",
-                stored_checksum, computed_checksum
-            )
-            .into(),
-        });
-    }
-
-    Ok(data.to_vec())
-}
-
 /// Save vector index metadata with CRC32 checksum.
 pub fn save_vector_meta(meta: &VectorIndexMeta, path: &Path) -> Result<()> {
-    let encoded = bitcode::encode(meta);
-    save_with_crc(&encoded, path)
+    super::common::save_encoded_with_crc(meta, path)
 }
 
 /// Load vector index metadata and validate CRC32 checksum.
 pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
     // Metadata should be small, but use standard limit for consistency
-    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE)?;
-    let meta: VectorIndexMeta = bitcode::decode(&data)?;
+    let meta: VectorIndexMeta = super::common::load_encoded_with_crc(
+        path,
+        super::MAX_VECTOR_INDEX_FILE_SIZE,
+        "Vector index",
+    )?;
 
     if meta.magic != VECTOR_META_MAGIC {
         return Err(IndexPersistenceError::InvalidMagic {
@@ -116,28 +47,22 @@ pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
 
 /// Save vector ID mappings with CRC32 checksum.
 pub fn save_vector_mappings(mappings: &VectorMappingsData, path: &Path) -> Result<()> {
-    let encoded = bitcode::encode(mappings);
-    save_with_crc(&encoded, path)
+    super::common::save_encoded_with_crc(mappings, path)
 }
 
 /// Load vector ID mappings and validate CRC32 checksum.
 pub fn load_vector_mappings(path: &Path) -> Result<VectorMappingsData> {
-    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE)?;
-    let mappings: VectorMappingsData = bitcode::decode(&data)?;
-    Ok(mappings)
+    super::common::load_encoded_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE, "Vector index")
 }
 
 /// Save vector snapshot metadata with CRC32 checksum.
 pub fn save_snapshot_meta(meta: &VectorSnapshotMeta, path: &Path) -> Result<()> {
-    let encoded = bitcode::encode(meta);
-    save_with_crc(&encoded, path)
+    super::common::save_encoded_with_crc(meta, path)
 }
 
 /// Load vector snapshot metadata and validate CRC32 checksum.
 pub fn load_snapshot_meta(path: &Path) -> Result<VectorSnapshotMeta> {
-    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE)?;
-    let meta: VectorSnapshotMeta = bitcode::decode(&data)?;
-    Ok(meta)
+    super::common::load_encoded_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE, "Vector index")
 }
 
 /// Load a complete vector index (meta + mappings + index path) from a directory.
