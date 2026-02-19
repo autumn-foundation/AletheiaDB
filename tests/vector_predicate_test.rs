@@ -1,5 +1,5 @@
+use aletheiadb::core::error::Result;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
-use aletheiadb::utils::Result;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 #[test]
@@ -84,8 +84,8 @@ fn test_find_similar_with_predicate_dimension_mismatch() -> Result<()> {
 
     assert!(result.is_err());
     match result {
-        Err(aletheiadb::utils::Error::Vector(
-            aletheiadb::utils::error::VectorError::DimensionMismatch { expected, actual },
+        Err(aletheiadb::core::error::Error::Vector(
+            aletheiadb::core::error::VectorError::DimensionMismatch { expected, actual },
         )) => {
             assert_eq!(expected, 2);
             assert_eq!(actual, 3);

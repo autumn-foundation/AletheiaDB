@@ -424,6 +424,62 @@ pub(crate) mod x86_ops {
             }
         }
     }
+
+    /// Scales `src` by `scalar` and stores result in `dst` using AVX2.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 is available. `src.len() == dst.len()`.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub unsafe fn scale_and_copy_avx2(src: &[f32], dst: &mut [f32], scalar: f32) {
+        assert_eq!(src.len(), dst.len());
+        unsafe {
+            let scalar_vec = _mm256_set1_ps(scalar);
+            let mut src_chunks = src.chunks_exact(8);
+            let mut dst_chunks = dst.chunks_exact_mut(8);
+
+            for (s_chunk, d_chunk) in src_chunks.by_ref().zip(dst_chunks.by_ref()) {
+                let va = _mm256_loadu_ps(s_chunk.as_ptr());
+                let result = _mm256_mul_ps(va, scalar_vec);
+                _mm256_storeu_ps(d_chunk.as_mut_ptr(), result);
+            }
+
+            let src_rem = src_chunks.remainder();
+            let dst_rem = dst_chunks.into_remainder();
+
+            for (s, d) in src_rem.iter().zip(dst_rem.iter_mut()) {
+                *d = *s * scalar;
+            }
+        }
+    }
+
+    /// Scales `src` by `scalar` and stores result in `dst` using SSE2.
+    ///
+    /// # Safety
+    /// Caller must ensure SSE2 is available. `src.len() == dst.len()`.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn scale_and_copy_sse2(src: &[f32], dst: &mut [f32], scalar: f32) {
+        assert_eq!(src.len(), dst.len());
+        unsafe {
+            let scalar_vec = _mm_set1_ps(scalar);
+            let mut src_chunks = src.chunks_exact(4);
+            let mut dst_chunks = dst.chunks_exact_mut(4);
+
+            for (s_chunk, d_chunk) in src_chunks.by_ref().zip(dst_chunks.by_ref()) {
+                let va = _mm_loadu_ps(s_chunk.as_ptr());
+                let result = _mm_mul_ps(va, scalar_vec);
+                _mm_storeu_ps(d_chunk.as_mut_ptr(), result);
+            }
+
+            let src_rem = src_chunks.remainder();
+            let dst_rem = dst_chunks.into_remainder();
+
+            for (s, d) in src_rem.iter().zip(dst_rem.iter_mut()) {
+                *d = *s * scalar;
+            }
+        }
+    }
 }
 
 /// Scalar fallback for computing dot product and magnitudes.
@@ -485,6 +541,19 @@ pub(crate) fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
     }
 }
 
+/// Scales `src` by `scalar` and stores result in `dst` (scalar fallback).
+#[inline]
+#[cfg_attr(
+    all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
+    allow(dead_code)
+)]
+pub(crate) fn scale_and_copy_scalar(src: &[f32], dst: &mut [f32], scalar: f32) {
+    assert_eq!(src.len(), dst.len());
+    for (s, d) in src.iter().zip(dst.iter_mut()) {
+        *d = *s * scalar;
+    }
+}
+
 /// Scales a vector in place using the best available SIMD instructions.
 ///
 /// Uses runtime feature detection to select:
@@ -515,6 +584,33 @@ pub(crate) fn scale_in_place(v: &mut [f32], scalar: f32) {
 
     // Fallback for non-x86 platforms or x86 CPUs without SSE2.
     scale_in_place_scalar(v, scalar);
+}
+
+/// Scales `src` by `scalar` and stores result in `dst` using the best available SIMD instructions.
+#[inline(always)]
+pub(crate) fn scale_and_copy(src: &[f32], dst: &mut [f32], scalar: f32) {
+    assert_eq!(src.len(), dst.len());
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        // Use runtime detection for best available instruction set.
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: We just verified AVX2 is available.
+            unsafe {
+                x86_ops::scale_and_copy_avx2(src, dst, scalar);
+            }
+            return;
+        }
+        if is_x86_feature_detected!("sse2") {
+            // SAFETY: We just verified SSE2 is available.
+            unsafe {
+                x86_ops::scale_and_copy_sse2(src, dst, scalar);
+            }
+            return;
+        }
+    }
+
+    // Fallback for non-x86 platforms or x86 CPUs without SSE2.
+    scale_and_copy_scalar(src, dst, scalar);
 }
 
 /// Computes dot product and both squared magnitudes using the best available
@@ -615,4 +711,70 @@ pub(crate) fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
 
     // Fallback for non-x86 platforms or x86 CPUs without SSE2.
     dot_product_scalar(a, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scale_and_copy_implementation_coverage() {
+        let src = vec![1.0f32; 17]; // 17 to force remainder logic (8*2 + 1)
+        let mut dst = vec![0.0f32; 17];
+        let scalar = 2.0;
+        let expected = vec![2.0f32; 17];
+
+        // 1. Unconditional Scalar coverage
+        scale_and_copy_scalar(&src, &mut dst, scalar);
+        assert_eq!(dst, expected, "Scalar implementation failed");
+        dst.fill(0.0);
+
+        // 2. Conditional x86 SIMD coverage
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Try SSE2 if available
+            if is_x86_feature_detected!("sse2") {
+                unsafe { x86_ops::scale_and_copy_sse2(&src, &mut dst, scalar) };
+                assert_eq!(dst, expected, "SSE2 implementation failed");
+                dst.fill(0.0);
+            }
+
+            // Try AVX2 if available
+            if is_x86_feature_detected!("avx2") {
+                unsafe { x86_ops::scale_and_copy_avx2(&src, &mut dst, scalar) };
+                assert_eq!(dst, expected, "AVX2 implementation failed");
+                dst.fill(0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_scale_in_place_implementation_coverage() {
+        let v = vec![1.0f32; 17];
+        let scalar = 2.0;
+        let expected = vec![2.0f32; 17];
+
+        // 1. Unconditional Scalar coverage
+        let mut v_scalar = v.clone();
+        scale_in_place_scalar(&mut v_scalar, scalar);
+        assert_eq!(v_scalar, expected, "Scalar implementation failed");
+
+        // 2. Conditional x86 SIMD coverage
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Try SSE2
+            if is_x86_feature_detected!("sse2") {
+                let mut v_sse2 = v.clone();
+                unsafe { x86_ops::scale_in_place_sse2(&mut v_sse2, scalar) };
+                assert_eq!(v_sse2, expected, "SSE2 implementation failed");
+            }
+
+            // Try AVX2
+            if is_x86_feature_detected!("avx2") {
+                let mut v_avx2 = v.clone();
+                unsafe { x86_ops::scale_in_place_avx2(&mut v_avx2, scalar) };
+                assert_eq!(v_avx2, expected, "AVX2 implementation failed");
+            }
+        }
+    }
 }

@@ -149,7 +149,7 @@ impl StringInterner {
     pub fn intern<S: AsRef<str>>(
         &self,
         string: S,
-    ) -> std::result::Result<InternedString, crate::utils::error::Error> {
+    ) -> std::result::Result<InternedString, crate::core::error::Error> {
         let string = string.as_ref();
 
         // Fast path: check if already interned (avoids Arc allocation)
@@ -174,8 +174,8 @@ impl StringInterner {
                     // Best effort: undo the reservation
                     self.next_id.fetch_sub(1, Ordering::Relaxed);
 
-                    return Err(crate::utils::error::Error::Storage(
-                        crate::utils::error::StorageError::CapacityExceeded {
+                    return Err(crate::core::error::Error::Storage(
+                        crate::core::error::StorageError::CapacityExceeded {
                             resource: "string interner".to_string(),
                             current: id_value as usize,
                             limit: self.max_capacity,
@@ -785,7 +785,7 @@ mod tests {
     // ========== New Concurrency & Error Handling Tests for Coverage ==========
 
     #[test]
-    fn test_intern_capacity_exceeded_error() -> crate::utils::error::Result<()> {
+    fn test_intern_capacity_exceeded_error() -> crate::core::error::Result<()> {
         let interner = StringInterner::with_max_capacity(10);
 
         // Intern 10 strings - should all succeed
@@ -803,8 +803,8 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::utils::error::Error::Storage(
-                    crate::utils::error::StorageError::CapacityExceeded { .. }
+                crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::CapacityExceeded { .. }
                 )
             ),
             "Expected CapacityExceeded error, got: {:?}",

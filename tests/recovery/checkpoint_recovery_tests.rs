@@ -8,6 +8,7 @@
 
 use aletheiadb::{
     GLOBAL_INTERNER, PropertyMapBuilder,
+    core::error::Result,
     core::{
         graph::Node,
         id::{EdgeId, NodeId, VersionId},
@@ -23,7 +24,6 @@ use aletheiadb::{
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
         },
     },
-    utils::error::Result,
 };
 use tempfile::TempDir;
 

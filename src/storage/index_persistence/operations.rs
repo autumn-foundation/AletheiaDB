@@ -29,10 +29,10 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::api::transaction::types::TxId;
 use crate::core::GLOBAL_INTERNER;
+use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
-use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
+use crate::core::id::{EdgeId, IdGenerator, NodeId, TxId, VersionId};
 use crate::core::temporal::time;
 use crate::core::version::VersionMetadata;
 use crate::index::temporal::TemporalIndexes;
@@ -40,7 +40,6 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::IndexPersistenceManager;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
-use crate::utils::error::{Result, StorageError};
 
 use super::tracker::PersistenceTracker;
 

@@ -4,6 +4,7 @@
 //! graph. It provides O(1) lookups and cache-friendly traversals optimized for
 //! non-temporal queries.
 
+use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
@@ -13,7 +14,6 @@ use crate::index::current::CurrentIndexes;
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::index::vector::{TemporalSearchResults, VectorIndex};
-use crate::utils::error::{Result, StorageError};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use parking_lot::RwLock;
@@ -187,8 +187,8 @@ impl CurrentStorage {
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
         // Check property limit before attempting to add
         if self.vector_indexes.len() >= DEFAULT_MAX_VECTOR_PROPERTIES {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError(format!(
+            return Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::IndexError(format!(
                     "Maximum number of vector-indexed properties ({}) reached. \
                      Cannot enable index for property '{}'",
                     DEFAULT_MAX_VECTOR_PROPERTIES, property_name
@@ -199,8 +199,8 @@ impl CurrentStorage {
         // Use atomic entry() API to avoid TOCTOU race condition
         match self.vector_indexes.entry(property_name.to_string()) {
             Entry::Occupied(_) => {
-                return Err(crate::utils::error::Error::Vector(
-                    crate::utils::error::VectorError::IndexError(format!(
+                return Err(crate::core::error::Error::Vector(
+                    crate::core::error::VectorError::IndexError(format!(
                         "Vector index already enabled for property '{}'",
                         property_name
                     )),
@@ -1101,8 +1101,8 @@ impl CurrentStorage {
         let (_, index, config) = self.get_vector_index_internal(None)?;
 
         if embedding.len() != config.dimensions {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::DimensionMismatch {
+            return Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::DimensionMismatch {
                     expected: config.dimensions,
                     actual: embedding.len(),
                 },
@@ -1142,8 +1142,8 @@ impl CurrentStorage {
         let (_, index, config) = self.get_vector_index_internal(None)?;
 
         if embedding.len() != config.dimensions {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::DimensionMismatch {
+            return Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::DimensionMismatch {
                     expected: config.dimensions,
                     actual: embedding.len(),
                 },
@@ -1182,8 +1182,8 @@ impl CurrentStorage {
         let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
 
         if embedding.len() != config.dimensions {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::DimensionMismatch {
+            return Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::DimensionMismatch {
                     expected: config.dimensions,
                     actual: embedding.len(),
                 },
@@ -1213,8 +1213,8 @@ impl CurrentStorage {
         let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
 
         if embedding.len() != config.dimensions {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::DimensionMismatch {
+            return Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::DimensionMismatch {
                     expected: config.dimensions,
                     actual: embedding.len(),
                 },
@@ -1248,8 +1248,8 @@ impl CurrentStorage {
         let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
 
         if query.len() != config.dimensions {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::DimensionMismatch {
+            return Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::DimensionMismatch {
                     expected: config.dimensions,
                     actual: query.len(),
                 },
@@ -1379,8 +1379,8 @@ impl CurrentStorage {
     ) -> Result<()> {
         // Check if already enabled for this specific property
         if self.temporal_vector_indexes.contains_key(property_name) {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError(format!(
+            return Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::IndexError(format!(
                     "Temporal vector index is already enabled for property '{}'",
                     property_name
                 )),
@@ -1487,7 +1487,7 @@ impl CurrentStorage {
     ) -> Result<Vec<(NodeId, f32)>> {
         let state = self.temporal_vector_index_state.read();
         let index = state.index.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                 "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
                     .to_string(),
             ))
@@ -1536,7 +1536,7 @@ impl CurrentStorage {
         let index = self
             .get_temporal_vector_index_for(property_name)
             .ok_or_else(|| {
-                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                     format!(
                         "No temporal vector index enabled for property '{}'. \
                      Call db.vector_index(\"{}\").temporal(...).enable() first.",
@@ -1583,7 +1583,7 @@ impl CurrentStorage {
         let index = self
             .get_temporal_vector_index_for(property_name)
             .ok_or_else(|| {
-                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                     format!(
                         "No temporal vector index enabled for property '{}'. \
                      Call db.vector_index(\"{}\").temporal(...).enable() first.",
@@ -1608,7 +1608,7 @@ impl CurrentStorage {
         let index = self
             .get_temporal_vector_index_for(property_name)
             .ok_or_else(|| {
-                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                     format!(
                         "No temporal vector index enabled for property '{}'. \
                      Call db.vector_index(\"{}\").temporal(...).enable() first.",
@@ -1635,7 +1635,7 @@ impl CurrentStorage {
         let index = self
             .get_temporal_vector_index_for(property_name)
             .ok_or_else(|| {
-                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                     format!(
                         "No temporal vector index enabled for property '{}'. \
                      Call db.vector_index(\"{}\").temporal(...).enable() first.",
@@ -1683,7 +1683,7 @@ impl CurrentStorage {
     ) -> Result<TemporalSearchResults> {
         let state = self.temporal_vector_index_state.read();
         let index = state.index.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                 "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
                     .to_string(),
             ))
@@ -2075,11 +2075,9 @@ impl CurrentStorage {
             .ok_or_else(|| StorageError::PropertyNotFound(prop_name.to_string()))?
             .as_arc_vector()
             .ok_or_else(|| {
-                crate::utils::error::Error::Vector(
-                    crate::utils::error::VectorError::InvalidVector {
-                        reason: "Property is not a vector".to_string(),
-                    },
-                )
+                crate::core::error::Error::Vector(crate::core::error::VectorError::InvalidVector {
+                    reason: "Property is not a vector".to_string(),
+                })
             })
     }
 
@@ -2091,16 +2089,17 @@ impl CurrentStorage {
             name.to_string()
         } else {
             self.get_default_vector_property_name().ok_or_else(|| {
-                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                     "Vector index is not enabled. Call enable_vector_index() first.".to_string(),
                 ))
             })?
         };
 
         let entry = self.vector_indexes.get(&prop_name).ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                format!("Vector index not found for property '{}'", prop_name),
-            ))
+            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(format!(
+                "Vector index not found for property '{}'",
+                prop_name
+            )))
         })?;
 
         Ok((
@@ -2167,3 +2166,25 @@ impl Default for CurrentStorage {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn test_vector_search_index_not_found() {
+        let storage = CurrentStorage::new();
+        // Don't enable vector index
+
+        let node_id = NodeId::new(1).unwrap();
+        // Try search
+        let result = storage.find_similar(node_id, 5);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("Vector index is not enabled"));
+
+        // Try search with specific property
+        let result = storage.find_similar_in("embedding", node_id, 5);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("Vector index not found"));
+    }
+}

@@ -7,11 +7,11 @@
 //! - **Semantic A***: Finds paths where nodes are semantically similar to a query concept.
 //! - **Time-Travel Pathfinding**: Finds paths that were valid at a specific point in time.
 
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::core::vector::cosine_similarity;
-use crate::db::AletheiaDB;
-use crate::utils::error::Result;
+use crate::query::traits::GraphView;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
@@ -49,18 +49,18 @@ impl PartialOrd for State {
 }
 
 /// A pathfinder that uses semantic similarity as a heuristic/cost.
-pub struct SemanticPathfinder<'a> {
-    db: &'a AletheiaDB,
+pub struct SemanticPathfinder<'a, G: GraphView + ?Sized> {
+    db: &'a G,
     vector_property: String,
 }
 
-impl<'a> SemanticPathfinder<'a> {
+impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
     /// Create a new SemanticPathfinder.
     ///
     /// # Arguments
-    /// * `db` - Reference to the database instance.
+    /// * `db` - Reference to the graph view (e.g., database instance).
     /// * `vector_property` - Name of the property containing vector embeddings.
-    pub fn new(db: &'a AletheiaDB, vector_property: &str) -> Self {
+    pub fn new(db: &'a G, vector_property: &str) -> Self {
         Self {
             db,
             vector_property: vector_property.to_string(),
@@ -313,9 +313,10 @@ impl<'a> SemanticPathfinder<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
+    use crate::core::error::Error;
     use crate::core::property::PropertyMapBuilder;
+    use crate::db::AletheiaDB;
     use crate::index::vector::{DistanceMetric, HnswConfig};
-    use crate::utils::error::Error;
 
     fn create_test_db() -> AletheiaDB {
         let db = AletheiaDB::new().unwrap();

@@ -9,13 +9,20 @@
 //! - `NodeVersion` / `EdgeVersion`: The version structures.
 //! - `VersionData`: Payload (Anchor or Delta).
 
+use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
-use crate::core::interning::InternedString;
+use crate::core::interning::{IdentityHasher, InternedString};
 use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
-use crate::utils::error::Result;
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
+
+/// Fast HashMap using IdentityHasher for interned keys.
+pub type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
+
+/// Fast HashSet using IdentityHasher for interned keys.
+pub type FastHashSet<T> = HashSet<T, BuildHasherDefault<IdentityHasher>>;
 
 /// Metadata about version creation for Snapshot Isolation.
 ///
@@ -352,20 +359,20 @@ impl Default for AnchorConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDelta {
     /// Properties that were added or modified (non-vector)
-    pub changed: HashMap<PropertyKey, PropertyValue>,
+    pub changed: FastHashMap<PropertyKey, PropertyValue>,
     /// Vector properties with sparse delta optimization
-    pub vector_deltas: HashMap<PropertyKey, VectorDelta>,
+    pub vector_deltas: FastHashMap<PropertyKey, VectorDelta>,
     /// Properties that were removed
-    pub removed: HashSet<PropertyKey>,
+    pub removed: FastHashSet<PropertyKey>,
 }
 
 impl PropertyDelta {
     /// Create a new empty delta.
     pub fn new() -> Self {
         PropertyDelta {
-            changed: HashMap::new(),
-            vector_deltas: HashMap::new(),
-            removed: HashSet::new(),
+            changed: FastHashMap::with_hasher(BuildHasherDefault::default()),
+            vector_deltas: FastHashMap::with_hasher(BuildHasherDefault::default()),
+            removed: FastHashSet::with_hasher(BuildHasherDefault::default()),
         }
     }
 
@@ -469,7 +476,12 @@ impl PropertyDelta {
             .saturating_sub(self.removed.len())
             .max(self.changed.len() + self.vector_deltas.len());
 
-        let mut result = HashMap::with_capacity(estimated_capacity);
+        // Use standard HashMap for construction, PropertyMap::from_iter will handle internal structure
+        // PropertyMap uses IdentityHasher internally too
+        let mut result = FastHashMap::with_capacity_and_hasher(
+            estimated_capacity,
+            BuildHasherDefault::<IdentityHasher>::default(),
+        );
 
         // Copy all base properties except removed ones (single lookup per property)
         // This is optimal when changes << base (typical case: ~1-10% change rate)
@@ -2713,5 +2725,45 @@ mod mutant_kill_tests {
 
         assert!(trait_is_anchor(&edge_anchor));
         assert!(!trait_is_anchor(&edge_delta));
+    }
+
+    #[test]
+    fn test_vector_delta_epsilon_boundary() {
+        // 🛡️ Sentinel Test: Verify exact epsilon handling in VectorDelta.
+        // This targets mutants that replace `<=` with `<` in floats_approx_equal.
+        // (a - b).abs() <= VECTOR_EPSILON
+
+        // A small offset to test boundaries around VECTOR_EPSILON.
+        const SMALL_OFFSET: f32 = 1e-9;
+
+        // Use 0.0 as base to ensure EPSILON is exactly representable and addition
+        // doesn't lose precision (which happens around 1.0 due to f32::EPSILON > VECTOR_EPSILON).
+        let v1 = vec![0.0f32];
+
+        // Case 1: Difference exactly equal to EPSILON
+        // 0.0 + 1e-7. abs(diff) = 1e-7.
+        // Original (<=): Equal -> No Delta (None)
+        // Mutant (<): Not Equal -> Delta (Some)
+        let v2 = vec![VECTOR_EPSILON];
+        assert!(
+            VectorDelta::from_diff(&v1, &v2).is_none(),
+            "Difference of exactly EPSILON should be considered equal (no delta)"
+        );
+
+        // Case 2: Difference slightly larger than EPSILON
+        // Should be detected as different
+        let v3 = vec![VECTOR_EPSILON + SMALL_OFFSET];
+        assert!(
+            VectorDelta::from_diff(&v1, &v3).is_some(),
+            "Difference > EPSILON should be detected"
+        );
+
+        // Case 3: Difference slightly smaller than EPSILON
+        // Should be considered equal
+        let v4 = vec![VECTOR_EPSILON - SMALL_OFFSET];
+        assert!(
+            VectorDelta::from_diff(&v1, &v4).is_none(),
+            "Difference < EPSILON should be considered equal"
+        );
     }
 }

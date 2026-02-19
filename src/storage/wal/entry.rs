@@ -230,12 +230,7 @@ mod sentry_tests {
             lsn: LSN(456),
             timestamp: fixed_timestamp,
         };
-        let entry = WalEntry {
-            lsn,
-            timestamp: fixed_timestamp,
-            operation: op,
-            checksum: 0,
-        };
+        let entry = WalEntry { lsn, timestamp: fixed_timestamp, operation: op, checksum: 0 };
 
         // Serialize
         let mut buffer = Vec::new();

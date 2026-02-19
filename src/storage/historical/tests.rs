@@ -241,7 +241,7 @@ fn test_retention_policy_node_limit() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+        crate::core::error::Error::Storage(StorageError::CapacityExceeded {
             resource,
             current,
             limit,
@@ -299,7 +299,7 @@ fn test_retention_policy_edge_limit() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+        crate::core::error::Error::Storage(StorageError::CapacityExceeded {
             resource,
             current,
             limit,
@@ -1637,7 +1637,7 @@ fn test_observer_error_doesnt_block_storage() {
 
     impl StorageObserver for FailingObserver {
         fn on_event(&self, _event: &StorageEvent) -> Result<()> {
-            Err(crate::utils::error::Error::Storage(
+            Err(crate::core::error::Error::Storage(
                 StorageError::InconsistentState {
                     reason: "Test error".to_string(),
                 },
@@ -1783,7 +1783,7 @@ fn test_pre_anchor_hook_error_graceful_degradation() {
 
     // Hook that always fails
     let hook: PreAnchorHook = Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
-        Err(crate::utils::error::Error::Storage(
+        Err(crate::core::error::Error::Storage(
             StorageError::InconsistentState {
                 reason: "Test hook error".to_string(),
             },
@@ -1996,8 +1996,8 @@ fn test_reconstruction_depth_limit_exceeded_for_nodes() {
     assert!(result.is_err(), "Expected MaxDepthExceeded error");
     let err = result.unwrap_err();
     match err {
-        crate::utils::error::Error::Temporal(
-            crate::utils::error::TemporalError::MaxDepthExceeded { max_depth, .. },
+        crate::core::error::Error::Temporal(
+            crate::core::error::TemporalError::MaxDepthExceeded { max_depth, .. },
         ) => {
             assert_eq!(max_depth, MAX_RECONSTRUCTION_DEPTH);
         }
@@ -2132,8 +2132,8 @@ fn test_reconstruction_depth_limit_exceeded_for_edges() {
     assert!(result.is_err(), "Expected MaxDepthExceeded error");
     let err = result.unwrap_err();
     match err {
-        crate::utils::error::Error::Temporal(
-            crate::utils::error::TemporalError::MaxDepthExceeded { max_depth, .. },
+        crate::core::error::Error::Temporal(
+            crate::core::error::TemporalError::MaxDepthExceeded { max_depth, .. },
         ) => {
             assert_eq!(max_depth, MAX_RECONSTRUCTION_DEPTH);
         }

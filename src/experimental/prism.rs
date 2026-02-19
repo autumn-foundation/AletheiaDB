@@ -46,10 +46,10 @@
 //! ```
 
 use crate::AletheiaDB;
+use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::ops::{dot_product, magnitude, normalize};
-use crate::utils::{Error, Result, VectorError};
 use std::collections::HashMap;
 
 /// A point in the semantic evolution of a node.

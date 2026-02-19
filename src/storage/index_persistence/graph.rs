@@ -19,10 +19,10 @@ use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
 
 /// Map decompression errors to `IndexPersistenceError`, preserving the
 /// specific `SizeLimitExceeded` variant for capacity violations.
-fn map_decompress_error(e: crate::utils::error::Error) -> IndexPersistenceError {
+fn map_decompress_error(e: crate::core::error::Error) -> IndexPersistenceError {
     match e {
-        crate::utils::error::Error::Storage(
-            crate::utils::error::StorageError::CapacityExceeded { current, limit, .. },
+        crate::core::error::Error::Storage(
+            crate::core::error::StorageError::CapacityExceeded { current, limit, .. },
         ) => IndexPersistenceError::SizeLimitExceeded {
             message: format!(
                 "Decompressed size {} exceeds limit {} (possible zip bomb)",
