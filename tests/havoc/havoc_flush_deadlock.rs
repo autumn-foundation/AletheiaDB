@@ -5,7 +5,7 @@ fn test_flush_deadlock_on_io_error() {
     use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
     use aletheiadb::storage::wal::ring_buffer::PendingEntry;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{mpsc, Arc};
+    use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::Duration;
 
