@@ -4018,3 +4018,110 @@ mod race_recovery_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod coverage_reentrancy_tests {
+    use super::*;
+
+    fn create_test_index() -> HnswIndex {
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_add_reentrancy_check() {
+        let index = create_test_index();
+        let node_id = NodeId::new(1).unwrap();
+        let vec = vec![1.0, 0.0, 0.0, 0.0];
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // add should fail
+        let result = index.add(node_id, &vec);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Cannot modify index from within a search_with_filter callback"));
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+
+    #[test]
+    fn test_remove_reentrancy_check() {
+        let index = create_test_index();
+        let node_id = NodeId::new(1).unwrap();
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // remove should fail
+        let result = index.remove(node_id);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Cannot modify index from within a search_with_filter callback"));
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+
+    #[test]
+    fn test_save_reentrancy_check() {
+        let index = create_test_index();
+        let path = Path::new("dummy.index");
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // save should fail
+        let result = index.save(path);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Cannot save index from within a search_with_filter callback"));
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+
+    #[test]
+    fn test_search_reentrancy_check() {
+        let index = create_test_index();
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // search should fail
+        let result = index.search(&query, 10);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Cannot perform search from within a search_with_filter callback"));
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+
+    #[test]
+    fn test_search_with_filter_reentrancy_check() {
+        let index = create_test_index();
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // search_with_filter should fail
+        let result = index.search_with_filter(&query, 10, |_| true);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Cannot perform search_with_filter from within a search_with_filter callback"));
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+}
