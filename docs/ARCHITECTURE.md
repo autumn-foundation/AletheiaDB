@@ -103,8 +103,8 @@ classDiagram
 
     MCPServer --> QueryEngine : Uses
     QueryEngine --> AletheiaDB : Uses
-    AletheiaDB ..> CurrentStorage : Uses (Trait Bound)
-    AletheiaDB ..> HistoricalStorage : Uses (Trait Bound)
+    AletheiaDB --> CurrentStorage : "Owns (Arc)"
+    AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
