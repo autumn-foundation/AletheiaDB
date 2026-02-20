@@ -94,6 +94,8 @@ pub mod worker;
 
 #[cfg(test)]
 mod dos_tests;
+#[cfg(test)]
+mod manifest_consistency_tests;
 
 pub use api::{
     IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,

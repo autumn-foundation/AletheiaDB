@@ -48,6 +48,16 @@ pub(crate) struct PersistenceTracker {
     last_temporal_persist: AtomicU64,
     /// Last persist timestamp for string interner
     last_string_persist: AtomicU64,
+
+    /// Last persisted LSN for vector indexes
+    last_vector_lsn: AtomicU64,
+    /// Last persisted LSN for graph index
+    last_graph_lsn: AtomicU64,
+    /// Last persisted LSN for temporal index
+    last_temporal_lsn: AtomicU64,
+    /// Last persisted LSN for string interner
+    last_string_lsn: AtomicU64,
+
     /// Shutdown signal for background persistence thread
     shutdown: AtomicBool,
 }
@@ -69,8 +79,55 @@ impl PersistenceTracker {
             last_graph_persist: AtomicU64::new(now),
             last_temporal_persist: AtomicU64::new(now),
             last_string_persist: AtomicU64::new(now),
+            last_vector_lsn: AtomicU64::new(0),
+            last_graph_lsn: AtomicU64::new(0),
+            last_temporal_lsn: AtomicU64::new(0),
+            last_string_lsn: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
         }
+    }
+
+    /// Set the starting LSN for all components (used during initialization/recovery).
+    pub fn set_start_lsn(&self, lsn: u64) {
+        self.last_vector_lsn.store(lsn, Ordering::Relaxed);
+        self.last_graph_lsn.store(lsn, Ordering::Relaxed);
+        self.last_temporal_lsn.store(lsn, Ordering::Relaxed);
+        self.last_string_lsn.store(lsn, Ordering::Relaxed);
+    }
+
+    /// Update the last persisted LSN for vector indexes.
+    pub fn update_vector_lsn(&self, lsn: u64) {
+        self.last_vector_lsn.fetch_max(lsn, Ordering::Relaxed);
+    }
+
+    /// Update the last persisted LSN for graph index.
+    pub fn update_graph_lsn(&self, lsn: u64) {
+        self.last_graph_lsn.fetch_max(lsn, Ordering::Relaxed);
+    }
+
+    /// Update the last persisted LSN for temporal index.
+    pub fn update_temporal_lsn(&self, lsn: u64) {
+        self.last_temporal_lsn.fetch_max(lsn, Ordering::Relaxed);
+    }
+
+    /// Update the last persisted LSN for string interner.
+    pub fn update_string_lsn(&self, lsn: u64) {
+        self.last_string_lsn.fetch_max(lsn, Ordering::Relaxed);
+    }
+
+    /// Get the safe manifest LSN (minimum of all component LSNs).
+    ///
+    /// This LSN represents the point in time up to which ALL persisted components are consistent.
+    /// WAL replay should start from this LSN to ensure no operations are missed for components
+    /// that might be lagging behind.
+    pub fn get_safe_manifest_lsn(&self) -> u64 {
+        let vector = self.last_vector_lsn.load(Ordering::Relaxed);
+        let graph = self.last_graph_lsn.load(Ordering::Relaxed);
+        let temporal = self.last_temporal_lsn.load(Ordering::Relaxed);
+        let string = self.last_string_lsn.load(Ordering::Relaxed);
+
+        // Calculate minimum of all components
+        vector.min(graph).min(temporal).min(string)
     }
 
     /// Increment vector mutation counter.

@@ -35,7 +35,7 @@ fn test_persist_vector_indexes_with_none_tracker() {
     // This will likely fail on save_string_interner or empty indexes,
     // but the critical path we are testing is the None tracker handling
     // at the end of the function.
-    let _ = persist_vector_indexes(&current, &manager, None);
+    let _ = persist_vector_indexes(&current, &manager, None, 0);
 
     // If we reached here without panic, the Option check worked.
 }
@@ -51,7 +51,7 @@ fn test_persist_vector_indexes_with_tracker() {
     tracker.record_vector_mutation();
 
     // Even if persistence fails (e.g. IO error), we want to see if we attempted it
-    let _ = persist_vector_indexes(&current, &manager, Some(&tracker));
+    let _ = persist_vector_indexes(&current, &manager, Some(&tracker), 100);
 
     // NOTE: In the current implementation, if persistence fails early (e.g. IO),
     // the tracker reset might NOT be reached because of `?`.
@@ -86,7 +86,7 @@ fn test_graph_persist_keeps_interner_consistent_with_graph_string_ids() {
         .create_node("GraphPersistConsistency", properties)
         .expect("failed to create test node");
 
-    persist_graph_index(&current, &manager, None).expect("failed to persist graph index");
+    persist_graph_index(&current, &manager, None, 0).expect("failed to persist graph index");
 
     let interner_data =
         load_string_interner(&manager.interner_path()).expect("failed to load persisted interner");
@@ -155,7 +155,7 @@ fn test_temporal_persist_keeps_interner_consistent_with_temporal_string_ids() {
         .add_node_version(node_id, version_id, now, now, label, properties, false)
         .expect("failed to add node version");
 
-    persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker)
+    persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker, 0)
         .expect("failed to persist temporal index");
 
     let interner_data =
