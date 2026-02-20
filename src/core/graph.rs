@@ -554,4 +554,28 @@ mod sentry_tests {
             "has_label_str should return false for invalid label ID"
         );
     }
+
+    #[test]
+    fn test_sentry_edge_connects_source_check() {
+        // 🛡️ Sentry Test: Verify Edge::connects checks both source and target.
+        // This targets mutants that might ignore one of the checks (e.g. `source == s || target == t`).
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            crate::core::interning::GLOBAL_INTERNER
+                .intern("KNOWS")
+                .unwrap(),
+            NodeId::new(10).unwrap(), // Source
+            NodeId::new(20).unwrap(), // Target
+            PropertyMapBuilder::new().build(),
+            VersionId::new(100).unwrap(),
+        );
+
+        // Case 1: Wrong Source, Correct Target
+        // If implementation ignores source (e.g. just checks target), this returns True.
+        assert!(
+            !edge.connects(NodeId::new(99).unwrap(), NodeId::new(20).unwrap()),
+            "Should return false when source mismatch (even if target matches)"
+        );
+    }
 }

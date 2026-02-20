@@ -35,3 +35,13 @@
 **Summary:** `MAX_VALID_TIMESTAMP` constant definition was susceptible to reduction (e.g. `replace - with /`) because existing boundary tests used the constant itself for assertions (tautological tests).
 **Diagnosis:** **Weak Test**. Tests checked `TimeRange::new(MAX_VALID_TIMESTAMP, ...)` which would pass even if `MAX_VALID_TIMESTAMP` was small, as long as it was self-consistent.
 **Kill Shot:** Added `test_sentry_max_valid_timestamp_value` which asserts that `TimeRange::new` accepts a hardcoded large timestamp (`i64::MAX - 2000`), ensuring the limit isn't drastically reduced.
+
+**[Weakness in Edge::connects Verification]**
+**Module:** `src/core/graph.rs`
+**Summary:** The `Edge::connects(source, target)` method was vulnerable to a mutation where the `source` check could be ignored (e.g., `self.target == target` instead of `self.source == source && self.target == target`). Existing tests only checked:
+1. `(Correct, Correct) -> True`
+2. `(Wrong, Wrong) -> False`
+3. `(Correct, Wrong) -> False`
+They missed the case `(Wrong, Correct) -> False`.
+**Diagnosis:** **Weak Test**. The test suite lacked a specific assertion for source mismatch when the target matches.
+**Kill Shot:** Added `test_sentry_edge_connects_source_check` which explicitly verifies `!edge.connects(wrong_source, correct_target)`.
