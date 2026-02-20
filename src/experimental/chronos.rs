@@ -19,6 +19,32 @@
 //! 2. Compute the intersection of all interval sets: `I_path = ⋂ I_e`.
 //!    - This results in a set of disjoint intervals where *every* edge in the path was valid.
 //! 3. Sum the duration of intervals in `I_path` and divide by the duration of `W`.
+//!
+//! # Example
+//!
+//! ```rust
+//! // Requires features = ["nova"]
+//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::experimental::chronos::Chronos;
+//! use aletheiadb::core::temporal::TimeRange;
+//! use aletheiadb::core::temporal::time;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//! // ... setup graph and history ...
+//! # let node_id = db.create_node("Person", Default::default())?;
+//!
+//! let chronos = Chronos::new(&db);
+//! let start = time::from_secs(0);
+//! let end = time::now();
+//! let window = TimeRange::new(start, end)?;
+//!
+//! // Calculate how volatile a node is (updates per second)
+//! let volatility = chronos.node_volatility(node_id, window)?;
+//! println!("Node volatility: {:.2} updates/sec", volatility);
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::AletheiaDB;
 use crate::core::error::Result;
@@ -40,12 +66,41 @@ impl<'a> Chronos<'a> {
     /// Find a path from `start` to `end` that existed at `valid_time`.
     ///
     /// This performs a Breadth-First Search (BFS) on the graph snapshot at the given time.
+    /// It traverses edges that were valid at `valid_time` and visible to `tx_time`.
     ///
     /// # Arguments
     /// * `start` - The starting node.
     /// * `end` - The destination node.
     /// * `valid_time` - The valid time coordinate (when the path existed in reality).
     /// * `tx_time` - The transaction time coordinate (what we knew at that time).
+    ///
+    /// # Returns
+    /// * `Ok(Some(path))` - A vector of NodeIds representing the path.
+    /// * `Ok(None)` - If no path exists.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::experimental::chronos::Chronos;
+    /// # use aletheiadb::core::temporal::time;
+    /// # use aletheiadb::core::property::PropertyMapBuilder;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let t0 = time::now();
+    ///
+    /// // Create A -> B
+    /// let a = db.create_node("Node", Default::default())?;
+    /// let b = db.create_node("Node", Default::default())?;
+    /// db.create_edge(a, b, "LINK", Default::default())?;
+    ///
+    /// // Find path at t0
+    /// let chronos = Chronos::new(&db);
+    /// let path = chronos.find_path_at_time(a, b, t0, t0)?;
+    /// assert_eq!(path, Some(vec![a, b]));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn find_path_at_time(
         &self,
         start: NodeId,
@@ -102,6 +157,22 @@ impl<'a> Chronos<'a> {
     ///
     /// # Returns
     /// * `f32` - Updates per second.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::experimental::chronos::Chronos;
+    /// # use aletheiadb::core::temporal::{TimeRange, time};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node = db.create_node("Node", Default::default())?;
+    /// let chronos = Chronos::new(&db);
+    /// let window = TimeRange::new(time::from_secs(0), time::now())?;
+    /// let volatility = chronos.node_volatility(node, window)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn node_volatility(&self, node_id: NodeId, window: TimeRange) -> Result<f32> {
         let history = self.db.get_node_history(node_id)?;
 
@@ -134,6 +205,26 @@ impl<'a> Chronos<'a> {
     ///
     /// # Returns
     /// * `f32` - A value between 0.0 (never valid) and 1.0 (always valid).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::experimental::chronos::Chronos;
+    /// # use aletheiadb::core::temporal::{TimeRange, time};
+    /// # use aletheiadb::core::id::EdgeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let n1 = db.create_node("N", Default::default())?;
+    /// # let n2 = db.create_node("N", Default::default())?;
+    /// # let edge = db.create_edge(n1, n2, "E", Default::default())?;
+    /// let chronos = Chronos::new(&db);
+    /// let window = TimeRange::new(time::from_secs(0), time::now())?;
+    /// let stability = chronos.path_stability(&[edge], window)?;
+    /// println!("Path stability: {:.2}", stability);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn path_stability(&self, path: &[EdgeId], window: TimeRange) -> Result<f32> {
         if path.is_empty() {
             return Ok(1.0);
@@ -195,7 +286,13 @@ impl<'a> Chronos<'a> {
         Ok(total_valid_duration as f32 / window_duration as f32)
     }
 
-    // Helper: Merge overlapping/adjacent intervals
+    /// Helper: Merge overlapping or adjacent intervals into disjoint intervals.
+    ///
+    /// # Arguments
+    /// * `intervals` - A vector of TimeRanges to merge.
+    ///
+    /// # Returns
+    /// A sorted vector of disjoint TimeRanges covering the same total time.
     fn merge_intervals(mut intervals: Vec<TimeRange>) -> Vec<TimeRange> {
         if intervals.is_empty() {
             return intervals;
@@ -210,7 +307,6 @@ impl<'a> Chronos<'a> {
                 // Overlap or adjacent, extend current
                 if next.end() > current.end() {
                     // We need to reconstruct TimeRange because fields are private/immutable
-                    // Assuming we can create new TimeRange.
                     // This unwrap is safe because start <= end is guaranteed if next.end > current.end >= current.start
                     current = TimeRange::new(current.start(), next.end()).unwrap();
                 }
@@ -223,7 +319,16 @@ impl<'a> Chronos<'a> {
         merged
     }
 
-    // Helper: Intersect two sets of disjoint sorted intervals
+    /// Helper: Intersect two sets of disjoint sorted intervals.
+    ///
+    /// Finds the time periods present in BOTH sets.
+    ///
+    /// # Arguments
+    /// * `set_a` - First sorted set of disjoint TimeRanges.
+    /// * `set_b` - Second sorted set of disjoint TimeRanges.
+    ///
+    /// # Returns
+    /// A sorted vector of disjoint TimeRanges representing the intersection.
     fn intersect_interval_sets(set_a: &[TimeRange], set_b: &[TimeRange]) -> Result<Vec<TimeRange>> {
         let mut result = Vec::new();
         let mut i = 0;
