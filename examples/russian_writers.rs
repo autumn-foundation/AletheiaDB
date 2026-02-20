@@ -194,7 +194,6 @@ impl RussianLitCompleter {
             "exit".to_string(),
         ];
 
-
         Self {
             commands,
             authors: demo.authors.keys().cloned().collect(),
@@ -2096,9 +2095,6 @@ fn find_semantic_path(
     Ok(())
 }
 
-
-
-
 fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
     // Find character with fuzzy matching
     if let Some((name, &character_id)) = find_character_fuzzy(&demo.characters, character_name) {
@@ -2336,7 +2332,6 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
 
     Ok(())
 }
-
 
 /// Find authors with similar writing styles using style_embedding
 fn show_style_similarity(demo: &DemoData, author_name: &str, k: usize) -> Result<()> {
@@ -2727,8 +2722,6 @@ Examples:
   > list books
 "#
     );
-
-
 }
 
 // ============================================================================
