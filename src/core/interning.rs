@@ -345,9 +345,7 @@ impl StringInterner {
             }
         }
 
-        self.string_to_id
-            .get(string)
-            .map(|entry| *entry.value())
+        self.string_to_id.get(string).map(|entry| *entry.value())
     }
 
     /// Get the number of interned strings.
@@ -429,7 +427,9 @@ impl StringInterner {
     pub fn warm_common_strings(&self) {
         // Atomically reserve a block of IDs for common strings
         // This ensures no other thread can grab IDs in this range, preventing race conditions
-        let start_id = self.next_id.fetch_add(COMMON_STRINGS.len() as u32, Ordering::SeqCst);
+        let start_id = self
+            .next_id
+            .fetch_add(COMMON_STRINGS.len() as u32, Ordering::SeqCst);
 
         // Optimization is only valid if we got the range starting at 0
         // If start_id == 0, we OWN the range 0..N exclusively.
@@ -1308,7 +1308,11 @@ mod optimization_tests {
         let id_name = interner.get_id("name").expect("name should be interned");
 
         // Safety check: ID must NOT be 0 (which is "foo")
-        assert_ne!(id_name.as_u32(), 0, "Optimization returned ID 0 for 'name', but 0 is 'foo'");
+        assert_ne!(
+            id_name.as_u32(),
+            0,
+            "Optimization returned ID 0 for 'name', but 0 is 'foo'"
+        );
         // If atomic reservation works, "name" might get ID 1, or range might be shifted.
         // What matters is it's NOT 0.
 
@@ -1316,7 +1320,9 @@ mod optimization_tests {
         let resolved = interner.resolve_with(id_name, |s| s.to_string()).unwrap();
         assert_eq!(resolved, "name");
 
-        let resolved_0 = interner.resolve_with(InternedString::from_raw(0), |s| s.to_string()).unwrap();
+        let resolved_0 = interner
+            .resolve_with(InternedString::from_raw(0), |s| s.to_string())
+            .unwrap();
         assert_eq!(resolved_0, "foo");
     }
 
@@ -1347,7 +1353,12 @@ mod optimization_tests {
 
         for (i, s) in COMMON_STRINGS.iter().enumerate() {
             let id = interner.get_id(s).unwrap();
-            assert_eq!(id.as_u32() as usize, i, "Optimization mismatch for string '{}'", s);
+            assert_eq!(
+                id.as_u32() as usize,
+                i,
+                "Optimization mismatch for string '{}'",
+                s
+            );
         }
     }
 
@@ -1382,9 +1393,15 @@ mod optimization_tests {
         // In that case, "name" MUST NOT be 0. And resolve(0) must be "race_key".
         if race_id.as_u32() == 0 {
             let id_name = interner.get_id("name").unwrap();
-            assert_ne!(id_name.as_u32(), 0, "Race condition: 'name' got ID 0 but 'race_key' owns ID 0");
+            assert_ne!(
+                id_name.as_u32(),
+                0,
+                "Race condition: 'name' got ID 0 but 'race_key' owns ID 0"
+            );
 
-            let resolved_0 = interner.resolve_with(InternedString::from_raw(0), |s| s.to_string()).unwrap();
+            let resolved_0 = interner
+                .resolve_with(InternedString::from_raw(0), |s| s.to_string())
+                .unwrap();
             assert_eq!(resolved_0, "race_key");
         } else {
             // warm_common_strings won the race.
@@ -1393,7 +1410,9 @@ mod optimization_tests {
             let id_name = interner.get_id("name").unwrap();
             assert_eq!(id_name.as_u32(), 0);
 
-            let resolved_0 = interner.resolve_with(InternedString::from_raw(0), |s| s.to_string()).unwrap();
+            let resolved_0 = interner
+                .resolve_with(InternedString::from_raw(0), |s| s.to_string())
+                .unwrap();
             assert_eq!(resolved_0, "name");
         }
     }
