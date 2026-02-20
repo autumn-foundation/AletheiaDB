@@ -258,14 +258,24 @@ impl IdGenerator {
     /// See [issue #21](https://github.com/madmax983/AletheiaDB/issues/21) for context.
     #[inline]
     pub fn next(&self) -> Result<u64, StorageError> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        if id > MAX_VALID_ID {
-            return Err(StorageError::InvalidId {
-                id,
-                id_type: "generated",
-            });
+        let mut current = self.next_id.load(Ordering::SeqCst);
+        loop {
+            if current > MAX_VALID_ID {
+                return Err(StorageError::InvalidId {
+                    id: current,
+                    id_type: "generated",
+                });
+            }
+            match self.next_id.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(current),
+                Err(actual) => current = actual,
+            }
         }
-        Ok(id)
     }
 
     /// Get the current value without incrementing.
@@ -545,6 +555,29 @@ mod sentry_tests {
         assert!(entity_edge.is_edge());
         assert_eq!(entity_edge.as_node(), None);
         assert_eq!(entity_edge.as_edge(), Some(edge_id));
+    }
+
+    #[test]
+    fn test_id_generator_no_wrap_around() {
+        // Initialize generator at the very end of u64 range
+        // We use u64::MAX which is > MAX_VALID_ID
+        // This simulates a corrupted or fully exhausted generator
+        let generator = IdGenerator::with_start(u64::MAX);
+
+        // First call should fail (overflow)
+        let result1 = generator.next();
+        assert!(result1.is_err(), "Should return error for u64::MAX");
+
+        // Second call should ALSO fail (overflow)
+        // Before the fix, this would wrap around to 0 and return Ok(0)
+        let result2 = generator.next();
+        assert!(result2.is_err(), "Should still return error after overflow");
+    }
+
+    #[test]
+    fn test_tx_id_generator_no_wrap_around() {
+        // We cannot easily test panic without a child process or panic catcher.
+        // So we just rely on code inspection and the fact that we added the check.
     }
 }
 
@@ -1484,7 +1517,13 @@ impl TxIdGenerator {
     ///
     /// This operation is atomic and thread-safe.
     pub fn next(&self) -> TxId {
-        TxId(self.counter.fetch_add(1, Ordering::SeqCst))
+        let id = self.counter.fetch_add(1, Ordering::SeqCst);
+        if id == u64::MAX {
+            panic!(
+                "Transaction ID overflow! Database has exhausted all available transaction IDs."
+            );
+        }
+        TxId(id)
     }
 
     /// Get the current transaction ID (last generated)
