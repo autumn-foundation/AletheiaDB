@@ -528,6 +528,71 @@ mod tests {
             "Debug output should fallback to raw ID for unknown label"
         );
     }
+
+    #[test]
+    fn test_node_with_metadata() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let props = PropertyMapBuilder::new().build();
+        let metadata = VersionMetadata::new(
+            crate::core::id::TxId::new(123),
+            crate::core::temporal::Timestamp::from(456),
+        );
+
+        let node = Node::with_metadata(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+            metadata,
+        );
+
+        assert_eq!(node.metadata, metadata);
+        assert_ne!(node.metadata, VersionMetadata::default());
+    }
+
+    #[test]
+    fn test_edge_with_metadata() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().build();
+        let metadata = VersionMetadata::new(
+            crate::core::id::TxId::new(789),
+            crate::core::temporal::Timestamp::from(999),
+        );
+
+        let edge = Edge::with_metadata(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(1).unwrap(),
+            metadata,
+        );
+
+        assert_eq!(edge.metadata, metadata);
+        assert_ne!(edge.metadata, VersionMetadata::default());
+    }
+
+    #[test]
+    fn test_edge_connects_source_mismatch() {
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Correct: source 1, target 2
+        assert!(edge.connects(NodeId::new(1).unwrap(), NodeId::new(2).unwrap()));
+
+        // Mismatch source, match target
+        assert!(
+            !edge.connects(NodeId::new(3).unwrap(), NodeId::new(2).unwrap()),
+            "Should return false when source mismatches even if target matches"
+        );
+    }
 }
 
 #[cfg(test)]
