@@ -3815,4 +3815,43 @@ mod sentry_tests {
         let (deserialized, _) = deserialize_vector(&buffer).unwrap();
         assert_eq!(deserialized.len(), MAX_VECTOR_DIMENSIONS);
     }
+
+    /// 🎯 Target: PropertyMapBuilder::try_insert (replacement logic)
+    /// 💣 Risk: Incorrect size tracking when replacing a value can lead to serialization buffer issues.
+    /// 🧪 Strategy: Replace a property with a larger value and verify serialized_size matches actual bytes.
+    /// 🔬 Verification: serialized_size() == serialize().len()
+    #[test]
+    fn test_builder_replacement_size_tracking_correctness() {
+        // Step 1: Create initial map with known size
+        let map = PropertyMapBuilder::new()
+            .insert("key", 100i64) // key (4+3=7) + val (9) + count (4) = 20
+            .build();
+
+        let initial_size = map.serialized_size();
+        let actual_initial = map.serialize().unwrap().len();
+        assert_eq!(initial_size, actual_initial, "Initial size check");
+
+        // Step 2: Replace with larger value via builder
+        // "larger_string_value" len is 19.
+        // key size unchanged (7).
+        // old val size (9).
+        // new val size (1 + 4 + 19 = 24).
+        // Expected size: 20 - 9 + 24 = 35.
+        let map = map
+            .builder()
+            .insert("key", "larger_string_value")
+            .build();
+
+        let new_size = map.serialized_size();
+        let actual_new = map.serialize().unwrap().len();
+
+        // This assertion kills mutants that mess up the subtraction of old_val.serialized_size()
+        // or addition of new val_size in try_insert.
+        assert_eq!(
+            new_size, actual_new,
+            "Cached size must match actual serialized size after replacement. \
+             Expected {}, got cached {}",
+            actual_new, new_size
+        );
+    }
 }
