@@ -839,7 +839,7 @@ impl VectorIndex for HnswIndex {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
     /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -4043,7 +4043,9 @@ mod coverage_reentrancy_tests {
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
-                assert!(msg.contains("Cannot modify index from within a search_with_filter callback"));
+                assert!(
+                    msg.contains("Cannot modify index from within a search_with_filter callback")
+                );
             }
             _ => panic!("Expected re-entrancy error"),
         }
@@ -4062,7 +4064,9 @@ mod coverage_reentrancy_tests {
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
-                assert!(msg.contains("Cannot modify index from within a search_with_filter callback"));
+                assert!(
+                    msg.contains("Cannot modify index from within a search_with_filter callback")
+                );
             }
             _ => panic!("Expected re-entrancy error"),
         }
@@ -4081,7 +4085,9 @@ mod coverage_reentrancy_tests {
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
-                assert!(msg.contains("Cannot save index from within a search_with_filter callback"));
+                assert!(
+                    msg.contains("Cannot save index from within a search_with_filter callback")
+                );
             }
             _ => panic!("Expected re-entrancy error"),
         }
@@ -4100,7 +4106,9 @@ mod coverage_reentrancy_tests {
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
-                assert!(msg.contains("Cannot perform search from within a search_with_filter callback"));
+                assert!(
+                    msg.contains("Cannot perform search from within a search_with_filter callback")
+                );
             }
             _ => panic!("Expected re-entrancy error"),
         }
@@ -4119,9 +4127,105 @@ mod coverage_reentrancy_tests {
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
-                assert!(msg.contains("Cannot perform search_with_filter from within a search_with_filter callback"));
+                assert!(msg.contains(
+                    "Cannot perform search_with_filter from within a search_with_filter callback"
+                ));
             }
             _ => panic!("Expected re-entrancy error"),
         }
+    }
+}
+
+#[cfg(test)]
+mod coverage_misc_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn test_index_stats_default() {
+        // Cover #[derive(Default)] for IndexStats
+        let stats = IndexStats::default();
+        assert_eq!(
+            stats
+                .vectors_added
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    struct MockReadError;
+    impl Read for MockReadError {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("Mock read error"))
+        }
+    }
+
+    #[test]
+    fn test_deserialize_from_read_error() {
+        let mut reader = MockReadError;
+        let result = HnswConfig::deserialize_from(&mut reader);
+        assert!(result.is_err());
+    }
+
+    struct MockFailReader {
+        data: Vec<u8>,
+        fail_at: usize,
+        cursor: usize,
+    }
+
+    impl MockFailReader {
+        fn new(data: Vec<u8>, fail_at: usize) -> Self {
+            Self {
+                data,
+                fail_at,
+                cursor: 0,
+            }
+        }
+    }
+
+    impl Read for MockFailReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.cursor >= self.fail_at {
+                return Err(std::io::Error::other("Mock read error"));
+            }
+            // Read as much as possible up to fail_at
+            let remaining_before_fail = self.fail_at - self.cursor;
+            let available_data = self.data.len() - self.cursor;
+            let to_read = std::cmp::min(buf.len(), remaining_before_fail);
+            let to_read = std::cmp::min(to_read, available_data);
+
+            if to_read == 0 {
+                return Ok(0);
+            }
+
+            // Fix: buffer might be larger than data source, so verify bounds
+            buf[..to_read].copy_from_slice(&self.data[self.cursor..self.cursor + to_read]);
+            self.cursor += to_read;
+            Ok(to_read)
+        }
+    }
+
+    #[test]
+    fn test_deserialize_quantization_error() {
+        // Construct valid data up to quantization
+        let config = HnswConfig::default();
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
+        buffer.push(config.metric.to_u8());
+        buffer.extend_from_slice(&(config.m as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_construction as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_search as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.capacity as u64).to_le_bytes());
+        // 8 + 1 + 8 + 8 + 8 + 8 = 41 bytes
+
+        // We want read_exact to succeed for the first 41 bytes,
+        // then fail when trying to read the 42nd byte (quantization).
+
+        let mut reader = MockFailReader::new(buffer, 41);
+        let result = HnswConfig::deserialize_from(&mut reader);
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Mock read error"));
     }
 }
