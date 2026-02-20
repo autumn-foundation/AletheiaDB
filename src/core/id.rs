@@ -1517,13 +1517,21 @@ impl TxIdGenerator {
     ///
     /// This operation is atomic and thread-safe.
     pub fn next(&self) -> TxId {
-        let id = self.counter.fetch_add(1, Ordering::SeqCst);
-        if id == u64::MAX {
-            panic!(
-                "Transaction ID overflow! Database has exhausted all available transaction IDs."
-            );
+        let mut current = self.counter.load(Ordering::SeqCst);
+        loop {
+            if current == u64::MAX {
+                panic!("Transaction ID overflow! Database has exhausted all available transaction IDs.");
+            }
+            match self.counter.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return TxId(current),
+                Err(actual) => current = actual,
+            }
         }
-        TxId(id)
     }
 
     /// Get the current transaction ID (last generated)
