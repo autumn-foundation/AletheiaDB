@@ -3447,6 +3447,117 @@ mod tests {
         assert!(path.exists());
         Ok(())
     }
+
+    #[test]
+    fn test_metric_conversions_accuracy() -> Result<()> {
+        // Test all supported metrics to ensure correct distance-to-similarity conversion
+        let metrics = vec![
+            (DistanceMetric::Cosine, vec![1.0, 0.0], vec![1.0, 0.0], 1.0),   // Identical -> 1.0
+            (DistanceMetric::Cosine, vec![1.0, 0.0], vec![0.0, 1.0], 0.0),   // Orthogonal -> 0.0
+            (DistanceMetric::Euclidean, vec![0.0, 0.0], vec![0.0, 0.0], -0.0), // Identical -> 0 (negated)
+            (DistanceMetric::Euclidean, vec![0.0, 0.0], vec![3.0, 4.0], -25.0), // Dist=5^2=25 -> -25
+            (DistanceMetric::DotProduct, vec![1.0, 0.0], vec![1.0, 0.0], 1.0), // Dot=1 -> 1
+        ];
+
+        for (metric, v1, v2, expected) in metrics {
+            let index = HnswIndexBuilder::new(v1.len(), metric).build()?;
+            let n1 = NodeId::new(1).unwrap();
+            index.add(n1, &v1)?;
+            let results = index.search(&v2, 1)?;
+            assert_eq!(results.len(), 1);
+            let sim = results[0].1;
+            assert!((sim - expected).abs() < 0.001, "Metric {:?} failed. Expected {}, got {}", metric, expected, sim);
+        }
+
+        // Property checks for others
+        // Note: Tanimoto excluded due to upstream usearch issue returning NaN for F32 vectors
+        let other_metrics = vec![DistanceMetric::Haversine, DistanceMetric::Hamming];
+        for metric in other_metrics {
+             let index = HnswIndexBuilder::new(2, metric).build()?;
+             let n1 = NodeId::new(1).unwrap();
+
+             // Use binary-like vectors for Hamming/Tanimoto safety, avoiding potential 0/0 NaNs in Tanimoto
+             let v = vec![1.0, 0.0];
+             index.add(n1, &v)?;
+             let results = index.search(&v, 1)?;
+             let sim = results[0].1;
+
+             // Identical vectors should have "max" similarity.
+             // For distance-based (Haversine, Hamming), distance is 0, so similarity should be -0 = 0.
+             // For Tanimoto, distance is 0, similarity is 1-0 = 1.
+             let expected_max = match metric {
+                 DistanceMetric::Tanimoto => 1.0,
+                 _ => 0.0, // -0.0
+             };
+
+             if sim.is_nan() {
+                 panic!("Metric {:?} returned NaN similarity for vector {:?}", metric, v);
+             }
+
+             assert!((sim - expected_max).abs() < 0.001, "Metric {:?} identity check failed. Expected {}, got {}", metric, expected_max, sim);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_rejects_all() -> Result<()> {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        for i in 1..=10 {
+            let id = NodeId::new(i).unwrap();
+            index.add(id, &[1.0, 0.0, 0.0, 0.0])?;
+        }
+
+        // Filter that rejects everything
+        let results = index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 10, |_| false)?;
+        assert_eq!(results.len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_quantization_reduces_index_size() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let f32_path = dir.path().join("f32.index");
+        let i8_path = dir.path().join("i8.index");
+
+        let dimensions = 128;
+        let count = 200; // Small count for unit test speed, but enough to see diff
+
+        // 1. Build F32 Index
+        {
+            let index = HnswIndexBuilder::new(dimensions, DistanceMetric::Cosine)
+                .quantization(Quantization::F32)
+                .build()?;
+
+            for i in 0..count {
+                let vec = vec![0.1; dimensions];
+                index.add(NodeId::new(i as u64 + 1).unwrap(), &vec)?;
+            }
+            index.save(&f32_path)?;
+        }
+
+        // 2. Build I8 Index
+        {
+            let index = HnswIndexBuilder::new(dimensions, DistanceMetric::Cosine)
+                .quantization(Quantization::I8)
+                .build()?;
+
+            for i in 0..count {
+                let vec = vec![0.1; dimensions];
+                index.add(NodeId::new(i as u64 + 1).unwrap(), &vec)?;
+            }
+            index.save(&i8_path)?;
+        }
+
+        let f32_size = std::fs::metadata(&f32_path).unwrap().len();
+        let i8_size = std::fs::metadata(&i8_path).unwrap().len();
+
+        // I8 should be significantly smaller
+        assert!(i8_size < f32_size, "I8 index ({} bytes) should be smaller than F32 index ({} bytes)", i8_size, f32_size);
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
