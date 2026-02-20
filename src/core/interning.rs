@@ -433,7 +433,7 @@ impl StringInterner {
 
         // Optimization is only valid if we got the range starting at 0
         // If start_id == 0, we OWN the range 0..N exclusively.
-        let can_optimize = start_id == 0;
+        let optimization_valid = start_id == 0;
 
         for (i, s) in COMMON_STRINGS.iter().enumerate() {
             let id_val = start_id + i as u32;
@@ -448,8 +448,19 @@ impl StringInterner {
             self.id_to_string.insert(id, arc_str);
         }
 
-        if can_optimize {
+        if optimization_valid {
             self.is_warmed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Remove a mapping from the internal map (Test Only).
+    ///
+    /// This is used to verify that the lock-free optimization works even when
+    /// the fallback map does not contain the key.
+    #[cfg(test)]
+    pub fn remove_mapping_for_test(&self, s: &str) {
+        if let Some((_, id)) = self.string_to_id.remove(s) {
+            self.id_to_string.remove(&id);
         }
     }
 }
@@ -1352,6 +1363,9 @@ mod optimization_tests {
         interner.warm_common_strings();
 
         for (i, s) in COMMON_STRINGS.iter().enumerate() {
+            // Remove the mapping from the fallback map to PROVE the result comes from the optimization
+            interner.remove_mapping_for_test(s);
+
             let id = interner.get_id(s).unwrap();
             assert_eq!(
                 id.as_u32() as usize,
