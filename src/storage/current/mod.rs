@@ -709,6 +709,14 @@ impl CurrentStorage {
         self.indexes.compact_adjacency();
     }
 
+    /// Get the current number of delta edges (test-only).
+    ///
+    /// Delta edges are insertions not yet compacted into frozen CSR.
+    #[cfg(test)]
+    pub(crate) fn delta_edge_count(&self) -> usize {
+        self.indexes.delta_edge_count()
+    }
+
     /// Rebuild adjacency indexes (deprecated - use `compact_adjacency` instead).
     ///
     /// This method is kept for backward compatibility and simply calls `compact_adjacency`.

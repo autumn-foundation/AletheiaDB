@@ -483,10 +483,8 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
 
     drop(historical);
 
-    // Rebuild adjacency indexes
-    if tx.buffer.has_edge_operations() {
-        tx.current.compact_adjacency();
-    }
+    // With incremental adjacency indexes, edge updates are immediately visible
+    // via merged reads. Background compaction handles delta->frozen promotion.
 
     Ok(())
 }

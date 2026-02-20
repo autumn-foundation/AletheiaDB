@@ -955,10 +955,10 @@ mod general_tests {
         let edge_props = PropertyMapBuilder::new().insert("since", 2020i64).build();
         let edge_id = tx.create_edge(alice, bob, "KNOWS", edge_props).unwrap();
 
-        // Commit - should call rebuild_adjacency() since edge was created
+        // Commit and verify edge adjacency is immediately visible.
         tx.commit().unwrap();
 
-        // Verify adjacency was rebuilt correctly
+        // Verify adjacency is readable without explicit compaction
         assert_eq!(current.node_count(), 2);
         assert_eq!(current.edge_count(), 1);
 
@@ -970,6 +970,32 @@ mod general_tests {
         let incoming = current.get_incoming_edges(bob);
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0], edge_id);
+    }
+
+    #[test]
+    fn test_edge_commit_does_not_force_adjacency_compaction() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        let props = PropertyMapBuilder::new().build();
+        let source = tx.create_node("Person", props.clone()).unwrap();
+        let target = tx.create_node("Person", props).unwrap();
+
+        tx.create_edge(
+            source,
+            target,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+        )
+        .unwrap();
+
+        tx.commit().unwrap();
+
+        // Edges are immediately readable from merged adjacency without forcing
+        // commit-time compaction; compaction is handled asynchronously.
+        assert_eq!(current.edge_count(), 1);
+        assert_eq!(current.out_degree(source), 1);
+        assert_eq!(current.delta_edge_count(), 1);
     }
 
     #[test]
@@ -1150,7 +1176,7 @@ mod general_tests {
     }
 
     #[test]
-    fn test_batch_edge_operations_rebuild_once() {
+    fn test_batch_edge_operations_visible_without_manual_compaction() {
         let (mut tx, _temp_dir) = create_test_write_tx();
         let current = Arc::clone(&tx.current);
 
@@ -1177,7 +1203,7 @@ mod general_tests {
             .unwrap();
         }
 
-        // Commit should rebuild adjacency only once
+        // Commit should make edges visible immediately (compaction is asynchronous)
         tx.commit().unwrap();
 
         // Verify all edges are in adjacency index
