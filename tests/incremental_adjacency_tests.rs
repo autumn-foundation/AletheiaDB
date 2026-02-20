@@ -1055,6 +1055,47 @@ mod phase5_background_compaction {
         scheduler.shutdown();
         handle.join().unwrap();
     }
+
+    // Step 5.11: Test shutdown triggers final compaction for remaining items
+    #[test]
+    fn test_shutdown_triggers_final_compaction() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let config = IncrementalConfig {
+            max_delta_edges: 1000, // High threshold so it won't trigger automatically
+            check_interval: Duration::from_millis(50),
+            ..Default::default()
+        };
+
+        let index = Arc::new(IncrementalAdjacencyIndex::with_config(
+            Arc::new(AdjacencyIndex::new()),
+            config,
+        ));
+        let scheduler = CompactionScheduler::new(Arc::clone(&index));
+        let handle = scheduler.start();
+
+        // Add just a few edges (below threshold)
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        for i in 0..5 {
+            index.insert(
+                NodeId::new(i).unwrap(),
+                AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
+            );
+        }
+
+        // Verify edges are in delta
+        assert_eq!(index.delta_edge_count(), 5);
+        assert_eq!(index.frozen_edge_count(), 0);
+
+        // Shutdown should force compaction even though threshold wasn't met
+        scheduler.shutdown();
+        handle.join().unwrap();
+
+        // Should have compacted everything to frozen
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 5);
+    }
 }
 
 // ============================================================================
