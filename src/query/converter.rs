@@ -570,28 +570,24 @@ impl AstConverter {
         if let Some(ref props) = node.properties {
             for (key, value) in props {
                 if key == "id" {
-                    match value {
-                        PropertyValue::Int(id) => {
-                            ops.push(QueryOp::StartNode(NodeId::new(*id as u64)?));
-                            optimized_start = true;
-                        }
+                    let node_id_res = match value {
+                        PropertyValue::Int(id) => Some(NodeId::new(*id as u64)),
                         PropertyValue::Parameter(name) => {
                             // If parameter resolves to a NodeId (or Int), use StartNode optimization
-                            if let Some(param_val) = self.parameters.get(name) {
-                                match param_val {
-                                    ParameterValue::NodeId(id) => {
-                                        ops.push(QueryOp::StartNode(*id));
-                                        optimized_start = true;
-                                    }
-                                    ParameterValue::Value(PredicateValue::Int(id)) => {
-                                        ops.push(QueryOp::StartNode(NodeId::new(*id as u64)?));
-                                        optimized_start = true;
-                                    }
-                                    _ => {} // Other types don't support StartNode optimization
+                            self.parameters.get(name).and_then(|param_val| match param_val {
+                                ParameterValue::NodeId(id) => Some(Ok(*id)),
+                                ParameterValue::Value(PredicateValue::Int(id)) => {
+                                    Some(NodeId::new(*id as u64))
                                 }
-                            }
+                                _ => None, // Other types don't support StartNode optimization
+                            })
                         }
-                        _ => {}
+                        _ => None,
+                    };
+
+                    if let Some(res) = node_id_res {
+                        ops.push(QueryOp::StartNode(res?));
+                        optimized_start = true;
                     }
                 }
                 if optimized_start {
@@ -605,6 +601,10 @@ impl AstConverter {
             ops.push(QueryOp::ScanNodes {
                 label: node.label.clone(),
             });
+        } else if let Some(ref label) = node.label {
+            // Security: If we optimized to StartNode, we MUST still apply the label check
+            // if one was specified (e.g. MATCH (n:Secret {id: 1})).
+            ops.push(QueryOp::FilterLabel(label.clone()));
         }
 
         // Add filters for inline properties
@@ -1935,5 +1935,24 @@ mod sentry_tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("missing"));
         assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn test_start_node_optimization_preserves_labels() {
+        // 🎯 Target: convert_node_pattern optimization security
+        // 💣 Risk: Optimization drops label check (e.g. MATCH (n:Secret {id: 1}) returns node 1 even if not Secret)
+        // 🧪 Strategy: Bind parameter for ID, include label, verify both StartNode and FilterLabel present
+
+        let ast = Parser::parse("MATCH (n:Secret {id: $id}) RETURN n").unwrap();
+        let mut converter = AstConverter::new();
+        converter.bind("id", ParameterValue::NodeId(NodeId::new(123).unwrap()));
+
+        let query = converter.convert(&ast).unwrap();
+
+        let has_start_node = query.ops.iter().any(|op| matches!(op, QueryOp::StartNode(_)));
+        let has_label_filter = query.ops.iter().any(|op| matches!(op, QueryOp::FilterLabel(label) if label == "Secret"));
+
+        assert!(has_start_node, "Should use StartNode");
+        assert!(has_label_filter, "Should preserve 'Secret' label check");
     }
 }
