@@ -86,6 +86,9 @@ pub mod chronos;
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
 #[cfg(feature = "nova")]
+/// Dissonance: Semantic Stress Detector.
+pub mod dissonance;
+#[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
 #[cfg(feature = "nova")]
