@@ -574,13 +574,15 @@ impl AstConverter {
                         PropertyValue::Int(id) => Some(NodeId::new(*id as u64)),
                         PropertyValue::Parameter(name) => {
                             // If parameter resolves to a NodeId (or Int), use StartNode optimization
-                            self.parameters.get(name).and_then(|param_val| match param_val {
-                                ParameterValue::NodeId(id) => Some(Ok(*id)),
-                                ParameterValue::Value(PredicateValue::Int(id)) => {
-                                    Some(NodeId::new(*id as u64))
-                                }
-                                _ => None, // Other types don't support StartNode optimization
-                            })
+                            self.parameters
+                                .get(name)
+                                .and_then(|param_val| match param_val {
+                                    ParameterValue::NodeId(id) => Some(Ok(*id)),
+                                    ParameterValue::Value(PredicateValue::Int(id)) => {
+                                        Some(NodeId::new(*id as u64))
+                                    }
+                                    _ => None, // Other types don't support StartNode optimization
+                                })
                         }
                         _ => None,
                     };
@@ -1949,8 +1951,14 @@ mod sentry_tests {
 
         let query = converter.convert(&ast).unwrap();
 
-        let has_start_node = query.ops.iter().any(|op| matches!(op, QueryOp::StartNode(_)));
-        let has_label_filter = query.ops.iter().any(|op| matches!(op, QueryOp::FilterLabel(label) if label == "Secret"));
+        let has_start_node = query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::StartNode(_)));
+        let has_label_filter = query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::FilterLabel(label) if label == "Secret"));
 
         assert!(has_start_node, "Should use StartNode");
         assert!(has_label_filter, "Should preserve 'Secret' label check");
