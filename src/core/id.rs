@@ -1480,11 +1480,38 @@ impl TxIdGenerator {
         }
     }
 
+    /// Create a new transaction ID generator starting from a specific value.
+    /// Useful for testing overflow behavior.
+    pub fn with_start(start: u64) -> Self {
+        TxIdGenerator {
+            counter: AtomicU64::new(start),
+        }
+    }
+
     /// Generate the next transaction ID
     ///
     /// This operation is atomic and thread-safe.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the transaction ID counter overflows (reaches u64::MAX).
+    /// This is a catastrophic event requiring a database restart/migration.
     pub fn next(&self) -> TxId {
-        TxId(self.counter.fetch_add(1, Ordering::SeqCst))
+        let mut current = self.counter.load(Ordering::SeqCst);
+        loop {
+            if current == u64::MAX {
+                panic!("Transaction ID overflow: exhausted all 2^64 IDs");
+            }
+            match self.counter.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return TxId(current),
+                Err(v) => current = v,
+            }
+        }
     }
 
     /// Get the current transaction ID (last generated)

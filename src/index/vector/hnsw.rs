@@ -364,6 +364,12 @@ impl HnswConfig {
         reader.read_exact(&mut buf_u64)?;
         let dimensions = u64::from_le_bytes(buf_u64) as usize;
 
+        if dimensions == 0 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+
         if dimensions > MAX_VECTOR_DIMENSIONS {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: format!(
@@ -476,6 +482,9 @@ fn create_metric_wrapper<F>(
 where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
 {
+    // Warden: Ensure positive dimensions to prevent invalid slice creation
+    assert!(dims > 0, "Metric wrapper created with 0 dimensions");
+
     Box::new(move |a: *const f32, b: *const f32| {
         // Check for null pointers to prevent UB
         if a.is_null() || b.is_null() {
@@ -2159,6 +2168,12 @@ impl HnswIndex {
     /// - The mappings file is corrupted (CRC mismatch).
     /// - Custom metric is used with non-F32 quantization (safety violation).
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        if config.dimensions == 0 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+
         if config.dimensions > MAX_VECTOR_DIMENSIONS {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: format!(
