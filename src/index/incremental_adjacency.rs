@@ -763,6 +763,14 @@ impl CompactionScheduler {
                 // Sleep for check interval
                 thread::sleep(check_interval);
             }
+
+            // Graceful shutdown: perform one final compaction if there are pending changes
+            // This ensures tests and application shutdown leave the index in a clean state
+            if index.delta_edge_count() > 0 || index.tombstone_count() > 0 {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    index.compact();
+                }));
+            }
         })
     }
 
