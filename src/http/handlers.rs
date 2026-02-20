@@ -551,6 +551,55 @@ mod tests {
     }
 
     #[actix_rt::test]
+    async fn test_execute_query_with_projection() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+
+        // Setup data with extra property
+        let props = crate::core::PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("secret", "hidden")
+            .build();
+        let _alice = db.create_node("Person", props).unwrap();
+
+        let state = web::Data::new(AppState::new(db));
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
+
+        let payload = json!({
+            "operation": "execute_query",
+            "query": "MATCH (n:Person) RETURN n.name, n.age"
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        if !resp.status().is_success() {
+            let body = test::read_body(resp).await;
+            panic!("Request failed: {:?}", body);
+        }
+
+        let body = test::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+
+        let props = &data[0]["node"]["properties"];
+        assert_eq!(props["name"], "Alice");
+        assert_eq!(props["age"], 30);
+        // "secret" should be filtered out
+        assert!(props.get("secret").is_none());
+    }
+
+    #[actix_rt::test]
     async fn test_health_check_returns_json() {
         let app =
             test::init_service(App::new().route("/status", web::get().to(health_check))).await;

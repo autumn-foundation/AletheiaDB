@@ -2175,6 +2175,75 @@ mod tests {
         assert_eq!(upper, Some(5));
     }
 
+    // ==================== ProjectIterator Tests ====================
+
+    #[test]
+    fn test_project_iterator_filters_properties() {
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30)
+            .insert("city", "Paris")
+            .build();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        let input = MockIterator::from_nodes(vec![node]);
+        let mut project = ProjectIterator::new(
+            Box::new(input),
+            vec!["name".to_string(), "city".to_string()],
+        );
+
+        let row = project.next().unwrap().unwrap();
+        let projected_node = row.entity.as_node().unwrap();
+
+        assert_eq!(
+            projected_node.properties.get("name").unwrap().as_str().unwrap(),
+            "Alice"
+        );
+        assert_eq!(
+            projected_node.properties.get("city").unwrap().as_str().unwrap(),
+            "Paris"
+        );
+        assert!(projected_node.properties.get("age").is_none());
+    }
+
+    #[test]
+    fn test_project_iterator_missing_property() {
+        let node = test_node(1, "Alice"); // Only has "name"
+        let input = MockIterator::from_nodes(vec![node]);
+        let mut project = ProjectIterator::new(
+            Box::new(input),
+            vec!["name".to_string(), "age".to_string()],
+        );
+
+        let row = project.next().unwrap().unwrap();
+        let projected_node = row.entity.as_node().unwrap();
+
+        assert_eq!(
+            projected_node.properties.get("name").unwrap().as_str().unwrap(),
+            "Alice"
+        );
+        assert!(projected_node.properties.get("age").is_none());
+    }
+
+    #[test]
+    fn test_project_iterator_non_node_pass_through() {
+        // Projecting on non-node entities (like EdgeId) should be a no-op currently
+        // as the implementation only checks for Node
+        let row = QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()));
+        let input = MockIterator::from_results(vec![Ok(row)]);
+
+        let mut project = ProjectIterator::new(Box::new(input), vec!["name".to_string()]);
+
+        let result = project.next().unwrap().unwrap();
+        assert!(matches!(result.entity, EntityResult::NodeId(_)));
+    }
+
     // ==================== MockIterator Tests ====================
 
     #[test]

@@ -1361,4 +1361,35 @@ mod tests {
             _ => panic!("Expected Node or NodeId result"),
         }
     }
+
+    #[test]
+    fn test_execute_project() {
+        let (current, historical, alice, _bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Project {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![alice],
+                }),
+                properties: vec!["name".to_string()],
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 1);
+        let node = rows[0].entity.as_node().unwrap();
+        assert_eq!(
+            node.properties.get("name").unwrap().as_str().unwrap(),
+            "Alice"
+        );
+        // Embedding should be filtered out
+        assert!(node.properties.get("embedding").is_none());
+    }
 }
