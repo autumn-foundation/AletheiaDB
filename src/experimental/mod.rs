@@ -38,6 +38,7 @@
 //! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
 //! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
+//! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -211,3 +212,7 @@ pub mod sentinel;
 #[cfg(feature = "nova")]
 /// Wormhole: Detecting Semantic-Structural Gaps.
 pub mod wormhole;
+
+#[cfg(feature = "nova")]
+/// Gravity: Semantic Mass and Orbit Analysis.
+pub mod gravity;
