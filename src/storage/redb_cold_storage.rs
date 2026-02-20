@@ -20,17 +20,27 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+//! use aletheiadb::storage::wal::LSN;
+//! use aletheiadb::core::version::{NodeVersion, EdgeVersion};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = RedbConfig::default();
 //! let storage = RedbColdStorage::new("data/cold.redb", config)?;
 //!
-//! // Store versions with LSN tracking
-//! storage.store_batch_with_lsn(&node_versions, &edge_versions, LSN(1000))?;
+//! // Store versions with LSN tracking (atomic batch)
+//! let node_versions: Vec<NodeVersion> = vec![]; // ... populate
+//! let edge_versions: Vec<EdgeVersion> = vec![]; // ... populate
+//! let lsn = LSN(1000);
+//!
+//! storage.store_batch_with_lsn(&node_versions, &edge_versions, lsn)?;
 //!
 //! // Get flushed LSN for WAL truncation
 //! let flushed_lsn = storage.get_flushed_lsn()?;
+//! assert_eq!(flushed_lsn, Some(lsn));
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::core::error::{Result, StorageError};
@@ -308,6 +318,15 @@ impl RedbConfig {
 }
 
 /// Redb-based cold storage implementation.
+///
+/// This struct provides a durable, disk-based storage backend for historical version data.
+/// It uses Redb for ACID-compliant storage and supports compression (Zstd/LZ4) and
+/// checksum validation.
+///
+/// Key features:
+/// - **Atomic Batches**: Store multiple node and edge versions atomically.
+/// - **LSN Tracking**: Tracks the highest LSN flushed to disk to coordinate WAL truncation.
+/// - **Compression**: Transparent compression of version data.
 pub struct RedbColdStorage {
     /// Path to the database file.
     path: PathBuf,
@@ -901,6 +920,18 @@ impl RedbColdStorage {
     ///
     /// This operation is atomic - either all versions are stored and the LSN is updated,
     /// or nothing is changed. This enables safe WAL truncation.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - A slice of node versions to store.
+    /// * `edges` - A slice of edge versions to store.
+    /// * `lsn` - The Log Sequence Number (LSN) associated with this batch.
+    ///
+    /// # LSN Behavior
+    ///
+    /// The `flushed_lsn` in the metadata table will only be updated if the provided `lsn`
+    /// is greater than the current stored value. This ensures monotonicity even if
+    /// batches are processed out of order (though typically they are processed in order).
     pub fn store_batch_with_lsn(
         &self,
         nodes: &[NodeVersion],
