@@ -68,13 +68,17 @@ impl<'a> GravityWell<'a> {
 
         // 1. Get neighbors at the end of the window
         // We only care about nodes that are currently connected (or at window end)
-        let edge_ids = self.db.get_outgoing_edges_at_time(center_id, window.end(), tx_time);
+        let edge_ids = self
+            .db
+            .get_outgoing_edges_at_time(center_id, window.end(), tx_time);
 
         if edge_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let edges = self.db.get_edges_at_time(&edge_ids, window.end(), tx_time)?;
+        let edges = self
+            .db
+            .get_edges_at_time(&edge_ids, window.end(), tx_time)?;
 
         // Extract valid target IDs
         let target_ids: Vec<NodeId> = edges
@@ -90,7 +94,8 @@ impl<'a> GravityWell<'a> {
         let mut metrics = Vec::with_capacity(target_ids.len());
 
         for target_id in target_ids {
-            let target_start_vec = self.get_vector_at(target_id, property, window.start(), tx_time)?;
+            let target_start_vec =
+                self.get_vector_at(target_id, property, window.start(), tx_time)?;
             let target_end_vec = self.get_vector_at(target_id, property, window.end(), tx_time)?;
 
             let start_dist = if let (Some(c), Some(t)) = (&center_start_vec, &target_start_vec) {
@@ -204,8 +209,8 @@ fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMapBuilder;
     use crate::api::transaction::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
 
     #[test]
     fn test_gravity_attraction() {
@@ -228,8 +233,9 @@ mod tests {
             center,
             neighbor,
             "ORBITS",
-            PropertyMapBuilder::new().build()
-        ).unwrap();
+            PropertyMapBuilder::new().build(),
+        )
+        .unwrap();
 
         // Ensure start time is strictly after creation
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -243,7 +249,8 @@ mod tests {
             .insert_vector("vec", &[0.707, 0.707])
             .build();
 
-        db.write(|tx| tx.update_node(neighbor, update_props)).unwrap();
+        db.write(|tx| tx.update_node(neighbor, update_props))
+            .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(50));
         let t_end = time::now();
@@ -262,10 +269,19 @@ mod tests {
 
         // Start dist (orthogonal) ~= 1.0
         // End dist (45 deg) ~= 1.0 - 0.707 = 0.293
-        assert!(m.start_distance.unwrap() > 0.9, "Start distance should be high");
-        assert!(m.end_distance.unwrap() < 0.4, "End distance should be lower");
+        assert!(
+            m.start_distance.unwrap() > 0.9,
+            "Start distance should be high"
+        );
+        assert!(
+            m.end_distance.unwrap() < 0.4,
+            "End distance should be lower"
+        );
 
         // Velocity should be negative (attraction)
-        assert!(m.velocity.unwrap() < 0.0, "Velocity should be negative (attraction)");
+        assert!(
+            m.velocity.unwrap() < 0.0,
+            "Velocity should be negative (attraction)"
+        );
     }
 }
