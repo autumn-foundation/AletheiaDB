@@ -533,7 +533,7 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use crate::core::interning::{InternedString, GLOBAL_INTERNER};
+    use crate::core::interning::{GLOBAL_INTERNER, InternedString};
     use crate::core::property::PropertyMapBuilder;
 
     #[test]
