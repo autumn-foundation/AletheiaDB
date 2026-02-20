@@ -768,10 +768,20 @@ impl AstConverter {
                 Expression::Property(prop) => {
                     projections.push(prop.property.clone());
                 }
-                Expression::Identifier(name) => {
-                    // Bare variable (e.g., RETURN n) - store the variable name.
-                    // The executor handles returning the full node for bare variables.
-                    projections.push(name.clone());
+                Expression::Identifier(_) => {
+                    // Bare variable (e.g., RETURN n).
+                    // We DO NOT add this to projections, because Project op
+                    // assumes all strings are property keys.
+                    // If we have a bare variable, it implies returning the whole entity
+                    // (or at least not filtering it out).
+
+                    // Note: If we have mixed RETURN n, n.prop, the behavior
+                    // depends on whether Project applies intersection or union.
+                    // Current ProjectIterator creates a NEW node with ONLY the listed properties.
+                    // So if we have bare variable, we shouldn't use Project op at all?
+
+                    // For now, ignoring identifiers means we don't treat them as property keys.
+                    // If the projection list is empty, we don't generate QueryOp::Project.
                 }
                 _ => {
                     // Other expressions are computed at execution time

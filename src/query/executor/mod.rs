@@ -297,6 +297,14 @@ impl QueryExecutor {
                 )))
             }
 
+            PhysicalOp::Project { input, properties } => {
+                let input_iter = self.execute_op(input)?;
+                Ok(Box::new(iterators::ProjectIterator::new(
+                    input_iter,
+                    properties.clone(),
+                )))
+            }
+
             PhysicalOp::Empty => Ok(Box::new(iterators::EmptyIterator)),
             PhysicalOp::SimilarToNode {
                 source_node,

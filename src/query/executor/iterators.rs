@@ -1292,6 +1292,48 @@ impl ResultIterator for ProvenanceFilterIterator {
     }
 }
 
+/// Iterator for projecting specific properties from query results.
+pub struct ProjectIterator {
+    input: Box<dyn ResultIterator>,
+    properties: Vec<String>,
+}
+
+impl ProjectIterator {
+    pub fn new(input: Box<dyn ResultIterator>, properties: Vec<String>) -> Self {
+        ProjectIterator { input, properties }
+    }
+}
+
+impl ResultIterator for ProjectIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        match self.input.next() {
+            Some(Ok(mut row)) => {
+                if let Some(node) = row.entity.as_node() {
+                    let mut new_props = crate::core::PropertyMapBuilder::new();
+                    for prop in &self.properties {
+                        if let Some(val) = node.properties.get(prop) {
+                            new_props = new_props.try_insert(prop, val.clone()).unwrap();
+                        }
+                    }
+                    let new_node = crate::core::graph::Node::new(
+                        node.id,
+                        node.label,
+                        new_props.build(),
+                        node.current_version,
+                    );
+                    row.entity = EntityResult::Node(new_node);
+                }
+                Some(Ok(row))
+            }
+            other => other,
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.input.size_hint()
+    }
+}
+
 /// Convert a `PredicateValue` to a `PropertyValue` for storage-level lookups.
 fn predicate_to_property_value(pv: &PredicateValue) -> PropertyValue {
     match pv {
