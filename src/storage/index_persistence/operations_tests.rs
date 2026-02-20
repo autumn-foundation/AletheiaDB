@@ -127,8 +127,10 @@ fn test_persist_all_indexes_creates_manifest() {
 
     // Use a separate temp dir for WAL to avoid conflicts
     let wal_dir = tempfile::tempdir().unwrap();
-    let config = crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig::new(wal_dir.path());
-    let wal = Arc::new(crate::storage::wal::concurrent_system::ConcurrentWalSystem::new(config).unwrap());
+    let config =
+        crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig::new(wal_dir.path());
+    let wal =
+        Arc::new(crate::storage::wal::concurrent_system::ConcurrentWalSystem::new(config).unwrap());
 
     let tracker = Arc::new(PersistenceTracker::new());
 
@@ -140,16 +142,29 @@ fn test_persist_all_indexes_creates_manifest() {
         &wal,
         &manager,
         &tracker,
-    ).expect("persist_all_indexes failed");
+    )
+    .expect("persist_all_indexes failed");
 
     // Verify manifest exists
     // Note: IndexPersistenceManager adds "indexes" subdir and uses .idx extension
     let manifest_path = manager.base_path().join("indexes").join("manifest.idx");
-    assert!(manifest_path.exists(), "Manifest file should be created by persist_all_indexes at {:?}", manifest_path);
+    assert!(
+        manifest_path.exists(),
+        "Manifest file should be created by persist_all_indexes at {:?}",
+        manifest_path
+    );
 
     // Verify string interner exists (created by default)
-    let interner_path = manager.base_path().join("indexes").join("strings").join("interner.idx");
-    assert!(interner_path.exists(), "String interner should be persisted by persist_all_indexes at {:?}", interner_path);
+    let interner_path = manager
+        .base_path()
+        .join("indexes")
+        .join("strings")
+        .join("interner.idx");
+    assert!(
+        interner_path.exists(),
+        "String interner should be persisted by persist_all_indexes at {:?}",
+        interner_path
+    );
 }
 
 #[test]
