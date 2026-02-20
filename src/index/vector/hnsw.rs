@@ -84,6 +84,24 @@
 //! - Multiple threads can add vectors simultaneously
 //! - Multiple threads can search simultaneously
 //! - Searches can run concurrently with additions
+//!
+//! # Concurrency Model
+//!
+//! To ensure thread safety and prevent deadlocks, the index uses a strict lock hierarchy:
+//!
+//! 1. **Entry Locks** (`entry_locks`): Sharded mutexes protecting updates to specific keys.
+//!    Acquired first to serialize updates to the same node ID.
+//! 2. **Save Lock** (`save_lock`): Read/Write lock.
+//!    - **Read**: Acquired by `add`, `remove`, `search` to ensure index existence.
+//!    - **Write**: Acquired by `save` to block modifications during persistence.
+//! 3. **Inner Index Lock** (`inner`): Read/Write lock protecting the usearch index.
+//!    - **Read**: Acquired for searching and capacity checks.
+//!    - **Write**: Acquired for structural modifications (add/remove/resize).
+//! 4. **ID Mapping** (`id_mapping`): Concurrent `DashMap`.
+//!    - Accessed last to map `NodeId` ↔ `u64` (usearch key).
+//!
+//! **Invariant**: Always acquire locks in the order: `entry_locks` → `save_lock` → `inner` → `id_mapping`.
+//! Violating this order will cause deadlocks.
 
 use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
@@ -396,8 +414,11 @@ impl HnswConfig {
 /// Statistics for index operations.
 #[derive(Debug, Default)]
 struct IndexStats {
+    /// Total number of vectors added (including updates)
     vectors_added: AtomicU64,
+    /// Total number of vectors removed
     vectors_removed: AtomicU64,
+    /// Total number of search operations performed
     searches_performed: AtomicU64,
     /// Number of times search operations were retried due to transient errors
     search_retries: AtomicU64,
@@ -442,7 +463,6 @@ const MAX_SEARCH_ATTEMPTS: u32 = 4; // 1 initial attempt + 3 retries
 /// # Returns
 ///
 /// `true` if the error is transient and safe to retry, `false` otherwise
-#[inline]
 fn is_retryable_usearch_error(error_msg: &str) -> bool {
     // Thread pool exhaustion is a transient error that resolves when threads become available
     error_msg.contains("No available threads to lock")
@@ -793,6 +813,46 @@ impl std::fmt::Debug for HnswIndex {
 }
 
 impl VectorIndex for HnswIndex {
+    /// Adds a vector to the index.
+    ///
+    /// If the node ID already exists in the index, its vector is **updated** (upsert behavior).
+    ///
+    /// # Concurrency
+    ///
+    /// This method is fully thread-safe and supports high concurrency:
+    /// - Multiple threads can call `add` simultaneously.
+    /// - Updates to the *same* node ID are serialized via internal sharded locks to prevent race conditions.
+    /// - Concurrent searches are allowed (except during the brief write lock held on the inner index).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `vector.len()` does not match the configured dimensions (`DimensionMismatch`).
+    /// - The vector contains `NaN` or `Infinite` values (`InvalidVector`).
+    /// - The index is memory-mapped (read-only) (`IndexError`).
+    /// - An internal error occurs in the underlying usearch library (`IndexError`).
+    ///
+    /// # Panics
+    ///
+    /// This method does not panic under normal conditions.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
+    /// # use aletheiadb::core::id::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
+    /// let id = NodeId::new(1).unwrap();
+    ///
+    /// // Add a new vector
+    /// index.add(id, &[1.0, 0.0, 0.0])?;
+    ///
+    /// // Update the existing vector (upsert)
+    /// index.add(id, &[0.0, 1.0, 0.0])?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         // Check for re-entrant modification during filtered search (prevents deadlock)
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
@@ -1034,6 +1094,32 @@ impl VectorIndex for HnswIndex {
         }
     }
 
+    /// Removes a vector from the index.
+    ///
+    /// This operation is idempotent: removing a node that does not exist is safe and returns `Ok`.
+    ///
+    /// # Concurrency
+    ///
+    /// This method is fully thread-safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The index is memory-mapped (read-only) (`IndexError`).
+    /// - An internal error occurs in the underlying usearch library (`IndexError`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
+    /// # use aletheiadb::core::id::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
+    /// # let id = NodeId::new(1).unwrap();
+    /// index.remove(id)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn remove(&self, id: NodeId) -> Result<()> {
         // Check for re-entrant modification during filtered search (prevents deadlock)
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
@@ -1073,6 +1159,50 @@ impl VectorIndex for HnswIndex {
         Ok(())
     }
 
+    /// Performs approximate k-nearest neighbor search.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query vector.
+    /// * `k` - The number of results to return.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `(NodeId, similarity)` tuples, sorted by similarity (descending).
+    /// - Higher similarity score means closer match.
+    /// - For Cosine metric, range is [-1.0, 1.0].
+    /// - For Euclidean metric, range is (-∞, 0.0] (negative squared distance).
+    ///
+    /// # Concurrency
+    ///
+    /// This method is thread-safe and can run concurrently with other searches and `add` operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `query.len()` does not match configured dimensions.
+    /// - `query` contains NaN/Inf.
+    ///
+    /// # DoS Protection
+    ///
+    /// The `k` parameter is capped at `MAX_K` (100,000) to prevent memory exhaustion DoS.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
+    /// # use aletheiadb::core::id::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
+    /// # let id = NodeId::new(1).unwrap();
+    /// # index.add(id, &[1.0, 0.0, 0.0])?;
+    /// let results = index.search(&[1.0, 0.0, 0.0], 10)?;
+    /// for (node_id, score) in results {
+    ///     println!("Node: {:?}, Score: {}", node_id, score);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
         // Check for re-entrant access during filtered search (prevents deadlock)
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
@@ -1144,6 +1274,36 @@ impl VectorIndex for HnswIndex {
         unreachable!("Search retry loop should always return from within the loop body")
     }
 
+    /// Performs k-NN search with a post-filtering predicate.
+    ///
+    /// This method iteratively searches for candidates and applies the predicate until
+    /// `k` matching results are found or the index is exhausted.
+    ///
+    /// # Deadlock Warning
+    ///
+    /// The `predicate` closure **MUST NOT** attempt to modify the index (call `add`, `remove`, `save`).
+    /// Doing so will cause a panic to prevent a deadlock.
+    ///
+    /// # Performance
+    ///
+    /// - If the predicate rejects many nodes, this method will perform multiple internal searches
+    ///   with exponentially increasing candidate counts (`k`, `2k`, `4k`...).
+    /// - Worst case performance is O(N) if the predicate rejects almost everything.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
+    /// # use aletheiadb::core::id::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
+    /// let results = index.search_with_filter(&[1.0, 0.0, 0.0], 10, |id| {
+    ///     // Only return even IDs
+    ///     id.as_u64() % 2 == 0
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn search_with_filter<F>(
         &self,
         query: &[f32],
@@ -1285,6 +1445,10 @@ impl VectorIndex for HnswIndex {
 
     /// Save the index to disk.
     ///
+    /// This operation persists the index to two files:
+    /// 1. `<path>`: The binary HNSW index (usearch format).
+    /// 2. `<path>.usearch.mappings`: The ID mapping file (custom format with CRC32).
+    ///
     /// # Async Runtime Behavior
     ///
     /// This method performs blocking I/O operations (`std::fs::write` and `usearch::Index::save`).
@@ -1298,6 +1462,13 @@ impl VectorIndex for HnswIndex {
     ///
     /// If executed outside a Tokio runtime, or in a single-threaded runtime (where `block_in_place`
     /// would panic), it falls back to standard synchronous execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - File creation fails.
+    /// - Disk write fails.
+    /// - An internal error occurs in the underlying usearch library.
     fn save(&self, path: &Path) -> Result<()> {
         // Check for re-entrant modification during filtered search (prevents deadlock)
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
@@ -1369,15 +1540,20 @@ impl HnswIndex {
         unreachable!("Retry loop should always return")
     }
 
-    /// Internal implementation of index saving.
-    ///
-    /// This method performs the actual blocking I/O operations for saving the index
-    /// and its mappings. It is separated from `save()` to allow the latter to use
-    /// `tokio::task::block_in_place` when running within a Tokio runtime.
-    /// Check and expand capacity if needed.
+    /// Checks and expands index capacity if needed.
     ///
     /// This method ensures that the index has enough capacity to accommodate new vectors.
-    /// It handles the lock upgrading dance (read -> write -> read) to minimize contention.
+    /// It uses a "lock upgrading" strategy (optimistic read -> exclusive write) to minimize contention.
+    ///
+    /// # Concurrency
+    ///
+    /// - **Fast Path**: Acquires `read` lock. If capacity is sufficient, returns immediately.
+    /// - **Slow Path**: Acquires `write` lock. Expands capacity by doubling it (min 1024).
+    ///
+    /// # Race Condition Protection
+    ///
+    /// Uses `CAPACITY_PADDING` to account for concurrent additions that might occur
+    /// between the capacity check and the actual addition.
     ///
     /// # Arguments
     ///
@@ -1418,6 +1594,20 @@ impl HnswIndex {
         Ok(())
     }
 
+    /// Internal implementation of index saving.
+    ///
+    /// This is separated from `save()` to allow the latter to use `block_in_place`
+    /// when running in an async context.
+    ///
+    /// # Lock Ordering
+    ///
+    /// 1. Acquires `save_lock` (exclusive) - Blocks all adds/removes.
+    /// 2. Acquires `inner` (write) - Blocks all searches.
+    ///
+    /// # File Format
+    ///
+    /// - **Binary Index**: Saved directly by usearch C++ library.
+    /// - **Mappings File**: Saved by Rust with CRC32 checksum.
     fn save_internal(&self, path: &Path) -> Result<()> {
         // Acquire save_lock (exclusive) to prevent concurrent adds/removes.
         // This ensures consistency between the index snapshot and the ID mappings.
@@ -1671,9 +1861,18 @@ impl HnswIndex {
 }
 
 /// Load and verify mappings from a companion file.
-/// Returns (id_mapping, reverse_mapping, max_key, metadata) or error if integrity check fails.
-/// Format V1: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
-/// Format V2: `[MAGIC:4][VERSION:2][DIMS:8][QUANT:1][METRIC:1][COUNT:8][DATA:16*count][CRC32:4]`
+///
+/// # Format
+///
+/// - **V1**: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
+/// - **V2**: `[MAGIC:4][VERSION:2][DIMS:8][QUANT:1][METRIC:1][COUNT:8][DATA:16*count][CRC32:4]`
+///
+/// # Integrity Checks
+///
+/// - **Magic Bytes**: Verifies file type (`GMAP`).
+/// - **File Size**: Checked against expected size based on header count (prevents partial reads).
+/// - **CRC32**: Verifies full file integrity.
+/// - **Limits**: Enforces `MAX_MAPPINGS_COUNT` to prevent OOM DoS.
 #[allow(clippy::type_complexity)]
 fn load_mappings_with_integrity(
     mappings_path: &Path,
@@ -1887,7 +2086,11 @@ impl HnswIndex {
         self.id_mapping.len()
     }
 
-    /// Creates a new HNSW index from a configuration.
+    /// Creates a new in-memory HNSW index from a configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configuration is invalid (e.g., dimensions = 0).
     pub fn new(config: HnswConfig) -> Result<Self> {
         HnswIndexBuilder::from_config(&config).build()
     }
@@ -1938,7 +2141,23 @@ impl HnswIndex {
         self.next_key.fetch_max(usearch_key + 1, Ordering::SeqCst);
     }
 
-    /// Loads an index from a file path.
+    /// Loads an index from disk.
+    ///
+    /// # Safety and Verification
+    ///
+    /// This method performs strict validation to ensure data integrity and safety:
+    /// - **Dimensions Check**: Verifies that the on-disk index matches the configured dimensions.
+    /// - **Metric Check**: Verifies that the on-disk metric matches the configuration.
+    /// - **Integrity Check**: Verifies the CRC32 checksum of the mappings file.
+    /// - **Security**: Checks against DoS vectors (huge files, invalid headers).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file does not exist or cannot be read.
+    /// - The index configuration (dimensions, metric, quantization) does not match the file.
+    /// - The mappings file is corrupted (CRC mismatch).
+    /// - Custom metric is used with non-F32 quantization (safety violation).
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
         if config.dimensions > MAX_VECTOR_DIMENSIONS {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -2035,7 +2254,19 @@ impl HnswIndex {
         })
     }
 
-    /// Opens a memory-mapped index from a file path.
+    /// Opens a memory-mapped index from disk in read-only mode.
+    ///
+    /// This is useful for serving large indexes that exceed available RAM, as the OS
+    /// will page in parts of the index as needed.
+    ///
+    /// # Limitations
+    ///
+    /// - **Read-Only**: `add` and `remove` operations will return `IndexError`.
+    /// - **Performance**: Search latency may be higher than in-memory indexes due to disk I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file is invalid or corrupted.
     pub fn open_mmap(path: &Path) -> Result<Self> {
         let index = Index::new(&IndexOptions::default()).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
@@ -3784,5 +4015,315 @@ mod race_recovery_tests {
         assert!(index.inner.read().capacity() > 10);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_reentrancy_tests {
+    use super::*;
+
+    fn create_test_index() -> HnswIndex {
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_add_reentrancy_check() {
+        let index = create_test_index();
+        let node_id = NodeId::new(1).unwrap();
+        let vec = vec![1.0, 0.0, 0.0, 0.0];
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // add should fail
+        let result = index.add(node_id, &vec);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(
+                    msg.contains("Cannot modify index from within a search_with_filter callback")
+                );
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+
+    #[test]
+    fn test_remove_reentrancy_check() {
+        let index = create_test_index();
+        let node_id = NodeId::new(1).unwrap();
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // remove should fail
+        let result = index.remove(node_id);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(
+                    msg.contains("Cannot modify index from within a search_with_filter callback")
+                );
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+
+    #[test]
+    fn test_save_reentrancy_check() {
+        let index = create_test_index();
+        let path = Path::new("dummy.index");
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // save should fail
+        let result = index.save(path);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(
+                    msg.contains("Cannot save index from within a search_with_filter callback")
+                );
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+
+    #[test]
+    fn test_search_reentrancy_check() {
+        let index = create_test_index();
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // search should fail
+        let result = index.search(&query, 10);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(
+                    msg.contains("Cannot perform search from within a search_with_filter callback")
+                );
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+
+    #[test]
+    fn test_search_with_filter_reentrancy_check() {
+        let index = create_test_index();
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+
+        // Simulate being inside a callback
+        let _guard = FilterCallbackGuard::new();
+
+        // search_with_filter should fail
+        let result = index.search_with_filter(&query, 10, |_| true);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains(
+                    "Cannot perform search_with_filter from within a search_with_filter callback"
+                ));
+            }
+            _ => panic!("Expected re-entrancy error"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod coverage_misc_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn test_index_stats_default() {
+        // Cover #[derive(Default)] for IndexStats
+        let stats = IndexStats::default();
+        assert_eq!(
+            stats
+                .vectors_added
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    struct MockReadError;
+    impl Read for MockReadError {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("Mock read error"))
+        }
+    }
+
+    #[test]
+    fn test_deserialize_from_read_error() {
+        let mut reader = MockReadError;
+        let result = HnswConfig::deserialize_from(&mut reader);
+        assert!(result.is_err());
+    }
+
+    struct MockFailReader {
+        data: Vec<u8>,
+        fail_at: usize,
+        cursor: usize,
+    }
+
+    impl MockFailReader {
+        fn new(data: Vec<u8>, fail_at: usize) -> Self {
+            Self {
+                data,
+                fail_at,
+                cursor: 0,
+            }
+        }
+    }
+
+    impl Read for MockFailReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.cursor >= self.fail_at {
+                return Err(std::io::Error::other("Mock read error"));
+            }
+            // Read as much as possible up to fail_at
+            let remaining_before_fail = self.fail_at - self.cursor;
+            let available_data = self.data.len() - self.cursor;
+            let to_read = std::cmp::min(buf.len(), remaining_before_fail);
+            let to_read = std::cmp::min(to_read, available_data);
+
+            if to_read == 0 {
+                return Ok(0);
+            }
+
+            // Fix: buffer might be larger than data source, so verify bounds
+            buf[..to_read].copy_from_slice(&self.data[self.cursor..self.cursor + to_read]);
+            self.cursor += to_read;
+            Ok(to_read)
+        }
+    }
+
+    #[test]
+    fn test_deserialize_quantization_error() {
+        // Construct valid data up to quantization
+        let config = HnswConfig::default();
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
+        buffer.push(config.metric.to_u8());
+        buffer.extend_from_slice(&(config.m as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_construction as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.ef_search as u64).to_le_bytes());
+        buffer.extend_from_slice(&(config.capacity as u64).to_le_bytes());
+        // 8 + 1 + 8 + 8 + 8 + 8 = 41 bytes
+
+        // We want read_exact to succeed for the first 41 bytes,
+        // then fail when trying to read the 42nd byte (quantization).
+
+        let mut reader = MockFailReader::new(buffer, 41);
+        let result = HnswConfig::deserialize_from(&mut reader);
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Mock read error"));
+    }
+}
+
+#[cfg(test)]
+mod coverage_additions {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn create_test_index() -> HnswIndex {
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_retry_usearch_logic() {
+        let index = create_test_index();
+        let mut attempts = 0;
+
+        // We use a closure that simulates a transient error for the first 2 attempts
+        // and then succeeds.
+        // Or we can simulate total failure to verify it retries MAX_SEARCH_ATTEMPTS times.
+
+        let result: crate::core::error::Result<()> = index.retry_usearch(
+            || {
+                attempts += 1;
+                // Always fail with the specific retryable error message
+                Err("No available threads to lock".to_string())
+            },
+            "test_context",
+        );
+
+        // Should fail after retries
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("test_context"));
+                assert!(msg.contains("No available threads to lock"));
+            }
+            _ => panic!("Expected IndexError"),
+        }
+
+        // MAX_SEARCH_ATTEMPTS is 4 (1 initial + 3 retries)
+        assert_eq!(attempts, 4);
+
+        // Verify stats were updated
+        assert_eq!(index.stats.search_retries.load(Ordering::Relaxed), 3);
+        assert_eq!(index.stats.search_retry_failures.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_retry_usearch_success_after_retry() {
+        let index = create_test_index();
+        let mut attempts = 0;
+
+        let result: crate::core::error::Result<()> = index.retry_usearch(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err("No available threads to lock".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            "test_context",
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(attempts, 3);
+
+        assert_eq!(index.stats.search_retries.load(Ordering::Relaxed), 2);
+        // failures should be 0 (since it eventually succeeded)
+        assert_eq!(index.stats.search_retry_failures.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_save_async_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("async_save.index");
+
+        let index = create_test_index();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+
+        // Call save inside a tokio runtime
+        // This should trigger the block_in_place path
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let result = index.save(&path);
+            assert!(result.is_ok());
+        });
+
+        assert!(path.exists());
+        assert!(path.with_extension("usearch.mappings").exists());
     }
 }
