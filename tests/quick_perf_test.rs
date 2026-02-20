@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tempfile::TempDir;
 
-fn create_db_with_mode(mode: DurabilityMode) -> (AletheiaDB, TempDir) {
+fn create_db_with_mode(mode: DurabilityMode) -> (TempDir, AletheiaDB) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
     let config = WalConfigBuilder::new()
         .wal_dir(temp_dir.path().to_path_buf())
@@ -21,7 +21,7 @@ fn create_db_with_mode(mode: DurabilityMode) -> (AletheiaDB, TempDir) {
         .durability_mode(mode)
         .build();
     let db = AletheiaDB::with_wal_config(config).unwrap();
-    (db, temp_dir)
+    (temp_dir, db)
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn quick_perf_test() {
 
     // Test Synchronous (baseline)
     {
-        let (db, _guard) = create_db_with_mode(DurabilityMode::Synchronous);
+        let (_guard, db) = create_db_with_mode(DurabilityMode::Synchronous);
         let start = Instant::now();
 
         for i in 0..test_count {
@@ -60,7 +60,7 @@ fn quick_perf_test() {
 
     // Test Async
     {
-        let (db, _guard) = create_db_with_mode(DurabilityMode::Async {
+        let (_guard, db) = create_db_with_mode(DurabilityMode::Async {
             flush_interval_ms: 100,
         });
         let start = Instant::now();
@@ -88,7 +88,7 @@ fn quick_perf_test() {
 
     // Test GroupCommit
     {
-        let (db, _guard) = create_db_with_mode(DurabilityMode::group_commit_default());
+        let (_guard, db) = create_db_with_mode(DurabilityMode::group_commit_default());
         let start = Instant::now();
 
         for i in 0..test_count {
@@ -114,7 +114,7 @@ fn quick_perf_test() {
 
     // Test AsyncBatched default
     {
-        let (db, _guard) = create_db_with_mode(DurabilityMode::async_batched_default());
+        let (_guard, db) = create_db_with_mode(DurabilityMode::async_batched_default());
         let start = Instant::now();
 
         for i in 0..test_count {
@@ -140,7 +140,7 @@ fn quick_perf_test() {
 
     // Test AsyncBatched aggressive
     {
-        let (db, _guard) =
+        let (_guard, db) =
             create_db_with_mode(DurabilityMode::async_batched_validated(5, 50).unwrap());
         let start = Instant::now();
 
