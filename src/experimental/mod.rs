@@ -149,12 +149,27 @@ pub mod temporal_narrative {
     }
 
     /// Generator for creating natural language narratives from temporal history.
+    ///
+    /// # ⚠️ EXPERIMENTAL FEATURE
+    ///
+    /// This is a **stub implementation** that exists to provide helpful error messages.
+    /// You must enable the `nova` feature to use this functionality.
+    ///
+    /// Add this to your `Cargo.toml`:
+    /// ```toml
+    /// [dependencies]
+    /// aletheiadb = { version = "...", features = ["nova"] }
+    /// ```
     pub struct NarrativeGenerator<'a> {
         _marker: std::marker::PhantomData<&'a ()>,
     }
 
     impl<'a> NarrativeGenerator<'a> {
         /// Create a new narrative generator.
+        ///
+        /// # Panics
+        ///
+        /// This function **will always panic** because the `nova` feature is not enabled.
         pub fn new(_db: &'a AletheiaDB) -> Self {
             panic!(
                 "Experimental features like NarrativeGenerator require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n"
@@ -169,6 +184,10 @@ pub mod temporal_narrative {
         }
 
         /// Generate a narrative for a specific node.
+        ///
+        /// # Panics
+        ///
+        /// This function **will always panic** because the `nova` feature is not enabled.
         pub fn generate_node_narrative(&self, _node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
             panic!("Experimental features like NarrativeGenerator require the 'nova' feature.");
         }
