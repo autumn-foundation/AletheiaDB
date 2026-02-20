@@ -391,6 +391,71 @@ impl HnswConfig {
             ..Default::default()
         })
     }
+
+    /// Validate the configuration parameters to prevent DoS or safety issues.
+    pub fn validate(&self) -> Result<()> {
+        // Validate dimensions
+        if self.dimensions == 0 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: "dimensions must be > 0".to_string(),
+            }));
+        }
+        if self.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "dimensions {} exceeds maximum allowed {}",
+                    self.dimensions, MAX_VECTOR_DIMENSIONS
+                ),
+            }));
+        }
+
+        // Validate M
+        if self.m == 0 || self.m > 64 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!("M must be in range [1, 64], got {}", self.m),
+            }));
+        }
+
+        // Validate ef_construction
+        // Prevent DoS via excessive memory allocation
+        if self.ef_construction < 10 || self.ef_construction > 4096 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "ef_construction must be in range [10, 4096], got {}",
+                    self.ef_construction
+                ),
+            }));
+        }
+
+        // Validate ef_search
+        // Prevent DoS via excessive CPU/Memory usage
+        if self.ef_search < 1 || self.ef_search > 4096 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "ef_search must be in range [1, 4096], got {}",
+                    self.ef_search
+                ),
+            }));
+        }
+
+        // Security Check: Custom metrics require F32 quantization
+        // This is critical because usearch passes raw pointers to the metric function.
+        // If quantization is not F32 (e.g., I8 or F16), the pointers will point to
+        // compressed data, but our metric wrapper casts them to `*const f32`.
+        // This would cause a buffer over-read (reading 4x or 2x memory), leading to
+        // potential crashes (DoS) or information leakage.
+        if self.custom_metric.is_some() && self.quantization != Quantization::F32 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "Custom metrics are only supported with F32 quantization (requested {:?}). \
+                     Using other quantization levels with custom metrics causes memory safety issues.",
+                    self.quantization
+                ),
+            }));
+        }
+
+        Ok(())
+    }
 }
 
 /// Statistics for index operations.
@@ -575,65 +640,8 @@ impl HnswIndexBuilder {
 
     /// Builds the HNSW index with the configured parameters.
     pub fn build(self) -> Result<HnswIndex> {
-        // Validate dimensions
-        if self.config.dimensions == 0 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: "dimensions must be > 0".to_string(),
-            }));
-        }
-        if self.config.dimensions > MAX_VECTOR_DIMENSIONS {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "dimensions {} exceeds maximum allowed {}",
-                    self.config.dimensions, MAX_VECTOR_DIMENSIONS
-                ),
-            }));
-        }
-
-        // Validate M
-        if self.config.m == 0 || self.config.m > 64 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!("M must be in range [1, 64], got {}", self.config.m),
-            }));
-        }
-
-        // Validate ef_construction
-        // Prevent DoS via excessive memory allocation
-        if self.config.ef_construction < 10 || self.config.ef_construction > 4096 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "ef_construction must be in range [10, 4096], got {}",
-                    self.config.ef_construction
-                ),
-            }));
-        }
-
-        // Validate ef_search
-        // Prevent DoS via excessive CPU/Memory usage
-        if self.config.ef_search < 1 || self.config.ef_search > 4096 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "ef_search must be in range [1, 4096], got {}",
-                    self.config.ef_search
-                ),
-            }));
-        }
-
-        // Security Check: Custom metrics require F32 quantization
-        // This is critical because usearch passes raw pointers to the metric function.
-        // If quantization is not F32 (e.g., I8 or F16), the pointers will point to
-        // compressed data, but our metric wrapper casts them to `*const f32`.
-        // This would cause a buffer over-read (reading 4x or 2x memory), leading to
-        // potential crashes (DoS) or information leakage.
-        if self.config.custom_metric.is_some() && self.config.quantization != Quantization::F32 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "Custom metrics are only supported with F32 quantization (requested {:?}). \
-                     Using other quantization levels with custom metrics causes memory safety issues.",
-                    self.config.quantization
-                ),
-            }));
-        }
+        // Validate config
+        self.config.validate()?;
 
         // Create usearch index options
         let options = IndexOptions {
@@ -1940,25 +1948,8 @@ impl HnswIndex {
 
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
-        if config.dimensions > MAX_VECTOR_DIMENSIONS {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "dimensions {} exceeds maximum allowed {}",
-                    config.dimensions, MAX_VECTOR_DIMENSIONS
-                ),
-            }));
-        }
-
-        // Security Check: Custom metrics require F32 quantization
-        if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!(
-                    "Custom metrics are only supported with F32 quantization (requested {:?}). \
-                     Using other quantization levels with custom metrics causes memory safety issues.",
-                    config.quantization
-                ),
-            }));
-        }
+        // Validate config (prevents DoS with huge M/ef values)
+        config.validate()?;
 
         let options = IndexOptions {
             dimensions: config.dimensions,
