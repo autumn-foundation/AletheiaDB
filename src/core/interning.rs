@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Default maximum number of interned strings (DoS protection)
 pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
@@ -118,6 +118,8 @@ pub struct StringInterner {
     next_id: AtomicU32,
     /// Maximum number of strings to intern (DoS protection)
     max_capacity: usize,
+    /// Whether common strings are pre-interned at IDs 0..N (lock-free optimization).
+    is_warmed: AtomicBool,
 }
 
 impl StringInterner {
@@ -133,6 +135,7 @@ impl StringInterner {
             id_to_string: DashMap::with_hasher(BuildHasherDefault::default()),
             next_id: AtomicU32::new(0),
             max_capacity,
+            is_warmed: AtomicBool::new(false),
         }
     }
 
@@ -321,8 +324,29 @@ impl StringInterner {
 
     /// Get the ID of a string if it has been interned.
     pub fn get_id<S: AsRef<str>>(&self, string: S) -> Option<InternedString> {
+        let string = string.as_ref();
+
+        // Lock-free optimization for common strings
+        // If the interner was warmed cleanly (IDs 0..N match COMMON_STRINGS),
+        // we can return the hardcoded ID without locking the DashMap.
+        if self.is_warmed.load(Ordering::Relaxed) {
+            match string {
+                "name" => return Some(InternedString::from_raw(0)),
+                "id" => return Some(InternedString::from_raw(1)),
+                "type" => return Some(InternedString::from_raw(2)),
+                "label" => return Some(InternedString::from_raw(3)),
+                "created_at" => return Some(InternedString::from_raw(4)),
+                "updated_at" => return Some(InternedString::from_raw(5)),
+                "valid_from" => return Some(InternedString::from_raw(6)),
+                "valid_to" => return Some(InternedString::from_raw(7)),
+                "tx_from" => return Some(InternedString::from_raw(8)),
+                "tx_to" => return Some(InternedString::from_raw(9)),
+                _ => {}
+            }
+        }
+
         self.string_to_id
-            .get(string.as_ref())
+            .get(string)
             .map(|entry| *entry.value())
     }
 
@@ -343,6 +367,7 @@ impl StringInterner {
         self.string_to_id.clear();
         self.id_to_string.clear();
         self.next_id.store(0, Ordering::Relaxed);
+        self.is_warmed.store(false, Ordering::Relaxed);
     }
 
     /// Get all interned strings in ID order.
@@ -402,10 +427,29 @@ impl StringInterner {
     /// let id = interner.intern("name").unwrap();
     /// ```
     pub fn warm_common_strings(&self) {
-        // Intern each common string using intern_unchecked since these are
-        // known-good strings from a trusted internal source
-        for s in COMMON_STRINGS {
-            let _id = self.intern_unchecked(s);
+        // Atomically reserve a block of IDs for common strings
+        // This ensures no other thread can grab IDs in this range, preventing race conditions
+        let start_id = self.next_id.fetch_add(COMMON_STRINGS.len() as u32, Ordering::SeqCst);
+
+        // Optimization is only valid if we got the range starting at 0
+        // If start_id == 0, we OWN the range 0..N exclusively.
+        let can_optimize = start_id == 0;
+
+        for (i, s) in COMMON_STRINGS.iter().enumerate() {
+            let id_val = start_id + i as u32;
+            let id = InternedString::from_raw(id_val);
+            let arc_str: Arc<str> = Arc::from(*s);
+
+            // Manual insertion (bypassing intern_unchecked which increments counter)
+            // If start_id == 0, the map is empty/reserved, so no conflicts.
+            // If start_id != 0, we might overwrite existing entries, but we accept this
+            // as "warming" is best-effort when raced.
+            self.string_to_id.insert(arc_str.clone(), id);
+            self.id_to_string.insert(id, arc_str);
+        }
+
+        if can_optimize {
+            self.is_warmed.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -1239,5 +1283,118 @@ mod mutant_kill_tests {
         }
 
         writer.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod optimization_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn test_optimization_safety_mixed_usage() {
+        // Test that optimization is DISABLED if interned strings are shifted
+        let interner = StringInterner::new();
+
+        // Intern a random string first - it grabs ID 0
+        let id_foo = interner.intern("foo").unwrap();
+        assert_eq!(id_foo.as_u32(), 0);
+
+        // Now warm common strings
+        // "name" (the first common string) should get ID 1, not 0
+        interner.warm_common_strings();
+
+        let id_name = interner.get_id("name").expect("name should be interned");
+
+        // Safety check: ID must NOT be 0 (which is "foo")
+        assert_ne!(id_name.as_u32(), 0, "Optimization returned ID 0 for 'name', but 0 is 'foo'");
+        // If atomic reservation works, "name" might get ID 1, or range might be shifted.
+        // What matters is it's NOT 0.
+
+        // Verify resolution
+        let resolved = interner.resolve_with(id_name, |s| s.to_string()).unwrap();
+        assert_eq!(resolved, "name");
+
+        let resolved_0 = interner.resolve_with(InternedString::from_raw(0), |s| s.to_string()).unwrap();
+        assert_eq!(resolved_0, "foo");
+    }
+
+    #[test]
+    fn test_optimization_correctness_clean_usage() {
+        // Test that IDs are as expected when warmed cleanly
+        let interner = StringInterner::new();
+        interner.warm_common_strings();
+
+        // "name" should be 0
+        let id_name = interner.get_id("name").unwrap();
+        assert_eq!(id_name.as_u32(), 0);
+
+        // "id" should be 1
+        let id_id = interner.get_id("id").unwrap();
+        assert_eq!(id_id.as_u32(), 1);
+
+        // "tx_to" (last one, index 9) should be 9
+        let id_tx_to = interner.get_id("tx_to").unwrap();
+        assert_eq!(id_tx_to.as_u32(), 9);
+    }
+
+    #[test]
+    fn test_common_strings_consistency() {
+        // Verify that the hardcoded match in get_id returns the correct index for COMMON_STRINGS
+        let interner = StringInterner::new();
+        interner.warm_common_strings();
+
+        for (i, s) in COMMON_STRINGS.iter().enumerate() {
+            let id = interner.get_id(s).unwrap();
+            assert_eq!(id.as_u32() as usize, i, "Optimization mismatch for string '{}'", s);
+        }
+    }
+
+    #[test]
+    fn test_optimization_race_safety() {
+        // This test attempts to trigger the race condition where next_id check and loop are not atomic.
+        // With atomic reservation fix, this should be safe.
+
+        let interner = Arc::new(StringInterner::new());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let i1 = interner.clone();
+        let b1 = barrier.clone();
+        let handle1 = thread::spawn(move || {
+            b1.wait();
+            // Try to race with warming
+            i1.intern("race_key").unwrap()
+        });
+
+        let i2 = interner.clone();
+        let b2 = barrier.clone();
+        let handle2 = thread::spawn(move || {
+            b2.wait();
+            i2.warm_common_strings();
+        });
+
+        let race_id = handle1.join().unwrap();
+        handle2.join().unwrap();
+
+        // Now verify integrity
+        // If race_id is 0, it means intern("race_key") won the race for ID 0.
+        // In that case, "name" MUST NOT be 0. And resolve(0) must be "race_key".
+        if race_id.as_u32() == 0 {
+            let id_name = interner.get_id("name").unwrap();
+            assert_ne!(id_name.as_u32(), 0, "Race condition: 'name' got ID 0 but 'race_key' owns ID 0");
+
+            let resolved_0 = interner.resolve_with(InternedString::from_raw(0), |s| s.to_string()).unwrap();
+            assert_eq!(resolved_0, "race_key");
+        } else {
+            // warm_common_strings won the race.
+            // "name" should be 0.
+            // "race_key" should be > 0.
+            let id_name = interner.get_id("name").unwrap();
+            assert_eq!(id_name.as_u32(), 0);
+
+            let resolved_0 = interner.resolve_with(InternedString::from_raw(0), |s| s.to_string()).unwrap();
+            assert_eq!(resolved_0, "name");
+        }
     }
 }
