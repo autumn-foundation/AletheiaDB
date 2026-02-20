@@ -29,3 +29,7 @@
 ## 2026-03-02 - Deadlock in Synchronous WAL Append
 **Learning:** `PendingEntry` was intended to implement `Drop` to notify waiters of errors if the entry was discarded (e.g., buffer full or panic), but the implementation was missing. This caused `CompletionHandle::wait()` to hang indefinitely if the entry was dropped before completion.
 **Action:** Implemented `Drop` for `PendingEntry` to check `!notifier.is_complete()` and notify an error. Also updated tests to access `PendingEntry` fields by reference since `Drop` prevents moving fields out.
+
+## [Query Converter Optimization & Usability Gaps]
+**Learning:** `AstConverter` missed the `StartNode` optimization (O(1) lookup) when the node ID was provided via a parameter (``), falling back to a full table scan. Also, `WHERE value = n.prop` failed because the converter enforced `property = value` ordering.
+**Action:** Updated `convert_node_pattern` to resolve ID parameters for optimization. Updated `convert_comparison` to support symmetric equality by swapping operands. Added regression tests in `src/query/converter.rs`.

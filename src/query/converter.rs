@@ -564,22 +564,48 @@ impl AstConverter {
 
     /// Convert a node pattern to query operations.
     fn convert_node_pattern(&self, node: &NodePattern, ops: &mut Vec<QueryOp>) -> Result<()> {
+        let mut optimized_start = false;
+
         // Check for inline property filters that might specify a node ID
         if let Some(ref props) = node.properties {
             for (key, value) in props {
-                if key == "id"
-                    && let PropertyValue::Int(id) = value
-                {
-                    ops.push(QueryOp::StartNode(NodeId::new(*id as u64)?));
-                    return Ok(());
+                if key == "id" {
+                    match value {
+                        PropertyValue::Int(id) => {
+                            ops.push(QueryOp::StartNode(NodeId::new(*id as u64)?));
+                            optimized_start = true;
+                        }
+                        PropertyValue::Parameter(name) => {
+                            // If parameter resolves to a NodeId (or Int), use StartNode optimization
+                            if let Some(param_val) = self.parameters.get(name) {
+                                match param_val {
+                                    ParameterValue::NodeId(id) => {
+                                        ops.push(QueryOp::StartNode(*id));
+                                        optimized_start = true;
+                                    }
+                                    ParameterValue::Value(PredicateValue::Int(id)) => {
+                                        ops.push(QueryOp::StartNode(NodeId::new(*id as u64)?));
+                                        optimized_start = true;
+                                    }
+                                    _ => {} // Other types don't support StartNode optimization
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if optimized_start {
+                    break;
                 }
             }
         }
 
         // Otherwise, scan by label or all nodes
-        ops.push(QueryOp::ScanNodes {
-            label: node.label.clone(),
-        });
+        if !optimized_start {
+            ops.push(QueryOp::ScanNodes {
+                label: node.label.clone(),
+            });
+        }
 
         // Add filters for inline properties
         if let Some(ref props) = node.properties {
@@ -694,28 +720,40 @@ impl AstConverter {
         op: ComparisonOp,
         right: &Expression,
     ) -> Result<Predicate> {
-        // Extract property key from left side - must be a property access (e.g., n.age)
-        let key = match left {
-            Expression::Property(prop) => prop.property.clone(),
-            _ => {
-                return Err(Error::Query(QueryError::SyntaxError {
-                    message: "Left side of comparison must be a property access (e.g., n.age)"
-                        .to_string(),
-                }));
-            }
-        };
+        // Try left side as property
+        if let Expression::Property(prop) = left {
+            let key = prop.property.clone();
+            let value = self.expression_to_predicate_value(right)?;
 
-        // Extract value from right side
-        let value = self.expression_to_predicate_value(right)?;
+            return Ok(match op {
+                ComparisonOp::Eq => Predicate::Eq { key, value },
+                ComparisonOp::Ne => Predicate::Ne { key, value },
+                ComparisonOp::Lt => Predicate::Lt { key, value },
+                ComparisonOp::Le => Predicate::Lte { key, value },
+                ComparisonOp::Gt => Predicate::Gt { key, value },
+                ComparisonOp::Ge => Predicate::Gte { key, value },
+            });
+        }
 
-        Ok(match op {
-            ComparisonOp::Eq => Predicate::Eq { key, value },
-            ComparisonOp::Ne => Predicate::Ne { key, value },
-            ComparisonOp::Lt => Predicate::Lt { key, value },
-            ComparisonOp::Le => Predicate::Lte { key, value },
-            ComparisonOp::Gt => Predicate::Gt { key, value },
-            ComparisonOp::Ge => Predicate::Gte { key, value },
-        })
+        // Try right side as property (swap operands)
+        if let Expression::Property(prop) = right {
+            let key = prop.property.clone();
+            let value = self.expression_to_predicate_value(left)?;
+
+            // When swapping, we must flip inequalities
+            return Ok(match op {
+                ComparisonOp::Eq => Predicate::Eq { key, value }, // Symmetric
+                ComparisonOp::Ne => Predicate::Ne { key, value }, // Symmetric
+                ComparisonOp::Lt => Predicate::Gt { key, value }, // < becomes >
+                ComparisonOp::Le => Predicate::Gte { key, value }, // <= becomes >=
+                ComparisonOp::Gt => Predicate::Lt { key, value }, // > becomes <
+                ComparisonOp::Ge => Predicate::Lte { key, value }, // >= becomes <=
+            });
+        }
+
+        Err(Error::Query(QueryError::SyntaxError {
+            message: "Comparison must involve a property access (e.g., n.age)".to_string(),
+        }))
     }
 
     /// Convert an expression to a predicate value.
@@ -733,7 +771,7 @@ impl AstConverter {
                 }
             }
             _ => Err(Error::Query(QueryError::SyntaxError {
-                message: "Expected literal or parameter on right side of comparison".to_string(),
+                message: "Expected literal or parameter in comparison".to_string(),
             })),
         }
     }
@@ -1615,5 +1653,111 @@ mod tests {
             plan.root,
             crate::query::planner::PhysicalOp::Empty
         ));
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::query::parser::Parser;
+    use crate::core::NodeId;
+
+    #[test]
+    fn test_start_node_optimization_with_parameter() {
+        // 🎯 Target: convert_node_pattern optimization for id lookup
+        // 💣 Risk: Optimization missed when using parameters -> full scan -> slow
+        // 🧪 Strategy: Bind a parameter for ID and check for QueryOp::StartNode
+
+        let ast = Parser::parse("MATCH (n {id: $id}) RETURN n").unwrap();
+        let mut converter = AstConverter::new();
+        converter.bind("id", ParameterValue::NodeId(NodeId::new(123).unwrap()));
+
+        let query = converter.convert(&ast).unwrap();
+
+        // Should optimize to StartNode(123)
+        let has_start_node = query.ops.iter().any(|op| match op {
+            QueryOp::StartNode(id) => id.as_u64() == 123,
+            _ => false,
+        });
+
+        assert!(
+            has_start_node,
+            "Query should be optimized to use StartNode when id is a parameter. Ops: {:?}",
+            query.ops
+        );
+    }
+
+    #[test]
+    fn test_comparison_asymmetry() {
+        // 🎯 Target: convert_comparison
+        // 💣 Risk: Inconvenient API (WHERE 1 = n.a fails)
+        // 🧪 Strategy: Try WHERE value = property and assert success
+
+        let ast = Parser::parse("MATCH (n) WHERE 1 = n.age RETURN n").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast);
+
+        assert!(
+            query.is_ok(),
+            "Comparison should be symmetric (value = property). Error: {:?}",
+            query.err()
+        );
+
+        let query = query.unwrap();
+        let has_filter = query.ops.iter().any(|op| match op {
+            QueryOp::Filter(Predicate::Eq { key, .. }) => key == "age",
+            _ => false,
+        });
+        assert!(has_filter, "Should produce equality filter for age");
+    }
+
+    #[test]
+    fn test_invalid_node_id_in_match() {
+        // 🎯 Target: convert_node_pattern with invalid ID
+        // 💣 Risk: Undefined behavior or panic
+        // 🧪 Strategy: Use negative ID (invalid for u64 NodeId)
+
+        let ast = Parser::parse("MATCH (n {id: -1}) RETURN n").unwrap();
+        let converter = AstConverter::new();
+        let result = converter.convert(&ast);
+
+        // Should handle gracefully (error or empty result), but definitely not panic
+        // Currently expect error because NodeId::new fails
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_duplicate_property_keys() {
+        // 🎯 Target: convert_node_pattern property handling
+        // 💣 Risk: Ambiguous behavior
+        // 🧪 Strategy: Use duplicate keys
+
+        let ast = Parser::parse("MATCH (n {a: 1, a: 2}) RETURN n").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        // Should produce two filters
+        let filters = query.ops.iter().filter(|op| matches!(op, QueryOp::Filter(_))).count();
+        // convert_node_pattern generates QueryOp::Filter for each property
+        assert_eq!(filters, 2);
+    }
+
+    #[test]
+    fn test_start_node_optimization_preserves_filters() {
+        // 🎯 Target: convert_node_pattern optimization correctness
+        // 💣 Risk: Optimization drops other filters (e.g. {id: 1, active: true} -> active ignored)
+        // 🧪 Strategy: Bind parameter for ID, add another property, verify both StartNode and Filter present
+
+        let ast = Parser::parse("MATCH (n {id: $id, active: true}) RETURN n").unwrap();
+        let mut converter = AstConverter::new();
+        converter.bind("id", ParameterValue::NodeId(NodeId::new(123).unwrap()));
+
+        let query = converter.convert(&ast).unwrap();
+
+        let has_start_node = query.ops.iter().any(|op| matches!(op, QueryOp::StartNode(_)));
+        let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(Predicate::Eq { key, .. }) if key == "active"));
+
+        assert!(has_start_node, "Should use StartNode");
+        assert!(has_filter, "Should preserve 'active' filter");
     }
 }
