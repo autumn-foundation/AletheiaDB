@@ -588,8 +588,10 @@ mod tests {
         assert!(edge.connects(NodeId::new(1).unwrap(), NodeId::new(2).unwrap()));
 
         // Mismatch source, match target
-        assert!(!edge.connects(NodeId::new(3).unwrap(), NodeId::new(2).unwrap()),
-            "Should return false when source mismatches even if target matches");
+        assert!(
+            !edge.connects(NodeId::new(3).unwrap(), NodeId::new(2).unwrap()),
+            "Should return false when source mismatches even if target matches"
+        );
     }
 }
 
