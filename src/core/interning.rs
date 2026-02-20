@@ -365,9 +365,7 @@ impl StringInterner {
                 strings[id] = entry.value().to_string();
             } else {
                 // Handle race condition where an ID was added after we read next_id
-                if id >= strings.len() {
-                    strings.resize(id + 1, String::new());
-                }
+                strings.resize(id + 1, String::new());
                 strings[id] = entry.value().to_string();
             }
         }
