@@ -77,11 +77,11 @@ sqlparser = { version = "0.40", optional = true }
 rayon = "1.8"
 comfy-table = "7.2.2"
 crossterm = "0.29.0"
+rand = "0.8"
 
 [dev-dependencies]
 criterion = "0.8"
 proptest = "1.4"
-rand = "0.8"
 tempfile = "3.8"
 serial_test = "3.0"
 # Tokio for async tests
@@ -92,6 +92,7 @@ lazy_static = "1.4"
 rustyline = "17.0"
 # Loom for concurrency testing
 loom = { version = "0.7.2", features = ["checkpoint"] }
+rand = "0.8"
 
 [features]
 # Nova experimental features

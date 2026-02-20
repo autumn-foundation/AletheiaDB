@@ -64,6 +64,9 @@ impl AletheiaDB {
 
         // 1. Save string interner first (dependency for all others)
         if let Some(ref tracker) = self.persistence_tracker {
+            // Update the string LSN tracker to current_lsn BEFORE calculating safe LSN
+            // This ensures that even if no new strings were added, the tracker reflects
+            // that the interner is up-to-date with current_lsn.
             crate::storage::index_persistence::operations::persist_string_interner(
                 manager,
                 tracker,

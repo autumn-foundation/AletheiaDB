@@ -97,22 +97,22 @@ impl PersistenceTracker {
 
     /// Update the last persisted LSN for vector indexes.
     pub fn update_vector_lsn(&self, lsn: u64) {
-        self.last_vector_lsn.fetch_max(lsn, Ordering::Relaxed);
+        self.last_vector_lsn.fetch_max(lsn, Ordering::Release);
     }
 
     /// Update the last persisted LSN for graph index.
     pub fn update_graph_lsn(&self, lsn: u64) {
-        self.last_graph_lsn.fetch_max(lsn, Ordering::Relaxed);
+        self.last_graph_lsn.fetch_max(lsn, Ordering::Release);
     }
 
     /// Update the last persisted LSN for temporal index.
     pub fn update_temporal_lsn(&self, lsn: u64) {
-        self.last_temporal_lsn.fetch_max(lsn, Ordering::Relaxed);
+        self.last_temporal_lsn.fetch_max(lsn, Ordering::Release);
     }
 
     /// Update the last persisted LSN for string interner.
     pub fn update_string_lsn(&self, lsn: u64) {
-        self.last_string_lsn.fetch_max(lsn, Ordering::Relaxed);
+        self.last_string_lsn.fetch_max(lsn, Ordering::Release);
     }
 
     /// Get the safe manifest LSN (minimum of all component LSNs).
@@ -121,10 +121,10 @@ impl PersistenceTracker {
     /// WAL replay should start from this LSN to ensure no operations are missed for components
     /// that might be lagging behind.
     pub fn get_safe_manifest_lsn(&self) -> u64 {
-        let vector = self.last_vector_lsn.load(Ordering::Relaxed);
-        let graph = self.last_graph_lsn.load(Ordering::Relaxed);
-        let temporal = self.last_temporal_lsn.load(Ordering::Relaxed);
-        let string = self.last_string_lsn.load(Ordering::Relaxed);
+        let vector = self.last_vector_lsn.load(Ordering::Acquire);
+        let graph = self.last_graph_lsn.load(Ordering::Acquire);
+        let temporal = self.last_temporal_lsn.load(Ordering::Acquire);
+        let string = self.last_string_lsn.load(Ordering::Acquire);
 
         // Calculate minimum of all components
         vector.min(graph).min(temporal).min(string)

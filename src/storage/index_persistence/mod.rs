@@ -236,9 +236,16 @@ pub const MAX_MMAP_FILE_SIZE: u64 = if cfg!(test) {
 /// Atomically write data to a file using write-temp-then-rename pattern.
 ///
 /// This prevents corruption if the process crashes mid-write:
-/// 1. Write to `{path}.tmp`
+/// 1. Write to `{path}.tmp.{random_suffix}`
 /// 2. Sync to disk
 /// 3. Rename temp → target (atomic on POSIX, nearly-atomic on Windows)
+///
+/// # Thread Safety
+///
+/// Uses a random suffix for the temporary file to allow multiple threads to attempt
+/// atomic writes to the same target concurrently (though last writer wins).
+/// This prevents race conditions where one thread truncates another thread's
+/// temporary file.
 ///
 /// # Errors
 ///
@@ -247,11 +254,19 @@ pub const MAX_MMAP_FILE_SIZE: u64 = if cfg!(test) {
 /// - Failed to sync to disk
 /// - Failed to rename temp to target
 pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use rand::Rng;
     use std::fs;
     use std::io::Write;
 
-    // Write to temporary file
-    let temp_path = path.with_extension("tmp");
+    // Generate a random suffix to prevent collisions between concurrent writers
+    let suffix: u32 = rand::thread_rng().r#gen();
+    let extension = match path.extension() {
+        Some(ext) => format!("{}.{}.tmp", ext.to_string_lossy(), suffix),
+        None => format!("{}.tmp", suffix),
+    };
+
+    // Write to temporary file with unique name
+    let temp_path = path.with_extension(extension);
     let mut file = fs::File::create(&temp_path)?;
     file.write_all(data)?;
     file.sync_all()?; // Ensure data is on disk
