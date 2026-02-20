@@ -1484,17 +1484,52 @@ impl TxIdGenerator {
     ///
     /// This operation is atomic and thread-safe.
     pub fn next(&self) -> TxId {
-        TxId(self.counter.fetch_add(1, Ordering::SeqCst))
+        let mut current = self.counter.load(Ordering::SeqCst);
+        loop {
+            if current == u64::MAX {
+                panic!("Transaction ID overflow! Database requires restart/migration.");
+            }
+            match self.counter.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return TxId(current),
+                Err(v) => current = v,
+            }
+        }
     }
 
     /// Get the current transaction ID (last generated)
     pub fn current(&self) -> TxId {
         TxId(self.counter.load(Ordering::SeqCst).saturating_sub(1))
     }
+
+    #[cfg(test)]
+    /// Set the internal counter for testing overflow conditions.
+    pub fn set_counter(&self, val: u64) {
+        self.counter.store(val, Ordering::SeqCst);
+    }
 }
 
 impl Default for TxIdGenerator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod warden_repro {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "Transaction ID overflow")]
+    fn test_tx_id_overflow_panic() {
+        let generator = TxIdGenerator::new();
+        // Force counter to max to simulate exhaustion
+        generator.set_counter(u64::MAX);
+        // This should panic to prevent wrapping to 0
+        let _ = generator.next();
     }
 }
