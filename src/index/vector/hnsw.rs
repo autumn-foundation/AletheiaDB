@@ -463,7 +463,6 @@ const MAX_SEARCH_ATTEMPTS: u32 = 4; // 1 initial attempt + 3 retries
 /// # Returns
 ///
 /// `true` if the error is transient and safe to retry, `false` otherwise
-#[inline]
 fn is_retryable_usearch_error(error_msg: &str) -> bool {
     // Thread pool exhaustion is a transient error that resolves when threads become available
     error_msg.contains("No available threads to lock")
@@ -4227,5 +4226,104 @@ mod coverage_misc_tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Mock read error"));
+    }
+}
+
+#[cfg(test)]
+mod coverage_additions {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn create_test_index() -> HnswIndex {
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_retry_usearch_logic() {
+        let index = create_test_index();
+        let mut attempts = 0;
+
+        // We use a closure that simulates a transient error for the first 2 attempts
+        // and then succeeds.
+        // Or we can simulate total failure to verify it retries MAX_SEARCH_ATTEMPTS times.
+
+        let result: crate::core::error::Result<()> = index.retry_usearch(
+            || {
+                attempts += 1;
+                // Always fail with the specific retryable error message
+                Err("No available threads to lock".to_string())
+            },
+            "test_context",
+        );
+
+        // Should fail after retries
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("test_context"));
+                assert!(msg.contains("No available threads to lock"));
+            }
+            _ => panic!("Expected IndexError"),
+        }
+
+        // MAX_SEARCH_ATTEMPTS is 4 (1 initial + 3 retries)
+        assert_eq!(attempts, 4);
+
+        // Verify stats were updated
+        assert_eq!(index.stats.search_retries.load(Ordering::Relaxed), 3);
+        assert_eq!(index.stats.search_retry_failures.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_retry_usearch_success_after_retry() {
+        let index = create_test_index();
+        let mut attempts = 0;
+
+        let result: crate::core::error::Result<()> = index.retry_usearch(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err("No available threads to lock".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            "test_context",
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(attempts, 3);
+
+        assert_eq!(index.stats.search_retries.load(Ordering::Relaxed), 2);
+        // failures should be 0 (since it eventually succeeded)
+        assert_eq!(index.stats.search_retry_failures.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_save_async_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("async_save.index");
+
+        let index = create_test_index();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+
+        // Call save inside a tokio runtime
+        // This should trigger the block_in_place path
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let result = index.save(&path);
+            assert!(result.is_ok());
+        });
+
+        assert!(path.exists());
+        assert!(path.with_extension("usearch.mappings").exists());
     }
 }
