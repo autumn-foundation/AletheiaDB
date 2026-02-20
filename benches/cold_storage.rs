@@ -34,6 +34,7 @@ use aletheiadb::storage::redb_cold_storage::{CompressionAlgorithm, RedbColdStora
 use aletheiadb::storage::version::NodeVersion;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -283,41 +284,62 @@ fn bench_read_latency_percentiles(c: &mut Criterion) {
 /// Benchmark: Write throughput over time.
 ///
 /// Measures sustained write throughput.
-/// Target: >10k versions/sec
+///
+/// `sustained_write_10k_versions` validates the >10k versions/sec target in
+/// ratio-optimized mode (`CompressionAlgorithm::Zstd`).
+/// `sustained_write_10k_versions_fast_reference` tracks throughput-optimized mode.
 fn bench_sustained_write_throughput(c: &mut Criterion) {
-    let temp_dir =
-        TempDir::new().expect("Failed to create temp directory for sustained write benchmark");
-    let config = RedbConfig::default()
-        .compression(CompressionAlgorithm::Zstd)
-        .enable_checksums(true);
-    let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
-        .expect("Failed to create RedbColdStorage for sustained write benchmark");
-
     let batch_size = 10000;
-    let versions = create_test_versions(batch_size);
+    for (bench_name, compression, target_label) in [
+        (
+            "sustained_write_10k_versions",
+            CompressionAlgorithm::Zstd,
+            Some(">10,000 versions/sec"),
+        ),
+        (
+            "sustained_write_10k_versions_fast_reference",
+            CompressionAlgorithm::Fast,
+            None,
+        ),
+    ] {
+        let temp_dir =
+            TempDir::new().expect("Failed to create temp directory for sustained write benchmark");
+        let config = RedbConfig::default()
+            .compression(compression)
+            .enable_checksums(true);
+        let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
+            .expect("Failed to create RedbColdStorage for sustained write benchmark");
 
-    c.bench_function("sustained_write_10k_versions", |b| {
-        b.iter_custom(|iters| {
-            let start = Instant::now();
-            for _ in 0..iters {
-                storage
-                    .store_node_versions_batch(black_box(&versions))
-                    .unwrap();
-            }
-            let elapsed = start.elapsed();
+        let versions = create_test_versions(batch_size);
+        let printed = AtomicBool::new(false);
 
-            // Print throughput for manual verification
-            let total_versions = batch_size * iters as usize;
-            let throughput = total_versions as f64 / elapsed.as_secs_f64();
-            if iters == 1 {
-                eprintln!("\nWrite Throughput:");
-                eprintln!("  {:.0} versions/sec", throughput);
-                eprintln!("  Target: >10,000 versions/sec");
-            }
+        c.bench_function(bench_name, |b| {
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    storage
+                        .store_node_versions_batch(black_box(&versions))
+                        .unwrap();
+                }
+                let elapsed = start.elapsed();
 
-            elapsed
+                // Emit a single sample throughput line for manual verification.
+                if !printed.swap(true, Ordering::Relaxed) {
+                    let total_versions = batch_size * iters as usize;
+                    let throughput = total_versions as f64 / elapsed.as_secs_f64();
+                    eprintln!("\nWrite Throughput ({bench_name}):");
+                    eprintln!("  {:.0} versions/sec", throughput);
+                    if let Some(target) = target_label {
+                        eprintln!("  Target: {target}");
+                    } else {
+                        eprintln!("  Mode: throughput-optimized reference (fast)");
+                    }
+                }
+
+                elapsed
+            });
         });
-    });
+    }
 }
 
 /// Benchmark: Compression ratio measurement.

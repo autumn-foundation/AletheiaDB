@@ -47,6 +47,7 @@ use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
 use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
+use rayon::prelude::*;
 use redb::{ReadableDatabase, ReadableTable};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,6 +68,16 @@ const METADATA_TABLE: redb::TableDefinition<'static, &'static str, &'static [u8]
 
 /// Metadata keys stored in the metadata table.
 const FLUSHED_LSN_KEY: &str = "flushed_lsn";
+
+/// Batch size threshold where parallel pre-compression becomes worthwhile.
+const PARALLEL_COMPRESSION_THRESHOLD: usize = 1_024;
+
+#[derive(Debug)]
+struct PreparedVersionBatch {
+    entries: Vec<(u64, Vec<u8>)>,
+    raw_size_bytes: u64,
+    compressed_size_bytes: u64,
+}
 
 // ============================================================================
 // Types moved from cold_storage.rs
@@ -407,6 +418,120 @@ impl RedbColdStorage {
     /// Decompress data using the configured algorithm.
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
         crate::storage::compression::decompress(data, &self.config.to_cold_storage_config())
+    }
+
+    #[inline]
+    fn should_parallel_compress(&self, batch_len: usize) -> bool {
+        matches!(self.config.compression, CompressionAlgorithm::Zstd)
+            && batch_len >= PARALLEL_COMPRESSION_THRESHOLD
+    }
+
+    fn prepare_node_versions_batch(
+        &self,
+        versions: &[NodeVersion],
+    ) -> Result<PreparedVersionBatch> {
+        let cold_config = self.config.to_cold_storage_config();
+
+        let entries_with_sizes: Vec<(u64, Vec<u8>, u64, u64)> = if self
+            .should_parallel_compress(versions.len())
+        {
+            versions
+                .par_iter()
+                .map(|version| {
+                    let encoded = encode_node_version(version);
+                    let raw_size = encoded.len() as u64;
+                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
+                    let compressed_size = compressed.len() as u64;
+                    Ok::<_, crate::core::error::Error>((
+                        version.id.as_u64(),
+                        compressed,
+                        raw_size,
+                        compressed_size,
+                    ))
+                })
+                .collect::<Result<_>>()?
+        } else {
+            versions
+                .iter()
+                .map(|version| {
+                    let encoded = encode_node_version(version);
+                    let raw_size = encoded.len() as u64;
+                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
+                    let compressed_size = compressed.len() as u64;
+                    Ok((version.id.as_u64(), compressed, raw_size, compressed_size))
+                })
+                .collect::<Result<_>>()?
+        };
+
+        let raw_size_bytes = entries_with_sizes.iter().map(|(_, _, raw, _)| *raw).sum();
+        let compressed_size_bytes = entries_with_sizes
+            .iter()
+            .map(|(_, _, _, compressed)| *compressed)
+            .sum();
+        let entries = entries_with_sizes
+            .into_iter()
+            .map(|(id, payload, _, _)| (id, payload))
+            .collect();
+
+        Ok(PreparedVersionBatch {
+            entries,
+            raw_size_bytes,
+            compressed_size_bytes,
+        })
+    }
+
+    fn prepare_edge_versions_batch(
+        &self,
+        versions: &[EdgeVersion],
+    ) -> Result<PreparedVersionBatch> {
+        let cold_config = self.config.to_cold_storage_config();
+
+        let entries_with_sizes: Vec<(u64, Vec<u8>, u64, u64)> = if self
+            .should_parallel_compress(versions.len())
+        {
+            versions
+                .par_iter()
+                .map(|version| {
+                    let encoded = encode_edge_version(version);
+                    let raw_size = encoded.len() as u64;
+                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
+                    let compressed_size = compressed.len() as u64;
+                    Ok::<_, crate::core::error::Error>((
+                        version.id.as_u64(),
+                        compressed,
+                        raw_size,
+                        compressed_size,
+                    ))
+                })
+                .collect::<Result<_>>()?
+        } else {
+            versions
+                .iter()
+                .map(|version| {
+                    let encoded = encode_edge_version(version);
+                    let raw_size = encoded.len() as u64;
+                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
+                    let compressed_size = compressed.len() as u64;
+                    Ok((version.id.as_u64(), compressed, raw_size, compressed_size))
+                })
+                .collect::<Result<_>>()?
+        };
+
+        let raw_size_bytes = entries_with_sizes.iter().map(|(_, _, raw, _)| *raw).sum();
+        let compressed_size_bytes = entries_with_sizes
+            .iter()
+            .map(|(_, _, _, compressed)| *compressed)
+            .sum();
+        let entries = entries_with_sizes
+            .into_iter()
+            .map(|(id, payload, _, _)| (id, payload))
+            .collect();
+
+        Ok(PreparedVersionBatch {
+            entries,
+            raw_size_bytes,
+            compressed_size_bytes,
+        })
     }
 
     /// Set fault injection flag for write operations (Test only).
@@ -803,6 +928,9 @@ impl RedbColdStorage {
             return Ok(());
         }
 
+        let prepared = self.prepare_node_versions_batch(versions)?;
+        let version_count = prepared.entries.len() as u64;
+
         let write_txn = self
             .db
             .begin_write()
@@ -816,31 +944,26 @@ impl RedbColdStorage {
                 },
             )?;
 
-            for version in versions {
-                let encoded = encode_node_version(version);
-                let raw_size = encoded.len();
-                let compressed = self.compress(&encoded)?;
-                let compressed_size = compressed.len();
-
+            for (id, compressed) in &prepared.entries {
                 table
-                    .insert(version.id.as_u64(), compressed.as_slice())
+                    .insert(*id, compressed.as_slice())
                     .map_err(map_storage_error("Failed to store node version"))?;
-
-                self.stats
-                    .node_versions_stored
-                    .fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .bytes_written_raw
-                    .fetch_add(raw_size as u64, Ordering::Relaxed);
-                self.stats
-                    .bytes_written_compressed
-                    .fetch_add(compressed_size as u64, Ordering::Relaxed);
             }
         }
 
         write_txn
             .commit()
             .map_err(map_commit_error("Failed to commit batch"))?;
+
+        self.stats
+            .node_versions_stored
+            .fetch_add(version_count, Ordering::Relaxed);
+        self.stats
+            .bytes_written_raw
+            .fetch_add(prepared.raw_size_bytes, Ordering::Relaxed);
+        self.stats
+            .bytes_written_compressed
+            .fetch_add(prepared.compressed_size_bytes, Ordering::Relaxed);
 
         Ok(())
     }
@@ -852,6 +975,9 @@ impl RedbColdStorage {
         if versions.is_empty() {
             return Ok(());
         }
+
+        let prepared = self.prepare_edge_versions_batch(versions)?;
+        let version_count = prepared.entries.len() as u64;
 
         let write_txn = self
             .db
@@ -866,31 +992,26 @@ impl RedbColdStorage {
                 },
             )?;
 
-            for version in versions {
-                let encoded = encode_edge_version(version);
-                let raw_size = encoded.len();
-                let compressed = self.compress(&encoded)?;
-                let compressed_size = compressed.len();
-
+            for (id, compressed) in &prepared.entries {
                 table
-                    .insert(version.id.as_u64(), compressed.as_slice())
+                    .insert(*id, compressed.as_slice())
                     .map_err(map_storage_error("Failed to store edge version"))?;
-
-                self.stats
-                    .edge_versions_stored
-                    .fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .bytes_written_raw
-                    .fetch_add(raw_size as u64, Ordering::Relaxed);
-                self.stats
-                    .bytes_written_compressed
-                    .fetch_add(compressed_size as u64, Ordering::Relaxed);
             }
         }
 
         write_txn
             .commit()
             .map_err(map_commit_error("Failed to commit batch"))?;
+
+        self.stats
+            .edge_versions_stored
+            .fetch_add(version_count, Ordering::Relaxed);
+        self.stats
+            .bytes_written_raw
+            .fetch_add(prepared.raw_size_bytes, Ordering::Relaxed);
+        self.stats
+            .bytes_written_compressed
+            .fetch_add(prepared.compressed_size_bytes, Ordering::Relaxed);
 
         Ok(())
     }
@@ -940,6 +1061,11 @@ impl RedbColdStorage {
     ) -> Result<()> {
         self.check_fail_writes()?;
 
+        let prepared_nodes = self.prepare_node_versions_batch(nodes)?;
+        let prepared_edges = self.prepare_edge_versions_batch(edges)?;
+        let node_count = prepared_nodes.entries.len() as u64;
+        let edge_count = prepared_edges.entries.len() as u64;
+
         let write_txn = self
             .db
             .begin_write()
@@ -951,25 +1077,10 @@ impl RedbColdStorage {
                 .open_table(NODE_VERSIONS_TABLE)
                 .map_err(map_table_error("Failed to open node_versions table"))?;
 
-            for version in nodes {
-                let encoded = encode_node_version(version);
-                let raw_size = encoded.len();
-                let compressed = self.compress(&encoded)?;
-                let compressed_size = compressed.len();
-
+            for (id, compressed) in &prepared_nodes.entries {
                 table
-                    .insert(version.id.as_u64(), compressed.as_slice())
+                    .insert(*id, compressed.as_slice())
                     .map_err(map_storage_error("Failed to store node version"))?;
-
-                self.stats
-                    .node_versions_stored
-                    .fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .bytes_written_raw
-                    .fetch_add(raw_size as u64, Ordering::Relaxed);
-                self.stats
-                    .bytes_written_compressed
-                    .fetch_add(compressed_size as u64, Ordering::Relaxed);
             }
         }
 
@@ -979,25 +1090,10 @@ impl RedbColdStorage {
                 .open_table(EDGE_VERSIONS_TABLE)
                 .map_err(map_table_error("Failed to open edge_versions table"))?;
 
-            for version in edges {
-                let encoded = encode_edge_version(version);
-                let raw_size = encoded.len();
-                let compressed = self.compress(&encoded)?;
-                let compressed_size = compressed.len();
-
+            for (id, compressed) in &prepared_edges.entries {
                 table
-                    .insert(version.id.as_u64(), compressed.as_slice())
+                    .insert(*id, compressed.as_slice())
                     .map_err(map_storage_error("Failed to store edge version"))?;
-
-                self.stats
-                    .edge_versions_stored
-                    .fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .bytes_written_raw
-                    .fetch_add(raw_size as u64, Ordering::Relaxed);
-                self.stats
-                    .bytes_written_compressed
-                    .fetch_add(compressed_size as u64, Ordering::Relaxed);
             }
         }
 
@@ -1013,6 +1109,21 @@ impl RedbColdStorage {
         write_txn
             .commit()
             .map_err(map_commit_error("Failed to commit batch"))?;
+
+        self.stats
+            .node_versions_stored
+            .fetch_add(node_count, Ordering::Relaxed);
+        self.stats
+            .edge_versions_stored
+            .fetch_add(edge_count, Ordering::Relaxed);
+        self.stats.bytes_written_raw.fetch_add(
+            prepared_nodes.raw_size_bytes + prepared_edges.raw_size_bytes,
+            Ordering::Relaxed,
+        );
+        self.stats.bytes_written_compressed.fetch_add(
+            prepared_nodes.compressed_size_bytes + prepared_edges.compressed_size_bytes,
+            Ordering::Relaxed,
+        );
 
         Ok(())
     }
