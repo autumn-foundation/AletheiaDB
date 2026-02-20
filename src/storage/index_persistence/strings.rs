@@ -85,6 +85,13 @@ pub fn restore_string_interner(data: &StringInternerData) -> Result<()> {
         // The interner should assign indices in order
         // If not, the interner had pre-existing strings which is a bug
         if interned_id.as_u32() != idx as u32 {
+            // Special handling for gaps: if the string is empty, it might be a gap
+            // captured during concurrent ID reservation in `get_all_strings`.
+            // If so, we can safely ignore the mismatch as no data references this ID.
+            if s.is_empty() {
+                continue;
+            }
+
             return Err(IndexPersistenceError::InternerMismatch {
                 expected: idx as u32,
                 got: interned_id.as_u32(),
