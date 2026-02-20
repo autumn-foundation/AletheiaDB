@@ -1,4 +1,35 @@
 //! Shard coordinator for managing distributed operations.
+//!
+//! The `ShardCoordinator` is the central component responsible for orchestrating
+//! distributed transactions across multiple shards in AletheiaDB. It ensures
+//! ACID properties (Atomicity, Consistency, Isolation, Durability) are maintained
+//! even when data is partitioned across different nodes.
+//!
+//! # Key Responsibilities
+//!
+//! 1.  **Transaction Coordination**: Manages the lifecycle of distributed transactions using
+//!     the Two-Phase Commit (2PC) protocol.
+//! 2.  **Query Routing**: Uses the `ShardRouter` to direct queries to the appropriate shards.
+//! 3.  **Time Synchronization**: Maintains a Hybrid Logical Clock (HLC) to assign consistent
+//!     timestamps for cross-shard operations.
+//! 4.  **Failure Recovery**: Detects failed transactions and orchestrates recovery or abortion.
+//!
+//! # Two-Phase Commit (2PC) Flow
+//!
+//! 1.  **Begin**: A transaction ID is generated.
+//! 2.  **Prepare**: The coordinator asks all participating shards to prepare.
+//!     *   If all vote YES, the transaction proceeds to commit.
+//!     *   If any vote NO or timeout, the transaction is aborted.
+//! 3.  **Commit**:
+//!     *   The decision is logged to the `TwoPhaseCommitLog` (WAL).
+//!     *   The coordinator tells all participants to commit.
+//!     *   Once all acknowledge, the decision log is cleared.
+//!
+//! # Recovery
+//!
+//! If the coordinator crashes during the Commit phase, the `recover_pending_transactions`
+//! method replays the pending decisions from the log, ensuring that all participants
+//! eventually reach a consistent state.
 
 use super::config::{RebalanceConfig, ShardConfig};
 use super::router::{ShardRouter, TraversalPlan};
@@ -152,6 +183,22 @@ impl ShardConnection {
 }
 
 /// Coordinator for managing shards and distributed operations.
+///
+/// This struct holds the state required to coordinate distributed transactions,
+/// including connections to shards, the transaction ID generator, and the commit log.
+///
+/// # Example
+///
+/// ```no_run
+/// use aletheiadb::storage::sharding::{ShardCoordinator, ShardConfig};
+///
+/// // Configure shards
+/// let config = ShardConfig::default(); // ... configure
+/// let coordinator = ShardCoordinator::new(config);
+///
+/// // Route a query
+/// let shard_id = coordinator.route_node("Person");
+/// ```
 pub struct ShardCoordinator {
     /// Router for query routing decisions.
     router: ShardRouter,
@@ -181,6 +228,9 @@ pub struct ShardCoordinator {
 
 impl ShardCoordinator {
     /// Create a new shard coordinator.
+    ///
+    /// Initializes connections to all defined shards, sets up the router, and
+    /// prepares the transaction ID generator.
     pub fn new(config: ShardConfig) -> Self {
         let mut connections = HashMap::new();
         let mut shard_states = HashMap::new();
@@ -354,6 +404,9 @@ impl ShardCoordinator {
     }
 
     /// Start a new distributed transaction.
+    ///
+    /// Generates a new unique `TxId` and registers the transaction as active.
+    /// The transaction starts in the `Pending` phase.
     pub fn begin_distributed_transaction(
         &self,
         participants: Vec<ShardId>,
@@ -378,6 +431,11 @@ impl ShardCoordinator {
     }
 
     /// Execute the prepare phase of 2PC.
+    ///
+    /// 1.  Assigns a commit timestamp (if not already assigned).
+    /// 2.  Sends `Prepare` requests to all participant shards.
+    /// 3.  If all shards respond with success, the transaction moves to `Prepared` state.
+    /// 4.  If any shard fails or times out, the transaction is aborted.
     pub fn prepare_distributed_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
@@ -485,10 +543,17 @@ impl ShardCoordinator {
 
     /// Execute the commit phase of 2PC.
     ///
-    /// This method follows the critical 2PC protocol:
-    /// 1. Log the commit decision BEFORE sending commits
-    /// 2. Send commit to all participants
-    /// 3. Clear the decision after all acknowledge
+    /// This method follows the critical 2PC protocol to ensure atomicity:
+    ///
+    /// 1.  **Log Decision**: The decision to commit is persisted to the `TwoPhaseCommitLog`.
+    ///     This is the "Point of No Return". Once logged, the transaction *must* complete.
+    /// 2.  **Send Commit**: `Commit` requests are sent to all participant shards.
+    ///     This step includes retry logic with exponential backoff to handle transient failures.
+    /// 3.  **Clear Log**: Once all participants acknowledge the commit, the decision is
+    ///     removed from the log.
+    ///
+    /// If the coordinator crashes after step 1 but before step 3, recovery will
+    /// replay this method to ensure completion.
     pub fn commit_distributed_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
@@ -725,12 +790,16 @@ impl ShardCoordinator {
 
     /// Recovery: replay pending commit decisions.
     ///
-    /// This should be called on coordinator startup to handle
-    /// transactions that were in-flight when the coordinator crashed.
+    /// This should be called on coordinator startup to handle transactions that were
+    /// in the middle of the commit phase when the coordinator crashed (or restarted).
     ///
-    /// Returns a tuple of (successfully recovered, dead-lettered transactions).
-    /// Dead-lettered transactions are those that exceeded max recovery attempts
-    /// and require manual intervention.
+    /// It reads the `TwoPhaseCommitLog` and retries the commit for any pending decisions.
+    ///
+    /// # Returns
+    ///
+    /// A `RecoveryResult` containing:
+    /// *   `recovered`: List of `TxId`s that were successfully completed.
+    /// *   `dead_lettered`: List of transactions that failed after max retries and require manual intervention.
     pub fn recover_pending_transactions(&self) -> Result<RecoveryResult, DistributedTxError> {
         let decisions = {
             let log = self

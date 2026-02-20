@@ -1,3 +1,12 @@
+//! Implementation of the `GraphView` trait for `AletheiaDB`.
+//!
+//! This module adapts the main database struct to the `GraphView` trait,
+//! allowing it to be used in query execution and other components that
+//! require a generic view of the graph.
+//!
+//! The `GraphView` trait provides a unified interface for accessing graph elements
+//! (nodes and edges) both in the current state and at specific points in time.
+
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
@@ -5,6 +14,29 @@ use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::query::traits::GraphView;
 
+/// Implementation of `GraphView` for `AletheiaDB`.
+///
+/// This implementation delegates all calls to the underlying `AletheiaDB` methods,
+/// exposing the database's full capabilities through the `GraphView` interface.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::query::traits::GraphView;
+/// use aletheiadb::core::id::NodeId;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+///
+/// // Use the database as a GraphView
+/// let view: &dyn GraphView = &db;
+///
+/// // Access graph elements through the trait
+/// // let node = view.get_node(NodeId::new(1)?)?;
+/// # Ok(())
+/// # }
+/// ```
 impl GraphView for AletheiaDB {
     fn get_node(&self, id: NodeId) -> Result<Node> {
         self.get_node(id)
