@@ -32,10 +32,10 @@
 //! - **Negative Dissonance**: Graph neighbors are *more* similar than the global best?
 //!   (Rare, but possible if index search is approximate).
 
+use crate::AletheiaDB;
 use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::vector::ops;
-use crate::AletheiaDB;
 
 /// The Dissonance Engine for detecting semantic anomalies.
 pub struct DissonanceEngine<'a> {
@@ -144,7 +144,9 @@ impl<'a> DissonanceEngine<'a> {
         // Search for K neighbors where K = neighbor count
         let k = neighbors.len();
         // We search k+1 because the node itself might be returned as the top result (sim=1.0)
-        let knn_results = self.db.search_vectors_in(vector_property, node_vec, k + 1)?;
+        let knn_results = self
+            .db
+            .search_vectors_in(vector_property, node_vec, k + 1)?;
 
         let mut total_knn_sim = 0.0;
         let mut valid_knn = 0;
@@ -230,19 +232,17 @@ mod tests {
         }
 
         // Connect A to B (Dissimilar)
-        db.create_edge(
-            a,
-            b,
-            "CONNECTED_TO",
-            PropertyMapBuilder::new().build(),
-        )
-        .unwrap();
+        db.create_edge(a, b, "CONNECTED_TO", PropertyMapBuilder::new().build())
+            .unwrap();
 
         let engine = DissonanceEngine::new(&db);
         let dissonance = engine.calculate_dissonance(a, "vec").unwrap();
 
         println!("High Dissonance Score: {}", dissonance);
-        assert!(dissonance > 0.5, "Expected high dissonance for orthogonal connection");
+        assert!(
+            dissonance > 0.5,
+            "Expected high dissonance for orthogonal connection"
+        );
     }
 
     #[test]
@@ -287,18 +287,16 @@ mod tests {
             .unwrap();
         }
 
-        db.create_edge(
-            a,
-            b,
-            "CONNECTED_TO",
-            PropertyMapBuilder::new().build(),
-        )
-        .unwrap();
+        db.create_edge(a, b, "CONNECTED_TO", PropertyMapBuilder::new().build())
+            .unwrap();
 
         let engine = DissonanceEngine::new(&db);
         let dissonance = engine.calculate_dissonance(a, "vec").unwrap();
 
         println!("Low Dissonance Score: {}", dissonance);
-        assert!(dissonance < 0.1, "Expected low dissonance for similar connection");
+        assert!(
+            dissonance < 0.1,
+            "Expected low dissonance for similar connection"
+        );
     }
 }
