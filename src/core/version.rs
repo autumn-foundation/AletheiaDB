@@ -12,7 +12,7 @@
 use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
 use crate::core::interning::{IdentityHasher, InternedString};
-use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
+use crate::core::property::{PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
@@ -159,8 +159,10 @@ impl VectorDelta {
             return None;
         }
 
-        // Validate dimension doesn't exceed maximum to prevent DoS
-        if old.len() > MAX_VECTOR_DIMENSIONS {
+        // Validate dimension doesn't exceed u32::MAX (needed for sparse indices)
+        // MAX_VECTOR_DIMENSIONS is far smaller than u32::MAX, but we relax the check here
+        // to ensure PropertyDelta change detection works correctly for large vectors.
+        if old.len() > u32::MAX as usize {
             return None;
         }
 
@@ -2468,7 +2470,7 @@ mod sentry_tests {
 mod mutant_kill_tests {
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
-    use crate::core::property::PropertyMapBuilder;
+    use crate::core::property::{PropertyMapBuilder, MAX_VECTOR_DIMENSIONS};
     use crate::core::temporal::TIMESTAMP_MAX;
     use std::sync::Arc;
 
@@ -2815,5 +2817,52 @@ mod mutant_kill_tests {
             VectorDelta::from_diff(&v1, &v4).is_none(),
             "Difference < EPSILON should be considered equal"
         );
+    }
+
+    #[test]
+    fn test_vector_delta_handles_huge_vectors() {
+        // 🛡️ Sentinel Test: Verify VectorDelta handles vectors larger than MAX_VECTOR_DIMENSIONS.
+        // This ensures PropertyDelta::from_diff doesn't silently ignore changes in large vectors.
+        //
+        // Note: We use MAX_VECTOR_DIMENSIONS + 1
+        let size = MAX_VECTOR_DIMENSIONS + 1;
+        let vec1 = vec![0.0f32; size];
+        let mut vec2 = vec![0.0f32; size];
+        vec2[0] = 1.0; // One change
+
+        let delta = VectorDelta::from_diff(&vec1, &vec2);
+        assert!(delta.is_some(), "VectorDelta should handle huge vectors");
+
+        match delta.unwrap() {
+            VectorDelta::Sparse { dimension, .. } => {
+                assert_eq!(dimension, size);
+            }
+            VectorDelta::Full(v) => {
+                // Should use sparse because only 1 element changed
+                panic!("Expected Sparse delta, got Full: len={}", v.len());
+            }
+        }
+    }
+
+    #[test]
+    fn test_property_delta_captures_huge_vector_change() {
+        // 🛡️ Sentinel Test: Integration test for PropertyDelta with huge vectors.
+        // Simulates the bug scenario.
+
+        let size = MAX_VECTOR_DIMENSIONS + 1;
+        let vec1 = vec![0.0f32; size];
+        let mut vec2 = vec![0.0f32; size];
+        vec2[0] = 1.0;
+
+        // Bypass public API limits to construct PropertyValues
+        let val1 = PropertyValue::Vector(Arc::from(vec1));
+        let val2 = PropertyValue::Vector(Arc::from(vec2));
+
+        let map1 = PropertyMapBuilder::new().insert("vec", val1).build();
+        let map2 = PropertyMapBuilder::new().insert("vec", val2).build();
+
+        let delta = PropertyDelta::from_diff(&map1, &map2);
+        assert!(!delta.is_empty(), "PropertyDelta should capture change");
+        assert!(delta.vector_deltas.contains_key(&GLOBAL_INTERNER.intern("vec").unwrap()));
     }
 }
