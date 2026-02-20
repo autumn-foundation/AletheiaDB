@@ -1,0 +1,409 @@
+const DEFAULT_RECONSTRUCTION_CACHE_SIZE: usize = 10_000;
+
+/// Anchor cache size ratio relative to main cache (Improvement #1: Issue #338).
+///
+/// Typically 10-20% of versions become anchors depending on `anchor_interval`.
+/// With default interval of 10, we get ~10% anchors. Setting to 1/5 (20%)
+/// provides headroom for configurations with smaller intervals.
+const ANCHOR_CACHE_SIZE_RATIO: usize = 5; // 20% of main cache
+
+/// Minimum anchor cache size to ensure reasonable performance (Improvement #1: Issue #338).
+///
+/// Even with very small main caches, we want enough anchor cache to hold
+/// at least a few anchors to avoid immediate evictions.
+const MIN_ANCHOR_CACHE_SIZE: usize = 100;
+
+/// Historical storage for versioned nodes and edges.
+///
+/// This storage engine maintains version chains for all temporal data,
+/// using anchor+delta compression to minimize storage overhead.
+/// A TinyLFU cache reduces redundant delta chain traversals for concurrent reads.
+pub struct HistoricalStorage {
+    /// Configuration for anchor creation strategy
+    config: AnchorConfig,
+    /// Retention policy for version pruning (DoS protection)
+    retention_policy: RetentionPolicy,
+    /// Maximum depth for version reconstruction (DoS protection)
+    max_reconstruction_depth: usize,
+    /// All node versions, indexed by version ID
+    node_versions: HashMap<VersionId, NodeVersion>,
+    /// All edge versions, indexed by version ID
+    edge_versions: HashMap<VersionId, EdgeVersion>,
+    /// Head version ID for each node (most recent)
+    node_version_heads: HashMap<NodeId, VersionId>,
+    /// Head version ID for each edge (most recent)
+    edge_version_heads: HashMap<EdgeId, VersionId>,
+    /// Cached version counts per node (for O(1) capacity checks)
+    node_version_counts: HashMap<NodeId, usize>,
+    /// Cached version counts per edge (for O(1) capacity checks)
+    edge_version_counts: HashMap<EdgeId, usize>,
+    /// Versions since last anchor per node (for O(1) anchor interval checks)
+    ///
+    /// Issue #208: Cache the count of versions since the last anchor to avoid
+    /// walking the version chain on every add operation. This improves write
+    /// performance from O(anchor_interval) to O(1).
+    node_versions_since_anchor: HashMap<NodeId, usize>,
+    /// Versions since last anchor per edge (for O(1) anchor interval checks)
+    ///
+    /// Issue #208: Cache the count of versions since the last anchor to avoid
+    /// walking the version chain on every add operation. This improves write
+    /// performance from O(anchor_interval) to O(1).
+    edge_versions_since_anchor: HashMap<EdgeId, usize>,
+    /// Cached count of node anchor versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when node anchors are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_node_anchor_count: usize,
+    /// Cached count of node delta versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when node deltas are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_node_delta_count: usize,
+    /// Cached count of edge anchor versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when edge anchors are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_edge_anchor_count: usize,
+    /// Cached count of edge delta versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when edge deltas are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_edge_delta_count: usize,
+    /// TinyLFU cache for reconstructed node properties (reduces lock contention)
+    node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// TinyLFU cache for reconstructed edge properties
+    edge_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// Improvement #1: Dedicated cache for node anchor properties.
+    ///
+    /// This separate cache ensures anchors are never evicted by delta cache pressure,
+    /// providing guaranteed O(1) access to anchors even under heavy load. Anchors are
+    /// frequently reused as base points for delta reconstruction, so keeping them cached
+    /// reduces average reconstruction cost from O(N) to O(M) where M << N.
+    node_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// Improvement #1: Dedicated cache for edge anchor properties.
+    ///
+    /// This separate cache ensures anchors are never evicted by delta cache pressure,
+    /// providing guaranteed O(1) access to anchors even under heavy load.
+    edge_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// Improvement #3: Primary cache hit counter for adaptive sizing.
+    ///
+    /// Tracks successful lookups in the primary property cache (fast path).
+    /// This is the most common case for recently accessed properties.
+    primary_cache_hits: Arc<AtomicU64>,
+    /// Improvement #3: Anchor cache hit counter for adaptive sizing.
+    ///
+    /// Tracks successful lookups in the dedicated anchor cache (fallback path).
+    /// High values indicate anchors are being evicted from primary cache under
+    /// delta pressure, suggesting the primary cache may need to be larger.
+    anchor_cache_hits: Arc<AtomicU64>,
+    /// Improvement #3: Full reconstruction counter for adaptive sizing.
+    ///
+    /// Tracks cache misses requiring full property reconstruction from deltas.
+    /// High values indicate insufficient cache capacity overall.
+    full_reconstructions: Arc<AtomicU64>,
+    /// Observers subscribed to storage events
+    ///
+    pub fn add_node_version(
+        &mut self,
+        node_id: NodeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        properties: PropertyMap,
+        is_tombstone: bool,
+    ) -> Result<()> {
+        // Construct bi-temporal interval from separate dimensions
+        let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+
+        // For tombstones, close the valid_time at valid_from to create an empty interval [valid_from, valid_from)
+        // This represents "entity is no longer valid starting from this point"
+        if is_tombstone {
+            temporal = temporal.close_valid_time(valid_from)?;
+        }
+
+        // Check capacity limit using cached count (O(1) operation, DoS protection)
+        let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
+        if version_count >= self.retention_policy.max_versions_per_entity {
+            return Err(StorageError::CapacityExceeded {
+                resource: format!("node {} versions", node_id),
+                current: version_count,
+                limit: self.retention_policy.max_versions_per_entity,
+            }
+            .into());
+        }
+
+        // Check if this node already has versions
+        let prev_version_id = self.node_version_heads.get(&node_id).copied();
+
+        // Create version (anchor or delta based on chain length)
+        let mut version = if let Some(prev_id) = prev_version_id {
+            // Verify previous version exists (properties reconstructed later via reconstruct_node_properties)
+            if !self.node_versions.contains_key(&prev_id) {
+                return Err(StorageError::VersionNotFound(prev_id).into());
+            }
+
+            // Get cached counter and increment (O(1) instead of O(anchor_interval))
+            // Issue #208: Use cached counter to avoid walking version chain
+            let current_count = self
+                .node_versions_since_anchor
+                .get(&node_id)
+                .copied()
+                .unwrap_or(0);
+            let versions_since_anchor = current_count + 1;
+
+            if versions_since_anchor >= self.config.anchor_interval as usize {
+                // Create anchor with link to previous version
+                // Use properties.clone() here as we need original for caching later
+                let mut anchor = NodeVersion::new_anchor(
+                    version_id,
+                    node_id,
+                    temporal,
+                    label,
+                    properties.clone(),
+                );
+                anchor.prev_version = Some(prev_id);
+                // Reset counter to 0 after creating anchor
+                self.node_versions_since_anchor.insert(node_id, 0);
+                anchor
+            } else {
+                // Create delta from previous version
+                let old_properties = self.reconstruct_node_properties(prev_id)?;
+                // Update counter for next iteration
+                self.node_versions_since_anchor
+                    .insert(node_id, versions_since_anchor);
+                NodeVersion::new_delta(
+                    version_id,
+                    node_id,
+                    temporal,
+                    label,
+                    &old_properties,
+                    &properties,
+                    prev_id,
+                )
+            }
+        } else {
+            // First version is always an anchor
+            // Initialize counter to 0
+            self.node_versions_since_anchor.insert(node_id, 0);
+            NodeVersion::new_anchor(version_id, node_id, temporal, label, properties.clone())
+        };
+
+        // Handle pre-anchor hook (BEFORE storing)
+        if version.is_anchor() {
+            Self::handle_pre_anchor_hook(
+                AnchorHookContext {
+                    entity_type: "node",
+                    entity_id: node_id.as_u64(),
+                    timestamp: temporal.transaction_time().start(),
+                    properties: &properties,
+                },
+                &mut version.data,
+                &self.pre_node_anchor_hook,
+            );
+        }
+
+        // Link previous version to this one and close its temporal intervals
+        if let Some(prev_id) = prev_version_id
+            && let Some(prev) = self.node_versions.get_mut(&prev_id)
+        {
+            // Capture the intervals before modification for temporal index update
+            let old_temporal = *prev.temporal();
+
+            Self::close_previous_version_intervals(prev, version_id, &temporal)?;
+
+            // Update temporal indexes to reflect the closed intervals (Issue #209)
+            if let Some(ref indexes) = self.temporal_indexes {
+                let new_temporal = *prev.temporal();
+
+                // Update valid time end if it was closed
+                if old_temporal.valid_time().end() != new_temporal.valid_time().end() {
+                    indexes.update_node_valid_time_end(
+                        node_id,
+                        prev_id,
+                        new_temporal.valid_time().end(),
+                    );
+                }
+
+                // Update transaction time end if it was closed
+                if old_temporal.transaction_time().end() != new_temporal.transaction_time().end() {
+                    indexes.update_node_transaction_time_end(
+                        node_id,
+                        prev_id,
+                        new_temporal.transaction_time().end(),
+                    );
+                }
+            }
+        }
+
+        // Check if anchor before storing (for notifications and caching)
+        let is_anchor = version.is_anchor();
+
+        // Store the version and update indexes
+        self.node_versions.insert(version_id, version);
+        self.node_version_heads.insert(node_id, version_id);
+        *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+
+        // Issue #212: Update cached stats counters for O(1) stats() retrieval
+        if is_anchor {
+            self.cached_node_anchor_count += 1;
+        } else {
+            self.cached_node_delta_count += 1;
+        }
+
+        // Issue #210: Cache properties for ALL versions (anchors and deltas) to avoid
+        // reconstructing properties we just added when creating the next delta.
+        //
+        // BEFORE: Only anchors were cached, causing delta creation to reconstruct
+        //         the previous delta's properties even though we just added them.
+        // AFTER:  All versions are cached in the main property cache, eliminating
+        //         unnecessary reconstructions during consecutive writes.
+        let props_arc = Arc::new(properties);
+        self.node_property_cache
+            .insert(version_id, props_arc.clone());
+
+        // Anchors are also cached in the dedicated anchor cache for fallback
+        if is_anchor {
+            self.node_anchor_cache.insert(version_id, props_arc);
+        }
+
+        // Notify observers
+        let timestamp = temporal.transaction_time().start();
+        notify_observers(
+            &self.observers,
+            &StorageEvent::NodeVersionCreated {
+                version_id,
+                node_id,
+                timestamp,
+                is_anchor,
+            },
+    fn reconstruct_node_properties_with_depth(
+        &self,
+        version_id: VersionId,
+        _depth: usize, // Kept for API compatibility but unused in iterative implementation
+    ) -> Result<PropertyMap> {
+        // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
+        //
+        // 1. Check regular cache first (holds all versions: anchors + deltas)
+        // 2. If not found, check dedicated anchor cache (holds only anchors)
+        //
+        // Anchors are stored in BOTH caches during pre-population for redundancy:
+        // - Regular cache provides fast access when anchor is still in LRU window
+        // - Anchor cache acts as fallback when regular cache evicts due to delta pressure
+        //
+        // This fallback only triggers after regular cache eviction, providing
+        // guaranteed O(1) anchor access even under heavy cache pressure.
+        if let Some(cached) = self.node_property_cache.get(&version_id) {
+            self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached.as_ref().clone());
+        }
+
+        // Fallback to dedicated anchor cache (survives delta cache pressure)
+        if let Some(cached) = self.node_anchor_cache.get(&version_id) {
+            self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
+            // Re-populate main cache to make this anchor "hot" again
+            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
+            self.node_property_cache.insert(version_id, cached.clone());
+            return Ok(cached.as_ref().clone());
+        }
+
+        // Cache miss - reconstruct properties using iterative helper
+        self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
+
+        let properties = self.reconstruct_node_properties_iterative(version_id)?;
+
+        // Populate cache for future reads
+        self.node_property_cache
+            .insert(version_id, Arc::new(properties.clone()));
+
+        Ok(properties)
+    }
+
+    /// Reconstruct the properties of an edge version.
+    ///
+    /// **Cache Behavior**: Same as `reconstruct_node_properties()` - properties are
+    /// immutable per VersionId, so caching doesn't require invalidation.
+    ///
+    /// **Depth Limit**: Returns `TemporalError::MaxDepthExceeded` if the delta
+    /// chain exceeds `MAX_RECONSTRUCTION_DEPTH` (100). This protects against
+    /// stack overflow from corrupted version chains or cycles.
+    pub fn reconstruct_edge_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
+        self.reconstruct_edge_properties_with_depth(version_id, 0)
+    }
+
+    /// Internal helper for edge property reconstruction with depth tracking.
+    ///
+    /// Note (Issue #211): The iterative implementation only caches the final
+    /// reconstructed PropertyMap, not intermediate versions. This reduces memory
+    /// allocations at the cost of slightly lower cache hit rates compared to
+    /// the previous recursive approach.
+    ///
+    /// The depth parameter is kept for API compatibility but unused in the
+    /// iterative implementation.
+    fn reconstruct_edge_properties_with_depth(
+        &self,
+        version_id: VersionId,
+        _depth: usize, // Kept for API compatibility but unused in iterative implementation
+    ) -> Result<PropertyMap> {
+        // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
+        //
+        // 1. Check regular cache first (holds all versions: anchors + deltas)
+        // 2. If not found, check dedicated anchor cache (holds only anchors)
+        //
+pub struct CacheMetrics {
+    /// Number of successful lookups in primary property cache (fast path)
+    pub primary_cache_hits: u64,
+    /// Number of successful lookups in anchor cache fallback
+    pub anchor_cache_hits: u64,
+    /// Number of full property reconstructions from deltas
+    pub full_reconstructions: u64,
+}
+
+impl CacheMetrics {
+    /// Calculate total cache operations (hits + reconstructions).
+    pub fn total_operations(&self) -> u64 {
+        self.primary_cache_hits + self.anchor_cache_hits + self.full_reconstructions
+    }
+
+    /// Calculate overall cache hit rate (0.0 to 1.0).
+    ///
+    /// Returns None if no operations have been performed yet.
+    pub fn hit_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some((self.primary_cache_hits + self.anchor_cache_hits) as f64 / total as f64)
+        }
+    }
+
+    /// Calculate primary cache hit rate (0.0 to 1.0).
+    ///
+    /// This shows how often the primary cache is sufficient without fallback.
+    /// Returns None if no operations have been performed yet.
+    pub fn primary_hit_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some(self.primary_cache_hits as f64 / total as f64)
+        }
+    }
+
+    /// Calculate anchor cache fallback rate (0.0 to 1.0).
+    ///
+    /// This shows how often we need to fall back to the anchor cache.
+    /// High values indicate the primary cache is under pressure.
+    pub fn anchor_fallback_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some(self.anchor_cache_hits as f64 / total as f64)
+        }
+    }
+
+    /// Calculate reconstruction rate (0.0 to 1.0).
+    ///
+    /// This shows how often we need to perform full reconstruction.
+    /// High values indicate insufficient overall cache capacity.

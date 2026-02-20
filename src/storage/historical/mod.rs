@@ -21,10 +21,12 @@ use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
 use crate::core::version::{
     AnchorConfig, EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData,
 };
-use quick_cache::sync::Cache;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+
+pub(crate) mod cache;
+pub use cache::CacheMetrics;
+use cache::HistoryCache;
 
 #[cfg(feature = "observability")]
 use tracing;
@@ -143,20 +145,7 @@ struct AnchorHookContext<'a> {
 }
 
 /// Default cache size for reconstructed properties (10,000 entries)
-const DEFAULT_RECONSTRUCTION_CACHE_SIZE: usize = 10_000;
-
-/// Anchor cache size ratio relative to main cache (Improvement #1: Issue #338).
-///
-/// Typically 10-20% of versions become anchors depending on `anchor_interval`.
-/// With default interval of 10, we get ~10% anchors. Setting to 1/5 (20%)
-/// provides headroom for configurations with smaller intervals.
-const ANCHOR_CACHE_SIZE_RATIO: usize = 5; // 20% of main cache
-
-/// Minimum anchor cache size to ensure reasonable performance (Improvement #1: Issue #338).
-///
-/// Even with very small main caches, we want enough anchor cache to hold
-/// at least a few anchors to avoid immediate evictions.
-const MIN_ANCHOR_CACHE_SIZE: usize = 100;
+use cache::DEFAULT_RECONSTRUCTION_CACHE_SIZE;
 
 /// Historical storage for versioned nodes and edges.
 ///
@@ -214,38 +203,8 @@ pub struct HistoricalStorage {
     /// This counter is incremented when edge deltas are added and enables
     /// constant-time stats retrieval instead of O(versions) iteration.
     cached_edge_delta_count: usize,
-    /// TinyLFU cache for reconstructed node properties (reduces lock contention)
-    node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
-    /// TinyLFU cache for reconstructed edge properties
-    edge_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
-    /// Improvement #1: Dedicated cache for node anchor properties.
-    ///
-    /// This separate cache ensures anchors are never evicted by delta cache pressure,
-    /// providing guaranteed O(1) access to anchors even under heavy load. Anchors are
-    /// frequently reused as base points for delta reconstruction, so keeping them cached
-    /// reduces average reconstruction cost from O(N) to O(M) where M << N.
-    node_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
-    /// Improvement #1: Dedicated cache for edge anchor properties.
-    ///
-    /// This separate cache ensures anchors are never evicted by delta cache pressure,
-    /// providing guaranteed O(1) access to anchors even under heavy load.
-    edge_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
-    /// Improvement #3: Primary cache hit counter for adaptive sizing.
-    ///
-    /// Tracks successful lookups in the primary property cache (fast path).
-    /// This is the most common case for recently accessed properties.
-    primary_cache_hits: Arc<AtomicU64>,
-    /// Improvement #3: Anchor cache hit counter for adaptive sizing.
-    ///
-    /// Tracks successful lookups in the dedicated anchor cache (fallback path).
-    /// High values indicate anchors are being evicted from primary cache under
-    /// delta pressure, suggesting the primary cache may need to be larger.
-    anchor_cache_hits: Arc<AtomicU64>,
-    /// Improvement #3: Full reconstruction counter for adaptive sizing.
-    ///
-    /// Tracks cache misses requiring full property reconstruction from deltas.
-    /// High values indicate insufficient cache capacity overall.
-    full_reconstructions: Arc<AtomicU64>,
+    /// Cache manager for historical properties (Issue #338)
+    cache: HistoryCache,
     /// Observers subscribed to storage events
     ///
     /// Multiple components can observe storage events (anchors, deletes, etc.)
@@ -367,10 +326,6 @@ impl HistoricalStorage {
         retention_policy: RetentionPolicy,
         cache_size: usize,
     ) -> Self {
-        // Calculate anchor cache size: typically 10-20% of entities become anchors
-        // depending on anchor_interval (Improvement #1: Issue #338)
-        let anchor_cache_size = (cache_size / ANCHOR_CACHE_SIZE_RATIO).max(MIN_ANCHOR_CACHE_SIZE);
-
         HistoricalStorage {
             config,
             retention_policy,
@@ -387,13 +342,7 @@ impl HistoricalStorage {
             cached_node_delta_count: 0,
             cached_edge_anchor_count: 0,
             cached_edge_delta_count: 0,
-            node_property_cache: Arc::new(Cache::new(cache_size)),
-            edge_property_cache: Arc::new(Cache::new(cache_size)),
-            node_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
-            edge_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
-            primary_cache_hits: Arc::new(AtomicU64::new(0)),
-            anchor_cache_hits: Arc::new(AtomicU64::new(0)),
-            full_reconstructions: Arc::new(AtomicU64::new(0)),
+            cache: HistoryCache::new(cache_size),
             observers: Vec::new(),
             pre_node_anchor_hook: None,
             pre_edge_anchor_hook: None,
@@ -674,19 +623,9 @@ impl HistoricalStorage {
 
         // Issue #210: Cache properties for ALL versions (anchors and deltas) to avoid
         // reconstructing properties we just added when creating the next delta.
-        //
-        // BEFORE: Only anchors were cached, causing delta creation to reconstruct
-        //         the previous delta's properties even though we just added them.
-        // AFTER:  All versions are cached in the main property cache, eliminating
-        //         unnecessary reconstructions during consecutive writes.
         let props_arc = Arc::new(properties);
-        self.node_property_cache
-            .insert(version_id, props_arc.clone());
-
-        // Anchors are also cached in the dedicated anchor cache for fallback
-        if is_anchor {
-            self.node_anchor_cache.insert(version_id, props_arc);
-        }
+        self.cache
+            .put_node_properties(version_id, props_arc, is_anchor);
 
         // Notify observers
         let timestamp = temporal.transaction_time().start();
@@ -894,13 +833,8 @@ impl HistoricalStorage {
         // Issue #210: Cache properties for ALL versions (anchors and deltas) to avoid
         // reconstructing properties we just added when creating the next delta.
         let props_arc = Arc::new(properties);
-        self.edge_property_cache
-            .insert(version_id, props_arc.clone());
-
-        // Anchors are also cached in the dedicated anchor cache for fallback
-        if is_anchor {
-            self.edge_anchor_cache.insert(version_id, props_arc);
-        }
+        self.cache
+            .put_edge_properties(version_id, props_arc, is_anchor);
 
         // Notify observers
         let timestamp = temporal.transaction_time().start();
@@ -1231,38 +1165,21 @@ impl HistoricalStorage {
         _depth: usize, // Kept for API compatibility but unused in iterative implementation
     ) -> Result<PropertyMap> {
         // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
-        //
-        // 1. Check regular cache first (holds all versions: anchors + deltas)
-        // 2. If not found, check dedicated anchor cache (holds only anchors)
-        //
-        // Anchors are stored in BOTH caches during pre-population for redundancy:
-        // - Regular cache provides fast access when anchor is still in LRU window
-        // - Anchor cache acts as fallback when regular cache evicts due to delta pressure
-        //
-        // This fallback only triggers after regular cache eviction, providing
-        // guaranteed O(1) anchor access even under heavy cache pressure.
-        if let Some(cached) = self.node_property_cache.get(&version_id) {
-            self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(cached.as_ref().clone());
-        }
-
-        // Fallback to dedicated anchor cache (survives delta cache pressure)
-        if let Some(cached) = self.node_anchor_cache.get(&version_id) {
-            self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
-            // Re-populate main cache to make this anchor "hot" again
-            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
-            self.node_property_cache.insert(version_id, cached.clone());
+        if let Some(cached) = self.cache.get_node_properties(version_id) {
             return Ok(cached.as_ref().clone());
         }
 
         // Cache miss - reconstruct properties using iterative helper
-        self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
+        self.cache.record_full_reconstruction();
 
         let properties = self.reconstruct_node_properties_iterative(version_id)?;
 
         // Populate cache for future reads
-        self.node_property_cache
-            .insert(version_id, Arc::new(properties.clone()));
+        self.cache.put_node_properties(
+            version_id,
+            Arc::new(properties.clone()),
+            false, // Not necessarily an anchor
+        );
 
         Ok(properties)
     }
@@ -1294,38 +1211,21 @@ impl HistoricalStorage {
         _depth: usize, // Kept for API compatibility but unused in iterative implementation
     ) -> Result<PropertyMap> {
         // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
-        //
-        // 1. Check regular cache first (holds all versions: anchors + deltas)
-        // 2. If not found, check dedicated anchor cache (holds only anchors)
-        //
-        // Anchors are stored in BOTH caches during pre-population for redundancy:
-        // - Regular cache provides fast access when anchor is still in LRU window
-        // - Anchor cache acts as fallback when regular cache evicts due to delta pressure
-        //
-        // This fallback only triggers after regular cache eviction, providing
-        // guaranteed O(1) anchor access even under heavy cache pressure.
-        if let Some(cached) = self.edge_property_cache.get(&version_id) {
-            self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(cached.as_ref().clone());
-        }
-
-        // Fallback to dedicated anchor cache (survives delta cache pressure)
-        if let Some(cached) = self.edge_anchor_cache.get(&version_id) {
-            self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
-            // Re-populate main cache to make this anchor "hot" again
-            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
-            self.edge_property_cache.insert(version_id, cached.clone());
+        if let Some(cached) = self.cache.get_edge_properties(version_id) {
             return Ok(cached.as_ref().clone());
         }
 
         // Cache miss - reconstruct properties using iterative helper
-        self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
+        self.cache.record_full_reconstruction();
 
         let properties = self.reconstruct_edge_properties_iterative(version_id)?;
 
         // Populate cache for future reads
-        self.edge_property_cache
-            .insert(version_id, Arc::new(properties.clone()));
+        self.cache.put_edge_properties(
+            version_id,
+            Arc::new(properties.clone()),
+            false, // Not necessarily an anchor
+        );
 
         Ok(properties)
     }
@@ -2497,6 +2397,13 @@ impl HistoricalStorage {
             self.edge_versions.len()
         );
 
+        let (
+            node_cache_entries,
+            edge_cache_entries,
+            node_anchor_cache_entries,
+            edge_anchor_cache_entries,
+        ) = self.cache.sizes();
+
         HistoricalStats {
             total_node_versions: self.node_versions.len(),
             total_edge_versions: self.edge_versions.len(),
@@ -2508,10 +2415,10 @@ impl HistoricalStorage {
             unique_nodes: self.node_version_heads.len(),
             unique_edges: self.edge_version_heads.len(),
             // Separate regular and anchor cache entries for better visibility (Issue #338)
-            node_cache_entries: self.node_property_cache.len(),
-            edge_cache_entries: self.edge_property_cache.len(),
-            node_anchor_cache_entries: self.node_anchor_cache.len(),
-            edge_anchor_cache_entries: self.edge_anchor_cache.len(),
+            node_cache_entries,
+            edge_cache_entries,
+            node_anchor_cache_entries,
+            edge_anchor_cache_entries,
         }
     }
 
@@ -2551,12 +2458,8 @@ impl HistoricalStorage {
     ///     }
     /// }
     /// ```
-    pub fn cache_metrics(&self) -> CacheMetrics {
-        CacheMetrics {
-            primary_cache_hits: self.primary_cache_hits.load(Ordering::Relaxed),
-            anchor_cache_hits: self.anchor_cache_hits.load(Ordering::Relaxed),
-            full_reconstructions: self.full_reconstructions.load(Ordering::Relaxed),
-        }
+    pub fn cache_metrics(&self) -> cache::CacheMetrics {
+        self.cache.metrics()
     }
 
     /// Calculate the cache hit rate as a percentage (Improvement #3).
@@ -2574,7 +2477,7 @@ impl HistoricalStorage {
     /// }
     /// ```
     pub fn cache_hit_rate(&self) -> Option<f64> {
-        self.cache_metrics().hit_rate()
+        self.cache.hit_rate()
     }
 
     /// Check if the cache should be resized based on hit rate (Improvement #3).
@@ -2606,21 +2509,7 @@ impl HistoricalStorage {
     /// }
     /// ```
     pub fn should_resize_cache(&self, threshold: f64, min_operations: u64) -> Option<f64> {
-        let metrics = self.cache_metrics();
-        let total = metrics.total_operations();
-
-        // Need enough operations to make meaningful assessment
-        if total < min_operations {
-            return None;
-        }
-
-        let hit_rate = metrics.hit_rate().unwrap_or(0.0);
-
-        if hit_rate < threshold {
-            Some(hit_rate)
-        } else {
-            None
-        }
+        self.cache.should_resize(threshold, min_operations)
     }
 
     /// Get an iterator over all node versions (test-only helper).
@@ -2979,8 +2868,7 @@ impl HistoricalStorage {
     /// want to verify reconstruction behavior without cache interference.
     #[doc(hidden)]
     pub fn __test_clear_property_cache(&self) {
-        self.node_property_cache.clear();
-        self.node_anchor_cache.clear();
+        self.cache.clear();
     }
 }
 
@@ -2990,83 +2878,7 @@ impl Default for HistoricalStorage {
     }
 }
 
-/// Cache performance metrics (Issue #338: Improvement #3).
-///
-/// Provides granular insight into cache behavior:
-/// - `primary_cache_hits`: Fast path hits (most common)
-/// - `anchor_cache_hits`: Fallback hits (indicates primary cache pressure)
-/// - `full_reconstructions`: Slow path (indicates insufficient cache capacity)
-///
-/// # Interpretation
-/// - High `anchor_cache_hits` + low `primary_cache_hits` → increase primary cache size
-/// - High `full_reconstructions` → increase overall cache capacity
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CacheMetrics {
-    /// Number of successful lookups in primary property cache (fast path)
-    pub primary_cache_hits: u64,
-    /// Number of successful lookups in anchor cache fallback
-    pub anchor_cache_hits: u64,
-    /// Number of full property reconstructions from deltas
-    pub full_reconstructions: u64,
-}
-
-impl CacheMetrics {
-    /// Calculate total cache operations (hits + reconstructions).
-    pub fn total_operations(&self) -> u64 {
-        self.primary_cache_hits + self.anchor_cache_hits + self.full_reconstructions
-    }
-
-    /// Calculate overall cache hit rate (0.0 to 1.0).
-    ///
-    /// Returns None if no operations have been performed yet.
-    pub fn hit_rate(&self) -> Option<f64> {
-        let total = self.total_operations();
-        if total == 0 {
-            None
-        } else {
-            Some((self.primary_cache_hits + self.anchor_cache_hits) as f64 / total as f64)
-        }
-    }
-
-    /// Calculate primary cache hit rate (0.0 to 1.0).
-    ///
-    /// This shows how often the primary cache is sufficient without fallback.
-    /// Returns None if no operations have been performed yet.
-    pub fn primary_hit_rate(&self) -> Option<f64> {
-        let total = self.total_operations();
-        if total == 0 {
-            None
-        } else {
-            Some(self.primary_cache_hits as f64 / total as f64)
-        }
-    }
-
-    /// Calculate anchor cache fallback rate (0.0 to 1.0).
-    ///
-    /// This shows how often we need to fall back to the anchor cache.
-    /// High values indicate the primary cache is under pressure.
-    pub fn anchor_fallback_rate(&self) -> Option<f64> {
-        let total = self.total_operations();
-        if total == 0 {
-            None
-        } else {
-            Some(self.anchor_cache_hits as f64 / total as f64)
-        }
-    }
-
-    /// Calculate reconstruction rate (0.0 to 1.0).
-    ///
-    /// This shows how often we need to perform full reconstruction.
-    /// High values indicate insufficient overall cache capacity.
-    pub fn reconstruction_rate(&self) -> Option<f64> {
-        let total = self.total_operations();
-        if total == 0 {
-            None
-        } else {
-            Some(self.full_reconstructions as f64 / total as f64)
-        }
-    }
-}
+// CacheMetrics is now imported from cache module
 
 /// Statistics about the historical storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
