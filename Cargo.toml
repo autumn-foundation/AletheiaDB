@@ -94,9 +94,6 @@ rustyline = "17.0"
 loom = { version = "0.7.2", features = ["checkpoint"] }
 
 [features]
-# Nova experimental features
-nova = []
-
 # Enable Tracy profiling (use with: cargo build --release --features tracy)
 tracy = ["tracy-client/enable"]
 
@@ -376,8 +373,3 @@ name = "graph_label_checks"
 harness = false
 path = "benches/graph_label_checks.rs"
 required-features = []
-
-# Experimental features
-[[example]]
-name = "story_demo"
-# required-features = ["nova"]  <-- Removed to allow runtime error message

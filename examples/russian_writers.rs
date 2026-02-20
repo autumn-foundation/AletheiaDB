@@ -17,12 +17,6 @@ use aletheiadb::{
     WriteOps, query::semantic_pathfinding::SemanticPathfinder,
 };
 
-#[cfg(feature = "nova")]
-use aletheiadb::{
-    experimental::concept_algebra::ConceptAlgebra,
-    experimental::fishing::{Bait, FishingRod, FishingTrip},
-    experimental::prophet::Prophet,
-};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -200,12 +194,6 @@ impl RussianLitCompleter {
             "exit".to_string(),
         ];
 
-        #[cfg(feature = "nova")]
-        {
-            commands.push("fish".to_string());
-            commands.push("analogy".to_string());
-            commands.push("predict".to_string());
-        }
 
         Self {
             commands,
@@ -2108,238 +2096,8 @@ fn find_semantic_path(
     Ok(())
 }
 
-#[cfg(feature = "nova")]
-fn enrich_provenance(
-    db: &AletheiaDB,
-    _source_id: NodeId,
-    target_id: NodeId,
-    provenance: &str,
-) -> String {
-    use std::fmt::Write;
 
-    let mut enriched = String::new();
 
-    // Parse node IDs from provenance like "Linked from Node Node(39)"
-    for line in provenance.split('\n') {
-        if line.contains("Linked from Node Node(") {
-            // Extract node ID
-            if let Some(start) = line.find("Node(")
-                && let Some(end) = line[start..].find(')')
-                && let Ok(node_id) = line[start + 5..start + end].parse::<u64>()
-                && let Ok(linking_node) = db.get_node(NodeId::new(node_id).unwrap())
-                && let Ok(linking_name) = get_entity_name(&linking_node)
-            {
-                let linking_label = label_str(linking_node.label);
-
-                // Try to find the edge relationship
-                let mut edge_label = "connected to".to_string();
-                let outgoing = db.get_outgoing_edges(NodeId::new(node_id).unwrap());
-                for edge_id in outgoing {
-                    if let Ok(edge) = db.get_edge(edge_id)
-                        && edge.target == target_id
-                    {
-                        edge_label = label_str(edge.label);
-                        break;
-                    }
-                }
-
-                let _ = writeln!(
-                    enriched,
-                    "     ↳ via {} [{}] -[{}]→",
-                    linking_name, linking_label, edge_label
-                );
-                continue;
-            }
-        }
-
-        // Keep other provenance lines as-is
-        if !line.is_empty() && !line.contains("Linked from Node Node(") {
-            let _ = writeln!(enriched, "     {}", line);
-        }
-    }
-
-    enriched
-}
-
-#[cfg(feature = "nova")]
-fn go_fishing(demo: &DemoData, entity_name: &str) -> Result<()> {
-    // Find any entity as the starting point
-    let entity_result = find_any_entity(demo, entity_name);
-
-    let (entity_id, entity_display, entity_type) = match entity_result {
-        Some((name, id, etype)) => (id, name, etype),
-        None => {
-            println!("\n❌ Entity not found: {}", entity_name);
-            println!("\nTry: list authors, list books, list characters, or list themes");
-            return Ok(());
-        }
-    };
-
-    println!("\n╔═══════════════════════════════════════════════════════════╗");
-    println!("║  🎣 FISHING (ASSOCIATIVE MEMORY RETRIEVAL)");
-    println!("╚═══════════════════════════════════════════════════════════╝");
-    println!("\n🎯 Starting from: {} ({})\n", entity_display, entity_type);
-
-    // Create fishing configuration
-    let config = FishingTrip {
-        limit: 15,
-        depth: 1,
-        vector_weight: 1.0,
-        graph_weight: 0.6,
-        freshness_weight: 0.1,
-        edge_labels: None,
-    };
-
-    // Cast the line
-    let rod = FishingRod::new(&demo.db);
-    let bait = Bait::Node {
-        id: entity_id,
-        property: Some("semantic_embedding".to_string()),
-    };
-
-    let catches = timed!(
-        demo,
-        "Fishing (associative retrieval)",
-        rod.cast(bait, config)
-    )?;
-
-    if catches.is_empty() {
-        println!("❌ No related entities found");
-        println!("\n💡 This entity might not have semantic_embedding or graph connections");
-        return Ok(());
-    }
-
-    println!("🎣 Caught {} related entities:\n", catches.len());
-
-    for (i, catch) in catches.iter().enumerate() {
-        let node = demo.db.get_node(catch.node_id)?;
-        let name = get_entity_name(&node)?;
-        let label = label_str(node.label);
-
-        // Skip the source entity itself
-        if catch.node_id == entity_id {
-            continue;
-        }
-
-        println!(
-            "  {}. {} [{}] (score: {:.3})",
-            i + 1,
-            name,
-            label,
-            catch.score
-        );
-
-        // Show enriched provenance (why it was caught)
-        if !catch.provenance.is_empty() {
-            let enriched = enrich_provenance(&demo.db, entity_id, catch.node_id, &catch.provenance);
-            if !enriched.trim().is_empty() {
-                print!("{}", enriched);
-            }
-        }
-    }
-
-    println!("\n💡 Fishing combines:");
-    println!("   • Vector similarity (semantic relatedness)");
-    println!("   • Graph connections (structural relationships)");
-    println!("   • Freshness (recently updated content)");
-
-    Ok(())
-}
-
-#[cfg(feature = "nova")]
-fn literary_analogy(demo: &DemoData, a_name: &str, b_name: &str, c_name: &str) -> Result<()> {
-    // Find all three entities
-    let a_result = find_any_entity(demo, a_name);
-    let b_result = find_any_entity(demo, b_name);
-    let c_result = find_any_entity(demo, c_name);
-
-    let (a_id, a_display, a_type) = match a_result {
-        Some((name, id, etype)) => (id, name, etype),
-        None => {
-            println!("\n❌ Entity A not found: {}", a_name);
-            return Ok(());
-        }
-    };
-
-    let (b_id, b_display, b_type) = match b_result {
-        Some((name, id, etype)) => (id, name, etype),
-        None => {
-            println!("\n❌ Entity B not found: {}", b_name);
-            return Ok(());
-        }
-    };
-
-    let (c_id, c_display, c_type) = match c_result {
-        Some((name, id, etype)) => (id, name, etype),
-        None => {
-            println!("\n❌ Entity C not found: {}", c_name);
-            return Ok(());
-        }
-    };
-
-    println!("\n╔═══════════════════════════════════════════════════════════╗");
-    println!("║  🧮 CONCEPT ALGEBRA (LITERARY ANALOGY)");
-    println!("╚═══════════════════════════════════════════════════════════╝");
-    println!("\n📐 Solving: \"A is to B as X is to C\"");
-    println!("   A = {} ({})", a_display, a_type);
-    println!("   B = {} ({})", b_display, b_type);
-    println!("   C = {} ({})", c_display, c_type);
-    println!("\n🔍 Computing: A - B + C = X\n");
-
-    // Perform the analogy
-    let algebra = ConceptAlgebra::new(&demo.db).with_property("semantic_embedding");
-    let results = timed!(
-        demo,
-        "Concept algebra (analogy)",
-        algebra.analogy(a_id, b_id, c_id, 10)
-    )?;
-
-    if results.is_empty() {
-        println!("❌ No results found");
-        println!("\n💡 Entities might not have semantic_embedding property");
-        return Ok(());
-    }
-
-    println!("✨ Top analogies:\n");
-
-    for (i, (result_id, score)) in results.iter().enumerate() {
-        // Skip the input entities
-        if *result_id == a_id || *result_id == b_id || *result_id == c_id {
-            continue;
-        }
-
-        let node = demo.db.get_node(*result_id)?;
-        let name = get_entity_name(&node)?;
-        let label = label_str(node.label);
-
-        println!(
-            "  {}. {} [{}] (similarity: {:.3})",
-            i + 1,
-            name,
-            label,
-            score
-        );
-
-        if i == 0 {
-            println!("\n     💡 INTERPRETATION:");
-            println!("        \"{}\" is to \"{}\"", a_display, b_display);
-            println!("        as \"{}\" is to \"{}\"", name, c_display);
-            println!();
-        }
-
-        if i >= 4 {
-            break;
-        }
-    }
-
-    println!("\n🧮 Vector Arithmetic:");
-    println!("   {} - {} + {} = Result", a_display, b_display, c_display);
-    println!("\n💡 Example interpretations:");
-    println!("   • Crime&Punishment - Dostoevsky + Tolstoy = War&Peace");
-    println!("   • Raskolnikov - Guilt + Redemption = Prince Myshkin");
-
-    Ok(())
-}
 
 fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
     // Find character with fuzzy matching
@@ -2579,105 +2337,6 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
     Ok(())
 }
 
-/// Predict missing links using Prophet (topology + semantics).
-#[cfg(feature = "nova")]
-fn predict_missing_links(demo: &DemoData, args: &str) -> Result<()> {
-    // Parse arguments: handle quoted entity names and optional k parameter
-    // Examples: "Dostoevsky", "Fyodor Dostoevsky" 5, Tolstoy 10
-    let trimmed = args.trim();
-    let (entity_name, k) = if let Some(last_space_idx) = trimmed.rfind(' ') {
-        let (name_part, k_part) = trimmed.split_at(last_space_idx);
-        if let Ok(k_val) = k_part.trim().parse::<usize>() {
-            // Last token is a number, use it as k
-            (strip_quotes(name_part.trim()), k_val)
-        } else {
-            // Last token is not a number, entire string is the name
-            (strip_quotes(trimmed), 10)
-        }
-    } else {
-        // No spaces, entire string is the name
-        (strip_quotes(trimmed), 10)
-    };
-
-    if let Some(node_id) = demo.get_node(entity_name) {
-        let node = demo.db.get_node(node_id)?;
-        let entity_name_display = node
-            .properties
-            .get("name")
-            .or_else(|| node.properties.get("title"))
-            .map(format_value)
-            .unwrap_or_else(|| label_str(node.label));
-
-        println!("\n╔═══════════════════════════════════════════════════════════╗");
-        println!("║  LINK PREDICTION: {}", entity_name_display.to_uppercase());
-        println!("╚═══════════════════════════════════════════════════════════╝");
-        println!("\nPredicting missing connections using:");
-        println!("  • Topological structure (Adamic-Adar via common neighbors)");
-        println!("  • Semantic similarity (vector embeddings)");
-        println!();
-
-        // Use Prophet to predict links
-        let prophet = Prophet::new(&demo.db);
-        let predictions = timed!(
-            demo,
-            "Prophet link prediction",
-            prophet.predict_links(node_id, k)
-        )?;
-
-        if predictions.is_empty() {
-            println!("No predictions found. This entity might:");
-            println!("  • Have no neighbors (disconnected node)");
-            println!("  • Already be connected to all potential candidates");
-            println!("  • Have neighbors with no outgoing connections");
-            return Ok(());
-        }
-
-        println!(
-            "Predicted missing connections (top {}):\n",
-            predictions.len()
-        );
-
-        for (rank, (predicted_id, score)) in predictions.iter().enumerate() {
-            if let Ok(predicted_node) = demo.db.get_node(*predicted_id) {
-                let predicted_name = predicted_node
-                    .properties
-                    .get("name")
-                    .or_else(|| predicted_node.properties.get("title"))
-                    .map(format_value)
-                    .unwrap_or_else(|| label_str(predicted_node.label));
-
-                let label = label_str(predicted_node.label);
-
-                println!(
-                    "{}. {} ({}) - Score: {:.3}",
-                    rank + 1,
-                    predicted_name,
-                    label,
-                    score
-                );
-
-                // Show a hint about why this might be a good prediction
-                if *score > 1.0 {
-                    println!("   💡 Strong candidate: high topological + semantic similarity");
-                } else if *score > 0.5 {
-                    println!("   💡 Moderate candidate: shares common neighbors");
-                } else {
-                    println!("   💡 Weak candidate: few common neighbors");
-                }
-            }
-        }
-
-        println!("\n💡 These predictions combine:");
-        println!("   • Graph topology: Entities with many common neighbors");
-        println!("   • Vector semantics: Entities with similar embeddings");
-        println!("\n   Higher scores indicate more likely missing connections!");
-    } else {
-        println!("\n❌ Entity not found: {}", entity_name);
-        println!("\nTry: list authors, list books, list characters");
-    }
-
-    Ok(())
-}
 
 /// Find authors with similar writing styles using style_embedding
 fn show_style_similarity(demo: &DemoData, author_name: &str, k: usize) -> Result<()> {
@@ -3069,27 +2728,7 @@ Examples:
 "#
     );
 
-    #[cfg(feature = "nova")]
-    {
-        println!(
-            r#"
-EXPERIMENTAL FEATURES (enabled with --features nova):
-  fish <entity>            - Associative memory retrieval (🎣 Fishing)
-  analogy <a> <b> <c>      - Literary analogies: "A is to B as X is to C"
 
-Examples:
-  > fish Raskolnikov
-  > analogy "Crime and Punishment" Dostoevsky Tolstoy
-"#
-        );
-    }
-
-    #[cfg(not(feature = "nova"))]
-    {
-        println!(
-            "\n💡 Experimental features available with: cargo run --example russian_writers --features nova"
-        );
-    }
 }
 
 // ============================================================================
@@ -3298,20 +2937,6 @@ fn main() -> Result<()> {
                     show_personality_evolution(&demo, args)?;
                 }
             }
-            #[cfg(feature = "nova")]
-            "predict" => {
-                if args.is_empty() {
-                    println!("Usage: predict <entity_name> [k]");
-                    println!("Example: predict Dostoevsky");
-                    println!("         predict Tolstoy 8");
-                    println!("\nPredicts missing connections based on:");
-                    println!("  • Topological structure (common neighbors)");
-                    println!("  • Semantic similarity (vector embeddings)");
-                    println!("\n💡 Experimental feature from Prophet link prediction engine");
-                } else {
-                    predict_missing_links(&demo, args)?;
-                }
-            }
             "styles" => {
                 let parts: Vec<&str> = args.split_whitespace().collect();
                 if parts.is_empty() {
@@ -3402,33 +3027,6 @@ fn main() -> Result<()> {
                         println!("❌ Missing --like <concept> parameter");
                         println!("Example: path Pushkin Gorky --like \"Social Justice\"");
                     }
-                }
-            }
-            #[cfg(feature = "nova")]
-            "fish" => {
-                if args.is_empty() {
-                    println!("Usage: fish <entity>");
-                    println!("Example: fish Raskolnikov");
-                    println!();
-                    println!("🎣 Fishing (Associative Memory Retrieval):");
-                    println!("  Combines vector similarity + graph connections + freshness");
-                    println!("  to find related entities through multiple pathways.");
-                } else {
-                    go_fishing(&demo, args)?;
-                }
-            }
-            #[cfg(feature = "nova")]
-            "analogy" => {
-                let parts = parse_quoted_args(args);
-                if parts.len() < 3 {
-                    println!("Usage: analogy <a> <b> <c>");
-                    println!("Example: analogy \"Crime and Punishment\" Dostoevsky Tolstoy");
-                    println!();
-                    println!("🧮 Concept Algebra (Literary Analogies):");
-                    println!("  Finds entities where: A is to B as X is to C");
-                    println!("  Uses vector arithmetic: A - B + C = X");
-                } else {
-                    literary_analogy(&demo, &parts[0], &parts[1], &parts[2])?;
                 }
             }
             _ => {
