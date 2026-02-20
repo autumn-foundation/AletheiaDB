@@ -533,7 +533,7 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use crate::core::interning::InternedString;
+    use crate::core::interning::{InternedString, GLOBAL_INTERNER};
     use crate::core::property::PropertyMapBuilder;
 
     #[test]
@@ -553,5 +553,92 @@ mod sentry_tests {
             !node.has_label_str("AnyString"),
             "has_label_str should return false for invalid label ID"
         );
+    }
+
+    #[test]
+    fn test_node_with_metadata() {
+        // 🛡️ Sentry Test: Verify Node::with_metadata correctly stores metadata.
+        // This targets mutants where the metadata argument is ignored and replaced with default.
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let props = PropertyMapBuilder::new().build();
+        let tx_id = crate::core::id::TxId::new(123);
+        let timestamp = crate::core::temporal::Timestamp::from(456);
+        let metadata = crate::core::version::VersionMetadata::new(tx_id, timestamp);
+
+        let node = Node::with_metadata(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(10).unwrap(),
+            metadata,
+        );
+
+        assert_eq!(
+            node.metadata, metadata,
+            "Node::with_metadata should store the provided metadata"
+        );
+        assert_eq!(node.metadata.created_by_tx, tx_id);
+        assert_eq!(node.metadata.commit_timestamp, Some(timestamp));
+    }
+
+    #[test]
+    fn test_edge_with_metadata() {
+        // 🛡️ Sentry Test: Verify Edge::with_metadata correctly stores metadata.
+        // This targets mutants where the metadata argument is ignored and replaced with default.
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().build();
+        let tx_id = crate::core::id::TxId::new(789);
+        let timestamp = crate::core::temporal::Timestamp::from(1000);
+        let metadata = crate::core::version::VersionMetadata::new(tx_id, timestamp);
+
+        let edge = Edge::with_metadata(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(1).unwrap(),
+            metadata,
+        );
+
+        assert_eq!(
+            edge.metadata, metadata,
+            "Edge::with_metadata should store the provided metadata"
+        );
+        assert_eq!(edge.metadata.created_by_tx, tx_id);
+        assert_eq!(edge.metadata.commit_timestamp, Some(timestamp));
+    }
+
+    #[test]
+    fn test_edge_connects_source_mismatch() {
+        // 🛡️ Sentry Test: Verify Edge::connects checks both source and target.
+        // This explicitly targets a mutant where the source check is omitted.
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let other = NodeId::new(3).unwrap();
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            source,
+            target,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Case 1: Source matches, Target matches (True)
+        assert!(edge.connects(source, target));
+
+        // Case 2: Source mismatch, Target matches (False) - crucial test case!
+        assert!(
+            !edge.connects(other, target),
+            "Edge should not connect when source mismatches"
+        );
+
+        // Case 3: Source matches, Target mismatch (False)
+        assert!(!edge.connects(source, other));
+
+        // Case 4: Both mismatch (False)
+        assert!(!edge.connects(other, other));
     }
 }
