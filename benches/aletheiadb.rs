@@ -77,45 +77,57 @@ fn create_versioned_graph(
     (db, node_ids)
 }
 
-/// Benchmark node creation (with versioning overhead).
+/// Benchmark node creation on a warm database.
+///
+/// This measures steady-state create latency (transaction + WAL + temporal writes)
+/// and intentionally excludes one-time database startup overhead.
 fn bench_node_creation_with_versioning(c: &mut Criterion) {
+    let db = create_benchmark_db();
+    let mut counter = 0i64;
+
     c.bench_function("aletheiadb_node_creation", |b| {
-        b.iter_batched(
-            create_benchmark_db,
-            |db| {
-                let props = PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .insert("age", 30i64)
-                    .build();
-                let node = db.create_node("Person", props);
-                black_box(node)
-            },
-            criterion::BatchSize::SmallInput,
-        );
+        b.iter(|| {
+            let props = PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .insert("seq", counter)
+                .build();
+            counter = counter.wrapping_add(1);
+
+            let node = db.create_node("Person", props);
+            black_box(node)
+        });
     });
 }
 
-/// Benchmark edge creation (with versioning overhead).
+/// Benchmark edge creation on a warm database.
+///
+/// Uses a pre-built node pool and rotates source/target pairs so benchmarked
+/// time reflects edge create cost (not DB startup or per-iteration node setup).
 fn bench_edge_creation_with_versioning(c: &mut Criterion) {
-    c.bench_function("aletheiadb_edge_creation", |b| {
-        b.iter_batched(
-            || {
-                let db = create_benchmark_db();
-                let n1 = db
-                    .create_node("Person", PropertyMapBuilder::new().build())
-                    .unwrap();
-                let n2 = db
-                    .create_node("Person", PropertyMapBuilder::new().build())
-                    .unwrap();
-                (db, n1, n2)
-            },
-            |(db, n1, n2)| {
-                let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
-                let edge = db.create_edge(n1, n2, "KNOWS", props);
-                black_box(edge)
-            },
-            criterion::BatchSize::SmallInput,
+    const NODE_POOL_SIZE: usize = 4_096;
+
+    let db = create_benchmark_db();
+    let mut node_pool = Vec::with_capacity(NODE_POOL_SIZE);
+    for _ in 0..NODE_POOL_SIZE {
+        node_pool.push(
+            db.create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap(),
         );
+    }
+
+    let mut edge_counter = 0usize;
+
+    c.bench_function("aletheiadb_edge_creation", |b| {
+        b.iter(|| {
+            let source_idx = edge_counter % NODE_POOL_SIZE;
+            let target_idx = (edge_counter + 1) % NODE_POOL_SIZE;
+            edge_counter = edge_counter.wrapping_add(1);
+
+            let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
+            let edge = db.create_edge(node_pool[source_idx], node_pool[target_idx], "KNOWS", props);
+            black_box(edge)
+        });
     });
 }
 
