@@ -22,6 +22,14 @@ We will **decouple the storage logic from the core domain** by moving all persis
 
 The architectural boundary will be defined by a set of **Storage Traits** located in the `core` module:
 
+```mermaid
+classDiagram
+    class Core
+    class Storage
+    Core --> Storage : Uses (Trait Bound)
+    %% Removed the circular dependency arrow
+```
+
 ```rust
 // In Core
 pub trait StorageEngine: Send + Sync {
