@@ -306,6 +306,7 @@ mod tests {
             Some("Alice")
         );
         assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+        assert_eq!(node.metadata, VersionMetadata::default());
     }
 
     #[test]
@@ -347,6 +348,7 @@ mod tests {
             edge.get_property("since").and_then(|v| v.as_int()),
             Some(2020)
         );
+        assert_eq!(edge.metadata, VersionMetadata::default());
     }
 
     #[test]
@@ -524,6 +526,32 @@ mod tests {
         assert!(
             debug_str.contains("InternedString(4294967294)"),
             "Debug output should fallback to raw ID for unknown label"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::interning::InternedString;
+    use crate::core::property::PropertyMapBuilder;
+
+    #[test]
+    fn test_matches_label_robustness() {
+        // Create a Node with a raw InternedString that doesn't exist.
+        // This exercises the `unwrap_or(false)` path in `matches_label`.
+        let raw_label = InternedString::from_raw(u32::MAX - 5);
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            raw_label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Should return false, not panic or error.
+        assert!(
+            !node.has_label_str("AnyString"),
+            "has_label_str should return false for invalid label ID"
         );
     }
 }
