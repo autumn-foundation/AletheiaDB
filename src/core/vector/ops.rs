@@ -593,6 +593,13 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
     // SAFETY: We immediately fill the entire vector using scale_and_copy.
     // scale_and_copy internally asserts that src.len() == dst.len(), guaranteeing
     // that all elements are written before the vector is exposed.
+    //
+    // The `result` vector is allocated with capacity `v.len()`, so `set_len` is
+    // within capacity bounds. `scale_and_copy` is a trusted function (verified by tests)
+    // that writes to every element of `result`. Even if `scale_and_copy` were to panic,
+    // the `result` vector would be dropped, which is safe for `Vec<f32>` (no Drop impl for f32).
+    // The only risk is if `scale_and_copy` returned early without initializing, but
+    // its implementation guarantees full coverage via exact chunking and remainder handling.
     unsafe { result.set_len(v.len()) };
 
     scale_and_copy(v, &mut result, inv_mag);
