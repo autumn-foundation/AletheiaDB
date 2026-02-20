@@ -177,11 +177,9 @@ impl<'a> GestaltMatcher<'a> {
         // We fetch more than `limit` to allow for pruning during expansion.
         // Let's fetch limit * 10 or a fixed pool.
         let search_k = limit * 10;
-        let candidates = self.db.search_vectors_in(
-            &constraint.property,
-            &constraint.vector,
-            search_k,
-        )?;
+        let candidates =
+            self.db
+                .search_vectors_in(&constraint.property, &constraint.vector, search_k)?;
 
         let mut matches = Vec::new();
 
@@ -403,11 +401,7 @@ impl<'a> GestaltMatcher<'a> {
         }
     }
 
-    fn check_node_constraints(
-        &self,
-        node_id: NodeId,
-        pattern_node: &PatternNode,
-    ) -> Result<bool> {
+    fn check_node_constraints(&self, node_id: NodeId, pattern_node: &PatternNode) -> Result<bool> {
         // Label check
         if !self.check_node_label(node_id, &pattern_node.label)? {
             return Ok(false);
@@ -571,10 +565,8 @@ mod tests {
         assert_eq!(matches.len(), 2);
 
         // Verify content
-        let found_pairs: Vec<(NodeId, NodeId)> = matches
-            .iter()
-            .map(|m| (m.nodes[&0], m.nodes[&1]))
-            .collect();
+        let found_pairs: Vec<(NodeId, NodeId)> =
+            matches.iter().map(|m| (m.nodes[&0], m.nodes[&1])).collect();
 
         assert!(found_pairs.contains(&(a, b)));
         assert!(found_pairs.contains(&(c, d)));
