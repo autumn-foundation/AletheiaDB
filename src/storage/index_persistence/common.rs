@@ -111,3 +111,87 @@ pub fn load_encoded_with_crc<T: for<'a> Decode<'a>>(
     let decoded: T = bitcode::decode(data)?;
     Ok(decoded)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_save_load_round_trip() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let data = 42u64;
+
+        // Save
+        save_encoded_with_crc(&data, path).unwrap();
+
+        // Load
+        let loaded: u64 = load_encoded_with_crc(path, 1024, "Test").unwrap();
+        assert_eq!(loaded, data);
+    }
+
+    #[test]
+    fn test_checksum_mismatch() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let data = 42u64;
+
+        // Save
+        save_encoded_with_crc(&data, path).unwrap();
+
+        // Corrupt file (flip a bit in the data)
+        let mut bytes = fs::read(path).unwrap();
+        bytes[0] ^= 0xFF; // Flip first byte
+        let mut file_rw = fs::File::create(path).unwrap();
+        file_rw.write_all(&bytes).unwrap();
+
+        // Load should fail
+        let result: Result<u64> = load_encoded_with_crc(path, 1024, "Test");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            IndexPersistenceError::Corrupted { .. }
+        ));
+    }
+
+    #[test]
+    fn test_size_limit_exceeded() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let data = vec![0u8; 100]; // 100 bytes + overhead
+
+        // Save
+        save_encoded_with_crc(&data, path).unwrap();
+
+        // Load with tiny limit
+        let result: Result<Vec<u8>> = load_encoded_with_crc(path, 10, "Test");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            IndexPersistenceError::SizeLimitExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn test_file_too_small() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        // Write junk < 4 bytes
+        let mut file_rw = fs::File::create(path).unwrap();
+        file_rw.write_all(&[1, 2, 3]).unwrap();
+
+        // Load should fail
+        let result: Result<u64> = load_encoded_with_crc(path, 1024, "Test");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            IndexPersistenceError::Corrupted { source, .. } => {
+                assert!(source.to_string().contains("File too small"));
+            }
+            _ => panic!("Expected corrupted error for small file"),
+        }
+    }
+}
