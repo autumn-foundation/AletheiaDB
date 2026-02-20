@@ -55,12 +55,7 @@ impl CacheMetrics {
     ///
     /// Returns None if no operations have been performed yet.
     pub fn hit_rate(&self) -> Option<f64> {
-        let total = self.total_operations();
-        if total == 0 {
-            None
-        } else {
-            Some((self.primary_cache_hits + self.anchor_cache_hits) as f64 / total as f64)
-        }
+        self.calculate_rate(self.primary_cache_hits + self.anchor_cache_hits)
     }
 
     /// Calculate primary cache hit rate (0.0 to 1.0).
@@ -68,12 +63,7 @@ impl CacheMetrics {
     /// This shows how often the primary cache is sufficient without fallback.
     /// Returns None if no operations have been performed yet.
     pub fn primary_hit_rate(&self) -> Option<f64> {
-        let total = self.total_operations();
-        if total == 0 {
-            None
-        } else {
-            Some(self.primary_cache_hits as f64 / total as f64)
-        }
+        self.calculate_rate(self.primary_cache_hits)
     }
 
     /// Calculate anchor cache fallback rate (0.0 to 1.0).
@@ -81,12 +71,7 @@ impl CacheMetrics {
     /// This shows how often we need to fall back to the anchor cache.
     /// High values indicate the primary cache is under pressure.
     pub fn anchor_fallback_rate(&self) -> Option<f64> {
-        let total = self.total_operations();
-        if total == 0 {
-            None
-        } else {
-            Some(self.anchor_cache_hits as f64 / total as f64)
-        }
+        self.calculate_rate(self.anchor_cache_hits)
     }
 
     /// Calculate reconstruction rate (0.0 to 1.0).
@@ -94,11 +79,15 @@ impl CacheMetrics {
     /// This shows how often we need to perform full reconstruction.
     /// High values indicate insufficient overall cache capacity.
     pub fn reconstruction_rate(&self) -> Option<f64> {
+        self.calculate_rate(self.full_reconstructions)
+    }
+
+    fn calculate_rate(&self, numerator: u64) -> Option<f64> {
         let total = self.total_operations();
         if total == 0 {
             None
         } else {
-            Some(self.full_reconstructions as f64 / total as f64)
+            Some(numerator as f64 / total as f64)
         }
     }
 }

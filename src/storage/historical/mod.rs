@@ -1178,7 +1178,10 @@ impl HistoricalStorage {
         self.cache.put_node_properties(
             version_id,
             Arc::new(properties.clone()),
-            false, // Not necessarily an anchor
+            // Not necessarily an anchor.
+            // On cache miss, we only populate the primary cache. The dedicated anchor cache
+            // is populated only when an anchor is first created to serve as a long-term fallback.
+            false,
         );
 
         Ok(properties)
@@ -1224,7 +1227,10 @@ impl HistoricalStorage {
         self.cache.put_edge_properties(
             version_id,
             Arc::new(properties.clone()),
-            false, // Not necessarily an anchor
+            // Not necessarily an anchor.
+            // On cache miss, we only populate the primary cache. The dedicated anchor cache
+            // is populated only when an anchor is first created to serve as a long-term fallback.
+            false,
         );
 
         Ok(properties)
