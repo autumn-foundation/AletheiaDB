@@ -1659,8 +1659,8 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use crate::query::parser::Parser;
     use crate::core::NodeId;
+    use crate::query::parser::Parser;
 
     #[test]
     fn test_start_node_optimization_with_parameter() {
@@ -1737,7 +1737,11 @@ mod sentry_tests {
         let query = converter.convert(&ast).unwrap();
 
         // Should produce two filters
-        let filters = query.ops.iter().filter(|op| matches!(op, QueryOp::Filter(_))).count();
+        let filters = query
+            .ops
+            .iter()
+            .filter(|op| matches!(op, QueryOp::Filter(_)))
+            .count();
         // convert_node_pattern generates QueryOp::Filter for each property
         assert_eq!(filters, 2);
     }
@@ -1754,10 +1758,182 @@ mod sentry_tests {
 
         let query = converter.convert(&ast).unwrap();
 
-        let has_start_node = query.ops.iter().any(|op| matches!(op, QueryOp::StartNode(_)));
-        let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(Predicate::Eq { key, .. }) if key == "active"));
+        let has_start_node = query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::StartNode(_)));
+        let has_filter = query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::Filter(Predicate::Eq { key, .. }) if key == "active"));
 
         assert!(has_start_node, "Should use StartNode");
         assert!(has_filter, "Should preserve 'active' filter");
+    }
+
+    #[test]
+    fn test_start_node_optimization_with_integer_parameter() {
+        // 🎯 Target: convert_node_pattern optimization with Integer value
+        // 💣 Risk: Integer parameters (common from JSON) not optimizing
+        // 🧪 Strategy: Bind ParameterValue::Value(Int) instead of NodeId
+
+        let ast = Parser::parse("MATCH (n {id: $id}) RETURN n").unwrap();
+        let mut converter = AstConverter::new();
+        converter.bind("id", ParameterValue::Value(PredicateValue::Int(123)));
+
+        let query = converter.convert(&ast).unwrap();
+
+        let has_start_node = query.ops.iter().any(|op| match op {
+            QueryOp::StartNode(id) => id.as_u64() == 123,
+            _ => false,
+        });
+        assert!(has_start_node, "Should optimize Int parameter to StartNode");
+    }
+
+    #[test]
+    fn test_symmetric_comparison_operators() {
+        // 🎯 Target: convert_comparison operator flipping
+        // 💣 Risk: Incorrect logic (e.g., < becomes > instead of >)
+        // 🧪 Strategy: Test all inequalities in swapped position
+
+        let cases = vec![
+            (
+                "10 = n.a",
+                Predicate::Eq {
+                    key: "a".to_string(),
+                    value: PredicateValue::Int(10),
+                },
+            ),
+            (
+                "10 <> n.a",
+                Predicate::Ne {
+                    key: "a".to_string(),
+                    value: PredicateValue::Int(10),
+                },
+            ),
+            (
+                "10 > n.a",
+                Predicate::Lt {
+                    key: "a".to_string(),
+                    value: PredicateValue::Int(10),
+                },
+            ), // 10 > a  => a < 10
+            (
+                "10 >= n.a",
+                Predicate::Lte {
+                    key: "a".to_string(),
+                    value: PredicateValue::Int(10),
+                },
+            ), // 10 >= a => a <= 10
+            (
+                "10 < n.a",
+                Predicate::Gt {
+                    key: "a".to_string(),
+                    value: PredicateValue::Int(10),
+                },
+            ), // 10 < a  => a > 10
+            (
+                "10 <= n.a",
+                Predicate::Gte {
+                    key: "a".to_string(),
+                    value: PredicateValue::Int(10),
+                },
+            ), // 10 <= a => a >= 10
+        ];
+
+        for (query_str, expected) in cases {
+            let full_query = format!("MATCH (n) WHERE {} RETURN n", query_str);
+            let ast = Parser::parse(&full_query).unwrap();
+            let converter = AstConverter::new();
+            let query = converter.convert(&ast).unwrap();
+
+            let found = query.ops.iter().any(|op| {
+                if let QueryOp::Filter(pred) = op {
+                    // Simple check for variant and value match.
+                    // Note: Predicate doesn't derive PartialEq, so we format debug strings
+                    format!("{:?}", pred) == format!("{:?}", expected)
+                } else {
+                    false
+                }
+            });
+            assert!(
+                found,
+                "Failed to convert '{}'. Expected {:?}",
+                query_str, expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_comparison_invalid_syntax() {
+        // 🎯 Target: convert_comparison error path
+        // 💣 Risk: Panic or incorrect behavior on invalid syntax
+        // 🧪 Strategy: Compare two literals
+
+        let ast = Parser::parse("MATCH (n) WHERE 1 = 1 RETURN n").unwrap();
+        let converter = AstConverter::new();
+        let result = converter.convert(&ast);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Comparison must involve a property")
+        );
+    }
+
+    #[test]
+    fn test_comparison_with_parameter_resolution() {
+        // 🎯 Target: expression_to_predicate_value with parameter
+        // 💣 Risk: Parameters not resolving in WHERE clause
+        // 🧪 Strategy: Use parameter in WHERE
+
+        let ast = Parser::parse("MATCH (n) WHERE n.age = $age RETURN n").unwrap();
+        let mut converter = AstConverter::new();
+        converter.bind("age", ParameterValue::Value(PredicateValue::Int(30)));
+        let query = converter.convert(&ast).unwrap();
+
+        let found = query.ops.iter().any(|op| {
+            matches!(
+                op,
+                QueryOp::Filter(Predicate::Eq {
+                    value: PredicateValue::Int(30),
+                    ..
+                })
+            )
+        });
+        assert!(found, "Should resolve parameter in comparison");
+
+        // Also test swapped with parameter
+        let ast_swapped = Parser::parse("MATCH (n) WHERE $age = n.age RETURN n").unwrap();
+        let query_swapped = converter.convert(&ast_swapped).unwrap();
+        let found_swapped = query_swapped.ops.iter().any(|op| {
+            matches!(
+                op,
+                QueryOp::Filter(Predicate::Eq {
+                    value: PredicateValue::Int(30),
+                    ..
+                })
+            )
+        });
+        assert!(
+            found_swapped,
+            "Should resolve parameter in swapped comparison"
+        );
+    }
+
+    #[test]
+    fn test_parameter_not_found_error() {
+        // 🎯 Target: expression_to_predicate_value error path
+        // 💣 Risk: Silent failure or panic on missing parameter
+        // 🧪 Strategy: Use unbound parameter
+
+        let ast = Parser::parse("MATCH (n) WHERE n.age = $missing RETURN n").unwrap();
+        let converter = AstConverter::new();
+        let result = converter.convert(&ast);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("missing"));
+        assert!(err.contains("not found"));
     }
 }
