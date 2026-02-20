@@ -41,7 +41,7 @@
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
-//! ```rust
+//! ```rust,ignore
 //! // Requires features = ["nova"]
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
@@ -124,6 +124,81 @@ pub mod temporal_diff;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
+
+#[cfg(not(feature = "nova"))]
+/// Temporal narrative generator for natural language history logs.
+pub mod temporal_narrative {
+    use crate::AletheiaDB;
+    use crate::core::error::Result;
+    use crate::core::id::NodeId;
+
+    /// A single event in the narrative history of an entity.
+    #[derive(Debug, Clone)]
+    pub struct NarrativeEvent {
+        /// ISO 8601 timestamp of when the event was recorded (transaction time).
+        pub timestamp: String,
+        /// Sequential version number.
+        pub version_number: u64,
+        /// High-level description of what happened.
+        pub description: String,
+        /// Detailed list of changes (if any).
+        pub changes: Vec<String>,
+    }
+
+    /// Generator for creating natural language narratives from temporal history.
+    pub struct NarrativeGenerator<'a> {
+        _marker: std::marker::PhantomData<&'a ()>,
+    }
+
+    impl<'a> NarrativeGenerator<'a> {
+        /// Create a new narrative generator.
+        pub fn new(_db: &'a AletheiaDB) -> Self {
+            panic!(
+                "Experimental features like NarrativeGenerator require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n"
+            );
+        }
+
+        #[cfg(test)]
+        fn new_internal() -> Self {
+            Self {
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        /// Generate a narrative for a specific node.
+        pub fn generate_node_narrative(&self, _node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
+            panic!("Experimental features like NarrativeGenerator require the 'nova' feature.");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::AletheiaDB;
+        use crate::core::id::NodeId;
+
+        #[test]
+        #[should_panic(
+            expected = "Experimental features like NarrativeGenerator require the 'nova' feature. Please enable it in your Cargo.toml"
+        )]
+        fn test_stub_new_panics() {
+            let db = AletheiaDB::new().unwrap();
+            let _ = NarrativeGenerator::new(&db);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "Experimental features like NarrativeGenerator require the 'nova' feature."
+        )]
+        fn test_stub_generate_panics() {
+            let generator = NarrativeGenerator::new_internal();
+            // NodeId::from(0) is a valid way to create a NodeId in tests if implemented,
+            // or use new_unchecked if available to crate. Since we are in the crate, we might have access?
+            // Actually, NodeId::new(0) is public safe constructor.
+            let _ = generator.generate_node_narrative(NodeId::new(0).unwrap());
+        }
+    }
+}
 
 #[cfg(feature = "nova")]
 /// Thermos: Semantic Temperature & Volatility Gauge.
