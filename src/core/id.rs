@@ -1520,7 +1520,9 @@ impl TxIdGenerator {
         let mut current = self.counter.load(Ordering::SeqCst);
         loop {
             if current == u64::MAX {
-                panic!("Transaction ID overflow! Database has exhausted all available transaction IDs.");
+                panic!(
+                    "Transaction ID overflow! Database has exhausted all available transaction IDs."
+                );
             }
             match self.counter.compare_exchange(
                 current,

@@ -103,8 +103,9 @@ fn test_adr_0009_matches_implementation() {
     let impl_content = fs::read_to_string(impl_path).expect("Failed to read src/core/id.rs");
 
     // Implementation uses SeqCst
+    // Note: implementation might use fetch_add or compare_exchange, but must use SeqCst
     assert!(
-        impl_content.contains("fetch_add(1, Ordering::SeqCst)"),
+        impl_content.contains("Ordering::SeqCst"),
         "Implementation in src/core/id.rs should use Ordering::SeqCst"
     );
 
