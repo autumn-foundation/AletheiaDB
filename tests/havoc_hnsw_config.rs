@@ -1,4 +1,4 @@
-use aletheiadb::index::vector::{HnswConfig, DistanceMetric, Quantization};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, Quantization};
 use std::io::Cursor;
 
 #[test]
@@ -18,7 +18,7 @@ fn test_hnsw_zero_dimensions_rejected() {
 
     if let Err(e) = config_result {
         if e.to_string().contains("dimensions must be > 0") {
-             return; // Passed
+            return; // Passed
         }
         panic!("Deserialization failed but with unexpected error: {:?}", e);
     }

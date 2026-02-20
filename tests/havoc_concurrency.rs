@@ -1,11 +1,15 @@
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 #[test]
 fn test_concurrency_stress() {
-    let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+    let index = Arc::new(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap(),
+    );
 
     let num_threads = 10;
     let iterations = 100;

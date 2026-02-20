@@ -2493,7 +2493,7 @@ mod sentry_tests {
     #[test]
     fn test_hnsw_config_deserialize_invalid_quantization() {
         // Construct a buffer that is valid until quantization byte
-        let config = HnswConfig::default();
+        let config = HnswConfig::new(128, DistanceMetric::Cosine); // Use valid dimensions
         let mut buffer = Vec::new();
         // Write valid parts manually to ensure we reach quantization read
         buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
@@ -4222,7 +4222,7 @@ mod coverage_misc_tests {
     #[test]
     fn test_deserialize_quantization_error() {
         // Construct valid data up to quantization
-        let config = HnswConfig::default();
+        let config = HnswConfig::new(128, DistanceMetric::Cosine); // Use valid dimensions
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&(config.dimensions as u64).to_le_bytes());
         buffer.push(config.metric.to_u8());
