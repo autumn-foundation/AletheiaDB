@@ -2202,11 +2202,21 @@ mod tests {
         let projected_node = row.entity.as_node().unwrap();
 
         assert_eq!(
-            projected_node.properties.get("name").unwrap().as_str().unwrap(),
+            projected_node
+                .properties
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "Alice"
         );
         assert_eq!(
-            projected_node.properties.get("city").unwrap().as_str().unwrap(),
+            projected_node
+                .properties
+                .get("city")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "Paris"
         );
         assert!(projected_node.properties.get("age").is_none());
@@ -2216,16 +2226,19 @@ mod tests {
     fn test_project_iterator_missing_property() {
         let node = test_node(1, "Alice"); // Only has "name"
         let input = MockIterator::from_nodes(vec![node]);
-        let mut project = ProjectIterator::new(
-            Box::new(input),
-            vec!["name".to_string(), "age".to_string()],
-        );
+        let mut project =
+            ProjectIterator::new(Box::new(input), vec!["name".to_string(), "age".to_string()]);
 
         let row = project.next().unwrap().unwrap();
         let projected_node = row.entity.as_node().unwrap();
 
         assert_eq!(
-            projected_node.properties.get("name").unwrap().as_str().unwrap(),
+            projected_node
+                .properties
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "Alice"
         );
         assert!(projected_node.properties.get("age").is_none());
