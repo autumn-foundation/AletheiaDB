@@ -59,13 +59,21 @@ impl AletheiaDB {
                     reason: "Index persistence not enabled".to_string(),
                 })?;
 
-        // 1. Save string interner first (dependency for all others)
-        manager.save_string_interner().map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
-        })?;
-
         // Capture current LSN for all operations
         let current_lsn = self.wal.current_lsn().0;
+
+        // 1. Save string interner first (dependency for all others)
+        if let Some(ref tracker) = self.persistence_tracker {
+            crate::storage::index_persistence::operations::persist_string_interner(
+                manager,
+                tracker,
+                current_lsn,
+            )?;
+        } else {
+            manager.save_string_interner().map_err(|e| {
+                StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+            })?;
+        }
 
         // 2. Save graph index
         crate::storage::index_persistence::operations::persist_graph_index(

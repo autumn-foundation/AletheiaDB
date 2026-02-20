@@ -34,7 +34,9 @@ mod tests {
         update_manifest(&manager, &historical, &tracker, 10, 10, 50);
 
         // Load the manifest back and verify LSN
-        let manifest = manager.load_manifest_and_strings().expect("Failed to load manifest");
+        let manifest = manager
+            .load_manifest_and_strings()
+            .expect("Failed to load manifest");
 
         // CRITICAL CHECK:
         // The manifest LSN MUST be 100 (the minimum), not 200.
@@ -52,7 +54,9 @@ mod tests {
         // Call update_manifest again
         update_manifest(&manager, &historical, &tracker, 10, 10, 50);
 
-        let manifest_updated = manager.load_manifest_and_strings().expect("Failed to load updated manifest");
+        let manifest_updated = manager
+            .load_manifest_and_strings()
+            .expect("Failed to load updated manifest");
 
         // Now it should be 200
         assert_eq!(

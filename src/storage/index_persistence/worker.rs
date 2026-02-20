@@ -228,12 +228,7 @@ pub(crate) fn spawn_background_persistence_thread(
                 if vector_mutations >= policies.vector.mutation_threshold as u64
                     || vector_seconds >= policies.vector.time_interval_secs as u64
                 {
-                    match persist_vector_indexes(
-                        &current,
-                        &manager,
-                        Some(&tracker),
-                        snapshot_lsn,
-                    ) {
+                    match persist_vector_indexes(&current, &manager, Some(&tracker), snapshot_lsn) {
                         Ok(()) => any_index_persisted = true,
                         Err(e) => {
                             eprintln!(
