@@ -736,7 +736,9 @@ mod tests {
         // Helper to check result
         let check_result = |dst_uninit: &[MaybeUninit<f32>]| {
             // SAFETY: We assume the test function wrote valid data
-            let result_slice = unsafe { std::slice::from_raw_parts(dst_uninit.as_ptr() as *const f32, dst_uninit.len()) };
+            let result_slice = unsafe {
+                std::slice::from_raw_parts(dst_uninit.as_ptr() as *const f32, dst_uninit.len())
+            };
             assert_eq!(result_slice, expected);
         };
 

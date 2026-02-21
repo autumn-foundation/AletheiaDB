@@ -56,7 +56,8 @@ fn test_scale_and_copy_correctness() {
 
     // Verify result without transmute
     // SAFETY: We initialized dst_vec with valid floats via scale_and_copy
-    let dst_slice = unsafe { std::slice::from_raw_parts(dst_vec.as_ptr() as *const f32, dst_vec.len()) };
+    let dst_slice =
+        unsafe { std::slice::from_raw_parts(dst_vec.as_ptr() as *const f32, dst_vec.len()) };
 
     assert_eq!(dst_slice, &[2.0, 4.0, 6.0, 8.0, 10.0]);
 }
@@ -73,7 +74,8 @@ fn test_scale_and_copy_large_vector() {
     scale_and_copy(&src, &mut dst_vec, 2.0);
 
     // Verify result without transmute
-    let dst_slice = unsafe { std::slice::from_raw_parts(dst_vec.as_ptr() as *const f32, dst_vec.len()) };
+    let dst_slice =
+        unsafe { std::slice::from_raw_parts(dst_vec.as_ptr() as *const f32, dst_vec.len()) };
 
     for (i, val) in dst_slice.iter().enumerate() {
         assert_eq!(*val, (i as f32) * 2.0);
