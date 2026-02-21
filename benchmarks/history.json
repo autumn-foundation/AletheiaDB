@@ -330,5 +330,1404 @@
         "std_dev_ns": 27171.71107871942
       }
     }
+  },
+  {
+    "timestamp": "2026-02-21T20:43:41.849269+00:00",
+    "commit": "198c57d",
+    "branch": "jules-3069904928789557752-7bfd23b2",
+    "benchmarks": {
+      "aletheiadb_node_creation": {
+        "point_estimate_ns": 105587.98688853759,
+        "ci_lower_ns": 95514.70531319677,
+        "ci_upper_ns": 116848.53890799564,
+        "std_dev_ns": 297899.615617021
+      },
+      "node_lookup": {
+        "point_estimate_ns": 64.59939206492983,
+        "ci_lower_ns": 64.31960598586475,
+        "ci_upper_ns": 64.78000830642684,
+        "std_dev_ns": 0.6200861374209033
+      },
+      "aletheiadb_3_hop_traversal": {
+        "point_estimate_ns": 483.03326182978645,
+        "ci_lower_ns": 481.80184349359325,
+        "ci_upper_ns": 484.84096805610665,
+        "std_dev_ns": 6.6300598861301525
+      },
+      "mixed_read_write_80_20": {
+        "point_estimate_ns": 16590656.9,
+        "ci_lower_ns": 16207655.196500001,
+        "ci_upper_ns": 16980903.3395,
+        "std_dev_ns": 1415377.3600942031
+      },
+      "out_degree": {
+        "point_estimate_ns": 406.190262954019,
+        "ci_lower_ns": 404.293682319799,
+        "ci_upper_ns": 407.7133926523594,
+        "std_dev_ns": 4.541576157545607
+      },
+      "labeled_traversal": {
+        "point_estimate_ns": 465.9282119825052,
+        "ci_lower_ns": 465.36575554437513,
+        "ci_upper_ns": 466.53109839958495,
+        "std_dev_ns": 2.354312474418055
+      },
+      "aletheiadb_labeled_traversal": {
+        "point_estimate_ns": 159.868221653519,
+        "ci_lower_ns": 159.70189521578737,
+        "ci_upper_ns": 160.06935757679213,
+        "std_dev_ns": 0.38902356521474263
+      },
+      "write_transaction_creation": {
+        "point_estimate_ns": 462.437451192751,
+        "ci_lower_ns": 461.99519122365655,
+        "ci_upper_ns": 462.94956434670564,
+        "std_dev_ns": 1.8428791358821337
+      },
+      "aletheiadb_historical_stats": {
+        "point_estimate_ns": 1059.2181286545674,
+        "ci_lower_ns": 1057.0127237653435,
+        "ci_upper_ns": 1061.7960082805034,
+        "std_dev_ns": 4.316067987400935
+      },
+      "aletheiadb_edge_creation": {
+        "point_estimate_ns": 97345.81847350029,
+        "ci_lower_ns": 87540.2698041836,
+        "ci_upper_ns": 106690.73199747702,
+        "std_dev_ns": 322980.4204883581
+      },
+      "edge_lookup": {
+        "point_estimate_ns": 62.379754055443655,
+        "ci_lower_ns": 62.31319748551088,
+        "ci_upper_ns": 62.43332704863329,
+        "std_dev_ns": 0.1907702482557801
+      },
+      "cosine_similarity_openai_1536d": {
+        "point_estimate_ns": 301.5357890223981,
+        "ci_lower_ns": 299.436828174268,
+        "ci_upper_ns": 304.2497533911666,
+        "std_dev_ns": 6.190632927568682
+      },
+      "3_hop_traversal": {
+        "point_estimate_ns": 56709.40060537482,
+        "ci_lower_ns": 56625.45557799764,
+        "ci_upper_ns": 56814.57330336405,
+        "std_dev_ns": 319.55667834177916
+      },
+      "sustained_write_10k_versions_fast_reference": {
+        "point_estimate_ns": 455090030.52,
+        "ci_lower_ns": 454130011.388,
+        "ci_upper_ns": 456073534.51449996,
+        "std_dev_ns": 3565380.523849086
+      },
+      "find_neighbors": {
+        "point_estimate_ns": 1240.9175305026301,
+        "ci_lower_ns": 1239.2111025292563,
+        "ci_upper_ns": 1243.020194052436,
+        "std_dev_ns": 7.3909887971046215
+      },
+      "read_transaction_creation": {
+        "point_estimate_ns": 339.2398020202676,
+        "ci_lower_ns": 335.7963868551652,
+        "ci_upper_ns": 343.7172284630253,
+        "std_dev_ns": 18.818965872716934
+      },
+      "in_degree": {
+        "point_estimate_ns": 398.58432612085096,
+        "ci_lower_ns": 398.22563133232137,
+        "ci_upper_ns": 399.0398903730286,
+        "std_dev_ns": 1.759143199386583
+      },
+      "sustained_write_10k_versions": {
+        "point_estimate_ns": 181743777.5,
+        "ci_lower_ns": 180886862.2425,
+        "ci_upper_ns": 182694409.9835,
+        "std_dev_ns": 3304803.1740842476
+      },
+      "read_latency_p50_p99": {
+        "point_estimate_ns": 8.775181449430733,
+        "ci_lower_ns": 8.024850170733629,
+        "ci_upper_ns": 9.860906759496226,
+        "std_dev_ns": 46.621558845681925
+      },
+      "closure_write_single_node": {
+        "point_estimate_ns": 2805759.5909726266,
+        "ci_lower_ns": 2796347.4384530853,
+        "ci_upper_ns": 2816012.120000868,
+        "std_dev_ns": 34097.21087582842
+      },
+      "aletheiadb_out_degree": {
+        "point_estimate_ns": 100.39473233264385,
+        "ci_lower_ns": 100.3461474740387,
+        "ci_upper_ns": 100.45337807251627,
+        "std_dev_ns": 0.20210721265146966
+      },
+      "node_creation": {
+        "point_estimate_ns": 4433.240196900578,
+        "ci_lower_ns": 4241.021954438019,
+        "ci_upper_ns": 4580.727389059392,
+        "std_dev_ns": 3145.673287505665
+      },
+      "aletheiadb_in_degree": {
+        "point_estimate_ns": 104.89167571884613,
+        "ci_lower_ns": 104.80995331613747,
+        "ci_upper_ns": 104.97736687520474,
+        "std_dev_ns": 0.3996576690269795
+      },
+      "edge_creation": {
+        "point_estimate_ns": 4461.170580124679,
+        "ci_lower_ns": 4220.316615507933,
+        "ci_upper_ns": 4642.308576440936,
+        "std_dev_ns": 895.9354625716146
+      },
+      "traverse_and_rank_basic/100_power_law/100": {
+        "point_estimate_ns": 40645.37641606975,
+        "ci_lower_ns": 40575.570950488844,
+        "ci_upper_ns": 40756.949997928285,
+        "std_dev_ns": 336.8497633314371
+      },
+      "traverse_and_rank_basic/1K_power_law/1000": {
+        "point_estimate_ns": 47543.057259595385,
+        "ci_lower_ns": 46021.64734128316,
+        "ci_upper_ns": 48908.16197054701,
+        "std_dev_ns": 4763.408049445584
+      },
+      "traverse_and_rank_basic/1K_uniform/1000": {
+        "point_estimate_ns": 8124.010274408515,
+        "ci_lower_ns": 8111.796362768051,
+        "ci_upper_ns": 8140.633225059812,
+        "std_dev_ns": 40.44531174462546
+      },
+      "traverse_and_rank_basic/1K_sparse/1000": {
+        "point_estimate_ns": 1276.267736055206,
+        "ci_lower_ns": 1275.238050728605,
+        "ci_upper_ns": 1277.5031410824251,
+        "std_dev_ns": 4.52527124574391
+      },
+      "traverse_and_rank_basic/100_uniform/100": {
+        "point_estimate_ns": 7893.298112167472,
+        "ci_lower_ns": 7888.653271164987,
+        "ci_upper_ns": 7898.511851004496,
+        "std_dev_ns": 17.626978977413632
+      },
+      "traverse_and_rank_basic/100_sparse/100": {
+        "point_estimate_ns": 1286.6027493511683,
+        "ci_lower_ns": 1285.0983382172292,
+        "ci_upper_ns": 1288.1828752014662,
+        "std_dev_ns": 5.089050680837771
+      },
+      "cosine_similarity/optimized/384": {
+        "point_estimate_ns": 77.19818195555419,
+        "ci_lower_ns": 77.0254227262645,
+        "ci_upper_ns": 77.35644672994619,
+        "std_dev_ns": 0.6351143353771208
+      },
+      "cosine_similarity/optimized/1536": {
+        "point_estimate_ns": 299.6658910971508,
+        "ci_lower_ns": 299.28030145854456,
+        "ci_upper_ns": 300.01812927935566,
+        "std_dev_ns": 0.9796408552665271
+      },
+      "cosine_similarity/optimized/768": {
+        "point_estimate_ns": 151.7529320616881,
+        "ci_lower_ns": 151.66339332681332,
+        "ci_upper_ns": 151.8528047146588,
+        "std_dev_ns": 0.42975604256628436
+      },
+      "cosine_similarity/optimized/3072": {
+        "point_estimate_ns": 592.05438700011,
+        "ci_lower_ns": 591.7843089564706,
+        "ci_upper_ns": 592.3524809415526,
+        "std_dev_ns": 3.140527182797275
+      },
+      "cosine_similarity/optimized/1024": {
+        "point_estimate_ns": 201.4877458513007,
+        "ci_lower_ns": 200.85042107432656,
+        "ci_upper_ns": 202.30991997683532,
+        "std_dev_ns": 2.286718757092517
+      },
+      "cosine_similarity/naive_3pass/384": {
+        "point_estimate_ns": 1652.069934743413,
+        "ci_lower_ns": 1650.8755199815955,
+        "ci_upper_ns": 1653.63424223979,
+        "std_dev_ns": 3.902929057670135
+      },
+      "cosine_similarity/naive_3pass/1536": {
+        "point_estimate_ns": 6951.807962931847,
+        "ci_lower_ns": 6948.693184144439,
+        "ci_upper_ns": 6955.301184913111,
+        "std_dev_ns": 26.557028069060614
+      },
+      "cosine_similarity/naive_3pass/768": {
+        "point_estimate_ns": 3435.1943197863548,
+        "ci_lower_ns": 3415.0074432186134,
+        "ci_upper_ns": 3460.2340041209404,
+        "std_dev_ns": 33.745485433033565
+      },
+      "cosine_similarity/naive_3pass/3072": {
+        "point_estimate_ns": 14033.896443987927,
+        "ci_lower_ns": 14017.637288965314,
+        "ci_upper_ns": 14055.332691369887,
+        "std_dev_ns": 68.56629049836619
+      },
+      "cosine_similarity/naive_3pass/1024": {
+        "point_estimate_ns": 4599.753067310874,
+        "ci_lower_ns": 4596.423134574021,
+        "ci_upper_ns": 4603.320594678359,
+        "std_dev_ns": 11.839112254157909
+      },
+      "cosine_similarity/scalar_1pass/384": {
+        "point_estimate_ns": 636.193272589146,
+        "ci_lower_ns": 603.1786000088678,
+        "ci_upper_ns": 671.3907328636794,
+        "std_dev_ns": 54.35142076677396
+      },
+      "cosine_similarity/scalar_1pass/1536": {
+        "point_estimate_ns": 2360.199107123709,
+        "ci_lower_ns": 2353.509533143971,
+        "ci_upper_ns": 2371.9777121865504,
+        "std_dev_ns": 27.06475924935487
+      },
+      "cosine_similarity/scalar_1pass/768": {
+        "point_estimate_ns": 1181.9781014168025,
+        "ci_lower_ns": 1181.4734150690697,
+        "ci_upper_ns": 1182.503293651828,
+        "std_dev_ns": 2.447470776519013
+      },
+      "cosine_similarity/scalar_1pass/3072": {
+        "point_estimate_ns": 4728.166806747599,
+        "ci_lower_ns": 4714.062297505582,
+        "ci_upper_ns": 4744.313450360317,
+        "std_dev_ns": 31.848888397850683
+      },
+      "cosine_similarity/scalar_1pass/1024": {
+        "point_estimate_ns": 1581.0847224462116,
+        "ci_lower_ns": 1575.386218516162,
+        "ci_upper_ns": 1590.0045152937837,
+        "std_dev_ns": 333.81839431270055
+      },
+      "aletheiadb_batch/batch_node_creation/100": {
+        "point_estimate_ns": 289829222.94,
+        "ci_lower_ns": 288086841.681,
+        "ci_upper_ns": 291591735.663,
+        "std_dev_ns": 6371752.922878724
+      },
+      "aletheiadb_batch/batch_node_creation/1000": {
+        "point_estimate_ns": 2831177141.04,
+        "ci_lower_ns": 2815906625.1605,
+        "ci_upper_ns": 2849516226.441,
+        "std_dev_ns": 61540296.89892609
+      },
+      "aletheiadb_batch/batch_node_creation/10": {
+        "point_estimate_ns": 27807499.68,
+        "ci_lower_ns": 27674955.065375,
+        "ci_upper_ns": 27937406.647625,
+        "std_dev_ns": 478086.70359114587
+      },
+      "cold_batch_write_throughput/zstd/100": {
+        "point_estimate_ns": 7446457.8212696565,
+        "ci_lower_ns": 7420127.676199213,
+        "ci_upper_ns": 7471651.742407324,
+        "std_dev_ns": 72697.98103978255
+      },
+      "cold_batch_write_throughput/zstd/1000": {
+        "point_estimate_ns": 66782380.72,
+        "ci_lower_ns": 66576414.6425,
+        "ci_upper_ns": 67011409.79025,
+        "std_dev_ns": 790677.2192639813
+      },
+      "cold_batch_write_throughput/zstd/10000": {
+        "point_estimate_ns": 189514991.74,
+        "ci_lower_ns": 187487924.0425,
+        "ci_upper_ns": 191762558.41050002,
+        "std_dev_ns": 7782845.710291847
+      },
+      "cold_batch_write_throughput/fast/100": {
+        "point_estimate_ns": 4929242.764985439,
+        "ci_lower_ns": 4907642.7816374935,
+        "ci_upper_ns": 4953927.579909837,
+        "std_dev_ns": 69123.27007270302
+      },
+      "cold_batch_write_throughput/fast/1000": {
+        "point_estimate_ns": 45813563.21999999,
+        "ci_lower_ns": 45746108.88133332,
+        "ci_upper_ns": 45887614.86299998,
+        "std_dev_ns": 257616.34052136034
+      },
+      "cold_batch_write_throughput/fast/10000": {
+        "point_estimate_ns": 454829735.4,
+        "ci_lower_ns": 454227247.375,
+        "ci_upper_ns": 455468619.39250004,
+        "std_dev_ns": 2252619.1835775143
+      },
+      "cosine_similarity_normalized/specialized/384": {
+        "point_estimate_ns": 56.59762000366868,
+        "ci_lower_ns": 56.5607990597491,
+        "ci_upper_ns": 56.63747457203557,
+        "std_dev_ns": 0.11204400005862736
+      },
+      "cosine_similarity_normalized/specialized/1536": {
+        "point_estimate_ns": 284.76728742221144,
+        "ci_lower_ns": 280.13208389175924,
+        "ci_upper_ns": 290.0487059848769,
+        "std_dev_ns": 10.327696695751309
+      },
+      "cosine_similarity_normalized/general/384": {
+        "point_estimate_ns": 78.06332090156614,
+        "ci_lower_ns": 77.98414692436332,
+        "ci_upper_ns": 78.14823327687195,
+        "std_dev_ns": 0.19590303752736146
+      },
+      "cosine_similarity_normalized/general/1536": {
+        "point_estimate_ns": 300.4556351290062,
+        "ci_lower_ns": 299.919767288446,
+        "ci_upper_ns": 301.2823096721473,
+        "std_dev_ns": 3.0957363966422045
+      },
+      "vector_batch_serialize/rag_workload/100x1536": {
+        "point_estimate_ns": 22986.302710144148,
+        "ci_lower_ns": 22883.256720141966,
+        "ci_upper_ns": 23114.737578911776,
+        "std_dev_ns": 370.808906808476
+      },
+      "id_generation_current/read_current_approximate": {
+        "point_estimate_ns": 0.38298145410761325,
+        "ci_lower_ns": 0.3827446624742064,
+        "ci_upper_ns": 0.3832859438077964,
+        "std_dev_ns": 0.0014634778046948562
+      },
+      "id_generation_current/read_current": {
+        "point_estimate_ns": 0.38403609330145705,
+        "ci_lower_ns": 0.38353250613535567,
+        "ci_upper_ns": 0.38477552592734005,
+        "std_dev_ns": 0.001193710479478649
+      },
+      "single_transaction_latency/async": {
+        "point_estimate_ns": 65064.95586410406,
+        "ci_lower_ns": 57281.11139309532,
+        "ci_upper_ns": 72113.96764436083,
+        "std_dev_ns": 36257.02388392231
+      },
+      "single_transaction_latency/synchronous": {
+        "point_estimate_ns": 571976.8932190698,
+        "ci_lower_ns": 563852.8705069101,
+        "ci_upper_ns": 579816.9539870191,
+        "std_dev_ns": 27015.07526741548
+      },
+      "single_transaction_latency/group_commit_fast": {
+        "point_estimate_ns": 1799045.5265463018,
+        "ci_lower_ns": 1776809.670913189,
+        "ci_upper_ns": 1822518.8644070849,
+        "std_dev_ns": 80513.5807297254
+      },
+      "single_transaction_latency/group_commit_default": {
+        "point_estimate_ns": 2755248.5911706463,
+        "ci_lower_ns": 2743608.3875506874,
+        "ci_upper_ns": 2767805.857782784,
+        "std_dev_ns": 149327.2377911224
+      },
+      "single_transaction_latency/async_batched_default": {
+        "point_estimate_ns": 9188520.870000003,
+        "ci_lower_ns": 9183672.443199998,
+        "ci_upper_ns": 9193712.409999998,
+        "std_dev_ns": 18332.469964266
+      },
+      "single_transaction_latency/async_batched_aggressive": {
+        "point_estimate_ns": 5017230.003587653,
+        "ci_lower_ns": 4994946.330417144,
+        "ci_upper_ns": 5033474.251226593,
+        "std_dev_ns": 781014.4978530124
+      },
+      "target_time_travel/with_5_deltas": {
+        "point_estimate_ns": 279.26660591422876,
+        "ci_lower_ns": 270.62639508449615,
+        "ci_upper_ns": 290.0937413466504,
+        "std_dev_ns": 20.37210012896134
+      },
+      "target_time_travel/at_anchor": {
+        "point_estimate_ns": 272.30035568291356,
+        "ci_lower_ns": 272.12185278998066,
+        "ci_upper_ns": 272.49278264771937,
+        "std_dev_ns": 0.9667052441516802
+      },
+      "target_time_travel/worst_case_9_deltas": {
+        "point_estimate_ns": 274.46354850831545,
+        "ci_lower_ns": 274.26264211138334,
+        "ci_upper_ns": 274.6611589693988,
+        "std_dev_ns": 1.8974563556307482
+      },
+      "euclidean_distance/scalar/384": {
+        "point_estimate_ns": 566.6878257899341,
+        "ci_lower_ns": 566.0426552274762,
+        "ci_upper_ns": 567.3179776987806,
+        "std_dev_ns": 2.5250879216221414
+      },
+      "euclidean_distance/scalar/1536": {
+        "point_estimate_ns": 2332.189815352802,
+        "ci_lower_ns": 2330.847686373473,
+        "ci_upper_ns": 2334.0001891804973,
+        "std_dev_ns": 9.378124805684932
+      },
+      "euclidean_distance/scalar/768": {
+        "point_estimate_ns": 1155.2432735799714,
+        "ci_lower_ns": 1154.6503997718094,
+        "ci_upper_ns": 1155.8921738443653,
+        "std_dev_ns": 2.4107406294676887
+      },
+      "euclidean_distance/scalar/1024": {
+        "point_estimate_ns": 1548.5691262270595,
+        "ci_lower_ns": 1547.4469941751292,
+        "ci_upper_ns": 1549.9194334032748,
+        "std_dev_ns": 4.068111450057118
+      },
+      "euclidean_distance/squared_optimized/384": {
+        "point_estimate_ns": 56.54935943610618,
+        "ci_lower_ns": 56.49328139894014,
+        "ci_upper_ns": 56.60575220652723,
+        "std_dev_ns": 0.41466772652803724
+      },
+      "euclidean_distance/squared_optimized/1536": {
+        "point_estimate_ns": 269.6691770580903,
+        "ci_lower_ns": 269.2291547012724,
+        "ci_upper_ns": 270.15127651894113,
+        "std_dev_ns": 0.9017312909151741
+      },
+      "euclidean_distance/squared_optimized/768": {
+        "point_estimate_ns": 121.20137541414549,
+        "ci_lower_ns": 121.06846434986943,
+        "ci_upper_ns": 121.35750949907654,
+        "std_dev_ns": 2.133007006943603
+      },
+      "euclidean_distance/squared_optimized/1024": {
+        "point_estimate_ns": 173.00439571343534,
+        "ci_lower_ns": 172.87465717697717,
+        "ci_upper_ns": 173.15795926277556,
+        "std_dev_ns": 0.7656656467220114
+      },
+      "euclidean_distance/optimized/384": {
+        "point_estimate_ns": 65.57527435939502,
+        "ci_lower_ns": 60.83333640760525,
+        "ci_upper_ns": 69.99990814531309,
+        "std_dev_ns": 7.800896216176965
+      },
+      "euclidean_distance/optimized/1536": {
+        "point_estimate_ns": 272.6012258228882,
+        "ci_lower_ns": 272.4163630482749,
+        "ci_upper_ns": 272.8048343492003,
+        "std_dev_ns": 1.2809147242660688
+      },
+      "euclidean_distance/optimized/768": {
+        "point_estimate_ns": 123.78840471954702,
+        "ci_lower_ns": 123.67942151394844,
+        "ci_upper_ns": 123.91545195200639,
+        "std_dev_ns": 0.3390450102255318
+      },
+      "euclidean_distance/optimized/1024": {
+        "point_estimate_ns": 174.9884045355915,
+        "ci_lower_ns": 174.56833126494863,
+        "ci_upper_ns": 175.5089974607085,
+        "std_dev_ns": 1.2316625335398383
+      },
+      "read_under_write_contention/concurrent_writers/0": {
+        "point_estimate_ns": 4455.426772706844,
+        "ci_lower_ns": 4228.904255243324,
+        "ci_upper_ns": 4747.023021532846,
+        "std_dev_ns": 593.7576979858123
+      },
+      "read_under_write_contention/concurrent_writers/2": {
+        "point_estimate_ns": 56660316.7,
+        "ci_lower_ns": 56342906.459,
+        "ci_upper_ns": 57013083.076,
+        "std_dev_ns": 1234746.7595733292
+      },
+      "read_under_write_contention/concurrent_writers/4": {
+        "point_estimate_ns": 114751007.08,
+        "ci_lower_ns": 114185925.59750001,
+        "ci_upper_ns": 115377109.3205,
+        "std_dev_ns": 2190986.5817636866
+      },
+      "id_generation_concurrent/threads/16": {
+        "point_estimate_ns": 674798.7572626674,
+        "ci_lower_ns": 668288.2926207652,
+        "ci_upper_ns": 681783.3986652055,
+        "std_dev_ns": 23923.610665976543
+      },
+      "id_generation_concurrent/threads/8": {
+        "point_estimate_ns": 375165.36757558107,
+        "ci_lower_ns": 364372.68182923587,
+        "ci_upper_ns": 389890.68533766165,
+        "std_dev_ns": 20331.940368507767
+      },
+      "id_generation_concurrent/threads/2": {
+        "point_estimate_ns": 120894.25543802958,
+        "ci_lower_ns": 119813.18037511063,
+        "ci_upper_ns": 122226.33233414432,
+        "std_dev_ns": 3215.281715497198
+      },
+      "id_generation_concurrent/threads/4": {
+        "point_estimate_ns": 198106.50377518928,
+        "ci_lower_ns": 195265.73151800624,
+        "ci_upper_ns": 201011.87742324016,
+        "std_dev_ns": 7944.915683285184
+      },
+      "get_outgoing_allocation/degree_100": {
+        "point_estimate_ns": 35.37007753341642,
+        "ci_lower_ns": 35.32957017978826,
+        "ci_upper_ns": 35.41783828205542,
+        "std_dev_ns": 0.31983952106436037
+      },
+      "get_outgoing_allocation/degree_1": {
+        "point_estimate_ns": 35.64383561653385,
+        "ci_lower_ns": 35.61734796572943,
+        "ci_upper_ns": 35.66919243545134,
+        "std_dev_ns": 0.06884481015157937
+      },
+      "get_outgoing_allocation/degree_10": {
+        "point_estimate_ns": 35.29625517503524,
+        "ci_lower_ns": 35.26888529547903,
+        "ci_upper_ns": 35.32687675869668,
+        "std_dev_ns": 0.08881434916073606
+      },
+      "knn_search/k/50": {
+        "point_estimate_ns": 122093.90440761723,
+        "ci_lower_ns": 121492.29242675022,
+        "ci_upper_ns": 122907.09339724136,
+        "std_dev_ns": 2652.666291309944
+      },
+      "knn_search/k/1": {
+        "point_estimate_ns": 126509.63519457828,
+        "ci_lower_ns": 122083.13383962188,
+        "ci_upper_ns": 132789.85542901038,
+        "std_dev_ns": 19356.090456311176
+      },
+      "knn_search/k/20": {
+        "point_estimate_ns": 123289.13095568381,
+        "ci_lower_ns": 122098.07132619909,
+        "ci_upper_ns": 124403.67722678144,
+        "std_dev_ns": 3430.693861973091
+      },
+      "knn_search/k/5": {
+        "point_estimate_ns": 119250.1898455728,
+        "ci_lower_ns": 118895.43223975068,
+        "ci_upper_ns": 119590.96809472723,
+        "std_dev_ns": 866.5413190063905
+      },
+      "knn_search/k/10": {
+        "point_estimate_ns": 121112.20972699476,
+        "ci_lower_ns": 119567.8092913403,
+        "ci_upper_ns": 123386.16247473622,
+        "std_dev_ns": 4584.707344926931
+      },
+      "time_travel/with_deltas_v15": {
+        "point_estimate_ns": 123.94108617344811,
+        "ci_lower_ns": 123.87726856500903,
+        "ci_upper_ns": 124.00331126580733,
+        "std_dev_ns": 0.20129852895614195
+      },
+      "time_travel/worst_case_v19": {
+        "point_estimate_ns": 124.38143219103625,
+        "ci_lower_ns": 124.31759565286475,
+        "ci_upper_ns": 124.43933881412619,
+        "std_dev_ns": 0.22737834678792196
+      },
+      "time_travel/deep_history_v5": {
+        "point_estimate_ns": 124.32220953215895,
+        "ci_lower_ns": 124.25382761521922,
+        "ci_upper_ns": 124.40117725691292,
+        "std_dev_ns": 0.30269301475505767
+      },
+      "time_travel/at_anchor_v20": {
+        "point_estimate_ns": 123.9871966988356,
+        "ci_lower_ns": 123.88165028073607,
+        "ci_upper_ns": 124.10902247919365,
+        "std_dev_ns": 0.3018724578665994
+      },
+      "cold_read_latency/single_read/fast_compression": {
+        "point_estimate_ns": 34538.98897418321,
+        "ci_lower_ns": 34483.416819465136,
+        "ci_upper_ns": 34597.04178980134,
+        "std_dev_ns": 186.98530354473306
+      },
+      "cold_read_latency/single_read/no_compression": {
+        "point_estimate_ns": 3305.515133139873,
+        "ci_lower_ns": 3297.8645851267975,
+        "ci_upper_ns": 3314.7192684643405,
+        "std_dev_ns": 25.440653302298184
+      },
+      "cold_read_latency/single_read/zstd_compression": {
+        "point_estimate_ns": 34408.70690512883,
+        "ci_lower_ns": 34361.242517227394,
+        "ci_upper_ns": 34464.71293006415,
+        "std_dev_ns": 246.06774057610986
+      },
+      "compression_ratio/compress/zstd": {
+        "point_estimate_ns": 36219494.286666654,
+        "ci_lower_ns": 35560019.79233333,
+        "ci_upper_ns": 36921965.50316668,
+        "std_dev_ns": 2477152.691846728
+      },
+      "compression_ratio/compress/fast": {
+        "point_estimate_ns": 34868527.833333336,
+        "ci_lower_ns": 33563202.329333335,
+        "ci_upper_ns": 36400317.15733333,
+        "std_dev_ns": 5177346.382327758
+      },
+      "compression_ratio/compress/no_compression": {
+        "point_estimate_ns": 31258891.685,
+        "ci_lower_ns": 31049722.01375,
+        "ci_upper_ns": 31475848.00925,
+        "std_dev_ns": 775448.9110164539
+      },
+      "target_3_hop/traverse_three_hops": {
+        "point_estimate_ns": 269.43765503624775,
+        "ci_lower_ns": 268.0298722529492,
+        "ci_upper_ns": 271.0012557019393,
+        "std_dev_ns": 9.606920176901632
+      },
+      "vector_round_trip/round_trip/384": {
+        "point_estimate_ns": 384.86400918963216,
+        "ci_lower_ns": 382.49770453437765,
+        "ci_upper_ns": 386.9566262476498,
+        "std_dev_ns": 6.5658071524244015
+      },
+      "vector_round_trip/round_trip/1536": {
+        "point_estimate_ns": 613.6658263654791,
+        "ci_lower_ns": 611.8239384984795,
+        "ci_upper_ns": 615.3107056889797,
+        "std_dev_ns": 9.509857572562321
+      },
+      "vector_round_trip/round_trip/768": {
+        "point_estimate_ns": 427.7806563706588,
+        "ci_lower_ns": 425.9115196077719,
+        "ci_upper_ns": 429.451104453239,
+        "std_dev_ns": 5.004024432548947
+      },
+      "vector_round_trip/round_trip/3072": {
+        "point_estimate_ns": 1433.3591347985741,
+        "ci_lower_ns": 1421.3147234438861,
+        "ci_upper_ns": 1444.9015894425463,
+        "std_dev_ns": 49.42993508636259
+      },
+      "id_generation_lifecycle/create_and_generate_1000": {
+        "point_estimate_ns": 8802.392448704384,
+        "ci_lower_ns": 8363.484540151285,
+        "ci_upper_ns": 9120.957342294862,
+        "std_dev_ns": 1305.891940216402
+      },
+      "checkpoint_load/100": {
+        "point_estimate_ns": 323505.1117225931,
+        "ci_lower_ns": 317370.35659891285,
+        "ci_upper_ns": 329802.39480044524,
+        "std_dev_ns": 21738.10163697689
+      },
+      "checkpoint_load/1000": {
+        "point_estimate_ns": 1627957.6991962725,
+        "ci_lower_ns": 1614000.2404127382,
+        "ci_upper_ns": 1643690.7458574725,
+        "std_dev_ns": 32446.955283003063
+      },
+      "checkpoint_load/10000": {
+        "point_estimate_ns": 15179930.231428571,
+        "ci_lower_ns": 15079806.457857143,
+        "ci_upper_ns": 15286784.626642859,
+        "std_dev_ns": 375447.7020221171
+      },
+      "vector_batch_deserialize/retrieval_workload/100x1536": {
+        "point_estimate_ns": 36637.56808260677,
+        "ci_lower_ns": 36539.587069966845,
+        "ci_upper_ns": 36728.99519577845,
+        "std_dev_ns": 324.3594376831502
+      },
+      "recovery/100": {
+        "point_estimate_ns": 457033.1928759464,
+        "ci_lower_ns": 438482.2344092627,
+        "ci_upper_ns": 494306.82851205405,
+        "std_dev_ns": 51075.2476465431
+      },
+      "recovery/1000": {
+        "point_estimate_ns": 647916.7172199573,
+        "ci_lower_ns": 646497.8814303161,
+        "ci_upper_ns": 649590.2856508717,
+        "std_dev_ns": 7889.834617825697
+      },
+      "recovery/10": {
+        "point_estimate_ns": 500064.19062317995,
+        "ci_lower_ns": 459829.14466473385,
+        "ci_upper_ns": 536521.8430519077,
+        "std_dev_ns": 77402.31048346696
+      },
+      "multiple_accesses/resolve_100": {
+        "point_estimate_ns": 3567.367055038908,
+        "ci_lower_ns": 3556.587835497716,
+        "ci_upper_ns": 3579.9293147177,
+        "std_dev_ns": 41.49185115037814
+      },
+      "cold_write_latency/single_write/fast_compression": {
+        "point_estimate_ns": 340425.96731120173,
+        "ci_lower_ns": 338745.0933302751,
+        "ci_upper_ns": 342087.8231430796,
+        "std_dev_ns": 5000.708550567791
+      },
+      "cold_write_latency/single_write/no_compression": {
+        "point_estimate_ns": 343791.2879351284,
+        "ci_lower_ns": 317659.6437920853,
+        "ci_upper_ns": 379626.5056915552,
+        "std_dev_ns": 133108.06611400665
+      },
+      "cold_write_latency/single_write/zstd_compression": {
+        "point_estimate_ns": 373867.1990378567,
+        "ci_lower_ns": 370440.4175870634,
+        "ci_upper_ns": 377869.54543988156,
+        "std_dev_ns": 9877.743493399437
+      },
+      "aletheiadb_single_hop/10000_nodes": {
+        "point_estimate_ns": 116.49985044180652,
+        "ci_lower_ns": 116.39087063564696,
+        "ci_upper_ns": 116.60856510997525,
+        "std_dev_ns": 0.3353768363985375
+      },
+      "aletheiadb_single_hop/100_nodes": {
+        "point_estimate_ns": 116.13474008164467,
+        "ci_lower_ns": 116.05774719758405,
+        "ci_upper_ns": 116.21934076123657,
+        "std_dev_ns": 0.2799466457600994
+      },
+      "aletheiadb_single_hop/1000_nodes": {
+        "point_estimate_ns": 116.55173956114795,
+        "ci_lower_ns": 116.46367818388474,
+        "ci_upper_ns": 116.65163854417558,
+        "std_dev_ns": 0.30627926284570367
+      },
+      "valid_at_query/1000_versions": {
+        "point_estimate_ns": 3901.2447142025126,
+        "ci_lower_ns": 3697.8750605947957,
+        "ci_upper_ns": 4082.71623580502,
+        "std_dev_ns": 1058.362185703034
+      },
+      "valid_at_query/100_versions": {
+        "point_estimate_ns": 1529.9313631966777,
+        "ci_lower_ns": 1373.0330513962904,
+        "ci_upper_ns": 1654.4851320116004,
+        "std_dev_ns": 426.82645254257915
+      },
+      "valid_at_query/10000_versions": {
+        "point_estimate_ns": 22355.149504950496,
+        "ci_lower_ns": 21471.26207518374,
+        "ci_upper_ns": 23090.904627556694,
+        "std_dev_ns": 4686.36815458784
+      },
+      "vector_serialize/serialize/1": {
+        "point_estimate_ns": 27.673608053749902,
+        "ci_lower_ns": 27.632286608855228,
+        "ci_upper_ns": 27.724743699562758,
+        "std_dev_ns": 0.2224885253941403
+      },
+      "vector_serialize/serialize/384": {
+        "point_estimate_ns": 134.55908824435917,
+        "ci_lower_ns": 134.43078608145635,
+        "ci_upper_ns": 134.7104438960172,
+        "std_dev_ns": 0.6051064936589614
+      },
+      "vector_serialize/serialize/1536": {
+        "point_estimate_ns": 173.47123845365698,
+        "ci_lower_ns": 173.3445689234157,
+        "ci_upper_ns": 173.60173461784822,
+        "std_dev_ns": 0.7298685288771316
+      },
+      "vector_serialize/serialize/768": {
+        "point_estimate_ns": 133.5553335405855,
+        "ci_lower_ns": 128.5746139526206,
+        "ci_upper_ns": 139.6480356515268,
+        "std_dev_ns": 11.184025489207169
+      },
+      "vector_serialize/serialize/10": {
+        "point_estimate_ns": 27.10969151013782,
+        "ci_lower_ns": 27.088070657580058,
+        "ci_upper_ns": 27.13204086819459,
+        "std_dev_ns": 0.16193194965444008
+      },
+      "vector_serialize/serialize/3072": {
+        "point_estimate_ns": 219.166398555573,
+        "ci_lower_ns": 218.12404349449477,
+        "ci_upper_ns": 220.38295068654887,
+        "std_dev_ns": 3.1593014081284116
+      },
+      "vector_serialize/serialize/128": {
+        "point_estimate_ns": 34.78008298128952,
+        "ci_lower_ns": 34.22327454879736,
+        "ci_upper_ns": 35.39301498867917,
+        "std_dev_ns": 1.5387129620804807
+      },
+      "target_single_hop/traverse_one_hop": {
+        "point_estimate_ns": 39.50975043293543,
+        "ci_lower_ns": 39.45794272543594,
+        "ci_upper_ns": 39.578817026046,
+        "std_dev_ns": 0.2627589623244283
+      },
+      "incremental_read_no_delta/10000edges": {
+        "point_estimate_ns": 32.615126384579405,
+        "ci_lower_ns": 32.59835503228489,
+        "ci_upper_ns": 32.63338056705859,
+        "std_dev_ns": 0.1764509219117716
+      },
+      "incremental_read_no_delta/100edges": {
+        "point_estimate_ns": 32.64998275602441,
+        "ci_lower_ns": 32.62826765842757,
+        "ci_upper_ns": 32.67534077142335,
+        "std_dev_ns": 0.15722805440079446
+      },
+      "incremental_read_no_delta/1000edges": {
+        "point_estimate_ns": 32.638326994677385,
+        "ci_lower_ns": 32.617206185571135,
+        "ci_upper_ns": 32.662425750135775,
+        "std_dev_ns": 0.1365022661685344
+      },
+      "incremental_read_with_delta/5pct_delta": {
+        "point_estimate_ns": 64.20539590577019,
+        "ci_lower_ns": 63.866149530468796,
+        "ci_upper_ns": 64.70296495795208,
+        "std_dev_ns": 1.2042861636660909
+      },
+      "incremental_read_with_delta/10pct_delta": {
+        "point_estimate_ns": 67.85716221005087,
+        "ci_lower_ns": 66.55099368354807,
+        "ci_upper_ns": 69.56345063435435,
+        "std_dev_ns": 11.4710049240047
+      },
+      "incremental_read_with_delta/1pct_delta": {
+        "point_estimate_ns": 63.97808794457741,
+        "ci_lower_ns": 63.803338059925444,
+        "ci_upper_ns": 64.25243762149866,
+        "std_dev_ns": 1.466938559028812
+      },
+      "checkpoint_creation/100": {
+        "point_estimate_ns": 4892958.511683168,
+        "ci_lower_ns": 4453138.641514439,
+        "ci_upper_ns": 5316047.953912391,
+        "std_dev_ns": 957471.1519417716
+      },
+      "checkpoint_creation/1000": {
+        "point_estimate_ns": 4029267.210052417,
+        "ci_lower_ns": 3874044.9090519454,
+        "ci_upper_ns": 4261108.064843288,
+        "std_dev_ns": 441504.3756389884
+      },
+      "checkpoint_creation/10000": {
+        "point_estimate_ns": 7663184.584298194,
+        "ci_lower_ns": 7567967.6947611775,
+        "ci_upper_ns": 7757402.296487848,
+        "std_dev_ns": 293783.8391089341
+      },
+      "aletheiadb_fast_path/node_lookup/100": {
+        "point_estimate_ns": 62.73373899236301,
+        "ci_lower_ns": 62.66483647522679,
+        "ci_upper_ns": 62.809710208718144,
+        "std_dev_ns": 0.39135934967286307
+      },
+      "aletheiadb_fast_path/node_lookup/1000": {
+        "point_estimate_ns": 62.00297879878713,
+        "ci_lower_ns": 61.95085532214455,
+        "ci_upper_ns": 62.069171614739744,
+        "std_dev_ns": 0.24226979413802682
+      },
+      "aletheiadb_fast_path/node_lookup/10000": {
+        "point_estimate_ns": 61.157717975312195,
+        "ci_lower_ns": 61.10321012686252,
+        "ci_upper_ns": 61.22658676833341,
+        "std_dev_ns": 0.20416172669622049
+      },
+      "incremental_insert_latency/10000existing": {
+        "point_estimate_ns": 183.16392077464496,
+        "ci_lower_ns": 173.8104281130073,
+        "ci_upper_ns": 191.40702226917637,
+        "std_dev_ns": 40.58353570472353
+      },
+      "incremental_insert_latency/100000existing": {
+        "point_estimate_ns": 289.18018009986974,
+        "ci_lower_ns": 239.88875383036736,
+        "ci_upper_ns": 340.0765867034958,
+        "std_dev_ns": 118.53591673866855
+      },
+      "incremental_insert_latency/0existing": {
+        "point_estimate_ns": 288.59472195046067,
+        "ci_lower_ns": 238.6229966026389,
+        "ci_upper_ns": 340.8245076954626,
+        "std_dev_ns": 120.28775664838388
+      },
+      "incremental_insert_latency/1000existing": {
+        "point_estimate_ns": 226.3477089455863,
+        "ci_lower_ns": 217.26571311526763,
+        "ci_upper_ns": 238.19503646269692,
+        "std_dev_ns": 54.10091786776028
+      },
+      "string_length/resolve_with": {
+        "point_estimate_ns": 22.016764653074066,
+        "ci_lower_ns": 21.95214356124502,
+        "ci_upper_ns": 22.09002385525802,
+        "std_dev_ns": 0.24871001219589173
+      },
+      "string_length/resolve": {
+        "point_estimate_ns": 36.50580691123255,
+        "ci_lower_ns": 36.20757405196972,
+        "ci_upper_ns": 36.8016939750044,
+        "std_dev_ns": 0.7501905735274245
+      },
+      "temporal_insert/append_only/100": {
+        "point_estimate_ns": 20522.29958305742,
+        "ci_lower_ns": 20385.267113086968,
+        "ci_upper_ns": 20631.394888370593,
+        "std_dev_ns": 684.2967464825315
+      },
+      "temporal_insert/append_only/1000": {
+        "point_estimate_ns": 210751.62610075713,
+        "ci_lower_ns": 209314.34380635383,
+        "ci_upper_ns": 211873.80906999423,
+        "std_dev_ns": 5680.652576793
+      },
+      "temporal_insert/append_only/10000": {
+        "point_estimate_ns": 2170104.954571928,
+        "ci_lower_ns": 2162071.2235821434,
+        "ci_upper_ns": 2177642.346841939,
+        "std_dev_ns": 99951.82828220678
+      },
+      "temporal_insert/retroactive/100": {
+        "point_estimate_ns": 147472.24641996325,
+        "ci_lower_ns": 146592.02753194023,
+        "ci_upper_ns": 149223.88182725324,
+        "std_dev_ns": 9805.6702862456
+      },
+      "temporal_insert/retroactive/1000": {
+        "point_estimate_ns": 12548726.1525,
+        "ci_lower_ns": 12526667.3475625,
+        "ci_upper_ns": 12577634.3285,
+        "std_dev_ns": 93777.24757700117
+      },
+      "temporal_insert/retroactive/10000": {
+        "point_estimate_ns": 1286764102.48,
+        "ci_lower_ns": 1269283391.64,
+        "ci_upper_ns": 1309601746.974,
+        "std_dev_ns": 74452411.39648002
+      },
+      "string_access_single/resolve_with": {
+        "point_estimate_ns": 21.820499640233535,
+        "ci_lower_ns": 21.806117477221118,
+        "ci_upper_ns": 21.836261417227917,
+        "std_dev_ns": 0.039902043410477255
+      },
+      "string_access_single/resolve": {
+        "point_estimate_ns": 35.573416414968506,
+        "ci_lower_ns": 35.559164666582994,
+        "ci_upper_ns": 35.5900314885661,
+        "std_dev_ns": 0.2708011837692615
+      },
+      "comparison_csr/full_rebuild_insert_query": {
+        "point_estimate_ns": 140052.95014629822,
+        "ci_lower_ns": 138986.04724080354,
+        "ci_upper_ns": 141174.3368847318,
+        "std_dev_ns": 3578.8835747506027
+      },
+      "comparison_csr/incremental_csr_insert_query": {
+        "point_estimate_ns": 16596.11120437417,
+        "ci_lower_ns": 16442.978831018278,
+        "ci_upper_ns": 16737.220337734212,
+        "std_dev_ns": 1377.0705344329174
+      },
+      "find_nodes_by_property/10000_nodes": {
+        "point_estimate_ns": 757093.3238672103,
+        "ci_lower_ns": 746168.3758693849,
+        "ci_upper_ns": 766515.1394017288,
+        "std_dev_ns": 29835.045035738345
+      },
+      "find_nodes_by_property/100_nodes": {
+        "point_estimate_ns": 4674.447981458158,
+        "ci_lower_ns": 4670.523795762465,
+        "ci_upper_ns": 4678.918047100781,
+        "std_dev_ns": 14.617992774181248
+      },
+      "find_nodes_by_property/1000_nodes": {
+        "point_estimate_ns": 50790.10942825674,
+        "ci_lower_ns": 47402.70506254149,
+        "ci_upper_ns": 53722.90827884785,
+        "std_dev_ns": 9094.726036926444
+      },
+      "concurrent_reads_same_entity/1000_versions/4_readers": {
+        "point_estimate_ns": 220643.6706594189,
+        "ci_lower_ns": 218651.07300263204,
+        "ci_upper_ns": 222611.5618024858,
+        "std_dev_ns": 4865.43768344186
+      },
+      "concurrent_reads_same_entity/1000_versions/2_readers": {
+        "point_estimate_ns": 130103.11400194137,
+        "ci_lower_ns": 129418.02343327574,
+        "ci_upper_ns": 130803.55000659086,
+        "std_dev_ns": 3216.3649522275277
+      },
+      "concurrent_reads_same_entity/1000_versions/16_readers": {
+        "point_estimate_ns": 767645.7277732479,
+        "ci_lower_ns": 764525.121111043,
+        "ci_upper_ns": 770778.2599352465,
+        "std_dev_ns": 15584.005291488184
+      },
+      "concurrent_reads_same_entity/1000_versions/8_readers": {
+        "point_estimate_ns": 422905.2037297612,
+        "ci_lower_ns": 420854.7629823159,
+        "ci_upper_ns": 424934.40866369667,
+        "std_dev_ns": 11425.593512367848
+      },
+      "concurrent_reads_same_entity/100_versions/4_readers": {
+        "point_estimate_ns": 203703.20611648224,
+        "ci_lower_ns": 202440.93124589915,
+        "ci_upper_ns": 205194.36245293386,
+        "std_dev_ns": 5225.996708479067
+      },
+      "concurrent_reads_same_entity/100_versions/2_readers": {
+        "point_estimate_ns": 130264.34551336728,
+        "ci_lower_ns": 129534.23520270771,
+        "ci_upper_ns": 131028.28359908394,
+        "std_dev_ns": 4798.764901425062
+      },
+      "concurrent_reads_same_entity/100_versions/16_readers": {
+        "point_estimate_ns": 696718.4900718307,
+        "ci_lower_ns": 693914.9793091253,
+        "ci_upper_ns": 699715.2173716048,
+        "std_dev_ns": 15491.27050133308
+      },
+      "concurrent_reads_same_entity/100_versions/8_readers": {
+        "point_estimate_ns": 383867.5403632128,
+        "ci_lower_ns": 382497.37839177676,
+        "ci_upper_ns": 385170.55045344535,
+        "std_dev_ns": 7710.20248888855
+      },
+      "concurrent_reads_same_entity/10000_versions/4_readers": {
+        "point_estimate_ns": 474740.6933333331,
+        "ci_lower_ns": 421344.7715,
+        "ci_upper_ns": 528949.2962499999,
+        "std_dev_ns": 196782.40339912684
+      },
+      "concurrent_reads_same_entity/10000_versions/2_readers": {
+        "point_estimate_ns": 133878.10658767296,
+        "ci_lower_ns": 133460.23790329424,
+        "ci_upper_ns": 134345.93190582373,
+        "std_dev_ns": 2175.063729742513
+      },
+      "incremental_concurrent/threads/8": {
+        "point_estimate_ns": 410131.9005428304,
+        "ci_lower_ns": 408373.5202702741,
+        "ci_upper_ns": 411841.8930391688,
+        "std_dev_ns": 13058.990535438406
+      },
+      "incremental_concurrent/threads/2": {
+        "point_estimate_ns": 141575.1914281492,
+        "ci_lower_ns": 140155.98381994627,
+        "ci_upper_ns": 143494.56347257362,
+        "std_dev_ns": 6603.834932604687
+      },
+      "incremental_concurrent/threads/4": {
+        "point_estimate_ns": 211622.76810935422,
+        "ci_lower_ns": 210643.15045712664,
+        "ci_upper_ns": 212666.46160767143,
+        "std_dev_ns": 4921.443297055306
+      },
+      "batch_throughput/async": {
+        "point_estimate_ns": 52792620.31,
+        "ci_lower_ns": 52741715.938,
+        "ci_upper_ns": 52842522.594000004,
+        "std_dev_ns": 184682.41502608263
+      },
+      "batch_throughput/synchronous": {
+        "point_estimate_ns": 635748426.36,
+        "ci_lower_ns": 625995236.8475,
+        "ci_upper_ns": 645221511.522,
+        "std_dev_ns": 35302616.52595306
+      },
+      "vector_deserialize/deserialize/1": {
+        "point_estimate_ns": 54.634844338887056,
+        "ci_lower_ns": 54.562327144304966,
+        "ci_upper_ns": 54.7180284042944,
+        "std_dev_ns": 0.4692962144789647
+      },
+      "vector_deserialize/deserialize/384": {
+        "point_estimate_ns": 240.66191243823593,
+        "ci_lower_ns": 239.07238836894214,
+        "ci_upper_ns": 242.3761405864826,
+        "std_dev_ns": 6.282165687456844
+      },
+      "vector_deserialize/deserialize/1536": {
+        "point_estimate_ns": 376.7175371779577,
+        "ci_lower_ns": 373.53806652837216,
+        "ci_upper_ns": 380.21145368476397,
+        "std_dev_ns": 10.593303839886085
+      },
+      "vector_deserialize/deserialize/768": {
+        "point_estimate_ns": 281.79972963268517,
+        "ci_lower_ns": 280.3144358714689,
+        "ci_upper_ns": 283.4020330083632,
+        "std_dev_ns": 5.4114215871080855
+      },
+      "vector_deserialize/deserialize/10": {
+        "point_estimate_ns": 55.427536643270656,
+        "ci_lower_ns": 55.35863352615305,
+        "ci_upper_ns": 55.50540540573598,
+        "std_dev_ns": 0.4179189168767644
+      },
+      "vector_deserialize/deserialize/3072": {
+        "point_estimate_ns": 751.7690523500676,
+        "ci_lower_ns": 745.1251654616283,
+        "ci_upper_ns": 758.7798937152565,
+        "std_dev_ns": 32.56934522833825
+      },
+      "vector_deserialize/deserialize/128": {
+        "point_estimate_ns": 67.05146047776178,
+        "ci_lower_ns": 66.95504185671022,
+        "ci_upper_ns": 67.15417781035717,
+        "std_dev_ns": 0.46090468043793825
+      },
+      "point_in_time_queries/100vectors": {
+        "point_estimate_ns": 27.389063786854848,
+        "ci_lower_ns": 27.345163835210737,
+        "ci_upper_ns": 27.440472446259175,
+        "std_dev_ns": 0.14731101925340268
+      },
+      "point_in_time_queries/1000vectors": {
+        "point_estimate_ns": 30.179779021960126,
+        "ci_lower_ns": 30.078579618566604,
+        "ci_upper_ns": 30.289949941880494,
+        "std_dev_ns": 0.26437715703196063
+      },
+      "frozen_view_hot_path/merged_guard/10000edges": {
+        "point_estimate_ns": 32.67519883195999,
+        "ci_lower_ns": 32.649108182513416,
+        "ci_upper_ns": 32.706271673362586,
+        "std_dev_ns": 0.14482066879288646
+      },
+      "frozen_view_hot_path/merged_guard/100000edges": {
+        "point_estimate_ns": 32.76054260158381,
+        "ci_lower_ns": 32.73806757132794,
+        "ci_upper_ns": 32.786727461779705,
+        "std_dev_ns": 0.17373225593993583
+      },
+      "frozen_view_hot_path/merged_guard/1000edges": {
+        "point_estimate_ns": 32.62919008770308,
+        "ci_lower_ns": 32.605461651218995,
+        "ci_upper_ns": 32.65514848763087,
+        "std_dev_ns": 0.21476070759175245
+      },
+      "frozen_view_hot_path/frozen_view/10000edges": {
+        "point_estimate_ns": 33.896657755440856,
+        "ci_lower_ns": 33.482295353838865,
+        "ci_upper_ns": 34.348690334063875,
+        "std_dev_ns": 1.4311210377550325
+      },
+      "frozen_view_hot_path/frozen_view/100000edges": {
+        "point_estimate_ns": 39.969587399460416,
+        "ci_lower_ns": 39.94481871185667,
+        "ci_upper_ns": 39.99974429706756,
+        "std_dev_ns": 0.14857647091883155
+      },
+      "frozen_view_hot_path/frozen_view/1000edges": {
+        "point_estimate_ns": 20.747840792120062,
+        "ci_lower_ns": 20.734209310323433,
+        "ci_upper_ns": 20.762883691754624,
+        "std_dev_ns": 0.17888170415587473
+      },
+      "snapshot_creation/time_interval_1s": {
+        "point_estimate_ns": 77.07483680377175,
+        "ci_lower_ns": 77.01920620750329,
+        "ci_upper_ns": 77.13983057918867,
+        "std_dev_ns": 0.2883066914177555
+      },
+      "snapshot_creation/transaction_interval_10": {
+        "point_estimate_ns": 24160.601549213745,
+        "ci_lower_ns": 24070.95496700248,
+        "ci_upper_ns": 24242.851609687445,
+        "std_dev_ns": 952.9031033834278
+      },
+      "snapshot_creation/transaction_interval_100": {
+        "point_estimate_ns": 2503.7850904370607,
+        "ci_lower_ns": 2490.085509540908,
+        "ci_upper_ns": 2517.3349735616202,
+        "std_dev_ns": 126.61764600049827
+      },
+      "vector_serialize_into/serialize_into/384": {
+        "point_estimate_ns": 119.69433782414332,
+        "ci_lower_ns": 119.42625567786244,
+        "ci_upper_ns": 120.01074892728904,
+        "std_dev_ns": 1.4166882738202475
+      },
+      "vector_serialize_into/serialize_into/1536": {
+        "point_estimate_ns": 181.31700014885956,
+        "ci_lower_ns": 181.2098463237283,
+        "ci_upper_ns": 181.44543224129666,
+        "std_dev_ns": 0.6017509010163365
+      },
+      "vector_serialize_into/serialize_into/768": {
+        "point_estimate_ns": 141.5379075588664,
+        "ci_lower_ns": 141.4070386977251,
+        "ci_upper_ns": 141.68053300576926,
+        "std_dev_ns": 0.6513876337328833
+      },
+      "property_lookup_vs_scan/manual_label_scan_filter": {
+        "point_estimate_ns": 138292.4284031892,
+        "ci_lower_ns": 137987.3106202215,
+        "ci_upper_ns": 138632.84856732658,
+        "std_dev_ns": 791.5883306187459
+      },
+      "property_lookup_vs_scan/find_nodes_by_property": {
+        "point_estimate_ns": 39030.58003540599,
+        "ci_lower_ns": 38955.93113527668,
+        "ci_upper_ns": 39098.61222806409,
+        "std_dev_ns": 239.7993862709776
+      },
+      "cosine_similarity_batch/find_most_similar/100": {
+        "point_estimate_ns": 8280.609838079861,
+        "ci_lower_ns": 8265.691245368853,
+        "ci_upper_ns": 8298.343185238891,
+        "std_dev_ns": 41.256241498551134
+      },
+      "cosine_similarity_batch/find_most_similar/1000": {
+        "point_estimate_ns": 90458.83444632955,
+        "ci_lower_ns": 88304.6182155683,
+        "ci_upper_ns": 92978.87079841267,
+        "std_dev_ns": 4348.194252478644
+      },
+      "cosine_similarity_batch/find_most_similar/10": {
+        "point_estimate_ns": 811.346767454623,
+        "ci_lower_ns": 810.3818058083525,
+        "ci_upper_ns": 812.3507548979015,
+        "std_dev_ns": 3.5231342212289287
+      },
+      "concurrent_writes/same_entity_contention/8": {
+        "point_estimate_ns": 9476390.287272723,
+        "ci_lower_ns": 9148257.177181816,
+        "ci_upper_ns": 9844934.79586364,
+        "std_dev_ns": 1278310.3311533588
+      },
+      "concurrent_writes/same_entity_contention/2": {
+        "point_estimate_ns": 214574.15811153175,
+        "ci_lower_ns": 181185.43486848514,
+        "ci_upper_ns": 248623.72722661766,
+        "std_dev_ns": 52568.23054200384
+      },
+      "concurrent_writes/same_entity_contention/4": {
+        "point_estimate_ns": 1225713.092424772,
+        "ci_lower_ns": 1166934.228398231,
+        "ci_upper_ns": 1295075.5195692186,
+        "std_dev_ns": 191882.99420482724
+      },
+      "concurrent_writes/different_entities/8": {
+        "point_estimate_ns": 417359.9350203844,
+        "ci_lower_ns": 408207.3261324403,
+        "ci_upper_ns": 426214.2611504691,
+        "std_dev_ns": 21102.406923544866
+      },
+      "concurrent_writes/different_entities/2": {
+        "point_estimate_ns": 139706.9219879635,
+        "ci_lower_ns": 138856.87105457723,
+        "ci_upper_ns": 140629.48944885316,
+        "std_dev_ns": 3793.6545388626446
+      },
+      "concurrent_writes/different_entities/4": {
+        "point_estimate_ns": 220014.88403028538,
+        "ci_lower_ns": 218937.17862020747,
+        "ci_upper_ns": 220928.03934378288,
+        "std_dev_ns": 6023.820497545809
+      },
+      "id_generation_single_thread/sequential_10000": {
+        "point_estimate_ns": 69016.45399421676,
+        "ci_lower_ns": 68968.24171414861,
+        "ci_upper_ns": 69070.52474002307,
+        "std_dev_ns": 154.21533071252975
+      },
+      "id_generation_single_thread/sequential_1000": {
+        "point_estimate_ns": 6901.385823250511,
+        "ci_lower_ns": 6897.198130665531,
+        "ci_upper_ns": 6906.045779369853,
+        "std_dev_ns": 18.129633948975492
+      },
+      "single_hop_traversal/10000_nodes": {
+        "point_estimate_ns": 431.90010998472775,
+        "ci_lower_ns": 430.16176804663496,
+        "ci_upper_ns": 435.22520005399963,
+        "std_dev_ns": 3.910805512643241
+      },
+      "single_hop_traversal/100_nodes": {
+        "point_estimate_ns": 431.13578048684417,
+        "ci_lower_ns": 430.5470938155083,
+        "ci_upper_ns": 431.82511293445754,
+        "std_dev_ns": 1.900789041985434
+      },
+      "single_hop_traversal/1000_nodes": {
+        "point_estimate_ns": 431.9392073634425,
+        "ci_lower_ns": 430.5472852379227,
+        "ci_upper_ns": 434.3478903337882,
+        "std_dev_ns": 5.008426399981345
+      },
+      "incremental_compaction/edges/10000+1000": {
+        "point_estimate_ns": 955604.505621398,
+        "ci_lower_ns": 949457.5815469574,
+        "ci_upper_ns": 961351.8567861561,
+        "std_dev_ns": 31094.33736716666
+      },
+      "incremental_compaction/edges/1000+100": {
+        "point_estimate_ns": 60279.243483966304,
+        "ci_lower_ns": 60017.43469354896,
+        "ci_upper_ns": 60514.541520152045,
+        "std_dev_ns": 1169.4178671929315
+      },
+      "incremental_compaction/edges/100000+10000": {
+        "point_estimate_ns": 8192206.006666664,
+        "ci_lower_ns": 8161752.750833332,
+        "ci_upper_ns": 8222796.052333336,
+        "std_dev_ns": 154965.52568273258
+      },
+      "string_comparison/resolve_with": {
+        "point_estimate_ns": 22.172138656238662,
+        "ci_lower_ns": 22.027956189501555,
+        "ci_upper_ns": 22.381519712122486,
+        "std_dev_ns": 0.9543828051736296
+      },
+      "string_comparison/resolve": {
+        "point_estimate_ns": 36.166875268357224,
+        "ci_lower_ns": 35.74626295357047,
+        "ci_upper_ns": 36.63060848650528,
+        "std_dev_ns": 1.5154170521481247
+      },
+      "target_batch_insertion/insert_1000_edges": {
+        "point_estimate_ns": 630488.7643259179,
+        "ci_lower_ns": 627712.4823942354,
+        "ci_upper_ns": 633429.481267599,
+        "std_dev_ns": 6529.230313258534
+      },
+      "knn_search_index_size/index_size/500": {
+        "point_estimate_ns": 68084.75761452413,
+        "ci_lower_ns": 67886.98221119061,
+        "ci_upper_ns": 68321.7698030196,
+        "std_dev_ns": 461.9275418261912
+      },
+      "knn_search_index_size/index_size/100": {
+        "point_estimate_ns": 21022.150894363203,
+        "ci_lower_ns": 20982.212180073308,
+        "ci_upper_ns": 21064.357180164658,
+        "std_dev_ns": 111.01539429908154
+      },
+      "knn_search_index_size/index_size/5000": {
+        "point_estimate_ns": 242319.20836616535,
+        "ci_lower_ns": 241147.3793878223,
+        "ci_upper_ns": 243454.87890109434,
+        "std_dev_ns": 3766.520173643887
+      },
+      "knn_search_index_size/index_size/1000": {
+        "point_estimate_ns": 120521.5449432149,
+        "ci_lower_ns": 120146.73582292297,
+        "ci_upper_ns": 120989.84363510176,
+        "std_dev_ns": 2840.1279841366995
+      },
+      "knn_search_index_size/index_size/10000": {
+        "point_estimate_ns": 313174.4962286636,
+        "ci_lower_ns": 310656.7263447485,
+        "ci_upper_ns": 316856.41957542504,
+        "std_dev_ns": 27171.71107871942
+      }
+    }
   }
 ]
