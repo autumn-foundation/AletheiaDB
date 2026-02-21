@@ -2926,8 +2926,11 @@ fn test_cosine_similarity_denormal_precision() {
 
     // We expect it to be within reasonable bounds of 1.0
     // Actually, with f64 fix, it should be 1.0 or slightly less (0.9997...)
-    assert!((sim - 1.0).abs() < 1e-3,
-        "Similarity {} should be close to 1.0 for scaled denormal vectors", sim);
+    assert!(
+        (sim - 1.0).abs() < 1e-3,
+        "Similarity {} should be close to 1.0 for scaled denormal vectors",
+        sim
+    );
 
     // Also explicitly check it doesn't trigger the debug assertion logic (which panics at > 1.001)
     // The clamp ensures it returns <= 1.0, but we want to ensure the internal calculation
@@ -2935,6 +2938,9 @@ fn test_cosine_similarity_denormal_precision() {
 
     // Verify symmetric case
     let sim_ba = cosine_similarity(&b, &a).unwrap();
-    assert!((sim_ba - 1.0).abs() < 1e-3,
-        "Symmetric similarity {} should be close to 1.0 for scaled denormal vectors", sim_ba);
+    assert!(
+        (sim_ba - 1.0).abs() < 1e-3,
+        "Symmetric similarity {} should be close to 1.0 for scaled denormal vectors",
+        sim_ba
+    );
 }
