@@ -124,6 +124,9 @@ pub mod sherlock;
 /// Sybil: Memetic Propagation Engine.
 pub mod sybil;
 #[cfg(feature = "nova")]
+/// Telepathy: Semantic Spreading Activation Engine.
+pub mod telepathy;
+#[cfg(feature = "nova")]
 /// Temporal Diff Engine for computing snapshot differences.
 pub mod temporal_diff;
 #[cfg(feature = "nova")]
