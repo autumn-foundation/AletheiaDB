@@ -204,6 +204,17 @@ impl TimeRange {
                 end,
             });
         }
+
+        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: end,
+                reason: format!(
+                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+
         Ok(TimeRange {
             start: self.start,
             end,
@@ -1681,5 +1692,25 @@ mod sentry_tests {
             outer.contains_range(&same_range),
             "Should contain itself (reflexive)"
         );
+    }
+
+    #[test]
+    fn test_sentry_close_at_rejects_invalid_timestamps() {
+        // 🛡️ Sentry Test: Verify close_at rejects timestamps exceeding MAX_VALID_TIMESTAMP.
+        // This mirrors the validation in TimeRange::new.
+
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let range = TimeRange::from(start);
+
+        // Invalid end (exceeds MAX_VALID_TIMESTAMP)
+        let invalid_end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+
+        let result = range.close_at(invalid_end);
+
+        assert!(result.is_err(), "close_at should reject invalid timestamps");
+        assert!(matches!(
+            result.unwrap_err(),
+            TemporalError::InvalidTimestamp { .. }
+        ));
     }
 }
