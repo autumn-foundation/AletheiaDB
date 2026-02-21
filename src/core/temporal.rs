@@ -204,6 +204,17 @@ impl TimeRange {
                 end,
             });
         }
+
+        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: end,
+                reason: format!(
+                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+
         Ok(TimeRange {
             start: self.start,
             end,
@@ -255,6 +266,14 @@ impl TimeRange {
         }
         let (start, _) = HybridTimestamp::deserialize(&bytes[0..12])?;
         let (end, _) = HybridTimestamp::deserialize(&bytes[12..24])?;
+
+        if start > end {
+            return Err(StorageError::CorruptedData(format!(
+                "Invalid TimeRange: start {} > end {}",
+                start, end
+            )));
+        }
+
         Ok((TimeRange { start, end }, 24))
     }
 }
@@ -1681,5 +1700,58 @@ mod sentry_tests {
             outer.contains_range(&same_range),
             "Should contain itself (reflexive)"
         );
+    }
+
+    #[test]
+    fn test_sentry_timerange_deserialize_enforces_ordering() {
+        // 🛡️ Sentry Test: Verify TimeRange::deserialize enforces start <= end.
+        let start_wc: i64 = 200;
+        let end_wc: i64 = 100;
+
+        let mut buffer = Vec::new();
+        // Start: 200
+        buffer.extend_from_slice(&start_wc.to_le_bytes());
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+        // End: 100
+        buffer.extend_from_slice(&end_wc.to_le_bytes());
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        let result = TimeRange::deserialize(&buffer);
+        assert!(result.is_err(), "Deserialization should reject start > end");
+    }
+
+    #[test]
+    fn test_sentry_timerange_deserialize_enforces_max_valid() {
+        // 🛡️ Sentry Test: Verify TimeRange::deserialize enforces MAX_VALID_TIMESTAMP.
+        // Note: MAX_VALID_TIMESTAMP + 1000 is i64::MAX, which is the valid sentinel TIMESTAMP_MAX!
+        // So we must use a value that is > MAX_VALID_TIMESTAMP but < i64::MAX.
+        let invalid_ts = MAX_VALID_TIMESTAMP + 1;
+
+        let mut buffer = Vec::new();
+        // Start: invalid
+        buffer.extend_from_slice(&invalid_ts.to_le_bytes());
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+        // End: invalid
+        buffer.extend_from_slice(&invalid_ts.to_le_bytes());
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        let result = TimeRange::deserialize(&buffer);
+        assert!(result.is_err(), "Deserialization should reject timestamp > MAX_VALID_TIMESTAMP");
+    }
+
+    #[test]
+    fn test_sentry_close_at_enforces_max_valid() {
+        // 🛡️ Sentry Test: Verify TimeRange::close_at enforces MAX_VALID_TIMESTAMP.
+        // We need an invalid timestamp to test this.
+        // Use new_unchecked to bypass validation for test setup.
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let range = TimeRange::from(start);
+
+        // Note: MAX_VALID_TIMESTAMP + 1000 hits the sentinel TIMESTAMP_MAX (i64::MAX).
+        // We must use a value that is > MAX_VALID_TIMESTAMP but < i64::MAX.
+        let invalid_end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+
+        let result = range.close_at(invalid_end);
+        assert!(result.is_err(), "close_at should reject timestamp > MAX_VALID_TIMESTAMP");
     }
 }
