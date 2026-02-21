@@ -1652,4 +1652,34 @@ mod sentry_tests {
             "Should accept large timestamp close to i64::MAX"
         );
     }
+
+    #[test]
+    fn test_sentry_contains_range_boundary_conditions() {
+        // 🛡️ Sentry Test: Verify contains_range handles identical start/end points.
+        // This targets mutants that replace <= with < in the implementation.
+
+        // Outer: [100, 200)
+        let outer = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        // Same start: [100, 150)
+        let same_start = TimeRange::new(100.into(), 150.into()).unwrap();
+        assert!(
+            outer.contains_range(&same_start),
+            "Should contain range with same start timestamp"
+        );
+
+        // Same end: [150, 200)
+        let same_end = TimeRange::new(150.into(), 200.into()).unwrap();
+        assert!(
+            outer.contains_range(&same_end),
+            "Should contain range with same end timestamp"
+        );
+
+        // Same range: [100, 200)
+        let same_range = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(
+            outer.contains_range(&same_range),
+            "Should contain itself (reflexive)"
+        );
+    }
 }

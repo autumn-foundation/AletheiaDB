@@ -149,12 +149,11 @@ impl<'a> GravityWell<'a> {
         if let Ok(history) = self.db.get_node_history(node_id) {
             let mut best_match: Option<Vec<f32>> = None;
             for version in history.versions {
-                if version.temporal.is_valid_at(valid_time) {
-                    if let Some(val) = version.properties.get(property) {
-                        if let Some(vec) = val.as_vector() {
-                            best_match = Some(vec.to_vec());
-                        }
-                    }
+                if version.temporal.is_valid_at(valid_time)
+                    && let Some(val) = version.properties.get(property)
+                    && let Some(vec) = val.as_vector()
+                {
+                    best_match = Some(vec.to_vec());
                 }
             }
             if let Some(vec) = best_match {
@@ -176,10 +175,10 @@ impl<'a> GravityWell<'a> {
     }
 
     fn extract_vector(node: &crate::core::graph::Node, property: &str) -> Result<Option<Vec<f32>>> {
-        if let Some(val) = node.properties.get(property) {
-            if let Some(vec) = val.as_vector() {
-                return Ok(Some(vec.to_vec()));
-            }
+        if let Some(val) = node.properties.get(property)
+            && let Some(vec) = val.as_vector()
+        {
+            return Ok(Some(vec.to_vec()));
         }
         Ok(None)
     }

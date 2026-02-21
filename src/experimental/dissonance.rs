@@ -120,16 +120,15 @@ impl<'a> DissonanceEngine<'a> {
         let mut valid_neighbors = 0;
 
         for &neighbor_id in &neighbors {
-            if let Ok(neighbor) = self.db.get_node(neighbor_id) {
-                if let Some(n_prop) = neighbor.properties.get(vector_property) {
-                    if let Some(n_vec) = n_prop.as_vector() {
-                        // Compute similarity manually. Defaulting to Cosine for MVP.
-                        // Ideally we'd match the index's metric.
-                        let sim = ops::cosine_similarity(node_vec, n_vec)?;
-                        total_graph_sim += sim;
-                        valid_neighbors += 1;
-                    }
-                }
+            if let Ok(neighbor) = self.db.get_node(neighbor_id)
+                && let Some(n_prop) = neighbor.properties.get(vector_property)
+                && let Some(n_vec) = n_prop.as_vector()
+            {
+                // Compute similarity manually. Defaulting to Cosine for MVP.
+                // Ideally we'd match the index's metric.
+                let sim = ops::cosine_similarity(node_vec, n_vec)?;
+                total_graph_sim += sim;
+                valid_neighbors += 1;
             }
         }
 
