@@ -9,6 +9,9 @@
 //! conversion functions enforce a maximum recursion depth of 100 levels.
 
 use crate::core::{GLOBAL_INTERNER, PropertyMap, PropertyMapBuilder, PropertyValue};
+use crate::query::converter::ParameterValue;
+use crate::query::executor::{EntityId, EntityResult, QueryRow};
+use crate::query::ir::PredicateValue;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -140,6 +143,116 @@ pub fn json_to_property_map(
             .map_err(|e| e.to_string())?;
     }
     Ok(builder.build())
+}
+
+/// Converts a JSON parameter map to AletheiaDB parameter values.
+pub fn json_to_parameter_map(
+    json: &HashMap<String, serde_json::Value>,
+) -> Result<HashMap<String, ParameterValue>, String> {
+    let mut params = HashMap::new();
+    for (key, value) in json {
+        params.insert(key.clone(), json_to_parameter_value(value)?);
+    }
+    Ok(params)
+}
+
+/// Converts a JSON value to a ParameterValue.
+pub fn json_to_parameter_value(value: &serde_json::Value) -> Result<ParameterValue, String> {
+    match value {
+        serde_json::Value::Null => Ok(ParameterValue::Value(PredicateValue::Null)),
+        serde_json::Value::Bool(b) => Ok(ParameterValue::Value(PredicateValue::Bool(*b))),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(ParameterValue::Value(PredicateValue::Int(i)))
+            } else {
+                let f = n
+                    .as_f64()
+                    .ok_or_else(|| "Invalid number format".to_string())?;
+                Ok(ParameterValue::Value(PredicateValue::Float(f)))
+            }
+        }
+        serde_json::Value::String(s) => {
+            Ok(ParameterValue::Value(PredicateValue::String(s.clone())))
+        }
+        serde_json::Value::Array(arr) => {
+            // Check if it's an embedding (vector of floats)
+            let floats: Result<Vec<f32>, String> = arr
+                .iter()
+                .map(|v| {
+                    v.as_f64()
+                        .map(|f| f as f32)
+                        .ok_or_else(|| "Invalid float in embedding array".to_string())
+                })
+                .collect();
+
+            match floats {
+                Ok(f) => Ok(ParameterValue::Embedding(Arc::from(f))),
+                Err(e) => Err(e),
+            }
+        }
+        serde_json::Value::Object(_) => {
+            Err("Objects are not supported as parameter values".to_string())
+        }
+    }
+}
+
+/// Converts a QueryRow to a JSON object.
+pub fn query_row_to_json(row: QueryRow) -> Result<serde_json::Value, String> {
+    let mut obj = serde_json::Map::new();
+
+    // Add entity data
+    match row.entity {
+        EntityResult::Node(node) => {
+            obj.insert(
+                "node".to_string(),
+                json!({
+                    "id": node.id.as_u64(),
+                    "label": interned_to_string(node.label),
+                    "properties": property_map_to_json(&node.properties)?
+                }),
+            );
+        }
+        EntityResult::Edge(edge) => {
+            obj.insert(
+                "edge".to_string(),
+                json!({
+                    "id": edge.id.as_u64(),
+                    "label": interned_to_string(edge.label),
+                    "source": edge.source.as_u64(),
+                    "target": edge.target.as_u64(),
+                    "properties": property_map_to_json(&edge.properties)?
+                }),
+            );
+        }
+        EntityResult::NodeId(id) => {
+            obj.insert("node_id".to_string(), json!(id.as_u64()));
+        }
+        EntityResult::EdgeId(id) => {
+            obj.insert("edge_id".to_string(), json!(id.as_u64()));
+        }
+    }
+
+    // Add metadata
+    if let Some(score) = row.score {
+        obj.insert("score".to_string(), json!(score));
+    }
+
+    if let Some(path) = row.path {
+        let path_json: Vec<serde_json::Value> = path
+            .iter()
+            .map(|id| match id {
+                EntityId::Node(nid) => json!({"type": "node", "id": nid.as_u64()}),
+                EntityId::Edge(eid) => json!({"type": "edge", "id": eid.as_u64()}),
+            })
+            .collect();
+        obj.insert("path".to_string(), serde_json::Value::Array(path_json));
+    }
+
+    if let Some(ts) = row.timestamp {
+        obj.insert("timestamp".to_string(), json!(ts.wallclock()));
+    }
+
+    Ok(serde_json::Value::Object(obj))
 }
 
 /// Converts a serde JSON Value to a [`PropertyValue`].

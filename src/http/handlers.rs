@@ -22,9 +22,13 @@
 //! ```
 
 use crate::core::NodeId;
-use crate::http::converters::{interned_to_string, json_to_property_map, property_map_to_json};
+use crate::http::converters::{
+    interned_to_string, json_to_parameter_map, json_to_property_map, property_map_to_json,
+    query_row_to_json,
+};
 use crate::http::state::AppState;
 use crate::query::QueryBuilder;
+use crate::query::converter::{parse_query, parse_query_with_params};
 use crate::query::ir::{Predicate, PredicateValue};
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
@@ -180,6 +184,29 @@ pub enum QueryRequest {
         /// Pagination offset (default: 0).
         #[serde(default)]
         offset: Option<usize>,
+    },
+
+    /// Execute an AQL query string.
+    ///
+    /// # Fields
+    /// * `query` - The AQL query string.
+    /// * `parameters` - Optional parameters for the query.
+    ///
+    /// # Example
+    /// ```json
+    /// {
+    ///   "operation": "execute_query",
+    ///   "query": "MATCH (n:Person) WHERE n.age > $min_age RETURN n",
+    ///   "parameters": {
+    ///     "min_age": 21
+    ///   }
+    /// }
+    /// ```
+    ExecuteQuery {
+        /// The AQL query string.
+        query: String,
+        /// Optional parameters for the query.
+        parameters: Option<HashMap<String, serde_json::Value>>,
     },
 }
 
@@ -455,6 +482,55 @@ pub async fn handle_query(
                 Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
             }
         }
+        QueryRequest::ExecuteQuery { query, parameters } => {
+            // 1. Parse the query (with parameters if provided)
+            let parsed_query = if let Some(params_json) = parameters {
+                match json_to_parameter_map(&params_json) {
+                    Ok(params) => match parse_query_with_params(&query, params) {
+                        Ok(q) => q,
+                        Err(e) => {
+                            return HttpResponse::BadRequest()
+                                .json(ApiResponse::error(e.to_string()));
+                        }
+                    },
+                    Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e)),
+                }
+            } else {
+                match parse_query(&query) {
+                    Ok(q) => q,
+                    Err(e) => {
+                        return HttpResponse::BadRequest().json(ApiResponse::error(e.to_string()));
+                    }
+                }
+            };
+
+            // 2. Execute the query
+            match db.execute_query(parsed_query) {
+                Ok(results) => {
+                    // 3. Serialize results
+                    let mut json_results = Vec::new();
+                    for row_result in results {
+                        match row_result {
+                            Ok(row) => match query_row_to_json(row) {
+                                Ok(json) => json_results.push(json),
+                                Err(e) => {
+                                    return HttpResponse::InternalServerError()
+                                        .json(ApiResponse::error(e));
+                                }
+                            },
+                            Err(e) => {
+                                return HttpResponse::InternalServerError()
+                                    .json(ApiResponse::error(e.to_string()));
+                            }
+                        }
+                    }
+                    HttpResponse::Ok().json(ApiResponse::success(json!(json_results)))
+                }
+                Err(e) => {
+                    HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
+                }
+            }
+        }
     }
 }
 
@@ -472,6 +548,55 @@ mod tests {
         let resp = test::call_service(&app, req).await;
 
         assert!(resp.status().is_success());
+    }
+
+    #[actix_rt::test]
+    async fn test_execute_query_with_projection() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+
+        // Setup data with extra property
+        let props = crate::core::PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("secret", "hidden")
+            .build();
+        let _alice = db.create_node("Person", props).unwrap();
+
+        let state = web::Data::new(AppState::new(db));
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
+
+        let payload = json!({
+            "operation": "execute_query",
+            "query": "MATCH (n:Person) RETURN n.name, n.age"
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        if !resp.status().is_success() {
+            let body = test::read_body(resp).await;
+            panic!("Request failed: {:?}", body);
+        }
+
+        let body = test::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+
+        let props = &data[0]["node"]["properties"];
+        assert_eq!(props["name"], "Alice");
+        assert_eq!(props["age"], 30);
+        // "secret" should be filtered out
+        assert!(props.get("secret").is_none());
     }
 
     #[actix_rt::test]
@@ -576,5 +701,128 @@ mod tests {
             "Error: {}",
             error
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_execute_query_simple_match() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+
+        // Setup data
+        let props = crate::core::PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .build();
+        let _alice_id = db.create_node("Person", props).unwrap();
+
+        let state = web::Data::new(AppState::new(db));
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
+
+        let payload = json!({
+            "operation": "execute_query",
+            "query": "MATCH (n:Person) RETURN n"
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        if !resp.status().is_success() {
+            let body = test::read_body(resp).await;
+            panic!("Request failed: {:?}", body);
+        }
+
+        let body = test::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json["success"].as_bool().unwrap());
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+
+        let node = &data[0]["node"];
+        assert_eq!(node["label"], "Person");
+        assert_eq!(node["properties"]["name"], "Alice");
+    }
+
+    #[actix_rt::test]
+    async fn test_execute_query_with_params() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+
+        // Setup data
+        let props_alice = crate::core::PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+        let _alice = db.create_node("Person", props_alice).unwrap();
+
+        let props_bob = crate::core::PropertyMapBuilder::new()
+            .insert("name", "Bob")
+            .insert("age", 20i64)
+            .build();
+        let _bob = db.create_node("Person", props_bob).unwrap();
+
+        let state = web::Data::new(AppState::new(db));
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
+
+        let payload = json!({
+            "operation": "execute_query",
+            "query": "MATCH (n:Person) WHERE n.age > $min_age RETURN n",
+            "parameters": {
+                "min_age": 25
+            }
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        if !resp.status().is_success() {
+            let body = test::read_body(resp).await;
+            panic!("Request failed: {:?}", body);
+        }
+
+        let body = test::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["node"]["properties"]["name"], "Alice");
+    }
+
+    #[actix_rt::test]
+    async fn test_execute_query_syntax_error() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+        let state = web::Data::new(AppState::new(db));
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
+
+        let payload = json!({
+            "operation": "execute_query",
+            "query": "MATCH (n:Person RETURN n" // Missing closing paren
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_client_error()); // 400 Bad Request
     }
 }
