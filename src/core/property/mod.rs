@@ -9,9 +9,9 @@
 pub mod map;
 pub mod value;
 
-pub use map::{PropertyMap, PropertyMapBuilder, MAX_PROPERTY_MAP_CAPACITY};
+pub use map::{MAX_PROPERTY_MAP_CAPACITY, PropertyMap, PropertyMapBuilder};
 pub use value::{
-    PropertyKey, PropertyValue, MAX_ARRAY_ELEMENTS, MAX_RECURSION_DEPTH, TAG_ARRAY, TAG_BOOL,
+    MAX_ARRAY_ELEMENTS, MAX_RECURSION_DEPTH, PropertyKey, PropertyValue, TAG_ARRAY, TAG_BOOL,
     TAG_BYTES, TAG_FLOAT, TAG_INT, TAG_NULL, TAG_STRING,
 };
 

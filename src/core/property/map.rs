@@ -5,9 +5,9 @@ use std::fmt;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
+use super::value::{PropertyKey, PropertyValue};
 use crate::core::error::{Result, StorageError};
 use crate::core::interning::{GLOBAL_INTERNER, IdentityHasher};
-use super::value::{PropertyKey, PropertyValue};
 
 // ============================================================================
 // Serialization Limits
@@ -649,7 +649,7 @@ impl Default for PropertyMapBuilder {
 mod tests {
     use super::*;
     use crate::core::interning::InternedString;
-    use crate::core::property::value::{TAG_NULL, MAX_RECURSION_DEPTH};
+    use crate::core::property::value::{MAX_RECURSION_DEPTH, TAG_NULL};
 
     #[test]
     fn test_property_map_creation() {

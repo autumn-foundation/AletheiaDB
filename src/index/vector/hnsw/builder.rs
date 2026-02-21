@@ -5,14 +5,14 @@ use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::index::vector::{DistanceMetric, Quantization, StorageMode};
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use usearch::{Index, IndexOptions};
 
 use super::config::HnswConfig;
 use super::index::{
-    create_metric_wrapper, to_usearch_metric, to_usearch_scalar, HnswIndex, IndexStats, MAX_K,
-    NUM_ENTRY_LOCKS,
+    HnswIndex, IndexStats, MAX_K, NUM_ENTRY_LOCKS, create_metric_wrapper, to_usearch_metric,
+    to_usearch_scalar,
 };
 
 /// Builder for configuring and creating an `HnswIndex`.

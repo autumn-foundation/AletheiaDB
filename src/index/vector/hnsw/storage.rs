@@ -313,9 +313,9 @@ where
 mod tests {
     use super::*;
     use crate::core::property::MAX_VECTOR_DIMENSIONS;
+    use crate::index::vector::VectorIndex;
     use crate::index::vector::hnsw::builder::HnswIndexBuilder;
     use crate::index::vector::hnsw::index::HnswIndex;
-    use crate::index::vector::VectorIndex;
 
     #[test]
     fn test_load_mappings_bad_magic() -> Result<()> {
