@@ -1,4 +1,5 @@
 use super::{MAX_VALID_TIME_FUTURE_OFFSET_US, WriteTransaction};
+use crate::api::transaction::BufferedWrite;
 use crate::core::error::{Result, TransactionError};
 use crate::core::temporal::{Timestamp, time};
 
@@ -51,17 +52,35 @@ pub(crate) fn validate_valid_from_not_before_creation(
 pub(crate) fn validate(tx: &WriteTransaction) -> Result<()> {
     for write in tx.buffer.operations() {
         match write {
-            crate::api::transaction::BufferedWrite::CreateEdge { source, target, .. }
-            | crate::api::transaction::BufferedWrite::UpdateEdge { source, target, .. } => {
+            BufferedWrite::CreateEdge { source, target, .. }
+            | BufferedWrite::UpdateEdge { source, target, .. } => {
                 // Check that source and target nodes exist
-                // They might exist in current storage or be created in this transaction
-                if !tx.buffer.has_modified_node(*source) && tx.current.get_node(*source).is_err() {
+                // They might exist in current storage or be created in this transaction.
+                //
+                // CRITICAL SECURITY FIX: We must check get_node_write() to ensure the
+                // latest operation is not a DeleteNode. has_modified_node() returns
+                // true for deleted nodes, which allowed creating dangling edges.
+
+                let source_exists = if let Some(write) = tx.buffer.get_node_write(*source) {
+                    !matches!(write, BufferedWrite::DeleteNode { .. })
+                } else {
+                    tx.current.get_node(*source).is_ok()
+                };
+
+                if !source_exists {
                     return Err(TransactionError::ValidationFailed {
                         reason: format!("Edge source node {:?} does not exist", source),
                     }
                     .into());
                 }
-                if !tx.buffer.has_modified_node(*target) && tx.current.get_node(*target).is_err() {
+
+                let target_exists = if let Some(write) = tx.buffer.get_node_write(*target) {
+                    !matches!(write, BufferedWrite::DeleteNode { .. })
+                } else {
+                    tx.current.get_node(*target).is_ok()
+                };
+
+                if !target_exists {
                     return Err(TransactionError::ValidationFailed {
                         reason: format!("Edge target node {:?} does not exist", target),
                     }

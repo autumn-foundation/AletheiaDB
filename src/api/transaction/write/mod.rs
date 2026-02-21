@@ -37,6 +37,8 @@ mod apply;
 mod conflict;
 mod validation;
 mod wal;
+#[cfg(test)]
+mod repro_dangling_edge;
 
 #[cfg(test)]
 pub(crate) const MAX_BACKWARD_DRIFT_US: i64 = crate::core::hlc::MAX_BACKWARD_DRIFT_US;
