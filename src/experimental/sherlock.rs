@@ -210,7 +210,6 @@ impl<'a> Sherlock<'a> {
     }
 }
 
-
 #[cfg(all(test, feature = "nova"))]
 mod tests {
     use super::*;
