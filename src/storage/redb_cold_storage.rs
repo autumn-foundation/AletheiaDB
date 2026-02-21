@@ -3528,11 +3528,10 @@ mod sentry_tests {
 #[cfg(test)]
 mod sentry_vector_tests {
     use super::*;
-    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::id::{NodeId, VersionId};
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::BiTemporalInterval;
-    use crate::core::property::PropertyMap;
-    use crate::core::version::{VectorDelta, PropertyDelta, VersionData};
+    use crate::core::version::{PropertyDelta, VectorDelta, VersionData};
     use std::sync::Arc;
 
     #[test]
@@ -3562,11 +3561,19 @@ mod sentry_vector_tests {
 
         let result = encode_node_version(&version);
 
-        assert!(result.is_err(), "Should fail serialization with unmaterialized vector deltas");
+        assert!(
+            result.is_err(),
+            "Should fail serialization with unmaterialized vector deltas"
+        );
 
         match result {
-            Err(crate::core::error::Error::Storage(crate::core::error::StorageError::InconsistentState { reason })) => {
-                assert!(reason.contains("Vector deltas must be materialized"), "Error message should mention materialization requirement");
+            Err(crate::core::error::Error::Storage(
+                crate::core::error::StorageError::InconsistentState { reason },
+            )) => {
+                assert!(
+                    reason.contains("Vector deltas must be materialized"),
+                    "Error message should mention materialization requirement"
+                );
             }
             _ => panic!("Expected StorageError::InconsistentState, got {:?}", result),
         }
