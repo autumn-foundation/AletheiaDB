@@ -260,7 +260,6 @@ pub fn find_similar_as_of<G: GraphView + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::transaction::WriteOps;
     use crate::core::error::VectorError;
     use crate::core::property::PropertyMapBuilder;
     use crate::db::AletheiaDB;

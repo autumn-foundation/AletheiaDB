@@ -312,7 +312,6 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::transaction::WriteOps;
     use crate::core::error::Error;
     use crate::core::property::PropertyMapBuilder;
     use crate::db::AletheiaDB;

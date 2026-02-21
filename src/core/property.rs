@@ -1402,35 +1402,53 @@ impl PartialEq for PropertyMap {
     }
 }
 
+/// Helper function to compare property keys by their resolved string value.
+///
+/// This avoids allocating Strings during sort, instead resolving them on-demand
+/// (zero-allocation via GLOBAL_INTERNER.resolve_with).
+///
+/// Sort order:
+/// 1. Resolved strings (alphabetical)
+/// 2. Unresolved keys (by ID)
+/// Resolved keys always come before unresolved ones.
+fn compare_interned_keys(k1: &PropertyKey, k2: &PropertyKey) -> std::cmp::Ordering {
+    // Optimization: if keys are equal, they are equal
+    if k1 == k2 {
+        return std::cmp::Ordering::Equal;
+    }
+
+    GLOBAL_INTERNER
+        .resolve_with(*k1, |s1| {
+            GLOBAL_INTERNER
+                .resolve_with(*k2, |s2| s1.cmp(s2))
+                .unwrap_or(std::cmp::Ordering::Less) // k1 found, k2 missing -> k1 < k2
+        })
+        .unwrap_or_else(|| {
+            // k1 missing. Check if k2 exists.
+            GLOBAL_INTERNER
+                .resolve_with(*k2, |_| std::cmp::Ordering::Greater) // k1 missing, k2 found -> k1 > k2
+                .unwrap_or_else(|| k1.cmp(k2)) // Both missing -> compare IDs
+        })
+}
+
 impl fmt::Debug for PropertyMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut map = f.debug_map();
-        // Collect entries and pre-resolve keys to sort them for deterministic output
-        // We map to (resolved_str, raw_id, value)
-        let mut entries: Vec<_> = self
-            .inner
-            .iter()
-            .map(|(key, value)| {
-                let resolved = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string());
-                (resolved, *key, value)
-            })
-            .collect();
+        // Collect entries without allocation
+        let mut entries: Vec<_> = self.inner.iter().collect();
 
-        // Sort by resolved string if available, otherwise by ID
-        // Resolved keys always come before unresolved ones for consistency
-        entries.sort_by(|(s1, k1, _), (s2, k2, _)| match (s1, s2) {
-            (Some(a), Some(b)) => a.cmp(b),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => k1.cmp(k2),
-        });
+        // Sort by resolved string on-demand to avoid allocations
+        entries.sort_by(|(k1, _), (k2, _)| compare_interned_keys(k1, k2));
 
-        for (resolved, key, value) in entries {
-            if let Some(key_str) = resolved {
-                map.entry(&key_str, value);
-            } else {
-                map.entry(&key, value);
-            }
+        for (key, value) in entries {
+            // Resolve again for display (zero-allocation via resolve_with)
+            GLOBAL_INTERNER
+                .resolve_with(*key, |s| {
+                    map.entry(&s, value);
+                })
+                .unwrap_or_else(|| {
+                    map.entry(key, value);
+                });
         }
         map.finish()
     }
@@ -1440,33 +1458,19 @@ impl fmt::Display for PropertyMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{")?;
 
-        // Collect entries and pre-resolve keys to sort them for deterministic output
-        // Reuse similar logic to Debug but use Display for values
-        let mut entries: Vec<_> = self
-            .inner
-            .iter()
-            .map(|(key, value)| {
-                let resolved = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string());
-                (resolved, *key, value)
-            })
-            .collect();
+        // Collect entries without allocation
+        let mut entries: Vec<_> = self.inner.iter().collect();
 
-        entries.sort_by(|(s1, k1, _), (s2, k2, _)| match (s1, s2) {
-            (Some(a), Some(b)) => a.cmp(b),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => k1.cmp(k2),
-        });
+        // Sort by resolved string on-demand to avoid allocations
+        entries.sort_by(|(k1, _), (k2, _)| compare_interned_keys(k1, k2));
 
-        for (i, (resolved, key, value)) in entries.into_iter().enumerate() {
+        for (i, (key, value)) in entries.into_iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            if let Some(key_str) = resolved {
-                write!(f, "{}: {}", key_str, value)?;
-            } else {
-                write!(f, "{}: {}", key, value)?;
-            }
+            GLOBAL_INTERNER
+                .resolve_with(*key, |s| write!(f, "{}: {}", s, value))
+                .unwrap_or_else(|| write!(f, "{}: {}", key, value))?;
         }
         write!(f, "}}")
     }

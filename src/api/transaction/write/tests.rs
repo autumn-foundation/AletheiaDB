@@ -3178,7 +3178,6 @@ mod bitemporal_validation_tests {
 
 mod find_nodes_by_property_tests {
     use super::*;
-    use crate::api::transaction::ReadOps;
     use crate::core::property::{PropertyMapBuilder, PropertyValue};
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {

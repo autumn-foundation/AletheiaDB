@@ -12,8 +12,8 @@
 use dashmap::DashMap;
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Default maximum number of interned strings (DoS protection)
 pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
