@@ -729,69 +729,42 @@ mod sentry_tests {
             meta,
         );
 
-        let node2 = Node::with_metadata(
-            NodeId::new(1).unwrap(),
-            label,
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            meta,
-        );
-
         // 1. Identity
-        assert_eq!(node1, node2, "Identical nodes should be equal");
+        assert_eq!(node1, node1.clone(), "Identical nodes should be equal");
 
         // 2. ID difference
-        let node_diff_id = Node::with_metadata(
-            NodeId::new(2).unwrap(),
-            label,
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            meta,
-        );
-        assert_ne!(node1, node_diff_id, "Nodes with different ID should differ");
+        let mut node_diff = node1.clone();
+        node_diff.id = NodeId::new(2).unwrap();
+        assert_ne!(node1, node_diff, "Nodes with different ID should differ");
 
         // 3. Label difference
-        let diff_label = GLOBAL_INTERNER.intern("Robot").unwrap();
-        let node_diff_label = Node::with_metadata(
-            NodeId::new(1).unwrap(),
-            diff_label,
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            meta,
-        );
-        assert_ne!(node1, node_diff_label, "Nodes with different label should differ");
+        let mut node_diff = node1.clone();
+        node_diff.label = GLOBAL_INTERNER.intern("Robot").unwrap();
+        assert_ne!(node1, node_diff, "Nodes with different label should differ");
 
         // 4. Property difference
-        let diff_props = PropertyMapBuilder::new().insert("name", "Bob").build();
-        let node_diff_props = Node::with_metadata(
-            NodeId::new(1).unwrap(),
-            label,
-            diff_props,
-            VersionId::new(1).unwrap(),
-            meta,
+        let mut node_diff = node1.clone();
+        node_diff.properties = PropertyMapBuilder::new().insert("name", "Bob").build();
+        assert_ne!(
+            node1, node_diff,
+            "Nodes with different properties should differ"
         );
-        assert_ne!(node1, node_diff_props, "Nodes with different properties should differ");
 
         // 5. Version difference
-        let node_diff_ver = Node::with_metadata(
-            NodeId::new(1).unwrap(),
-            label,
-            props.clone(),
-            VersionId::new(2).unwrap(),
-            meta,
+        let mut node_diff = node1.clone();
+        node_diff.current_version = VersionId::new(2).unwrap();
+        assert_ne!(
+            node1, node_diff,
+            "Nodes with different current_version should differ"
         );
-        assert_ne!(node1, node_diff_ver, "Nodes with different current_version should differ");
 
         // 6. Metadata difference
-        let diff_meta = VersionMetadata::new(crate::core::id::TxId::new(11), 1000.into());
-        let node_diff_meta = Node::with_metadata(
-            NodeId::new(1).unwrap(),
-            label,
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            diff_meta,
+        let mut node_diff = node1.clone();
+        node_diff.metadata = VersionMetadata::new(crate::core::id::TxId::new(11), 1000.into());
+        assert_ne!(
+            node1, node_diff,
+            "Nodes with different metadata should differ"
         );
-        assert_ne!(node1, node_diff_meta, "Nodes with different metadata should differ");
     }
 
     /// 🛡️ Sentry Test: Verify strict structural equality for Edge.
@@ -812,104 +785,51 @@ mod sentry_tests {
             meta,
         );
 
-        let edge2 = Edge::with_metadata(
-            EdgeId::new(1).unwrap(),
-            label,
-            NodeId::new(10).unwrap(),
-            NodeId::new(11).unwrap(),
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            meta,
-        );
-
         // 1. Identity
-        assert_eq!(edge1, edge2, "Identical edges should be equal");
+        assert_eq!(edge1, edge1.clone(), "Identical edges should be equal");
 
         // 2. ID difference
-        let edge_diff_id = Edge::with_metadata(
-            EdgeId::new(2).unwrap(),
-            label,
-            NodeId::new(10).unwrap(),
-            NodeId::new(11).unwrap(),
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            meta,
-        );
-        assert_ne!(edge1, edge_diff_id, "Edges with different ID should differ");
+        let mut edge_diff = edge1.clone();
+        edge_diff.id = EdgeId::new(2).unwrap();
+        assert_ne!(edge1, edge_diff, "Edges with different ID should differ");
 
         // 3. Label difference
-        let diff_label = GLOBAL_INTERNER.intern("LIKES").unwrap();
-        let edge_diff_label = Edge::with_metadata(
-            EdgeId::new(1).unwrap(),
-            diff_label,
-            NodeId::new(10).unwrap(),
-            NodeId::new(11).unwrap(),
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            meta,
-        );
-        assert_ne!(edge1, edge_diff_label, "Edges with different label should differ");
+        let mut edge_diff = edge1.clone();
+        edge_diff.label = GLOBAL_INTERNER.intern("LIKES").unwrap();
+        assert_ne!(edge1, edge_diff, "Edges with different label should differ");
 
         // 4. Source difference
-        let edge_diff_src = Edge::with_metadata(
-            EdgeId::new(1).unwrap(),
-            label,
-            NodeId::new(99).unwrap(),
-            NodeId::new(11).unwrap(),
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            meta,
-        );
-        assert_ne!(edge1, edge_diff_src, "Edges with different source should differ");
+        let mut edge_diff = edge1.clone();
+        edge_diff.source = NodeId::new(99).unwrap();
+        assert_ne!(edge1, edge_diff, "Edges with different source should differ");
 
         // 5. Target difference
-        let edge_diff_tgt = Edge::with_metadata(
-            EdgeId::new(1).unwrap(),
-            label,
-            NodeId::new(10).unwrap(),
-            NodeId::new(99).unwrap(),
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            meta,
-        );
-        assert_ne!(edge1, edge_diff_tgt, "Edges with different target should differ");
+        let mut edge_diff = edge1.clone();
+        edge_diff.target = NodeId::new(99).unwrap();
+        assert_ne!(edge1, edge_diff, "Edges with different target should differ");
 
         // 6. Property difference
-        let diff_props = PropertyMapBuilder::new().insert("since", 2025).build();
-        let edge_diff_props = Edge::with_metadata(
-            EdgeId::new(1).unwrap(),
-            label,
-            NodeId::new(10).unwrap(),
-            NodeId::new(11).unwrap(),
-            diff_props,
-            VersionId::new(1).unwrap(),
-            meta,
+        let mut edge_diff = edge1.clone();
+        edge_diff.properties = PropertyMapBuilder::new().insert("since", 2025).build();
+        assert_ne!(
+            edge1, edge_diff,
+            "Edges with different properties should differ"
         );
-        assert_ne!(edge1, edge_diff_props, "Edges with different properties should differ");
 
         // 7. Version difference
-        let edge_diff_ver = Edge::with_metadata(
-            EdgeId::new(1).unwrap(),
-            label,
-            NodeId::new(10).unwrap(),
-            NodeId::new(11).unwrap(),
-            props.clone(),
-            VersionId::new(2).unwrap(),
-            meta,
+        let mut edge_diff = edge1.clone();
+        edge_diff.current_version = VersionId::new(2).unwrap();
+        assert_ne!(
+            edge1, edge_diff,
+            "Edges with different current_version should differ"
         );
-        assert_ne!(edge1, edge_diff_ver, "Edges with different current_version should differ");
 
         // 8. Metadata difference
-        let diff_meta = VersionMetadata::new(crate::core::id::TxId::new(21), 2000.into());
-        let edge_diff_meta = Edge::with_metadata(
-            EdgeId::new(1).unwrap(),
-            label,
-            NodeId::new(10).unwrap(),
-            NodeId::new(11).unwrap(),
-            props.clone(),
-            VersionId::new(1).unwrap(),
-            diff_meta,
+        let mut edge_diff = edge1.clone();
+        edge_diff.metadata = VersionMetadata::new(crate::core::id::TxId::new(21), 2000.into());
+        assert_ne!(
+            edge1, edge_diff,
+            "Edges with different metadata should differ"
         );
-        assert_ne!(edge1, edge_diff_meta, "Edges with different metadata should differ");
     }
 }
