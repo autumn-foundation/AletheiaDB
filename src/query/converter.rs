@@ -2030,4 +2030,40 @@ mod sentry_tests {
         assert!(has_start_node, "Should use StartNode");
         assert!(has_label_filter, "Should preserve 'Secret' label check");
     }
+
+    #[test]
+    fn test_convert_order_by_timestamp() {
+        // MATCH (n) RETURN n ORDER BY timestamp DESC
+        let ast = Parser::parse("MATCH (n) RETURN n ORDER BY timestamp DESC").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let sort_op = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::Sort { .. }));
+        assert!(sort_op.is_some(), "Expected Sort operation");
+        if let Some(QueryOp::Sort { key, descending }) = sort_op {
+            assert!(
+                matches!(key, SortKey::Timestamp),
+                "Expected Timestamp key, got {:?}",
+                key
+            );
+            assert!(*descending, "Expected descending order");
+        }
+    }
+
+    #[test]
+    fn test_start_node_optimization_with_literal() {
+        // MATCH (n {id: 123}) RETURN n
+        let ast = Parser::parse("MATCH (n {id: 123}) RETURN n").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let has_start_node = query.ops.iter().any(|op| match op {
+            QueryOp::StartNode(id) => id.as_u64() == 123,
+            _ => false,
+        });
+        assert!(has_start_node, "Should use StartNode for literal ID");
+    }
 }
