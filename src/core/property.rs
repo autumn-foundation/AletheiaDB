@@ -3837,10 +3837,7 @@ mod sentry_tests {
         // old val size (9).
         // new val size (1 + 4 + 19 = 24).
         // Expected size: 20 - 9 + 24 = 35.
-        let map = map
-            .builder()
-            .insert("key", "larger_string_value")
-            .build();
+        let map = map.builder().insert("key", "larger_string_value").build();
 
         let new_size = map.serialized_size();
         let actual_new = map.serialize().unwrap().len();
