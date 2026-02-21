@@ -438,7 +438,7 @@ impl RedbColdStorage {
             versions
                 .par_iter()
                 .map(|version| {
-                    let encoded = encode_node_version(version);
+                    let encoded = encode_node_version(version)?;
                     let raw_size = encoded.len() as u64;
                     let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
                     let compressed_size = compressed.len() as u64;
@@ -454,7 +454,7 @@ impl RedbColdStorage {
             versions
                 .iter()
                 .map(|version| {
-                    let encoded = encode_node_version(version);
+                    let encoded = encode_node_version(version)?;
                     let raw_size = encoded.len() as u64;
                     let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
                     let compressed_size = compressed.len() as u64;
@@ -492,7 +492,7 @@ impl RedbColdStorage {
             versions
                 .par_iter()
                 .map(|version| {
-                    let encoded = encode_edge_version(version);
+                    let encoded = encode_edge_version(version)?;
                     let raw_size = encoded.len() as u64;
                     let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
                     let compressed_size = compressed.len() as u64;
@@ -508,7 +508,7 @@ impl RedbColdStorage {
             versions
                 .iter()
                 .map(|version| {
-                    let encoded = encode_edge_version(version);
+                    let encoded = encode_edge_version(version)?;
                     let raw_size = encoded.len() as u64;
                     let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
                     let compressed_size = compressed.len() as u64;
@@ -634,7 +634,7 @@ impl RedbColdStorage {
     pub fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
         self.check_fail_writes()?;
 
-        let encoded = encode_node_version(version);
+        let encoded = encode_node_version(version)?;
         let raw_size = encoded.len();
         let compressed = self.compress(&encoded)?;
         let compressed_size = compressed.len();
@@ -724,7 +724,7 @@ impl RedbColdStorage {
     pub fn store_edge_version(&self, version: &EdgeVersion) -> Result<()> {
         self.check_fail_writes()?;
 
-        let encoded = encode_edge_version(version);
+        let encoded = encode_edge_version(version)?;
         let raw_size = encoded.len();
         let compressed = self.compress(&encoded)?;
         let compressed_size = compressed.len();
@@ -1212,8 +1212,17 @@ enum SerializablePropertyValue {
 /// Encode a NodeVersion to bytes for storage.
 ///
 /// This function is public for use by all cold storage implementations.
-pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
+pub fn encode_node_version(version: &NodeVersion) -> Result<Vec<u8>> {
     use crate::core::interning::GLOBAL_INTERNER;
+
+    let label = GLOBAL_INTERNER
+        .resolve_with(version.label, |s| s.to_string())
+        .ok_or_else(|| {
+            StorageError::corruption(format!(
+                "Failed to resolve interned label ID {:?} for NodeVersion {:?}",
+                version.label, version.id
+            ))
+        })?;
 
     let serializable = SerializableNodeVersion {
         id: version.id.as_u64(),
@@ -1222,15 +1231,13 @@ pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
         temporal_valid_end: version.temporal.valid_time().end().wallclock(),
         temporal_tx_start: version.temporal.transaction_time().start().wallclock(),
         temporal_tx_end: version.temporal.transaction_time().end().wallclock(),
-        label: GLOBAL_INTERNER
-            .resolve_with(version.label, |s| s.to_string())
-            .unwrap_or_default(),
-        data: encode_version_data(&version.data),
+        label,
+        data: encode_version_data(&version.data)?,
         next_version: version.next_version.map(|v| v.as_u64()),
         prev_version: version.prev_version.map(|v| v.as_u64()),
     };
 
-    bitcode::encode(&serializable)
+    Ok(bitcode::encode(&serializable))
 }
 
 /// Decode a NodeVersion from bytes.
@@ -1282,8 +1289,17 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
 /// Encode an EdgeVersion to bytes for storage.
 ///
 /// This function is public for use by all cold storage implementations.
-pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
+pub fn encode_edge_version(version: &EdgeVersion) -> Result<Vec<u8>> {
     use crate::core::interning::GLOBAL_INTERNER;
+
+    let label = GLOBAL_INTERNER
+        .resolve_with(version.label, |s| s.to_string())
+        .ok_or_else(|| {
+            StorageError::corruption(format!(
+                "Failed to resolve interned label ID {:?} for EdgeVersion {:?}",
+                version.label, version.id
+            ))
+        })?;
 
     let serializable = SerializableEdgeVersion {
         id: version.id.as_u64(),
@@ -1292,17 +1308,15 @@ pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
         temporal_valid_end: version.temporal.valid_time().end().wallclock(),
         temporal_tx_start: version.temporal.transaction_time().start().wallclock(),
         temporal_tx_end: version.temporal.transaction_time().end().wallclock(),
-        label: GLOBAL_INTERNER
-            .resolve_with(version.label, |s| s.to_string())
-            .unwrap_or_default(),
+        label,
         source: version.source.as_u64(),
         target: version.target.as_u64(),
-        data: encode_version_data(&version.data),
+        data: encode_version_data(&version.data)?,
         next_version: version.next_version.map(|v| v.as_u64()),
         prev_version: version.prev_version.map(|v| v.as_u64()),
     };
 
-    bitcode::encode(&serializable)
+    Ok(bitcode::encode(&serializable))
 }
 
 /// Decode an EdgeVersion from bytes.
@@ -1355,7 +1369,9 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
     })
 }
 
-fn encode_version_data(data: &crate::storage::version::VersionData) -> SerializableVersionData {
+fn encode_version_data(
+    data: &crate::storage::version::VersionData,
+) -> Result<SerializableVersionData> {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::storage::version::VersionData;
 
@@ -1363,43 +1379,57 @@ fn encode_version_data(data: &crate::storage::version::VersionData) -> Serializa
         VersionData::Anchor {
             properties,
             vector_snapshot_id,
-        } => SerializableVersionData::Anchor {
-            properties: properties
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        GLOBAL_INTERNER
-                            .resolve_with(*k, |s| s.to_string())
-                            .unwrap_or_default(),
-                        encode_property_value(v),
-                    )
-                })
-                .collect(),
-            vector_snapshot_id: vector_snapshot_id.map(|id| id as u64),
-        },
-        VersionData::Delta { delta } => SerializableVersionData::Delta {
-            changed: delta
-                .changed
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        GLOBAL_INTERNER
-                            .resolve_with(*k, |s| s.to_string())
-                            .unwrap_or_default(),
-                        encode_property_value(v),
-                    )
-                })
-                .collect(),
-            removed: delta
-                .removed
-                .iter()
-                .map(|k| {
-                    GLOBAL_INTERNER
-                        .resolve_with(*k, |s| s.to_string())
-                        .unwrap_or_default()
-                })
-                .collect(),
-        },
+        } => {
+            let mut encoded_properties = Vec::with_capacity(properties.len());
+            for (k, v) in properties.iter() {
+                let key_str = GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s.to_string())
+                    .ok_or_else(|| {
+                        StorageError::corruption(format!(
+                            "Failed to resolve interned property key ID {:?}",
+                            k
+                        ))
+                    })?;
+                encoded_properties.push((key_str, encode_property_value(v)));
+            }
+
+            Ok(SerializableVersionData::Anchor {
+                properties: encoded_properties,
+                vector_snapshot_id: vector_snapshot_id.map(|id| id as u64),
+            })
+        }
+        VersionData::Delta { delta } => {
+            let mut encoded_changed = Vec::with_capacity(delta.changed.len());
+            for (k, v) in delta.changed.iter() {
+                let key_str = GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s.to_string())
+                    .ok_or_else(|| {
+                        StorageError::corruption(format!(
+                            "Failed to resolve interned property key ID {:?} in delta",
+                            k
+                        ))
+                    })?;
+                encoded_changed.push((key_str, encode_property_value(v)));
+            }
+
+            let mut encoded_removed = Vec::with_capacity(delta.removed.len());
+            for k in delta.removed.iter() {
+                let key_str = GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s.to_string())
+                    .ok_or_else(|| {
+                        StorageError::corruption(format!(
+                            "Failed to resolve interned property key ID {:?} in removed set",
+                            k
+                        ))
+                    })?;
+                encoded_removed.push(key_str);
+            }
+
+            Ok(SerializableVersionData::Delta {
+                changed: encoded_changed,
+                removed: encoded_removed,
+            })
+        }
     }
 }
 
