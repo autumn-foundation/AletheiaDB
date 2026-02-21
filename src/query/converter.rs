@@ -2030,4 +2030,60 @@ mod sentry_tests {
         assert!(has_start_node, "Should use StartNode");
         assert!(has_label_filter, "Should preserve 'Secret' label check");
     }
+
+    #[test]
+    fn test_pagination_order() {
+        // 🎯 Target: convert_pagination order (Skip before Limit)
+        // 💣 Risk: Semantic change (Skip 5 then Take 10 vs Take 10 then Skip 5)
+        // 🧪 Strategy: Parse query with both and check IR order
+
+        let ast = Parser::parse("MATCH (n) RETURN n SKIP 5 LIMIT 10").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let skip_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Skip(_)));
+        let limit_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Limit(_)));
+
+        assert!(skip_idx.is_some(), "Skip op missing");
+        assert!(limit_idx.is_some(), "Limit op missing");
+
+        assert!(
+            skip_idx.unwrap() < limit_idx.unwrap(),
+            "Skip operation must precede Limit operation"
+        );
+    }
+
+    #[test]
+    fn test_filter_before_project() {
+        // 🎯 Target: Pipeline order (Filter before Project)
+        // 💣 Risk: Filtering on projected-away columns
+        // 🧪 Strategy: Parse query with WHERE and RETURN specific property
+
+        let ast = Parser::parse("MATCH (n) WHERE n.age > 10 RETURN n.name").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let filter_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Filter(_)));
+        let project_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Project(_)));
+
+        assert!(filter_idx.is_some(), "Filter op missing");
+        assert!(project_idx.is_some(), "Project op missing");
+
+        assert!(
+            filter_idx.unwrap() < project_idx.unwrap(),
+            "Filter operation must precede Project operation"
+        );
+    }
 }
