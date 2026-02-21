@@ -588,6 +588,23 @@ classDiagram
 **Narrative Generator (The Scribe)**
 
 ```mermaid
+classDiagram
+    namespace Experimental {
+        class NarrativeGenerator {
+            +generate_node_narrative(node_id)
+        }
+        class GraphContextBuilder {
+            +with_history_limit(limit)
+            +with_neighbor_limit(limit)
+            +build()
+        }
+    }
+    GraphContextBuilder --> NarrativeGenerator : Uses
+    GraphContextBuilder --> AletheiaDB : Uses
+    NarrativeGenerator --> AletheiaDB : Uses
+```
+
+```mermaid
 sequenceDiagram
     participant User
     participant Scribe as NarrativeGenerator
@@ -675,6 +692,88 @@ classDiagram
     }
     GravityWell --> AletheiaDB : Uses
     GravityWell ..> OrbitMetrics : Produces
+```
+
+**Semantic Spreading Activation (Telepathy)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class TelepathyEngine {
+            +propagate(seeds)
+        }
+        class TelepathyConfig {
+            +decay: f32
+            +threshold: f32
+        }
+    }
+    TelepathyEngine --> AletheiaDB : Uses
+    TelepathyEngine --> TelepathyConfig : Uses
+```
+
+**Sequence: Spreading Activation**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Telepathy
+    participant DB as AletheiaDB
+
+    User->>Telepathy: propagate(seeds)
+    loop Max Steps
+        Telepathy->>DB: get_outgoing_edges(active_nodes)
+        DB-->>Telepathy: edges
+        loop Every Edge
+            Telepathy->>DB: get_vector(target)
+            Telepathy->>Telepathy: weight = similarity(source, target)
+            Telepathy->>Telepathy: signal = source_strength * weight * decay
+            Telepathy->>Telepathy: accumulate(target, signal)
+        end
+    end
+    Telepathy-->>User: Activations
+```
+
+**Semantic Graph Alignment (Metaphor)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Metaphor {
+            +align(source, target)
+        }
+        class Alignment {
+            +mappings: Vec<Mapping>
+            +score: f32
+        }
+        class Mapping {
+            +source: NodeId
+            +target: NodeId
+        }
+    }
+    Metaphor --> AletheiaDB : Uses
+    Metaphor ..> Alignment : Produces
+    Alignment --> Mapping : Contains
+```
+
+**Sequence: Subgraph Alignment**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Metaphor
+    participant DB as AletheiaDB
+
+    User->>Metaphor: align(source_nodes, target_nodes)
+    Metaphor->>DB: fetch_vectors_and_topology()
+    Metaphor->>Metaphor: compute_similarity_matrix()
+
+    loop Until All Mapped
+        Metaphor->>Metaphor: find_best_pair()
+        Metaphor->>Metaphor: record_mapping()
+        Metaphor->>Metaphor: boost_neighbors_score()
+    end
+
+    Metaphor-->>User: Alignment
 ```
 
 ### Temporal Query Processing
