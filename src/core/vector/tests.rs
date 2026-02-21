@@ -2902,3 +2902,39 @@ fn test_simd_mismatched_lengths_safety() {
         );
     }
 }
+
+// ========================================================================
+// Regression Tests
+// ========================================================================
+
+#[test]
+fn test_cosine_similarity_denormal_precision() {
+    // Regression test for denormal number precision issue (see repro_panic.rs).
+    // Small values can cause squared magnitude to be denormal, leading to precision loss.
+    // If calculated in f32, dot / magnitude can exceed 1.0 significantly.
+
+    // Value that produces denormal squared magnitude (1e-42)
+    let val = 1e-21f32;
+    let a = vec![val];
+    let b = vec![val * 1e20]; // b is a scaled version of a
+
+    let sim = cosine_similarity(&a, &b).unwrap();
+
+    // Should be exactly 1.0 mathematically
+    // With f64 fix, it should be very close to 1.0 (e.g. 0.9997 or 1.0000)
+    // Without fix, it was ~1.009
+
+    // We expect it to be within reasonable bounds of 1.0
+    // Actually, with f64 fix, it should be 1.0 or slightly less (0.9997...)
+    assert!((sim - 1.0).abs() < 1e-3,
+        "Similarity {} should be close to 1.0 for scaled denormal vectors", sim);
+
+    // Also explicitly check it doesn't trigger the debug assertion logic (which panics at > 1.001)
+    // The clamp ensures it returns <= 1.0, but we want to ensure the internal calculation
+    // was precise enough.
+
+    // Verify symmetric case
+    let sim_ba = cosine_similarity(&b, &a).unwrap();
+    assert!((sim_ba - 1.0).abs() < 1e-3,
+        "Symmetric similarity {} should be close to 1.0 for scaled denormal vectors", sim_ba);
+}

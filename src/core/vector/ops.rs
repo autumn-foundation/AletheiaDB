@@ -104,15 +104,19 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
-    let magnitude = (mag_a_sq * mag_b_sq).sqrt();
+    // Use f64 for magnitude computation to maintain precision when
+    // multiplying potentially small/large magnitudes. This prevents
+    // underflow/overflow of the product and reduces precision loss
+    // when dealing with denormal numbers.
+    let magnitude = (mag_a_sq as f64 * mag_b_sq as f64).sqrt();
 
     // Handle zero vectors
     if magnitude == 0.0 {
         return Ok(0.0);
     }
 
-    // Compute the raw result before clamping
-    let result = dot / magnitude;
+    // Compute the raw result in f64 before clamping
+    let result = (dot as f64) / magnitude;
 
     // Debug assertion to detect if clamping is hiding a significant numerical issue.
     // For correctly computed cosine similarity, values should only exceed [-1, 1]
@@ -128,7 +132,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
 
     // Clamp to handle minor floating-point inaccuracies that could produce
     // values slightly outside [-1.0, 1.0]
-    Ok(result.clamp(-1.0, 1.0))
+    Ok(result.clamp(-1.0, 1.0) as f32)
 }
 
 /// Computes cosine similarity between pre-normalized (unit) vectors.
