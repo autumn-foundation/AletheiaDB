@@ -1304,7 +1304,7 @@ impl PropertyMap {
             let key_size = 4 + key_len;
             calculated_size = calculated_size
                 .saturating_add(key_size)
-                .saturating_add(value.serialized_size()?);
+                .saturating_add(consumed);
 
             offset += consumed;
 
