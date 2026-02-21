@@ -22,18 +22,20 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 /// Create a test graph for query benchmarks
-fn create_test_graph(node_count: usize) -> Arc<CurrentStorage> {
+fn create_test_graph(node_count: usize) -> (Arc<CurrentStorage>, Vec<NodeId>) {
     let storage = Arc::new(CurrentStorage::new());
 
     // Enable vector index
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     storage.enable_vector_index("embedding", config).unwrap();
 
+    let mut node_ids = Vec::with_capacity(node_count);
+
     // Create nodes with properties and embeddings
     for i in 0..node_count {
         let embedding = vec![(i as f32) / (node_count as f32), 0.5, 0.3, 0.2];
 
-        storage
+        let id = storage
             .create_node(
                 if i % 3 == 0 { "Person" } else { "Document" },
                 PropertyMapBuilder::new()
@@ -44,13 +46,10 @@ fn create_test_graph(node_count: usize) -> Arc<CurrentStorage> {
                     .build(),
             )
             .unwrap();
+        node_ids.push(id);
     }
 
-    // Create edges
-    let node_ids: Vec<NodeId> = (0..node_count)
-        .map(|i| NodeId::new((i + 1) as u64).unwrap())
-        .collect();
-
+    // Create edges using actual NodeIds
     for i in 0..node_count.saturating_sub(1) {
         storage
             .create_edge(
@@ -62,12 +61,12 @@ fn create_test_graph(node_count: usize) -> Arc<CurrentStorage> {
             .unwrap();
     }
 
-    storage
+    (storage, node_ids)
 }
 
 /// Benchmark planning overhead (should be minimal)
 fn bench_planning_overhead(c: &mut Criterion) {
-    let storage = create_test_graph(100);
+    let (storage, node_ids) = create_test_graph(100);
     let stats = Arc::new(Statistics::default());
     let planner = QueryPlanner::new(Arc::clone(&stats), Arc::clone(&storage));
 
@@ -76,7 +75,8 @@ fn bench_planning_overhead(c: &mut Criterion) {
     // Simple node lookup - no optimization benefit
     group.bench_function("simple_lookup", |b| {
         b.iter(|| {
-            let query = QueryBuilder::new().start(NodeId::new(1).unwrap()).build();
+            // Use an actual valid NodeId
+            let query = QueryBuilder::new().start(node_ids[0]).build();
             let _plan = planner.plan(query).unwrap();
         });
     });
@@ -99,7 +99,7 @@ fn bench_planning_overhead(c: &mut Criterion) {
 
 /// Benchmark explain() performance
 fn bench_explain(c: &mut Criterion) {
-    let storage = create_test_graph(100);
+    let (storage, _node_ids) = create_test_graph(100);
     let stats = Arc::new(Statistics::default());
     let planner = QueryPlanner::new(Arc::clone(&stats), Arc::clone(&storage));
 
@@ -124,7 +124,7 @@ fn bench_explain(c: &mut Criterion) {
 fn bench_cost_estimation(c: &mut Criterion) {
     use aletheiadb::query::planner::{CostModel, physical::PhysicalOp};
 
-    let _storage = create_test_graph(100);
+    let (_storage, node_ids) = create_test_graph(100);
     let stats = Arc::new(Statistics::default());
     let cost_model = CostModel::default();
 
@@ -132,7 +132,7 @@ fn bench_cost_estimation(c: &mut Criterion) {
 
     // Simple operator
     let simple_op = PhysicalOp::NodeLookup {
-        node_ids: vec![NodeId::new(1).unwrap()],
+        node_ids: vec![node_ids[0]],
     };
 
     group.bench_function("simple_operator", |b| {
@@ -145,7 +145,7 @@ fn bench_cost_estimation(c: &mut Criterion) {
     let complex_op = PhysicalOp::Filter {
         input: Box::new(PhysicalOp::IndexedTraversal {
             input: Box::new(PhysicalOp::NodeLookup {
-                node_ids: vec![NodeId::new(1).unwrap()],
+                node_ids: vec![node_ids[0]],
             }),
             direction: aletheiadb::query::ir::Direction::Outgoing,
             label: Some("KNOWS".to_string()),
