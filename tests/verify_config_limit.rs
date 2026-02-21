@@ -1,9 +1,9 @@
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::DistanceMetric;
 use aletheiadb::index::vector::hnsw::HnswConfig;
 use aletheiadb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
-use aletheiadb::index::vector::DistanceMetric;
 
 #[test]
 fn test_large_full_snapshot_interval() -> aletheiadb::core::error::Result<()> {
@@ -29,11 +29,7 @@ fn test_large_full_snapshot_interval() -> aletheiadb::core::error::Result<()> {
         let node_id = NodeId::new(i as u64).unwrap();
         let timestamp = (1000 + i * 100) as i64;
 
-        index.add(
-            node_id,
-            &[1.0, 0.0, 0.0, 0.0],
-            timestamp.into(),
-        )?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], timestamp.into())?;
         index.on_transaction_at(timestamp.into())?;
     }
 
