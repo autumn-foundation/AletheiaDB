@@ -59,7 +59,9 @@ pub(crate) fn validate(tx: &WriteTransaction) -> Result<()> {
                     if tx.buffer.has_modified_node(*node_id) {
                         // Check buffered operation - fail if deleted
                         match tx.buffer.get_node_write(*node_id) {
-                            Some(crate::api::transaction::BufferedWrite::DeleteNode { .. }) => false,
+                            Some(crate::api::transaction::BufferedWrite::DeleteNode { .. }) => {
+                                false
+                            }
                             _ => true, // Created or Updated means it exists
                         }
                     } else {
