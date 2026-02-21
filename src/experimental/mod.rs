@@ -43,8 +43,15 @@
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
+//! > ⚠️ **REQUIRES FEATURE 'NOVA'**
+//! >
+//! > This feature is experimental and requires the `nova` feature flag.
+//! > Add `features = ["nova"]` to your `Cargo.toml`.
+//!
 //! ```rust,ignore
-//! // Requires features = ["nova"]
+//! // [dependencies]
+//! // aletheiadb = { version = "0.1", features = ["nova"] }
+//!
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
 //! use aletheiadb::core::property::PropertyValue;
