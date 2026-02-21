@@ -60,9 +60,12 @@ use crate::core::error::{Error, StorageError};
 /// If a flush fails, the error is stored and propagated to all waiting transactions.
 /// This ensures no transaction incorrectly believes its data is durable.
 pub struct GroupCommitCoordinator {
-    /// State protected by mutex
+    /// Core epoch and flush state.
     state: Mutex<GroupCommitState>,
     /// Per-epoch wait latches protected separately from coordinator state.
+    ///
+    /// Keeping waiter latches in a separate mutex avoids coupling waiter-map churn
+    /// with the hot epoch-state lock and keeps lock hold times short.
     waiters: Mutex<HashMap<u64, Arc<EpochLatch>>>,
     /// Lightweight internal metrics for profiling group-commit coordination.
     metrics: GroupCommitMetrics,
@@ -617,9 +620,18 @@ impl GroupCommitCoordinator {
             }
         }
 
-        // Advance flushed_epoch to wake up waiters for this epoch
-        // Note: We use max to handle potential out-of-order completions if we ever support that,
-        // though currently flushes are serialized.
+        // Flush completion order is serialized by the single flush thread.
+        // In debug builds, assert if this invariant is violated so we fail loud.
+        debug_assert!(
+            epoch <= state.flushed_epoch.saturating_add(1),
+            "out-of-order flush completion: epoch {} after flushed_epoch {}",
+            epoch,
+            state.flushed_epoch
+        );
+
+        // Advance flushed_epoch to wake up waiters for this epoch.
+        // If we ever support out-of-order completion, this watermark logic must
+        // be replaced with gap tracking to prevent false-success scenarios.
         if epoch > state.flushed_epoch {
             state.flushed_epoch = epoch;
         }
