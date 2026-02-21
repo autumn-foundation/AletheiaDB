@@ -199,6 +199,11 @@ impl<'a> Sherlock<'a> {
         );
     }
 
+    #[cfg(test)]
+    fn new_internal(db: &'a AletheiaDB) -> Self {
+        Self { db }
+    }
+
     /// Investigate a specific node for the given Mystery.
     pub fn investigate(&self, _node_id: NodeId, _mystery: &Mystery) -> Result<Vec<Deduction>> {
         panic!("Experimental features like Sherlock require the 'nova' feature.");
@@ -331,6 +336,8 @@ mod tests {
 mod tests_stub {
     use super::*;
     use crate::AletheiaDB;
+    use crate::core::id::NodeId;
+    use std::time::Duration;
 
     #[test]
     #[should_panic(
@@ -339,5 +346,17 @@ mod tests_stub {
     fn test_stub_new_panics() {
         let db = AletheiaDB::new().unwrap();
         let _ = Sherlock::new(&db);
+    }
+
+    #[test]
+    #[should_panic(expected = "Experimental features like Sherlock require the 'nova' feature.")]
+    fn test_stub_investigate_panics() {
+        let db = AletheiaDB::new().unwrap();
+        // Use internal constructor to bypass the panic in new()
+        let sherlock = Sherlock::new_internal(&db);
+        let _ = sherlock.investigate(
+            NodeId::new(0).unwrap(),
+            &Mystery::new(Duration::from_secs(1)),
+        );
     }
 }
