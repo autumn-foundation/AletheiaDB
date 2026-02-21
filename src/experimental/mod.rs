@@ -124,7 +124,6 @@ pub mod prophet;
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
-#[cfg(feature = "nova")]
 /// Sherlock: Temporal Pattern Matching Engine.
 pub mod sherlock;
 #[cfg(feature = "nova")]

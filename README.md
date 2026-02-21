@@ -57,6 +57,20 @@ cargo test
 just test
 ```
 
+### Experimental Features ("Nova")
+
+> ⚠️ **IMPORTANT**
+>
+> Experimental features like **Narrative Generation**, **Sherlock**, and **Semantic Pathfinding** require the `nova` feature flag.
+>
+> Add this to your `Cargo.toml` to use them:
+> ```toml
+> [dependencies]
+> aletheiadb = { version = "0.1", features = ["nova"] }
+> ```
+>
+> If you see a runtime panic saying "Experimental features like X require the 'nova' feature", this is why!
+
 ### Development Commands
 
 ```bash

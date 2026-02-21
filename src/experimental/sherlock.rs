@@ -71,9 +71,11 @@ pub struct Deduction {
 
 /// The Sherlock Engine.
 pub struct Sherlock<'a> {
+    #[allow(dead_code)]
     db: &'a AletheiaDB,
 }
 
+#[cfg(feature = "nova")]
 impl<'a> Sherlock<'a> {
     /// Create a new Sherlock instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -188,7 +190,23 @@ impl<'a> Sherlock<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "nova"))]
+impl<'a> Sherlock<'a> {
+    /// Create a new Sherlock instance.
+    pub fn new(_db: &'a AletheiaDB) -> Self {
+        panic!(
+            "Experimental features like Sherlock require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n"
+        );
+    }
+
+    /// Investigate a specific node for the given Mystery.
+    pub fn investigate(&self, _node_id: NodeId, _mystery: &Mystery) -> Result<Vec<Deduction>> {
+        panic!("Experimental features like Sherlock require the 'nova' feature.");
+    }
+}
+
+
+#[cfg(all(test, feature = "nova"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -306,5 +324,20 @@ mod tests {
         assert_eq!(results_pass.len(), 1, "Should match within 500ms");
         assert_eq!(results_pass[0].node_id, node_id);
         assert_eq!(results_pass[0].event_times, vec![t0, t1]);
+    }
+}
+
+#[cfg(all(test, not(feature = "nova")))]
+mod tests_stub {
+    use super::*;
+    use crate::AletheiaDB;
+
+    #[test]
+    #[should_panic(
+        expected = "Experimental features like Sherlock require the 'nova' feature. Please enable it in your Cargo.toml"
+    )]
+    fn test_stub_new_panics() {
+        let db = AletheiaDB::new().unwrap();
+        let _ = Sherlock::new(&db);
     }
 }
