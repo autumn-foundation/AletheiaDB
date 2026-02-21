@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use aletheiadb::storage::redb_cold_storage::{encode_node_version};
-    use aletheiadb::core::version::NodeVersion;
-    use aletheiadb::core::id::{VersionId, NodeId};
-    use aletheiadb::core::temporal::BiTemporalInterval;
+    use aletheiadb::core::id::{NodeId, VersionId};
+    use aletheiadb::core::interning::InternedString;
     use aletheiadb::core::property::PropertyMapBuilder;
-    use aletheiadb::core::interning::{InternedString};
+    use aletheiadb::core::temporal::BiTemporalInterval;
+    use aletheiadb::core::version::NodeVersion;
+    use aletheiadb::storage::redb_cold_storage::encode_node_version;
 
     #[test]
     fn test_encode_node_version_fails_on_invalid_id() {
@@ -25,10 +25,17 @@ mod tests {
         // Now this should fail with an error
         let result = encode_node_version(&version);
 
-        assert!(result.is_err(), "encode_node_version should fail for invalid ID");
+        assert!(
+            result.is_err(),
+            "encode_node_version should fail for invalid ID"
+        );
         let err = result.unwrap_err();
         let msg = format!("{}", err);
-        assert!(msg.contains("Failed to resolve interned label ID"), "Error message should mention resolution failure: {}", msg);
+        assert!(
+            msg.contains("Failed to resolve interned label ID"),
+            "Error message should mention resolution failure: {}",
+            msg
+        );
 
         println!("Confirmed: Invalid ID caused explicit error as expected.");
     }

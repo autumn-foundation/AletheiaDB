@@ -1380,18 +1380,20 @@ fn encode_version_data(
             properties,
             vector_snapshot_id,
         } => {
-            let mut encoded_properties = Vec::with_capacity(properties.len());
-            for (k, v) in properties.iter() {
-                let key_str = GLOBAL_INTERNER
-                    .resolve_with(*k, |s| s.to_string())
-                    .ok_or_else(|| {
-                        StorageError::corruption(format!(
-                            "Failed to resolve interned property key ID {:?}",
-                            k
-                        ))
-                    })?;
-                encoded_properties.push((key_str, encode_property_value(v)));
-            }
+            let encoded_properties = properties
+                .iter()
+                .map(|(k, v)| {
+                    let key_str = GLOBAL_INTERNER
+                        .resolve_with(*k, |s| s.to_string())
+                        .ok_or_else(|| {
+                            StorageError::corruption(format!(
+                                "Failed to resolve interned property key ID {:?}",
+                                k
+                            ))
+                        })?;
+                    Ok((key_str, encode_property_value(v)))
+                })
+                .collect::<std::result::Result<Vec<_>, StorageError>>()?;
 
             Ok(SerializableVersionData::Anchor {
                 properties: encoded_properties,
@@ -1399,31 +1401,36 @@ fn encode_version_data(
             })
         }
         VersionData::Delta { delta } => {
-            let mut encoded_changed = Vec::with_capacity(delta.changed.len());
-            for (k, v) in delta.changed.iter() {
-                let key_str = GLOBAL_INTERNER
-                    .resolve_with(*k, |s| s.to_string())
-                    .ok_or_else(|| {
-                        StorageError::corruption(format!(
-                            "Failed to resolve interned property key ID {:?} in delta",
-                            k
-                        ))
-                    })?;
-                encoded_changed.push((key_str, encode_property_value(v)));
-            }
+            let encoded_changed = delta
+                .changed
+                .iter()
+                .map(|(k, v)| {
+                    let key_str = GLOBAL_INTERNER
+                        .resolve_with(*k, |s| s.to_string())
+                        .ok_or_else(|| {
+                            StorageError::corruption(format!(
+                                "Failed to resolve interned property key ID {:?} in delta",
+                                k
+                            ))
+                        })?;
+                    Ok((key_str, encode_property_value(v)))
+                })
+                .collect::<std::result::Result<Vec<_>, StorageError>>()?;
 
-            let mut encoded_removed = Vec::with_capacity(delta.removed.len());
-            for k in delta.removed.iter() {
-                let key_str = GLOBAL_INTERNER
-                    .resolve_with(*k, |s| s.to_string())
-                    .ok_or_else(|| {
-                        StorageError::corruption(format!(
-                            "Failed to resolve interned property key ID {:?} in removed set",
-                            k
-                        ))
-                    })?;
-                encoded_removed.push(key_str);
-            }
+            let encoded_removed = delta
+                .removed
+                .iter()
+                .map(|k| {
+                    GLOBAL_INTERNER
+                        .resolve_with(*k, |s| s.to_string())
+                        .ok_or_else(|| {
+                            StorageError::corruption(format!(
+                                "Failed to resolve interned property key ID {:?} in removed set",
+                                k
+                            ))
+                        })
+                })
+                .collect::<std::result::Result<Vec<_>, StorageError>>()?;
 
             Ok(SerializableVersionData::Delta {
                 changed: encoded_changed,
