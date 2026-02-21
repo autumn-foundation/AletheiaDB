@@ -209,4 +209,29 @@ mod tests {
         assert_eq!(loaded.vector_count, 1000);
         assert!(matches!(loaded.snapshot_type, PersistedSnapshotType::Full));
     }
+
+    #[test]
+    fn test_load_vector_index_coverage() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        // Create meta.idx
+        let config = PersistedHnswConfig {
+            m: 16,
+            ef_construction: 128,
+            ef_search: 64,
+        };
+        let meta = new_vector_meta("coverage_test", 384, 0, config);
+        save_vector_meta(&meta, &path.join("meta.idx")).unwrap();
+
+        // Load index
+        let index_data = load_vector_index(path).unwrap();
+
+        // Verify metadata loaded
+        assert_eq!(index_data.meta.property_name, "coverage_test");
+
+        // Verify mappings are empty (this covers new_vector_mappings call)
+        assert_eq!(index_data.mappings.count, 0);
+        assert!(index_data.mappings.mappings.is_empty());
+    }
 }

@@ -16,9 +16,7 @@ use aletheiadb::storage::index_persistence::temporal::{
     convert_node_version, load_temporal_index, new_temporal_index_data, restore_node_version,
     save_temporal_index,
 };
-use aletheiadb::storage::index_persistence::vector::{
-    new_vector_meta, save_vector_meta,
-};
+use aletheiadb::storage::index_persistence::vector::{new_vector_meta, save_vector_meta};
 use aletheiadb::storage::index_persistence::{
     IndexPersistenceManager, formats::PersistedHnswConfig,
 };
@@ -2655,9 +2653,8 @@ fn test_parallel_loading_with_vectors() {
     use aletheiadb::storage::index_persistence::formats::PersistedHnswConfig;
     use aletheiadb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
     use aletheiadb::storage::index_persistence::load_indexes_parallel;
-    use aletheiadb::storage::index_persistence::vector::{
-        new_vector_meta, save_vector_meta,
-    };
+    use aletheiadb::storage::index_persistence::vector::{new_vector_meta, save_vector_meta};
+    use aletheiadb::storage::index_persistence::vector::{new_vector_meta, save_vector_meta};
 
     let dir = tempdir().unwrap();
     let graph_path = dir.path().join("graph.idx");
