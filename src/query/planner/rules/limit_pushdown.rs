@@ -145,7 +145,9 @@ impl LimitPushdown {
                 op: UnaryOp::Filter(predicate),
                 input,
             } => {
-                let (optimized_input, changed) = self.push_down(input, limit)?;
+                // Cannot safely push limit through filter because filtering reduces cardinality.
+                // We might need to scan many more items than 'limit' to find 'limit' matches.
+                let (optimized_input, changed) = self.push_down(input, None)?;
                 Ok((
                     LogicalOp::unary(UnaryOp::Filter(predicate.clone()), optimized_input),
                     changed,
@@ -280,5 +282,75 @@ mod tests {
 
         let result = rule.apply(&plan, &stats).unwrap();
         assert!(result.is_none()); // No change needed
+    }
+
+    #[test]
+    fn test_limit_pushdown_blocked_by_filter() {
+        use crate::query::ir::{Predicate, PredicateValue};
+
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Limit(1, Filter(id > 5, Limit(10, Scan)))
+        // The inner Limit(10) MUST NOT be reduced to 1 because Filter reduces cardinality.
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(1),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::Gt {
+                    key: "id".to_string(),
+                    value: PredicateValue::Int(5),
+                }),
+                LogicalOp::unary(
+                    UnaryOp::Limit(10),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        // If optimization returns None, it means no changes were made, which implies
+        // the inner limit was preserved (safe).
+        // If it returns Some, we must verify the inner limit wasn't reduced.
+        if let Some(optimized) = result {
+            let mut current = &optimized.root;
+
+            // Root: Limit(1)
+            if let LogicalOp::Unary {
+                op: UnaryOp::Limit(n),
+                input,
+            } = current
+            {
+                assert_eq!(*n, 1);
+                current = input;
+            } else {
+                panic!("Expected Limit(1) at root");
+            }
+
+            // Next: Filter
+            if let LogicalOp::Unary {
+                op: UnaryOp::Filter(_),
+                input,
+            } = current
+            {
+                current = input;
+            } else {
+                panic!("Expected Filter");
+            }
+
+            // Next: Inner Limit
+            if let LogicalOp::Unary {
+                op: UnaryOp::Limit(n),
+                ..
+            } = current
+            {
+                assert_eq!(
+                    *n, 10,
+                    "Inner limit should not be reduced below Filter (must remain 10)"
+                );
+            } else {
+                panic!("Expected inner Limit");
+            }
+        }
     }
 }
