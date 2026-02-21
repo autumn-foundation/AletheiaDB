@@ -85,29 +85,24 @@ impl TimeRange {
             return Err(TemporalError::InvalidTimeRange { start, end });
         }
 
-        // Warden: Validate that timestamps don't exceed MAX_VALID_TIMESTAMP
-        // This prevents invalid timestamps from entering via unchecked constructors
-        if start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX {
-            return Err(TemporalError::InvalidTimestamp {
-                timestamp: start,
-                reason: format!(
-                    "Start timestamp exceeds MAX_VALID_TIMESTAMP ({})",
-                    MAX_VALID_TIMESTAMP
-                ),
-            });
-        }
-
-        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
-            return Err(TemporalError::InvalidTimestamp {
-                timestamp: end,
-                reason: format!(
-                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
-                    MAX_VALID_TIMESTAMP
-                ),
-            });
-        }
+        Self::validate_timestamp(start, "Start")?;
+        Self::validate_timestamp(end, "End")?;
 
         Ok(TimeRange { start, end })
+    }
+
+    /// Validate that a timestamp doesn't exceed MAX_VALID_TIMESTAMP (unless it's TIMESTAMP_MAX).
+    fn validate_timestamp(timestamp: Timestamp, name: &str) -> Result<(), TemporalError> {
+        if timestamp.wallclock() > MAX_VALID_TIMESTAMP && timestamp != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp,
+                reason: format!(
+                    "{} timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    name, MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Create a time range that starts at the given timestamp and is still current.
@@ -205,15 +200,7 @@ impl TimeRange {
             });
         }
 
-        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
-            return Err(TemporalError::InvalidTimestamp {
-                timestamp: end,
-                reason: format!(
-                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
-                    MAX_VALID_TIMESTAMP
-                ),
-            });
-        }
+        Self::validate_timestamp(end, "End")?;
 
         Ok(TimeRange {
             start: self.start,
@@ -1707,10 +1694,12 @@ mod sentry_tests {
 
         let result = range.close_at(invalid_end);
 
-        assert!(result.is_err(), "close_at should reject invalid timestamps");
-        assert!(matches!(
-            result.unwrap_err(),
-            TemporalError::InvalidTimestamp { .. }
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(TemporalError::InvalidTimestamp { .. })
+            ),
+            "close_at should reject invalid timestamps"
+        );
     }
 }
