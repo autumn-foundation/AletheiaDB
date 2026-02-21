@@ -7,3 +7,8 @@
 **Bloat:** `ColdStorage` trait (Single-implementation abstraction used only by `RedbColdStorage`).
 **Cut:** Deleted the `ColdStorage` trait and `cold_storage.rs` module. Refactored all consumers to use the concrete `RedbColdStorage` struct directly.
 **Saved:** ~300 lines of boilerplate (trait definitions, mock implementations, duplicate imports) + removed dynamic dispatch overhead.
+
+## [Reduction]
+**Bloat:** `src/storage/sharding` (Unused distributed sharding implementation).
+**Cut:** Deleted the `sharding` module and `sharding-rpc` feature.
+**Saved:** ~2000 lines of complex distributed system code + removed `reqwest` dependency for sharding.

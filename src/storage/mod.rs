@@ -17,7 +17,6 @@ pub mod historical;
 pub mod index_persistence;
 pub mod migration;
 pub mod redb_cold_storage;
-pub mod sharding;
 pub mod snapshot;
 pub mod tiered_storage;
 pub mod wal;
