@@ -1299,7 +1299,10 @@ pub struct ProjectIterator {
 }
 
 impl ProjectIterator {
-    pub fn new(input: Box<dyn ResultIterator>, properties: Vec<String>) -> Self {
+    pub fn new(input: Box<dyn ResultIterator>, mut properties: Vec<String>) -> Self {
+        // Deduplicate properties to prevent errors when projecting same property multiple times
+        properties.sort();
+        properties.dedup();
         ProjectIterator { input, properties }
     }
 }

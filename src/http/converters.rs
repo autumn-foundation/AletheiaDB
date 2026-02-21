@@ -176,7 +176,7 @@ pub fn json_to_parameter_value(value: &serde_json::Value) -> Result<ParameterVal
         }
         serde_json::Value::Array(arr) => {
             // Check if it's an embedding (vector of floats)
-            let floats: Result<Vec<f32>, _> = arr
+            let floats: Result<Vec<f32>, String> = arr
                 .iter()
                 .map(|v| {
                     v.as_f64()
@@ -185,10 +185,9 @@ pub fn json_to_parameter_value(value: &serde_json::Value) -> Result<ParameterVal
                 })
                 .collect();
 
-            if let Ok(f) = floats {
-                Ok(ParameterValue::Embedding(Arc::from(f)))
-            } else {
-                Err("Arrays in parameters must be numeric vectors (embeddings)".to_string())
+            match floats {
+                Ok(f) => Ok(ParameterValue::Embedding(Arc::from(f))),
+                Err(e) => Err(e),
             }
         }
         serde_json::Value::Object(_) => {
