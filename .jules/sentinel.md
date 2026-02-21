@@ -35,3 +35,15 @@
 **Summary:** `MAX_VALID_TIMESTAMP` constant definition was susceptible to reduction (e.g. `replace - with /`) because existing boundary tests used the constant itself for assertions (tautological tests).
 **Diagnosis:** **Weak Test**. Tests checked `TimeRange::new(MAX_VALID_TIMESTAMP, ...)` which would pass even if `MAX_VALID_TIMESTAMP` was small, as long as it was self-consistent.
 **Kill Shot:** Added `test_sentry_max_valid_timestamp_value` which asserts that `TimeRange::new` accepts a hardcoded large timestamp (`i64::MAX - 2000`), ensuring the limit isn't drastically reduced.
+
+**[Edge Connects Source Check]**
+**Module:** `src/core/graph.rs`
+**Summary:** `Edge::connects` ignores the `source` argument if the `target` argument matches, because `self.source == source` could be replaced by `true`.
+**Diagnosis:** **Missing Coverage**. The existing tests only checked for complete matches, mismatches, or target mismatches. No test checked for "source mismatch, target match".
+**Kill Shot:** Added `test_edge_connects_source_mismatch` which specifically asserts false when only source mismatches.
+
+**[Node/Edge Metadata Construction]**
+**Module:** `src/core/graph.rs`
+**Summary:** `Node::with_metadata` and `Edge::with_metadata` functions were untested; replacing the `metadata` argument with `VersionMetadata::default()` would survive.
+**Diagnosis:** **Missing Coverage**. No unit tests existed for these specific constructor variants.
+**Kill Shot:** Added `test_node_with_metadata` and `test_edge_with_metadata` to verify that the provided metadata is actually stored.

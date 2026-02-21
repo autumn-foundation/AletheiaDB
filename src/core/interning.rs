@@ -351,20 +351,23 @@ impl StringInterner {
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
     pub fn get_all_strings(&self) -> Vec<String> {
-        // Use an initial capacity estimate from len(), but allow growing
-        // to handle race conditions where len() might lag behind insertions
-        // or where failed insertions create holes in the ID space.
-        let count = self.len();
-        let mut strings = Vec::with_capacity(count);
+        // Use next_id to estimate the required size. This avoids repeated resizing
+        // inside the loop, which can happen if iteration order doesn't match ID order.
+        // String::new() is non-allocating, so pre-filling the vector is cheap.
+        let max_id = self.next_id.load(Ordering::Relaxed) as usize;
+        let mut strings = vec![String::new(); max_id];
 
         // Collect all (id, string) pairs
         for entry in self.id_to_string.iter() {
             let id = entry.key().as_u32() as usize;
-            // Dynamically resize if we encounter an ID larger than current length
-            if id >= strings.len() {
+
+            if id < strings.len() {
+                strings[id] = entry.value().to_string();
+            } else {
+                // Handle race condition where an ID was added after we read next_id
                 strings.resize(id + 1, String::new());
+                strings[id] = entry.value().to_string();
             }
-            strings[id] = entry.value().to_string();
         }
 
         strings

@@ -326,29 +326,23 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 ### Basic Graph Operations
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps}; // WriteOps trait needed for transaction methods
+use aletheiadb::{AletheiaDB, properties};
 
 // Create a new database
 let db = AletheiaDB::new().unwrap();
 
-// Create nodes using write transactions
-let alice_id = db.write(|tx| {
-    tx.create_node("Person", properties! {
-        "name" => "Alice",
-        "age" => 30,
-    })
+// Create nodes
+let alice_id = db.create_node("Person", properties! {
+    "name" => "Alice",
+    "age" => 30,
 })?;
 
-let bob_id = db.write(|tx| {
-    tx.create_node("Person", properties! {
-        "name" => "Bob",
-    })
+let bob_id = db.create_node("Person", properties! {
+    "name" => "Bob",
 })?;
 
-// Create relationships
-db.write(|tx| {
-    tx.create_edge(alice_id, bob_id, "KNOWS", properties! {})
-})?;
+// Create relationship
+db.create_edge(alice_id, bob_id, "KNOWS", properties! {})?;
 
 // Read current state
 let alice = db.get_node(alice_id)?;
@@ -473,11 +467,9 @@ db.vector_index("embedding")
 
 // 1. Create node with initial embedding
 let embedding1 = vec![0.0f32; 384];
-let node_id = db.write(|tx| {
-    tx.create_node("Person", properties! {
-        "name" => "Alice",
-        "embedding" => &embedding1[..],
-    })
+let node_id = db.create_node("Person", properties! {
+    "name" => "Alice",
+    "embedding" => &embedding1[..],
 })?;
 
 // 2. Update node with different embedding (simulating drift)
@@ -706,19 +698,23 @@ See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)
 
 ### Transactions
 
+For complex operations involving multiple updates, use explicit transactions.
+
+**Note**: The `WriteOps` trait must be imported to use methods on the transaction object.
+
 ```rust
+use aletheiadb::{PropertyMap, WriteOps};
+
 // Explicit read transaction
 let result = db.read(|tx| {
-    let node = tx.get_node(alice_id)?;
-    Ok(node.label.clone())
+    tx.get_node(alice_id).map(|node| node.label.clone())
 })?;
 
 // Explicit write transaction with multiple operations
 db.write(|tx| {
     let node1 = tx.create_node("Event", PropertyMap::new())?;
     let node2 = tx.create_node("Event", PropertyMap::new())?;
-    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())?;
-    Ok(())
+    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
 })?;
 ```
 
