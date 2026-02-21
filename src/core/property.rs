@@ -80,7 +80,7 @@ pub type PropertyKey = InternedString;
 /// A value that can be stored as a property.
 ///
 /// All complex types (strings, bytes, arrays) use Arc for cheap cloning and sharing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum PropertyValue {
     /// Null/absent value.
     Null,
@@ -130,6 +130,25 @@ pub enum PropertyValue {
     /// checks, use [`SparseVec::approx_eq`](crate::core::vector::SparseVec::approx_eq)
     /// with an appropriate epsilon value instead of direct `==` comparison.
     SparseVector(Arc<SparseVec>),
+}
+
+impl PartialEq for PropertyValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PropertyValue::Null, PropertyValue::Null) => true,
+            (PropertyValue::Bool(a), PropertyValue::Bool(b)) => a == b,
+            (PropertyValue::Int(a), PropertyValue::Int(b)) => a == b,
+            (PropertyValue::Float(a), PropertyValue::Float(b)) => a == b,
+            (PropertyValue::String(a), PropertyValue::String(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::Array(a), PropertyValue::Array(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::Vector(a), PropertyValue::Vector(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::SparseVector(a), PropertyValue::SparseVector(b)) => {
+                Arc::ptr_eq(a, b) || a == b
+            }
+            _ => false,
+        }
+    }
 }
 
 impl PropertyValue {
@@ -1009,7 +1028,7 @@ impl From<SparseVec> for PropertyValue {
 /// The underlying HashMap is wrapped in an Arc, making clones very cheap
 /// (just incrementing a reference count). This enables efficient sharing
 /// of unchanged properties across versions.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct PropertyMap {
     inner: Arc<HashMap<PropertyKey, PropertyValue, BuildHasherDefault<IdentityHasher>>>,
     /// Cached serialized size in bytes.
@@ -1358,6 +1377,28 @@ impl PropertyMap {
     #[inline(always)]
     pub fn serialized_size(&self) -> usize {
         self.cached_size
+    }
+}
+
+impl PartialEq for PropertyMap {
+    fn eq(&self, other: &Self) -> bool {
+        // Fast path: if both maps share the same underlying Arc, they are identical.
+        // This is a O(1) check that avoids iterating over the map.
+        //
+        // NOTE: This treats shared pointers as equal even if they contain NaNs
+        // (which normally compare unequal). This is generally desired for database
+        // identity semantics but technically differs from strict IEEE 754 value equality.
+        if Arc::ptr_eq(&self.inner, &other.inner) {
+            return true;
+        }
+
+        // Fast path: if serialized sizes differ, maps must be different.
+        if self.cached_size != other.cached_size {
+            return false;
+        }
+
+        // Slow path: compare contents
+        self.inner == other.inner
     }
 }
 
@@ -3490,14 +3531,28 @@ mod sentry_tests {
     /// 🎯 Target: PropertyValue equality with NaN
     /// 💣 Risk: Users might expect NaN == NaN, but IEEE 754 says no.
     /// 🧪 Strategy: Create PropertyValues with NaN and check equality.
-    /// 🔬 Verification: Ensure they are NOT equal.
+    /// 🔬 Verification: Ensure behavior matches optimization (Identity -> Equal, Value -> Not Equal).
     #[test]
     fn test_property_value_nan_inequality() {
         // Dense vector with NaN
         let dense_nan = PropertyValue::vector([f32::NAN]);
-        assert_ne!(
+
+        // OPTIMIZATION CHANGE: Shared pointers are now considered equal even with NaN
+        assert_eq!(
             dense_nan, dense_nan,
-            "Dense vector with NaN should not equal itself"
+            "Dense vector with NaN SHOULD equal itself (identity optimization)"
+        );
+        assert_eq!(
+            dense_nan,
+            dense_nan.clone(),
+            "Cloned (shared) dense vector with NaN SHOULD equal itself (identity optimization)"
+        );
+
+        // But distinct allocations with same data should NOT be equal (standard IEEE 754 behavior)
+        let dense_nan_2 = PropertyValue::vector([f32::NAN]);
+        assert_ne!(
+            dense_nan, dense_nan_2,
+            "Distinct dense vectors with NaN should NOT be equal"
         );
 
         // Sparse vector with NaN
@@ -3506,6 +3561,7 @@ mod sentry_tests {
         assert!(result.is_err(), "SparseVec should reject NaN");
 
         // However, f32::NAN is valid f32. PropertyValue::Float(NaN) is possible.
+        // Float is a primitive variant, so no pointer optimization possible.
         let float_nan = PropertyValue::Float(f64::NAN);
         assert_ne!(float_nan, float_nan, "Float NaN should not equal itself");
 
@@ -3513,7 +3569,11 @@ mod sentry_tests {
         // PropertyValue::vector calls PropertyValue::try_vector -> validate_vector_dimensions.
         // It does NOT check values for NaN.
         let vec_nan = PropertyValue::vector([f32::NAN]);
-        assert_ne!(vec_nan, vec_nan, "Vector with NaN should not equal itself");
+        // Optimized behavior:
+        assert_eq!(
+            vec_nan, vec_nan,
+            "Vector with NaN SHOULD equal itself (identity)"
+        );
     }
 
     /// 🎯 Target: PropertyMapBuilder::insert panic
@@ -3724,10 +3784,10 @@ mod sentry_tests {
     /// 🎯 Target: PropertyValue::semantically_equal
     /// 💣 Risk: Spurious diffs when values are NaN (because NaN != NaN).
     /// 🧪 Strategy: Compare NaN values using semantically_equal vs PartialEq.
-    /// 🔬 Verification: semantically_equal returns true, == returns false.
+    /// 🔬 Verification: semantically_equal returns true, == returns false (or true if shared).
     #[test]
     fn test_semantically_equal_handles_nan() {
-        // Float(NaN)
+        // Float(NaN) - No optimization for Float (primitive)
         let nan_float = PropertyValue::Float(f64::NAN);
         assert_ne!(nan_float, nan_float, "PartialEq should treat NaN != NaN");
         assert!(
@@ -3737,13 +3797,28 @@ mod sentry_tests {
 
         // Vector with NaN
         let nan_vec = PropertyValue::vector([1.0f32, f32::NAN, 2.0f32]);
-        assert_ne!(
+
+        // OPTIMIZATION CHANGE: Shared pointers are equal
+        assert_eq!(
             nan_vec, nan_vec,
-            "PartialEq should treat vector with NaN != itself"
+            "PartialEq should treat shared vector with NaN == itself"
         );
+
+        // But distinct pointers are NOT equal
+        let nan_vec_2 = PropertyValue::vector([1.0f32, f32::NAN, 2.0f32]);
+        assert_ne!(
+            nan_vec, nan_vec_2,
+            "PartialEq should treat distinct vectors with NaN != each other"
+        );
+
+        // semantically_equal should be true for both
         assert!(
             nan_vec.semantically_equal(&nan_vec),
             "semantically_equal should treat vector with NaN == itself"
+        );
+        assert!(
+            nan_vec.semantically_equal(&nan_vec_2),
+            "semantically_equal should treat distinct vectors with NaN as equal"
         );
 
         // Mixed types (just to be safe)
