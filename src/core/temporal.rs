@@ -1695,10 +1695,7 @@ mod sentry_tests {
         let result = range.close_at(invalid_end);
 
         assert!(
-            matches!(
-                result,
-                Err(TemporalError::InvalidTimestamp { .. })
-            ),
+            matches!(result, Err(TemporalError::InvalidTimestamp { .. })),
             "close_at should reject invalid timestamps"
         );
     }
