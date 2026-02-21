@@ -644,16 +644,17 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
         {
-            let mut table = write_txn.open_table(table_def).map_err(
-                |e| -> crate::core::error::Error {
-                    StorageError::io_error(format!(
-                        "Failed to open table '{}': {}",
-                        table_def.name(),
-                        e
-                    ))
-                    .into()
-                },
-            )?;
+            let mut table =
+                write_txn
+                    .open_table(table_def)
+                    .map_err(|e| -> crate::core::error::Error {
+                        StorageError::io_error(format!(
+                            "Failed to open table '{}': {}",
+                            table_def.name(),
+                            e
+                        ))
+                        .into()
+                    })?;
 
             table
                 .insert(version.version_id().as_u64(), compressed.as_slice())
@@ -692,16 +693,16 @@ impl RedbColdStorage {
             .begin_read()
             .map_err(map_transaction_error("Failed to begin read transaction"))?;
 
-        let table = read_txn.open_table(table_def).map_err(
-            |e| -> crate::core::error::Error {
+        let table = read_txn
+            .open_table(table_def)
+            .map_err(|e| -> crate::core::error::Error {
                 StorageError::io_error(format!(
                     "Failed to open table '{}': {}",
                     table_def.name(),
                     e
                 ))
                 .into()
-            },
-        )?;
+            })?;
 
         match table.get(id.as_u64()) {
             Ok(Some(value)) => {
@@ -719,9 +720,7 @@ impl RedbColdStorage {
                 Ok(Some(version))
             }
             Ok(None) => Ok(None),
-            Err(e) => {
-                Err(StorageError::io_error(format!("Failed to read version: {}", e)).into())
-            }
+            Err(e) => Err(StorageError::io_error(format!("Failed to read version: {}", e)).into()),
         }
     }
 
@@ -789,18 +788,16 @@ impl RedbColdStorage {
             .begin_read()
             .map_err(map_transaction_error("Failed to begin read transaction"))?;
 
-        let table = read_txn.open_table(table_def).map_err(
-            |e| -> crate::core::error::Error {
+        let table = read_txn
+            .open_table(table_def)
+            .map_err(|e| -> crate::core::error::Error {
                 StorageError::io_error(format!("Failed to open table: {}", e)).into()
-            },
-        )?;
+            })?;
 
         match table.get(id.as_u64()) {
             Ok(Some(_)) => Ok(true),
             Ok(None) => Ok(false),
-            Err(e) => {
-                Err(StorageError::io_error(format!("Failed to check version: {}", e)).into())
-            }
+            Err(e) => Err(StorageError::io_error(format!("Failed to check version: {}", e)).into()),
         }
     }
 
@@ -815,16 +812,17 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
         let deleted = {
-            let mut table = write_txn.open_table(table_def).map_err(
-                |e| -> crate::core::error::Error {
-                    StorageError::io_error(format!(
-                        "Failed to open table '{}': {}",
-                        table_def.name(),
-                        e
-                    ))
-                    .into()
-                },
-            )?;
+            let mut table =
+                write_txn
+                    .open_table(table_def)
+                    .map_err(|e| -> crate::core::error::Error {
+                        StorageError::io_error(format!(
+                            "Failed to open table '{}': {}",
+                            table_def.name(),
+                            e
+                        ))
+                        .into()
+                    })?;
 
             match table.remove(id.as_u64()) {
                 Ok(Some(_)) => true,
@@ -871,16 +869,16 @@ impl RedbColdStorage {
         table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
         batch: &PreparedVersionBatch,
     ) -> Result<()> {
-        let mut table = txn.open_table(table_def).map_err(
-            |e| -> crate::core::error::Error {
+        let mut table = txn
+            .open_table(table_def)
+            .map_err(|e| -> crate::core::error::Error {
                 StorageError::io_error(format!(
                     "Failed to open table '{}': {}",
                     table_def.name(),
                     e
                 ))
                 .into()
-            },
-        )?;
+            })?;
 
         for (id, compressed) in &batch.entries {
             table
