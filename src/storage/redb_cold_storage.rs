@@ -1,22 +1,30 @@
 //! Redb-based cold storage backend for tiered storage architecture.
 //!
-//! This module implements cold storage using Redb, a pure Rust embedded database.
-//! It provides disk-based storage for historical versions with LSN tracking for
-//! coordinated WAL truncation.
+//! This module implements the "Cold" tier of AletheiaDB's storage hierarchy using [Redb](https://github.com/cberner/redb),
+//! a pure Rust embedded database. It provides durable, disk-based storage for historical data that has
+//! aged out of the "Warm" memory tier.
 //!
-//! # Architecture
+//! # Role in Architecture
 //!
-//! Redb cold storage implements ADR-0025 (Redb Cold Storage and LSN-Based WAL Truncation):
-//! - **node_versions table**: Stores compressed NodeVersion data keyed by VersionId
-//! - **edge_versions table**: Stores compressed EdgeVersion data keyed by VersionId
-//! - **metadata table**: Stores flushed_lsn for WAL truncation coordination
+//! 1.  **Historical Storage**: Persists `NodeVersion` and `EdgeVersion` objects that represent the
+//!     state of the graph at past points in time.
+//! 2.  **WAL Truncation Coordination**: Tracks the "Flushed LSN" (Log Sequence Number). The Write-Ahead
+//!     Log (WAL) can only be truncated up to the point that has been safely persisted here.
+//! 3.  **Compression**: Automatically compresses data using Zstd or LZ4 (via `compression` module)
+//!     to minimize disk usage.
 //!
-//! # LSN Tracking
+//! # Schema
 //!
-//! The `flushed_lsn` metadata enables safe WAL truncation:
-//! - Versions are written atomically with their max LSN
-//! - WAL can safely truncate segments where max_lsn < flushed_lsn
-//! - Recovery replays WAL from flushed_lsn + 1
+//! The storage uses three internal tables:
+//! - **`node_versions`**: Maps `VersionId` (u64) -> Compressed `NodeVersion` (bytes).
+//! - **`edge_versions`**: Maps `VersionId` (u64) -> Compressed `EdgeVersion` (bytes).
+//! - **`metadata`**: Singleton table storing system state, primarily the `flushed_lsn`.
+//!
+//! # Concurrency
+//!
+//! Redb provides ACID guarantees. Read transactions are snapshot-isolated and non-blocking.
+//! Write transactions are serialized (one active writer at a time). This module handles
+//! the transaction management internally.
 //!
 //! # Example
 //!
@@ -334,10 +342,12 @@ impl RedbConfig {
 /// It uses Redb for ACID-compliant storage and supports compression (Zstd/LZ4) and
 /// checksum validation.
 ///
-/// Key features:
+/// # Key Features
+///
 /// - **Atomic Batches**: Store multiple node and edge versions atomically.
 /// - **LSN Tracking**: Tracks the highest LSN flushed to disk to coordinate WAL truncation.
-/// - **Compression**: Transparent compression of version data.
+/// - **Compression**: Transparent compression of version data (Zstd by default).
+/// - **Integrity**: Optional CRC32 checksums on top of Redb's guarantees.
 pub struct RedbColdStorage {
     /// Path to the database file.
     path: PathBuf,
@@ -356,6 +366,15 @@ pub struct RedbColdStorage {
 
 impl RedbColdStorage {
     /// Create a new Redb cold storage at the given path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Directory or file path for the Redb database file.
+    /// * `config` - Configuration for compression and caching.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database file cannot be created or opened.
     pub fn new<P: AsRef<Path>>(path: P, config: RedbConfig) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
@@ -401,6 +420,8 @@ impl RedbColdStorage {
     }
 
     /// Create with default configuration.
+    ///
+    /// Equivalent to `RedbColdStorage::new(path, RedbConfig::default())`.
     pub fn with_default_config<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::new(path, RedbConfig::default())
     }
@@ -630,7 +651,9 @@ impl RedbColdStorage {
     // Logic moved from ColdStorage trait impl
     // ========================================================================
 
-    /// Store a node version.
+    /// Store a single node version.
+    ///
+    /// Encodes and compresses the version before writing it to the `node_versions` table.
     pub fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
         self.check_fail_writes()?;
 
@@ -674,7 +697,9 @@ impl RedbColdStorage {
         Ok(())
     }
 
-    /// Retrieve a node version.
+    /// Retrieve a node version by its ID.
+    ///
+    /// Returns `Ok(None)` if the version does not exist.
     pub fn get_node_version(&self, id: VersionId) -> Result<Option<NodeVersion>> {
         self.stats
             .node_version_reads
@@ -715,12 +740,12 @@ impl RedbColdStorage {
         }
     }
 
-    /// Retrieve a batch of node versions.
+    /// Retrieve multiple node versions efficiently.
     pub fn get_node_versions_batch(&self, ids: &[VersionId]) -> Result<Vec<Option<NodeVersion>>> {
         ids.iter().map(|id| self.get_node_version(*id)).collect()
     }
 
-    /// Store an edge version.
+    /// Store a single edge version.
     pub fn store_edge_version(&self, version: &EdgeVersion) -> Result<()> {
         self.check_fail_writes()?;
 
@@ -764,7 +789,7 @@ impl RedbColdStorage {
         Ok(())
     }
 
-    /// Retrieve an edge version.
+    /// Retrieve an edge version by its ID.
     pub fn get_edge_version(&self, id: VersionId) -> Result<Option<EdgeVersion>> {
         self.stats
             .edge_version_reads
@@ -805,12 +830,12 @@ impl RedbColdStorage {
         }
     }
 
-    /// Retrieve a batch of edge versions.
+    /// Retrieve multiple edge versions efficiently.
     pub fn get_edge_versions_batch(&self, ids: &[VersionId]) -> Result<Vec<Option<EdgeVersion>>> {
         ids.iter().map(|id| self.get_edge_version(*id)).collect()
     }
 
-    /// Check if a node version exists.
+    /// Check if a node version exists in cold storage.
     pub fn contains_node_version(&self, id: VersionId) -> Result<bool> {
         let read_txn = self
             .db
@@ -834,7 +859,7 @@ impl RedbColdStorage {
         }
     }
 
-    /// Check if an edge version exists.
+    /// Check if an edge version exists in cold storage.
     pub fn contains_edge_version(&self, id: VersionId) -> Result<bool> {
         let read_txn = self
             .db
@@ -859,6 +884,8 @@ impl RedbColdStorage {
     }
 
     /// Delete a node version.
+    ///
+    /// Returns `true` if the version existed and was deleted, `false` otherwise.
     pub fn delete_node_version(&self, id: VersionId) -> Result<bool> {
         let write_txn = self
             .db
@@ -890,6 +917,8 @@ impl RedbColdStorage {
     }
 
     /// Delete an edge version.
+    ///
+    /// Returns `true` if the version existed and was deleted, `false` otherwise.
     pub fn delete_edge_version(&self, id: VersionId) -> Result<bool> {
         let write_txn = self
             .db
@@ -921,6 +950,9 @@ impl RedbColdStorage {
     }
 
     /// Store a batch of node versions.
+    ///
+    /// Encodes and compresses versions in parallel (if batch size exceeds threshold),
+    /// then writes them in a single transaction.
     pub fn store_node_versions_batch(&self, versions: &[NodeVersion]) -> Result<()> {
         self.check_fail_writes()?;
 
@@ -969,6 +1001,9 @@ impl RedbColdStorage {
     }
 
     /// Store a batch of edge versions.
+    ///
+    /// Encodes and compresses versions in parallel (if batch size exceeds threshold),
+    /// then writes them in a single transaction.
     pub fn store_edge_versions_batch(&self, versions: &[EdgeVersion]) -> Result<()> {
         self.check_fail_writes()?;
 
@@ -1024,6 +1059,7 @@ impl RedbColdStorage {
     /// Flush to disk.
     ///
     /// For Redb, this is a no-op as transactions are durable on commit.
+    /// This method exists to satisfy the storage trait interface.
     pub fn flush(&self) -> Result<()> {
         // Redb automatically flushes on commit, nothing extra needed
         Ok(())
@@ -1031,7 +1067,8 @@ impl RedbColdStorage {
 
     /// Close the database connection.
     ///
-    /// This releases the file lock.
+    /// This releases the file lock and resources.
+    /// Note: The actual file lock is released when the inner `redb::Database` is dropped.
     pub fn close(&self) -> Result<()> {
         // Redb handles cleanup on drop
         Ok(())
@@ -1039,8 +1076,8 @@ impl RedbColdStorage {
 
     /// Store a batch of versions with LSN tracking.
     ///
-    /// This operation is atomic - either all versions are stored and the LSN is updated,
-    /// or nothing is changed. This enables safe WAL truncation.
+    /// This operation is **atomic** - either all versions are stored AND the LSN is updated,
+    /// or nothing changes. This atomicity is crucial for safe WAL truncation.
     ///
     /// # Arguments
     ///
@@ -1048,11 +1085,30 @@ impl RedbColdStorage {
     /// * `edges` - A slice of edge versions to store.
     /// * `lsn` - The Log Sequence Number (LSN) associated with this batch.
     ///
-    /// # LSN Behavior
+    /// # LSN Monotonicity
     ///
     /// The `flushed_lsn` in the metadata table will only be updated if the provided `lsn`
-    /// is greater than the current stored value. This ensures monotonicity even if
-    /// batches are processed out of order (though typically they are processed in order).
+    /// is *greater than* the current stored value. This prevents race conditions where
+    /// an out-of-order older batch might accidentally revert the flush progress marker.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+    /// # use aletheiadb::storage::wal::LSN;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = RedbColdStorage::with_default_config("data.redb")?;
+    /// let nodes = vec![]; // ... populate
+    /// let edges = vec![]; // ... populate
+    /// let lsn = LSN(500);
+    ///
+    /// // Atomic commit
+    /// storage.store_batch_with_lsn(&nodes, &edges, lsn)?;
+    ///
+    /// // Now safe to truncate WAL < 500
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn store_batch_with_lsn(
         &self,
         nodes: &[NodeVersion],
@@ -1130,8 +1186,13 @@ impl RedbColdStorage {
 
     /// Compact the database to reclaim space.
     ///
-    /// Note: This method requires mutable access because Redb's compact
-    /// operation modifies the database file structure.
+    /// Performs a database-wide compaction. This copies all live data to a new file
+    /// and replaces the old file, removing wasted space from deleted or overwritten records.
+    ///
+    /// # Locking
+    ///
+    /// This requires a mutable reference (`&mut self`) and will block other operations
+    /// until compaction is complete.
     pub fn compact(&mut self) -> Result<()> {
         self.db
             .compact()
@@ -2658,6 +2719,67 @@ mod tests {
             let result = RedbColdStorage::with_default_config(invalid_path);
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn test_error_parent_directory_creation_fails_conflict() {
+        // More robust test: create a file, then try to create a directory with the same name
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("conflict_file");
+        std::fs::write(&file_path, b"").unwrap();
+
+        // Try to use the file as a directory for the DB path
+        // e.g. "conflict_file/db.redb"
+        let invalid_path = file_path.join("db.redb");
+
+        let result = RedbColdStorage::with_default_config(invalid_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_node_versions_batch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let v1 = create_test_node_version(1);
+        let v2 = create_test_node_version(2);
+        let v3 = create_test_node_version(3);
+
+        storage
+            .store_node_versions_batch(&[v1.clone(), v2.clone(), v3.clone()])
+            .unwrap();
+
+        let ids = vec![v1.id, v2.id, v3.id, VersionId::new(999).unwrap()];
+        let results = storage.get_node_versions_batch(&ids).unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert!(results[0].is_some());
+        assert!(results[1].is_some());
+        assert!(results[2].is_some());
+        assert!(results[3].is_none());
+        assert_eq!(results[0].as_ref().unwrap().id, v1.id);
+    }
+
+    #[test]
+    fn test_get_edge_versions_batch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let v1 = create_test_edge_version(1);
+        let v2 = create_test_edge_version(2);
+
+        storage
+            .store_edge_versions_batch(&[v1.clone(), v2.clone()])
+            .unwrap();
+
+        let ids = vec![v1.id, v2.id];
+        let results = storage.get_edge_versions_batch(&ids).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_some());
+        assert_eq!(results[0].as_ref().unwrap().id, v1.id);
     }
 
     #[test]
