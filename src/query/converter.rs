@@ -2041,8 +2041,14 @@ mod sentry_tests {
         let converter = AstConverter::new();
         let query = converter.convert(&ast).unwrap();
 
-        let skip_idx = query.ops.iter().position(|op| matches!(op, QueryOp::Skip(_)));
-        let limit_idx = query.ops.iter().position(|op| matches!(op, QueryOp::Limit(_)));
+        let skip_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Skip(_)));
+        let limit_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Limit(_)));
 
         assert!(skip_idx.is_some(), "Skip op missing");
         assert!(limit_idx.is_some(), "Limit op missing");
@@ -2063,8 +2069,14 @@ mod sentry_tests {
         let converter = AstConverter::new();
         let query = converter.convert(&ast).unwrap();
 
-        let filter_idx = query.ops.iter().position(|op| matches!(op, QueryOp::Filter(_)));
-        let project_idx = query.ops.iter().position(|op| matches!(op, QueryOp::Project(_)));
+        let filter_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Filter(_)));
+        let project_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Project(_)));
 
         assert!(filter_idx.is_some(), "Filter op missing");
         assert!(project_idx.is_some(), "Project op missing");
