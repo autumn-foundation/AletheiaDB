@@ -252,3 +252,6 @@ pub mod gestalt;
 #[cfg(feature = "nova")]
 /// Gravity: Semantic Mass and Orbit Analysis.
 pub mod gravity;
+#[cfg(feature = "nova")]
+/// Metaphor: Semantic Graph Alignment Engine.
+pub mod metaphor;
