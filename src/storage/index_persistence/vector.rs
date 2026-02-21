@@ -76,16 +76,12 @@ pub fn load_snapshot_meta(path: &Path) -> Result<VectorSnapshotMeta> {
 /// Returns an error if any required file (meta.idx, mappings.idx) is missing or corrupted.
 pub fn load_vector_index(path: &Path) -> Result<VectorIndexData> {
     let meta_path = path.join("meta.idx");
-    // mappings.idx is no longer used, as HnswIndex saves its own mappings
-    // However, VectorIndexData expects mappings. We return empty mappings as placeholder
-    // since HnswIndex::load will handle the actual ID restoration from usearch.mappings
+    let mappings_path = path.join("mappings.idx");
     // usearch index is just a file path, we don't load it into memory here generally
     let index_path = path.join("current.usearch");
 
     let meta = load_vector_meta(&meta_path)?;
-
-    // Return empty mappings as placeholder
-    let mappings = new_vector_mappings();
+    let mappings = load_vector_mappings(&mappings_path)?;
 
     Ok(VectorIndexData {
         meta,
@@ -208,30 +204,5 @@ mod tests {
         assert_eq!(loaded.snapshot_id, 42);
         assert_eq!(loaded.vector_count, 1000);
         assert!(matches!(loaded.snapshot_type, PersistedSnapshotType::Full));
-    }
-
-    #[test]
-    fn test_load_vector_index_coverage() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-
-        // Create meta.idx
-        let config = PersistedHnswConfig {
-            m: 16,
-            ef_construction: 128,
-            ef_search: 64,
-        };
-        let meta = new_vector_meta("coverage_test", 384, 0, config);
-        save_vector_meta(&meta, &path.join("meta.idx")).unwrap();
-
-        // Load index
-        let index_data = load_vector_index(path).unwrap();
-
-        // Verify metadata loaded
-        assert_eq!(index_data.meta.property_name, "coverage_test");
-
-        // Verify mappings are empty (this covers new_vector_mappings call)
-        assert_eq!(index_data.mappings.count, 0);
-        assert!(index_data.mappings.mappings.is_empty());
     }
 }
