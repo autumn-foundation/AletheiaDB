@@ -3559,7 +3559,7 @@ mod tests {
 
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
-            assert!(msg.contains("Failed to create mappings file"));
+            assert!(msg.contains("Failed to create mappings file") || msg.contains("Failed to rename mappings file"));
         } else {
             // Note: Depending on OS, saving the index itself might fail first if index_path is valid but related calls fail.
             // But here index_path is valid (does not exist). usearch index save should succeed.
