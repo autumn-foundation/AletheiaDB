@@ -2136,19 +2136,33 @@ impl CurrentStorage {
             let label_id = GLOBAL_INTERNER.intern(label)?;
             let (candidates, stats) = self.calculate_adaptive_candidates(k, label);
 
-            let mut results = index.search_with_filter(query, candidates, |node_id| {
+            // Important: apply adaptive over-fetch exactly once.
+            //
+            // `search_with_filter` already performs its own iterative over-fetch expansion to satisfy
+            // the requested `k`. Passing our already-overfetched candidate count into that API causes
+            // redundant expansion under contention. Instead, fetch `candidates` once and filter locally.
+            let candidate_results = index.search(query, candidates)?;
+            let candidate_count = candidate_results.len();
+            let mut results = Vec::with_capacity(candidate_count);
+
+            for (node_id, similarity) in candidate_results {
                 // HOT PATH: Use zero-copy label lookup to avoid cloning entire Node
-                self.indexes
-                    .get_node_label(*node_id)
+                if self
+                    .indexes
+                    .get_node_label(node_id)
                     .map(|l| l == label_id)
                     .unwrap_or(false)
-            })?;
+                {
+                    results.push((node_id, similarity));
+                }
+            }
 
             if let Some(exclude_id) = exclude_node {
                 results.retain(|(id, _)| *id != exclude_id);
             }
 
-            stats.record_search(candidates, results.len());
+            // Track observed pass rate from actual candidates examined.
+            stats.record_search(candidate_count, results.len());
             results
         } else {
             // If we need to exclude a node, we might need one more result
