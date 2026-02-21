@@ -187,7 +187,7 @@ impl TimeRange {
     /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
     pub fn contains_range(&self, other: &TimeRange) -> bool {
-        self.start < other.start && other.end < self.end
+        self.start <= other.start && other.end <= self.end
     }
 
     /// Close this range at the given timestamp.
