@@ -7,6 +7,8 @@
 
 use crate::core::error::{StorageError, TemporalError};
 use crate::core::temporal::MAX_VALID_TIMESTAMP;
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::OnceLock;
 
 /// Hybrid Logical Clock timestamp combining wallclock and logical components.
@@ -37,10 +39,48 @@ pub const MAX_BACKWARD_DRIFT_US: i64 = 5 * 60 * 1_000_000;
 /// forward drift is measured against the last commit timestamp).
 pub const MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000;
 
+#[cfg(test)]
+thread_local! {
+    static CLOCK_SKEW_AUTO_HEAL_TEST_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Test-only guard to force auto-heal behavior for the current thread.
+///
+/// This lets unit tests stay deterministic regardless of ambient process environment.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ClockSkewAutoHealTestGuard {
+    previous: Option<bool>,
+}
+
+#[cfg(test)]
+impl ClockSkewAutoHealTestGuard {
+    pub(crate) fn force(enabled: bool) -> Self {
+        let previous = CLOCK_SKEW_AUTO_HEAL_TEST_OVERRIDE.with(|cell| {
+            let prev = cell.get();
+            cell.set(Some(enabled));
+            prev
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ClockSkewAutoHealTestGuard {
+    fn drop(&mut self) {
+        CLOCK_SKEW_AUTO_HEAL_TEST_OVERRIDE.with(|cell| cell.set(self.previous));
+    }
+}
+
 /// Whether clock-skew self-healing is enabled via environment variable.
 ///
 /// Enabled values: `1`, `true`, `on`, `yes`, `enabled` (case-insensitive).
 pub fn is_clock_skew_self_heal_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = CLOCK_SKEW_AUTO_HEAL_TEST_OVERRIDE.with(|cell| cell.get()) {
+        return forced;
+    }
+
     static CLOCK_SKEW_AUTO_HEAL: OnceLock<Option<bool>> = OnceLock::new();
     CLOCK_SKEW_AUTO_HEAL
         .get_or_init(|| {
