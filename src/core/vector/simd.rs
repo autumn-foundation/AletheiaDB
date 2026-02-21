@@ -2,6 +2,8 @@
 // SIMD Support
 // ============================================================================
 
+use std::mem::MaybeUninit;
+
 /// SIMD-accelerated vector operations for x86/x86_64 platforms.
 ///
 /// Uses runtime feature detection to select the best available instruction set:
@@ -19,6 +21,7 @@
 /// where SIMD becomes beneficial is typically around 16-32 dimensions.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub(crate) mod x86_ops {
+    use super::*;
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
     #[cfg(target_arch = "x86_64")]
@@ -429,9 +432,10 @@ pub(crate) mod x86_ops {
     ///
     /// # Safety
     /// Caller must ensure AVX2 is available. `src.len() == dst.len()`.
+    /// `dst` elements may be uninitialized, but they are guaranteed to be written.
     #[target_feature(enable = "avx2")]
     #[inline]
-    pub unsafe fn scale_and_copy_avx2(src: &[f32], dst: &mut [f32], scalar: f32) {
+    pub unsafe fn scale_and_copy_avx2(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
         assert_eq!(src.len(), dst.len());
         unsafe {
             let scalar_vec = _mm256_set1_ps(scalar);
@@ -441,14 +445,16 @@ pub(crate) mod x86_ops {
             for (s_chunk, d_chunk) in src_chunks.by_ref().zip(dst_chunks.by_ref()) {
                 let va = _mm256_loadu_ps(s_chunk.as_ptr());
                 let result = _mm256_mul_ps(va, scalar_vec);
-                _mm256_storeu_ps(d_chunk.as_mut_ptr(), result);
+                // Cast MaybeUninit pointer to f32 pointer
+                // Safe because MaybeUninit<f32> has same layout as f32
+                _mm256_storeu_ps(d_chunk.as_mut_ptr() as *mut f32, result);
             }
 
             let src_rem = src_chunks.remainder();
             let dst_rem = dst_chunks.into_remainder();
 
             for (s, d) in src_rem.iter().zip(dst_rem.iter_mut()) {
-                *d = *s * scalar;
+                d.write(*s * scalar);
             }
         }
     }
@@ -457,9 +463,10 @@ pub(crate) mod x86_ops {
     ///
     /// # Safety
     /// Caller must ensure SSE2 is available. `src.len() == dst.len()`.
+    /// `dst` elements may be uninitialized, but they are guaranteed to be written.
     #[target_feature(enable = "sse2")]
     #[inline]
-    pub unsafe fn scale_and_copy_sse2(src: &[f32], dst: &mut [f32], scalar: f32) {
+    pub unsafe fn scale_and_copy_sse2(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
         assert_eq!(src.len(), dst.len());
         unsafe {
             let scalar_vec = _mm_set1_ps(scalar);
@@ -469,14 +476,15 @@ pub(crate) mod x86_ops {
             for (s_chunk, d_chunk) in src_chunks.by_ref().zip(dst_chunks.by_ref()) {
                 let va = _mm_loadu_ps(s_chunk.as_ptr());
                 let result = _mm_mul_ps(va, scalar_vec);
-                _mm_storeu_ps(d_chunk.as_mut_ptr(), result);
+                // Cast MaybeUninit pointer to f32 pointer
+                _mm_storeu_ps(d_chunk.as_mut_ptr() as *mut f32, result);
             }
 
             let src_rem = src_chunks.remainder();
             let dst_rem = dst_chunks.into_remainder();
 
             for (s, d) in src_rem.iter().zip(dst_rem.iter_mut()) {
-                *d = *s * scalar;
+                d.write(*s * scalar);
             }
         }
     }
@@ -547,10 +555,10 @@ pub(crate) fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
-pub(crate) fn scale_and_copy_scalar(src: &[f32], dst: &mut [f32], scalar: f32) {
+pub(crate) fn scale_and_copy_scalar(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
     assert_eq!(src.len(), dst.len());
     for (s, d) in src.iter().zip(dst.iter_mut()) {
-        *d = *s * scalar;
+        d.write(*s * scalar);
     }
 }
 
@@ -587,8 +595,10 @@ pub(crate) fn scale_in_place(v: &mut [f32], scalar: f32) {
 }
 
 /// Scales `src` by `scalar` and stores result in `dst` using the best available SIMD instructions.
+///
+/// `dst` is allowed to be uninitialized, as this function guarantees writing to all elements.
 #[inline(always)]
-pub(crate) fn scale_and_copy(src: &[f32], dst: &mut [f32], scalar: f32) {
+pub(crate) fn scale_and_copy(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
     assert_eq!(src.len(), dst.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -720,30 +730,42 @@ mod tests {
     #[test]
     fn test_scale_and_copy_implementation_coverage() {
         let src = vec![1.0f32; 17]; // 17 to force remainder logic (8*2 + 1)
-        let mut dst = vec![0.0f32; 17];
         let scalar = 2.0;
         let expected = vec![2.0f32; 17];
 
+        // Helper to check result
+        let check_result = |dst_uninit: &[MaybeUninit<f32>]| {
+            // SAFETY: We assume the test function wrote valid data
+            let result_slice = unsafe { std::slice::from_raw_parts(dst_uninit.as_ptr() as *const f32, dst_uninit.len()) };
+            assert_eq!(result_slice, expected);
+        };
+
         // 1. Unconditional Scalar coverage
-        scale_and_copy_scalar(&src, &mut dst, scalar);
-        assert_eq!(dst, expected, "Scalar implementation failed");
-        dst.fill(0.0);
+        let mut dst_vec: Vec<MaybeUninit<f32>> = Vec::with_capacity(17);
+        unsafe { dst_vec.set_len(17) };
+
+        scale_and_copy_scalar(&src, &mut dst_vec, scalar);
+        check_result(&dst_vec);
 
         // 2. Conditional x86 SIMD coverage
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             // Try SSE2 if available
             if is_x86_feature_detected!("sse2") {
-                unsafe { x86_ops::scale_and_copy_sse2(&src, &mut dst, scalar) };
-                assert_eq!(dst, expected, "SSE2 implementation failed");
-                dst.fill(0.0);
+                let mut dst_sse2: Vec<MaybeUninit<f32>> = Vec::with_capacity(17);
+                unsafe { dst_sse2.set_len(17) };
+
+                unsafe { x86_ops::scale_and_copy_sse2(&src, &mut dst_sse2, scalar) };
+                check_result(&dst_sse2);
             }
 
             // Try AVX2 if available
             if is_x86_feature_detected!("avx2") {
-                unsafe { x86_ops::scale_and_copy_avx2(&src, &mut dst, scalar) };
-                assert_eq!(dst, expected, "AVX2 implementation failed");
-                dst.fill(0.0);
+                let mut dst_avx2: Vec<MaybeUninit<f32>> = Vec::with_capacity(17);
+                unsafe { dst_avx2.set_len(17) };
+
+                unsafe { x86_ops::scale_and_copy_avx2(&src, &mut dst_avx2, scalar) };
+                check_result(&dst_avx2);
             }
         }
     }

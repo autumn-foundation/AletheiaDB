@@ -47,3 +47,7 @@
 **2026-02-18 - Silent Data Loss in Property Interning**
 **Threat:** `PropertyMapBuilder::try_insert` silently swallowed errors when the string interner was full (e.g. DoS attack filling capacity). This resulted in properties being silently dropped during node/edge creation or updates, potentially leading to security bypasses (e.g. missing "role: admin" or "acl" properties) or data integrity issues.
 **Defense:** Modified `try_insert` to propagate the `CapacityExceeded` error instead of returning `Ok(self)`. Added regression test `tests/security_interner_dos.rs` which verifies that insertion fails when the interner is full.
+
+**2026-02-18 - Undefined Behavior in Vector Normalization**
+**Threat:** The `normalize` function in `src/core/vector/ops.rs` violated the safety contract of `Vec::set_len` by calling it on uninitialized memory before initialization. While memory was subsequently filled by `scale_and_copy`, this pattern is technically Undefined Behavior (UB) and relies on implementation details of `Vec` and `f32` (no Drop). Future compiler optimizations or changes to `Vec` could turn this into a crash or security vulnerability.
+**Defense:** Refactored `scale_and_copy` (and its SIMD backends in `src/core/vector/simd.rs`) to accept `&mut [MaybeUninit<f32>]`. Updated `normalize` to use `Vec::spare_capacity_mut` to safely access uninitialized memory, initializing it via `scale_and_copy` before calling `set_len`. This eliminates the UB while maintaining the "zero-overhead initialization" performance optimization.

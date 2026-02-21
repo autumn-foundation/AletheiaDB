@@ -1,5 +1,6 @@
 use super::ops::*;
 use super::simd::*;
+use std::mem::MaybeUninit;
 
 #[test]
 fn test_normalize_nan_handling() {
@@ -47,11 +48,17 @@ fn test_scale_and_copy_correctness() {
     // This is critical because normalize() relies on this to initialize the vector.
 
     let src = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-    let mut dst = vec![0.0; 5]; // Pre-fill with 0 to verify overwrite
+    // Create uninitialized destination
+    let mut dst_vec: Vec<MaybeUninit<f32>> = Vec::with_capacity(5);
+    unsafe { dst_vec.set_len(5) };
 
-    scale_and_copy(&src, &mut dst, 2.0);
+    scale_and_copy(&src, &mut dst_vec, 2.0);
 
-    assert_eq!(dst, vec![2.0, 4.0, 6.0, 8.0, 10.0]);
+    // Verify result without transmute
+    // SAFETY: We initialized dst_vec with valid floats via scale_and_copy
+    let dst_slice = unsafe { std::slice::from_raw_parts(dst_vec.as_ptr() as *const f32, dst_vec.len()) };
+
+    assert_eq!(dst_slice, &[2.0, 4.0, 6.0, 8.0, 10.0]);
 }
 
 #[test]
@@ -59,11 +66,16 @@ fn test_scale_and_copy_large_vector() {
     // 🛡️ Sentry: Test with larger vector to trigger SIMD loop + remainder
     let len = 1024 + 7; // 1031 elements
     let src: Vec<f32> = (0..len).map(|i| i as f32).collect();
-    let mut dst = vec![0.0; len];
 
-    scale_and_copy(&src, &mut dst, 2.0);
+    let mut dst_vec: Vec<MaybeUninit<f32>> = Vec::with_capacity(len);
+    unsafe { dst_vec.set_len(len) };
 
-    for (i, val) in dst.iter().enumerate() {
+    scale_and_copy(&src, &mut dst_vec, 2.0);
+
+    // Verify result without transmute
+    let dst_slice = unsafe { std::slice::from_raw_parts(dst_vec.as_ptr() as *const f32, dst_vec.len()) };
+
+    for (i, val) in dst_slice.iter().enumerate() {
         assert_eq!(*val, (i as f32) * 2.0);
     }
 }
