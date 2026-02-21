@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chronos — Benchmark Report</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/3.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg-primary: #0a0e17;
+    --bg-secondary: #111827;
+    --bg-tertiary: #1a2235;
+    --bg-card: #151d2e;
+    --border: #1e293b;
+    --border-bright: #334155;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-cyan: #22d3ee;
+    --accent-green: #34d399;
+    --accent-red: #f87171;
+    --accent-yellow: #fbbf24;
+    --accent-purple: #a78bfa;
+    --accent-orange: #fb923c;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    line-height: 1.6;
+  }
+
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+  }
+
+  /* ─── Header ─── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 2rem;
+    margin-bottom: 2rem;
+  }
+
+  .header-top {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+  }
+
+  h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    letter-spacing: -0.02em;
+  }
+
+  .header-icon {
+    font-size: 1.5rem;
+  }
+
+  .meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+  }
+
+  .meta span {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .meta-label {
+    color: var(--text-secondary);
+  }
+
+  /* ─── Verdict Banner ─── */
+  .verdict {
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 2rem;
+    border: 1px solid;
+  }
+
+  .verdict-critical {
+    background: rgba(248, 113, 113, 0.08);
+    border-color: rgba(248, 113, 113, 0.3);
+  }
+  .verdict-warn {
+    background: rgba(251, 191, 36, 0.08);
+    border-color: rgba(251, 191, 36, 0.3);
+  }
+  .verdict-good {
+    background: rgba(52, 211, 153, 0.08);
+    border-color: rgba(52, 211, 153, 0.3);
+  }
+  .verdict-neutral {
+    background: rgba(148, 163, 184, 0.06);
+    border-color: rgba(148, 163, 184, 0.2);
+  }
+
+  .verdict h2 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+  }
+
+  .verdict p {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+  }
+
+  /* ─── Stats Row ─── */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    text-align: center;
+  }
+
+  .stat-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.75rem;
+    font-weight: 700;
+  }
+
+  .stat-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 0.25rem;
+  }
+
+  .stat-improved .stat-value { color: var(--accent-green); }
+  .stat-regressed .stat-value { color: var(--accent-red); }
+  .stat-stable .stat-value { color: var(--accent-yellow); }
+  .stat-new .stat-value { color: var(--accent-purple); }
+  .stat-total .stat-value { color: var(--accent-cyan); }
+
+  /* ─── Section Headers ─── */
+  .section-header {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* ─── Table ─── */
+  .table-wrapper {
+    overflow-x: auto;
+    margin-bottom: 3rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+
+  thead th {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    padding: 0.75rem 1rem;
+    text-align: left;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-bright);
+    position: sticky;
+    top: 0;
+  }
+
+  thead th.numeric,
+  thead th.change,
+  thead th.status-cell {
+    text-align: right;
+  }
+
+  td {
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+  }
+
+  tr:hover td {
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  .bench-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 500;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+  }
+
+  .numeric {
+    font-family: 'JetBrains Mono', monospace;
+    text-align: right;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+  }
+
+  .change {
+    font-family: 'JetBrains Mono', monospace;
+    text-align: right;
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+
+  .status-cell {
+    text-align: right;
+    font-size: 1rem;
+  }
+
+  .row-improved .change { color: var(--accent-green); }
+  .row-regressed .change { color: var(--accent-red); }
+  .row-critical .change { color: var(--accent-red); font-weight: 700; }
+  .row-stable .change { color: var(--text-muted); }
+  .row-new .change { color: var(--accent-purple); }
+
+  .row-critical {
+    background: rgba(248, 113, 113, 0.05);
+  }
+  .row-improved {
+    background: rgba(52, 211, 153, 0.03);
+  }
+
+  /* ─── Chart ─── */
+  .chart-container {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+  }
+
+  .chart-canvas-wrap {
+    position: relative;
+    height: 400px;
+  }
+
+  /* ─── Footer ─── */
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  footer a {
+    color: var(--accent-cyan);
+    text-decoration: none;
+  }
+
+  /* ─── Responsive ─── */
+  @media (max-width: 640px) {
+    .container { padding: 1rem; }
+    h1 { font-size: 1.25rem; }
+    .meta { flex-direction: column; gap: 0.5rem; }
+    .chart-canvas-wrap { height: 280px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <div class="header-top">
+      <span class="header-icon">⏱</span>
+      <h1>CHRONOS</h1>
+    </div>
+    <div class="meta">
+      <span><span class="meta-label">commit</span> 198c57d</span>
+      <span><span class="meta-label">branch</span> jules-3069904928789557752-7bfd23b2</span>
+      <span><span class="meta-label">generated</span> 2026-02-21 18:07 UTC</span>
+      <span><span class="meta-label">history</span> 1 runs</span>
+    </div>
+  </header>
+
+  <div class="verdict verdict-neutral">
+    <h2>➖ No Significant Changes</h2>
+    <p>All benchmarks within noise threshold.</p>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat-card stat-total">
+      <div class="stat-value">6</div>
+      <div class="stat-label">Total</div>
+    </div>
+    <div class="stat-card stat-improved">
+      <div class="stat-value">0</div>
+      <div class="stat-label">Improved</div>
+    </div>
+    <div class="stat-card stat-stable">
+      <div class="stat-value">0</div>
+      <div class="stat-label">Stable</div>
+    </div>
+    <div class="stat-card stat-regressed">
+      <div class="stat-value">0</div>
+      <div class="stat-label">Regressed</div>
+    </div>
+    <div class="stat-card stat-new">
+      <div class="stat-value">6</div>
+      <div class="stat-label">New</div>
+    </div>
+  </div>
+
+  <div class="section-header">Benchmark Results</div>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Benchmark</th>
+          <th class="numeric">Previous</th>
+          <th class="numeric">Current</th>
+          <th class="change">Change</th>
+          <th class="status-cell">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+
+        <tr class="row-new">
+            <td class="bench-name">target_3_hop/traverse_three_hops</td>
+            <td class="numeric">—</td>
+            <td class="numeric">282.2 ns</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">target_batch_insertion/insert_1000_edges</td>
+            <td class="numeric">—</td>
+            <td class="numeric">781.38 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">target_single_hop/traverse_one_hop</td>
+            <td class="numeric">—</td>
+            <td class="numeric">42.6 ns</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">target_time_travel/at_anchor</td>
+            <td class="numeric">—</td>
+            <td class="numeric">282.6 ns</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">target_time_travel/with_5_deltas</td>
+            <td class="numeric">—</td>
+            <td class="numeric">275.1 ns</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">target_time_travel/worst_case_9_deltas</td>
+            <td class="numeric">—</td>
+            <td class="numeric">286.2 ns</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section-header">Performance Over Time (µs)</div>
+  <div class="chart-container">
+    <div class="chart-canvas-wrap">
+      <canvas id="timeseriesChart"></canvas>
+    </div>
+  </div>
+
+  <footer>
+    Generated by <strong>Chronos</strong> — The Temporal Benchkeeper &nbsp;|&nbsp; Powered by Criterion
+  </footer>
+</div>
+
+<script>
+  const datasets = [{"label": "target_3_hop/traverse_three_hops", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.282, "commit": "198c57d"}], "borderColor": "#22d3ee", "backgroundColor": "#22d3ee33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_batch_insertion/insert_1000_edges", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 781.382, "commit": "198c57d"}], "borderColor": "#a78bfa", "backgroundColor": "#a78bfa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_single_hop/traverse_one_hop", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.043, "commit": "198c57d"}], "borderColor": "#f472b6", "backgroundColor": "#f472b633", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/at_anchor", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.283, "commit": "198c57d"}], "borderColor": "#34d399", "backgroundColor": "#34d39933", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/with_5_deltas", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.275, "commit": "198c57d"}], "borderColor": "#fbbf24", "backgroundColor": "#fbbf2433", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/worst_case_9_deltas", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.286, "commit": "198c57d"}], "borderColor": "#f87171", "backgroundColor": "#f8717133", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}];
+
+  const ctx = document.getElementById('timeseriesChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: 'index',
+        intersect: false,
+      },
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            color: '#94a3b8',
+            font: { family: "'JetBrains Mono', monospace", size: 11 },
+            boxWidth: 12,
+            padding: 16,
+          },
+        },
+        tooltip: {
+          backgroundColor: '#1a2235',
+          titleColor: '#e2e8f0',
+          bodyColor: '#94a3b8',
+          borderColor: '#334155',
+          borderWidth: 1,
+          titleFont: { family: "'JetBrains Mono', monospace" },
+          bodyFont: { family: "'JetBrains Mono', monospace", size: 12 },
+          callbacks: {
+            afterTitle: function(items) {
+              const pt = items[0];
+              const ds = datasets[pt.datasetIndex];
+              if (ds && ds.data[pt.dataIndex]) {
+                return 'commit: ' + ds.data[pt.dataIndex].commit;
+              }
+              return '';
+            },
+            label: function(ctx) {
+              return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + ' µs';
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: {
+            tooltipFormat: 'yyyy-MM-dd HH:mm',
+            displayFormats: {
+              hour: 'MMM d HH:mm',
+              day: 'MMM d',
+              week: 'MMM d',
+              month: 'MMM yyyy',
+            },
+          },
+          ticks: {
+            color: '#64748b',
+            font: { family: "'JetBrains Mono', monospace", size: 10 },
+            maxRotation: 45,
+          },
+          grid: {
+            color: 'rgba(30, 41, 59, 0.5)',
+          },
+        },
+        y: {
+          beginAtZero: false,
+          ticks: {
+            color: '#64748b',
+            font: { family: "'JetBrains Mono', monospace", size: 10 },
+            callback: function(val) { return val.toFixed(1) + ' µs'; },
+          },
+          grid: {
+            color: 'rgba(30, 41, 59, 0.5)',
+          },
+        },
+      },
+    },
+  });
+</script>
+
+</body>
+</html>

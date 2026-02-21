@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chronos — Timeseries Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/3.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
+
+  :root {
+    --bg-void:      #06080d;
+    --bg-primary:   #0b0f19;
+    --bg-secondary: #111827;
+    --bg-card:      #141c2b;
+    --bg-elevated:  #1a2336;
+    --bg-hover:     #1e293b;
+    --border:       #1e293b;
+    --border-dim:   #162032;
+    --border-focus: #334155;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted:   #64748b;
+    --text-dim:     #475569;
+    --cyan:         #22d3ee;
+    --cyan-dim:     rgba(34, 211, 238, 0.15);
+    --green:        #34d399;
+    --green-dim:    rgba(52, 211, 153, 0.1);
+    --red:          #f87171;
+    --red-dim:      rgba(248, 113, 113, 0.1);
+    --yellow:       #fbbf24;
+    --purple:       #a78bfa;
+    --orange:       #fb923c;
+    --sidebar-w:    260px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg-void);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+  }
+
+  /* ─── Sidebar ─── */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    height: 100vh;
+    background: var(--bg-primary);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .sidebar-header {
+    padding: 1.25rem 1rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .sidebar-logo {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--cyan);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .sidebar-sub {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .sidebar-nav {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.75rem 0;
+  }
+
+  .nav-group-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    padding: 0.75rem 1rem 0.3rem;
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.45rem 1rem;
+    text-decoration: none;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    border-left: 2px solid transparent;
+    transition: all 0.15s;
+  }
+
+  .nav-item:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-left-color: var(--cyan);
+  }
+
+  .nav-item.active {
+    background: var(--cyan-dim);
+    color: var(--cyan);
+    border-left-color: var(--cyan);
+  }
+
+  .nav-bench-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nav-trend {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    flex-shrink: 0;
+    margin-left: 0.5rem;
+  }
+
+  .trend-down { color: var(--green); }
+  .trend-up { color: var(--red); }
+  .trend-flat { color: var(--text-muted); }
+
+  /* ─── Main Content ─── */
+  .main {
+    margin-left: var(--sidebar-w);
+    flex: 1;
+    padding: 2rem 2.5rem;
+    max-width: calc(100vw - var(--sidebar-w));
+  }
+
+  /* ─── Top Header ─── */
+  .page-header {
+    margin-bottom: 2rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .page-header h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+  }
+
+  .page-meta {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .page-meta span { display: flex; align-items: center; gap: 0.35rem; }
+  .page-meta .label { color: var(--text-dim); }
+
+  /* ─── Overview Cards ─── */
+  .overview-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .overview-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+  }
+
+  .overview-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--cyan);
+  }
+
+  .overview-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 0.2rem;
+  }
+
+  /* ─── Movers ─── */
+  .movers {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-bottom: 2.5rem;
+  }
+
+  .movers-col {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+  }
+
+  .movers-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.75rem;
+  }
+
+  .improved-label { color: var(--green); }
+  .regressed-label { color: var(--red); }
+
+  .mover-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-dim);
+  }
+
+  .mover-item:last-child { border-bottom: none; }
+
+  .mover-item span {
+    font-weight: 600;
+    font-size: 0.75rem;
+  }
+
+  .mover-item.improved span { color: var(--green); }
+  .mover-item.regressed span { color: var(--red); }
+
+  /* ─── Toggle Controls ─── */
+  .controls-bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .toggle-btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .toggle-btn:hover { border-color: var(--border-focus); color: var(--text-secondary); }
+  .toggle-btn.active { background: var(--cyan-dim); border-color: var(--cyan); color: var(--cyan); }
+
+  .controls-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* ─── Benchmark Sections ─── */
+  .bench-section {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    transition: border-color 0.2s;
+  }
+
+  .bench-section:target {
+    border-color: var(--cyan);
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.05);
+  }
+
+  .bench-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 1rem;
+  }
+
+  .bench-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .bench-latest {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--cyan);
+  }
+
+  .bench-stats-bar {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border-dim);
+  }
+
+  .bench-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .bench-stat-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+  }
+
+  .bench-stat-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  .bench-stat-value small {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+  }
+
+  .bench-stat-value.best { color: var(--green); }
+  .bench-stat-value.worst { color: var(--red); }
+
+  .chart-wrap {
+    position: relative;
+    height: 260px;
+  }
+
+  /* ─── Footer ─── */
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+  }
+
+  /* ─── Responsive ─── */
+  @media (max-width: 900px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; padding: 1rem; }
+    .movers { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Sidebar Navigation -->
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <div class="sidebar-logo">⏱ CHRONOS</div>
+    <div class="sidebar-sub">timeseries dashboard</div>
+  </div>
+  <div class="sidebar-nav">
+    <div class="nav-group-label">target_3_hop</div>
+<a class="nav-item" href="#bench-target_3_hop--traverse_three_hops" data-bench="target_3_hop--traverse_three_hops">
+  <span class="nav-bench-name">traverse_three_hops</span>
+  <span class="nav-trend trend-flat">→ +0.0%</span>
+</a>
+<div class="nav-group-label">target_batch_insertion</div>
+<a class="nav-item" href="#bench-target_batch_insertion--insert_1000_edges" data-bench="target_batch_insertion--insert_1000_edges">
+  <span class="nav-bench-name">insert_1000_edges</span>
+  <span class="nav-trend trend-flat">→ +0.0%</span>
+</a>
+<div class="nav-group-label">target_single_hop</div>
+<a class="nav-item" href="#bench-target_single_hop--traverse_one_hop" data-bench="target_single_hop--traverse_one_hop">
+  <span class="nav-bench-name">traverse_one_hop</span>
+  <span class="nav-trend trend-flat">→ +0.0%</span>
+</a>
+<div class="nav-group-label">target_time_travel</div>
+<a class="nav-item" href="#bench-target_time_travel--at_anchor" data-bench="target_time_travel--at_anchor">
+  <span class="nav-bench-name">at_anchor</span>
+  <span class="nav-trend trend-flat">→ +0.0%</span>
+</a>
+<a class="nav-item" href="#bench-target_time_travel--with_5_deltas" data-bench="target_time_travel--with_5_deltas">
+  <span class="nav-bench-name">with_5_deltas</span>
+  <span class="nav-trend trend-flat">→ +0.0%</span>
+</a>
+<a class="nav-item" href="#bench-target_time_travel--worst_case_9_deltas" data-bench="target_time_travel--worst_case_9_deltas">
+  <span class="nav-bench-name">worst_case_9_deltas</span>
+  <span class="nav-trend trend-flat">→ +0.0%</span>
+</a>
+
+  </div>
+</nav>
+
+<!-- Main Content -->
+<main class="main">
+  <div class="page-header">
+    <h1>Performance Timeseries</h1>
+    <div class="page-meta">
+      <span><span class="label">runs</span> 1</span>
+      <span><span class="label">benchmarks</span> 6</span>
+      <span><span class="label">generated</span> 2026-02-21 18:08 UTC</span>
+    </div>
+  </div>
+
+  <div class="overview-row">
+    <div class="overview-card">
+      <div class="overview-value">1</div>
+      <div class="overview-label">Total Runs</div>
+    </div>
+    <div class="overview-card">
+      <div class="overview-value">6</div>
+      <div class="overview-label">Benchmarks</div>
+    </div>
+    <div class="overview-card">
+      <div class="overview-value">0</div>
+      <div class="overview-label">Trending Faster</div>
+    </div>
+    <div class="overview-card">
+      <div class="overview-value">0</div>
+      <div class="overview-label">Trending Slower</div>
+    </div>
+  </div>
+
+  <div class="movers">
+
+  </div>
+
+  <div class="controls-bar">
+    <span class="controls-label">Overlays:</span>
+    <button class="toggle-btn active" id="toggle-trend" onclick="toggleOverlay('trend')">Trend Line</button>
+    <button class="toggle-btn active" id="toggle-mean" onclick="toggleOverlay('mean')">Mean</button>
+    <button class="toggle-btn" id="toggle-ci" onclick="toggleOverlay('ci')">Confidence Interval</button>
+  </div>
+
+
+<section class="bench-section" id="bench-target_3_hop--traverse_three_hops" data-bench-name="target_3_hop/traverse_three_hops">
+  <div class="bench-header">
+    <h2 class="bench-title">target_3_hop/traverse_three_hops</h2>
+    <div class="bench-latest">282.2 ns</div>
+  </div>
+  <div class="bench-stats-bar">
+    <div class="bench-stat">
+      <span class="bench-stat-label">Mean</span>
+      <span class="bench-stat-value">282.2 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Std Dev</span>
+      <span class="bench-stat-value">0.0 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">CV</span>
+      <span class="bench-stat-value">0.0%</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Best</span>
+      <span class="bench-stat-value best">282.2 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Worst</span>
+      <span class="bench-stat-value worst">282.2 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Overall</span>
+      <span class="bench-stat-value trend-flat">+0.0%</span>
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart-target_3_hop--traverse_three_hops" height="260"></canvas>
+  </div>
+</section>
+<section class="bench-section" id="bench-target_batch_insertion--insert_1000_edges" data-bench-name="target_batch_insertion/insert_1000_edges">
+  <div class="bench-header">
+    <h2 class="bench-title">target_batch_insertion/insert_1000_edges</h2>
+    <div class="bench-latest">781.38 µs</div>
+  </div>
+  <div class="bench-stats-bar">
+    <div class="bench-stat">
+      <span class="bench-stat-label">Mean</span>
+      <span class="bench-stat-value">781.38 µs</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Std Dev</span>
+      <span class="bench-stat-value">0.0 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">CV</span>
+      <span class="bench-stat-value">0.0%</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Best</span>
+      <span class="bench-stat-value best">781.38 µs <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Worst</span>
+      <span class="bench-stat-value worst">781.38 µs <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Overall</span>
+      <span class="bench-stat-value trend-flat">+0.0%</span>
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart-target_batch_insertion--insert_1000_edges" height="260"></canvas>
+  </div>
+</section>
+<section class="bench-section" id="bench-target_single_hop--traverse_one_hop" data-bench-name="target_single_hop/traverse_one_hop">
+  <div class="bench-header">
+    <h2 class="bench-title">target_single_hop/traverse_one_hop</h2>
+    <div class="bench-latest">42.6 ns</div>
+  </div>
+  <div class="bench-stats-bar">
+    <div class="bench-stat">
+      <span class="bench-stat-label">Mean</span>
+      <span class="bench-stat-value">42.6 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Std Dev</span>
+      <span class="bench-stat-value">0.0 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">CV</span>
+      <span class="bench-stat-value">0.0%</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Best</span>
+      <span class="bench-stat-value best">42.6 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Worst</span>
+      <span class="bench-stat-value worst">42.6 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Overall</span>
+      <span class="bench-stat-value trend-flat">+0.0%</span>
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart-target_single_hop--traverse_one_hop" height="260"></canvas>
+  </div>
+</section>
+<section class="bench-section" id="bench-target_time_travel--at_anchor" data-bench-name="target_time_travel/at_anchor">
+  <div class="bench-header">
+    <h2 class="bench-title">target_time_travel/at_anchor</h2>
+    <div class="bench-latest">282.6 ns</div>
+  </div>
+  <div class="bench-stats-bar">
+    <div class="bench-stat">
+      <span class="bench-stat-label">Mean</span>
+      <span class="bench-stat-value">282.6 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Std Dev</span>
+      <span class="bench-stat-value">0.0 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">CV</span>
+      <span class="bench-stat-value">0.0%</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Best</span>
+      <span class="bench-stat-value best">282.6 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Worst</span>
+      <span class="bench-stat-value worst">282.6 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Overall</span>
+      <span class="bench-stat-value trend-flat">+0.0%</span>
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart-target_time_travel--at_anchor" height="260"></canvas>
+  </div>
+</section>
+<section class="bench-section" id="bench-target_time_travel--with_5_deltas" data-bench-name="target_time_travel/with_5_deltas">
+  <div class="bench-header">
+    <h2 class="bench-title">target_time_travel/with_5_deltas</h2>
+    <div class="bench-latest">275.1 ns</div>
+  </div>
+  <div class="bench-stats-bar">
+    <div class="bench-stat">
+      <span class="bench-stat-label">Mean</span>
+      <span class="bench-stat-value">275.1 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Std Dev</span>
+      <span class="bench-stat-value">0.0 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">CV</span>
+      <span class="bench-stat-value">0.0%</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Best</span>
+      <span class="bench-stat-value best">275.1 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Worst</span>
+      <span class="bench-stat-value worst">275.1 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Overall</span>
+      <span class="bench-stat-value trend-flat">+0.0%</span>
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart-target_time_travel--with_5_deltas" height="260"></canvas>
+  </div>
+</section>
+<section class="bench-section" id="bench-target_time_travel--worst_case_9_deltas" data-bench-name="target_time_travel/worst_case_9_deltas">
+  <div class="bench-header">
+    <h2 class="bench-title">target_time_travel/worst_case_9_deltas</h2>
+    <div class="bench-latest">286.2 ns</div>
+  </div>
+  <div class="bench-stats-bar">
+    <div class="bench-stat">
+      <span class="bench-stat-label">Mean</span>
+      <span class="bench-stat-value">286.2 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Std Dev</span>
+      <span class="bench-stat-value">0.0 ns</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">CV</span>
+      <span class="bench-stat-value">0.0%</span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Best</span>
+      <span class="bench-stat-value best">286.2 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Worst</span>
+      <span class="bench-stat-value worst">286.2 ns <small>(198c57d)</small></span>
+    </div>
+    <div class="bench-stat">
+      <span class="bench-stat-label">Overall</span>
+      <span class="bench-stat-value trend-flat">+0.0%</span>
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart-target_time_travel--worst_case_9_deltas" height="260"></canvas>
+  </div>
+</section>
+
+  <footer>
+    Chronos — The Temporal Benchkeeper &nbsp;·&nbsp; Timeseries Dashboard
+  </footer>
+</main>
+
+<script>
+const CONFIGS = {"target_3_hop/traverse_three_hops": {"data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 282.1573, "commit": "198c57d", "branch": "jules-3069904928789557752-7bfd23b2", "ci_lower": 279.7026, "ci_upper": 285.151}], "trend": [], "mean": 282.1573, "unit": "ns", "stats": {"mean": "282.2 ns", "std_dev": "0.0 ns", "cv": "0.0%", "min": "282.2 ns", "max": "282.2 ns", "min_commit": "198c57d", "max_commit": "198c57d", "latest": "282.2 ns", "total_change": "+0.0%", "trend": "+0.0%", "count": 1}}, "target_batch_insertion/insert_1000_edges": {"data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 781.382, "commit": "198c57d", "branch": "jules-3069904928789557752-7bfd23b2", "ci_lower": 676.9029, "ci_upper": 878.0733}], "trend": [], "mean": 781.382, "unit": "\u00b5s", "stats": {"mean": "781.38 \u00b5s", "std_dev": "0.0 ns", "cv": "0.0%", "min": "781.38 \u00b5s", "max": "781.38 \u00b5s", "min_commit": "198c57d", "max_commit": "198c57d", "latest": "781.38 \u00b5s", "total_change": "+0.0%", "trend": "+0.0%", "count": 1}}, "target_single_hop/traverse_one_hop": {"data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 42.6068, "commit": "198c57d", "branch": "jules-3069904928789557752-7bfd23b2", "ci_lower": 42.3848, "ci_upper": 42.8318}], "trend": [], "mean": 42.6068, "unit": "ns", "stats": {"mean": "42.6 ns", "std_dev": "0.0 ns", "cv": "0.0%", "min": "42.6 ns", "max": "42.6 ns", "min_commit": "198c57d", "max_commit": "198c57d", "latest": "42.6 ns", "total_change": "+0.0%", "trend": "+0.0%", "count": 1}}, "target_time_travel/at_anchor": {"data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 282.592, "commit": "198c57d", "branch": "jules-3069904928789557752-7bfd23b2", "ci_lower": 281.1667, "ci_upper": 284.0}], "trend": [], "mean": 282.592, "unit": "ns", "stats": {"mean": "282.6 ns", "std_dev": "0.0 ns", "cv": "0.0%", "min": "282.6 ns", "max": "282.6 ns", "min_commit": "198c57d", "max_commit": "198c57d", "latest": "282.6 ns", "total_change": "+0.0%", "trend": "+0.0%", "count": 1}}, "target_time_travel/with_5_deltas": {"data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 275.1228, "commit": "198c57d", "branch": "jules-3069904928789557752-7bfd23b2", "ci_lower": 273.3902, "ci_upper": 276.6862}], "trend": [], "mean": 275.1228, "unit": "ns", "stats": {"mean": "275.1 ns", "std_dev": "0.0 ns", "cv": "0.0%", "min": "275.1 ns", "max": "275.1 ns", "min_commit": "198c57d", "max_commit": "198c57d", "latest": "275.1 ns", "total_change": "+0.0%", "trend": "+0.0%", "count": 1}}, "target_time_travel/worst_case_9_deltas": {"data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 286.226, "commit": "198c57d", "branch": "jules-3069904928789557752-7bfd23b2", "ci_lower": 285.2288, "ci_upper": 287.1851}], "trend": [], "mean": 286.226, "unit": "ns", "stats": {"mean": "286.2 ns", "std_dev": "0.0 ns", "cv": "0.0%", "min": "286.2 ns", "max": "286.2 ns", "min_commit": "198c57d", "max_commit": "198c57d", "latest": "286.2 ns", "total_change": "+0.0%", "trend": "+0.0%", "count": 1}}};
+
+const overlays = { trend: true, mean: true, ci: false };
+const charts = {};
+
+const COLORS = {
+  main: '#22d3ee',
+  mainFill: 'rgba(34, 211, 238, 0.08)',
+  trend: '#a78bfa',
+  mean: 'rgba(251, 191, 36, 0.5)',
+  ci: 'rgba(52, 211, 153, 0.12)',
+  ciBorder: 'rgba(52, 211, 153, 0.3)',
+};
+
+function buildChart(benchName, canvasId) {
+  const cfg = CONFIGS[benchName];
+  if (!cfg) return;
+
+  const ctx = document.getElementById(canvasId);
+  if (!ctx) return;
+
+  const datasets = [
+    {
+      label: benchName,
+      data: cfg.data,
+      borderColor: COLORS.main,
+      backgroundColor: COLORS.mainFill,
+      fill: true,
+      tension: 0.3,
+      pointRadius: 5,
+      pointHoverRadius: 8,
+      pointBackgroundColor: COLORS.main,
+      pointBorderColor: '#0b0f19',
+      pointBorderWidth: 2,
+      borderWidth: 2,
+      order: 1,
+    },
+  ];
+
+  // Trend line
+  if (cfg.trend.length >= 2) {
+    datasets.push({
+      label: 'Trend',
+      data: cfg.trend,
+      borderColor: COLORS.trend,
+      borderDash: [6, 4],
+      borderWidth: 1.5,
+      pointRadius: 0,
+      fill: false,
+      hidden: !overlays.trend,
+      order: 2,
+    });
+  }
+
+  // Mean line (annotation via dataset)
+  if (cfg.data.length >= 2) {
+    datasets.push({
+      label: 'Mean',
+      data: [
+        { x: cfg.data[0].x, y: cfg.mean },
+        { x: cfg.data[cfg.data.length - 1].x, y: cfg.mean },
+      ],
+      borderColor: COLORS.mean,
+      borderDash: [3, 3],
+      borderWidth: 1,
+      pointRadius: 0,
+      fill: false,
+      hidden: !overlays.mean,
+      order: 3,
+    });
+  }
+
+  // Confidence interval bands
+  if (cfg.data.some(d => d.ci_upper !== null)) {
+    datasets.push({
+      label: 'CI Upper',
+      data: cfg.data.map(d => ({ x: d.x, y: d.ci_upper || d.y })),
+      borderColor: COLORS.ciBorder,
+      backgroundColor: COLORS.ci,
+      borderWidth: 0.5,
+      pointRadius: 0,
+      fill: '+1',
+      hidden: !overlays.ci,
+      order: 4,
+    });
+    datasets.push({
+      label: 'CI Lower',
+      data: cfg.data.map(d => ({ x: d.x, y: d.ci_lower || d.y })),
+      borderColor: COLORS.ciBorder,
+      borderWidth: 0.5,
+      pointRadius: 0,
+      fill: false,
+      hidden: !overlays.ci,
+      order: 5,
+    });
+  }
+
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'bottom',
+          labels: {
+            color: '#64748b',
+            font: { family: "'JetBrains Mono', monospace", size: 10 },
+            boxWidth: 10,
+            padding: 12,
+            filter: (item) => !item.text.startsWith('CI'),
+          },
+        },
+        tooltip: {
+          backgroundColor: '#1a2336',
+          titleColor: '#e2e8f0',
+          bodyColor: '#94a3b8',
+          borderColor: '#334155',
+          borderWidth: 1,
+          titleFont: { family: "'JetBrains Mono', monospace", size: 12 },
+          bodyFont: { family: "'JetBrains Mono', monospace", size: 11 },
+          filter: (item) => item.datasetIndex === 0,
+          callbacks: {
+            afterTitle: function(items) {
+              const pt = cfg.data[items[0].dataIndex];
+              return pt ? 'commit: ' + pt.commit + ' (' + pt.branch + ')' : '';
+            },
+            label: function(ctx) {
+              const pt = cfg.data[ctx.dataIndex];
+              let s = ctx.parsed.y.toFixed(2) + ' ' + cfg.unit;
+              if (pt && pt.ci_lower !== null) {
+                s += '  [' + pt.ci_lower.toFixed(2) + ' – ' + pt.ci_upper.toFixed(2) + ']';
+              }
+              return s;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: {
+            tooltipFormat: 'yyyy-MM-dd HH:mm',
+            displayFormats: { hour: 'MMM d HH:mm', day: 'MMM d', week: 'MMM d' },
+          },
+          ticks: { color: '#475569', font: { family: "'JetBrains Mono', monospace", size: 10 }, maxRotation: 45 },
+          grid: { color: 'rgba(30, 41, 59, 0.3)' },
+        },
+        y: {
+          beginAtZero: false,
+          ticks: {
+            color: '#475569',
+            font: { family: "'JetBrains Mono', monospace", size: 10 },
+            callback: (v) => v.toFixed(1) + ' ' + cfg.unit,
+          },
+          grid: { color: 'rgba(30, 41, 59, 0.3)' },
+        },
+      },
+    },
+  });
+
+  charts[benchName] = chart;
+}
+
+function toggleOverlay(name) {
+  overlays[name] = !overlays[name];
+  const btn = document.getElementById('toggle-' + name);
+  btn.classList.toggle('active', overlays[name]);
+
+  // Map overlay name to dataset label patterns
+  const labelMap = {
+    trend: ['Trend'],
+    mean: ['Mean'],
+    ci: ['CI Upper', 'CI Lower'],
+  };
+
+  const labels = labelMap[name] || [];
+
+  Object.values(charts).forEach(chart => {
+    chart.data.datasets.forEach((ds, i) => {
+      if (labels.includes(ds.label)) {
+        chart.setDatasetVisibility(i, overlays[name]);
+      }
+    });
+    chart.update('none');
+  });
+}
+
+// Initialize all charts
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.bench-section').forEach(section => {
+    const name = section.dataset.benchName;
+    const canvasId = section.querySelector('canvas').id;
+    buildChart(name, canvasId);
+  });
+
+  // Sidebar scroll-spy
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      const id = entry.target.id;
+      const link = document.querySelector(`.nav-item[href="#${id}"]`);
+      if (link) {
+        link.classList.toggle('active', entry.isIntersecting);
+      }
+    });
+  }, { rootMargin: '-20% 0px -60% 0px' });
+
+  document.querySelectorAll('.bench-section').forEach(s => observer.observe(s));
+});
+</script>
+
+</body>
+</html>

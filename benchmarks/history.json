@@ -1,0 +1,45 @@
+[
+  {
+    "timestamp": "2026-02-21T18:07:48.283497+00:00",
+    "commit": "198c57d",
+    "branch": "jules-3069904928789557752-7bfd23b2",
+    "benchmarks": {
+      "target_time_travel/with_5_deltas": {
+        "point_estimate_ns": 275.12280051091363,
+        "ci_lower_ns": 273.3902260088697,
+        "ci_upper_ns": 276.6861536595373,
+        "std_dev_ns": 6.1668907832569655
+      },
+      "target_time_travel/at_anchor": {
+        "point_estimate_ns": 282.59198327344984,
+        "ci_lower_ns": 281.1666674124893,
+        "ci_upper_ns": 284.00000178026704,
+        "std_dev_ns": 5.874914585597326
+      },
+      "target_time_travel/worst_case_9_deltas": {
+        "point_estimate_ns": 286.22596070579993,
+        "ci_lower_ns": 285.2287895292346,
+        "ci_upper_ns": 287.1850984284939,
+        "std_dev_ns": 5.5773781190774185
+      },
+      "target_3_hop/traverse_three_hops": {
+        "point_estimate_ns": 282.15733606030585,
+        "ci_lower_ns": 279.7025671955745,
+        "ci_upper_ns": 285.15103732210275,
+        "std_dev_ns": 13.343540038507856
+      },
+      "target_single_hop/traverse_one_hop": {
+        "point_estimate_ns": 42.60678833115437,
+        "ci_lower_ns": 42.38483333115782,
+        "ci_upper_ns": 42.83175020908999,
+        "std_dev_ns": 0.9908401654190784
+      },
+      "target_batch_insertion/insert_1000_edges": {
+        "point_estimate_ns": 781381.9847088103,
+        "ci_lower_ns": 676902.9034657464,
+        "ci_upper_ns": 878073.2895045202,
+        "std_dev_ns": 114686.11563005627
+      }
+    }
+  }
+]
