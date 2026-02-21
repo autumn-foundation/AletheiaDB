@@ -110,15 +110,19 @@ use super::tracker::PersistenceTracker;
 /// - Index files are still valid (can be loaded with best-effort recovery)
 /// - Next persistence cycle will retry manifest save
 /// - WAL provides durability for data
-fn update_manifest(
+pub(crate) fn update_manifest(
     manager: &Arc<IndexPersistenceManager>,
     historical: &Arc<RwLock<HistoricalStorage>>,
-    snapshot_lsn: u64,
+    tracker: &Arc<PersistenceTracker>,
     node_count: u64,
     edge_count: u64,
     string_count: u64,
 ) {
-    let mut manifest = IndexManifest::new(snapshot_lsn);
+    // CRITICAL: Use the safe manifest LSN from tracker, which is the minimum
+    // LSN of all persisted components. This prevents the manifest from
+    // claiming consistency up to an LSN that some components haven't reached yet.
+    let safe_lsn = tracker.get_safe_manifest_lsn();
+    let mut manifest = IndexManifest::new(safe_lsn);
 
     // Add string interner entry (always present if any data exists)
     if string_count > 0 {
@@ -224,7 +228,7 @@ pub(crate) fn spawn_background_persistence_thread(
                 if vector_mutations >= policies.vector.mutation_threshold as u64
                     || vector_seconds >= policies.vector.time_interval_secs as u64
                 {
-                    match persist_vector_indexes(&current, &manager, Some(&tracker)) {
+                    match persist_vector_indexes(&current, &manager, Some(&tracker), snapshot_lsn) {
                         Ok(()) => any_index_persisted = true,
                         Err(e) => {
                             eprintln!(
@@ -241,7 +245,7 @@ pub(crate) fn spawn_background_persistence_thread(
                 if graph_mutations >= policies.graph.mutation_threshold as u64
                     || graph_seconds >= policies.graph.time_interval_secs as u64
                 {
-                    match persist_graph_index(&current, &manager, Some(&tracker)) {
+                    match persist_graph_index(&current, &manager, Some(&tracker), snapshot_lsn) {
                         Ok(()) => any_index_persisted = true,
                         Err(e) => {
                             eprintln!(
@@ -258,8 +262,13 @@ pub(crate) fn spawn_background_persistence_thread(
                 if temporal_mutations >= policies.temporal.version_threshold as u64
                     || temporal_seconds >= policies.temporal.time_interval_secs as u64
                 {
-                    match persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker)
-                    {
+                    match persist_temporal_index(
+                        &historical,
+                        &temporal_indexes,
+                        &manager,
+                        &tracker,
+                        snapshot_lsn,
+                    ) {
                         Ok(()) => any_index_persisted = true,
                         Err(e) => {
                             eprintln!(
@@ -276,7 +285,7 @@ pub(crate) fn spawn_background_persistence_thread(
                 if string_mutations >= policies.strings.new_strings_threshold as u64
                     || string_seconds >= policies.strings.time_interval_secs as u64
                 {
-                    match persist_string_interner(&manager, &tracker) {
+                    match persist_string_interner(&manager, &tracker, snapshot_lsn) {
                         Ok(()) => any_index_persisted = true,
                         Err(e) => {
                             eprintln!(
@@ -293,14 +302,13 @@ pub(crate) fn spawn_background_persistence_thread(
                 // Without this, manifest is only saved on clean shutdown, which never happens
                 // when the process is killed via Ctrl+C or crashes.
                 //
-                // We use the snapshot state captured BEFORE persistence to ensure the manifest
-                // LSN/counts are conservative and consistent with the persisted data, preventing
-                // WAL replay from skipping operations if concurrent writes happened during persistence.
+                // We use the safe LSN from tracker (min of component LSNs) to ensuring
+                // the manifest doesn't jump ahead of lagging components.
                 if any_index_persisted {
                     update_manifest(
                         &manager,
                         &historical,
-                        snapshot_lsn,
+                        &tracker,
                         node_count,
                         edge_count,
                         string_count,

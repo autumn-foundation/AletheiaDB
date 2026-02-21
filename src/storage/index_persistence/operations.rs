@@ -60,6 +60,7 @@ pub(crate) fn persist_vector_indexes(
     current: &Arc<CurrentStorage>,
     manager: &Arc<IndexPersistenceManager>,
     tracker: Option<&Arc<PersistenceTracker>>,
+    current_lsn: u64,
 ) -> Result<()> {
     use crate::storage::index_persistence::formats::PersistedHnswConfig;
     use crate::storage::index_persistence::vector::{
@@ -152,6 +153,7 @@ pub(crate) fn persist_vector_indexes(
 
     if let Some(tracker) = tracker {
         tracker.reset_vector_mutations();
+        tracker.update_vector_lsn(current_lsn);
     }
     Ok(())
 }
@@ -314,6 +316,7 @@ pub(crate) fn persist_graph_index(
     current: &Arc<CurrentStorage>,
     manager: &Arc<IndexPersistenceManager>,
     tracker: Option<&Arc<PersistenceTracker>>,
+    current_lsn: u64,
 ) -> Result<()> {
     use crate::storage::index_persistence::graph::{
         new_graph_index_data, persist_property_map, save_graph_index,
@@ -386,6 +389,7 @@ pub(crate) fn persist_graph_index(
 
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
+        tracker.update_graph_lsn(current_lsn);
     }
     Ok(())
 }
@@ -396,6 +400,7 @@ pub(crate) fn persist_temporal_index(
     _temporal_indexes: &Arc<TemporalIndexes>,
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
+    current_lsn: u64,
 ) -> Result<()> {
     use crate::storage::index_persistence::temporal::{
         convert_edge_version, convert_node_version, new_temporal_index_data, save_temporal_index,
@@ -455,6 +460,7 @@ pub(crate) fn persist_temporal_index(
     })?;
 
     tracker.reset_temporal_mutations();
+    tracker.update_temporal_lsn(current_lsn);
     Ok(())
 }
 
@@ -462,12 +468,14 @@ pub(crate) fn persist_temporal_index(
 pub(crate) fn persist_string_interner(
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
+    current_lsn: u64,
 ) -> Result<()> {
     manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
     })?;
 
     tracker.reset_string_mutations();
+    tracker.update_string_lsn(current_lsn);
     Ok(())
 }
 
@@ -517,20 +525,24 @@ pub(crate) fn persist_all_indexes(
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
 ) -> Result<()> {
+    let current_lsn = wal.current_lsn().0;
+
     // Persist all indexes - log errors but continue with remaining indexes
-    if let Err(e) = persist_string_interner(manager, tracker) {
+    if let Err(e) = persist_string_interner(manager, tracker, current_lsn) {
         eprintln!("Failed to persist string interner: {}", e);
     }
-    if let Err(e) = persist_graph_index(current, manager, Some(tracker)) {
+    if let Err(e) = persist_graph_index(current, manager, Some(tracker), current_lsn) {
         eprintln!("Failed to persist graph index: {}", e);
     }
-    if let Err(e) = persist_temporal_index(historical, temporal_indexes, manager, tracker) {
+    if let Err(e) =
+        persist_temporal_index(historical, temporal_indexes, manager, tracker, current_lsn)
+    {
         eprintln!("Failed to persist temporal index: {}", e);
     }
     if let Err(e) = persist_temporal_adjacency_index(historical, manager) {
         eprintln!("Failed to persist temporal adjacency index: {}", e);
     }
-    if let Err(e) = persist_vector_indexes(current, manager, Some(tracker)) {
+    if let Err(e) = persist_vector_indexes(current, manager, Some(tracker), current_lsn) {
         eprintln!("Failed to persist vector indexes: {}", e);
     }
 
@@ -540,8 +552,11 @@ pub(crate) fn persist_all_indexes(
         TemporalAdjacencyIndexManifestEntry,
     };
 
-    let current_lsn = wal.current_lsn().0;
-    let mut manifest = IndexManifest::new(current_lsn);
+    // Use safe LSN from tracker (min of all components)
+    // On full persist, this should theoretically equal current_lsn if all succeeded.
+    // If some failed, we fallback to the safe LSN.
+    let safe_lsn = tracker.get_safe_manifest_lsn();
+    let mut manifest = IndexManifest::new(safe_lsn);
 
     // Add string interner entry
     manifest.string_interner = Some(StringInternerManifestEntry {
@@ -612,14 +627,18 @@ pub(crate) fn load_indexes_startup(
     node_id_gen: &Arc<IdGenerator>,
     edge_id_gen: &Arc<IdGenerator>,
     version_id_gen: &Arc<IdGenerator>,
-) {
+) -> Option<u64> {
     // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
     // (manifest is only saved on shutdown, not during background persistence)
-    match manager.load_manifest_and_strings() {
-        Ok(_) => {}                      // Successfully loaded
-        Err(e) if e.is_not_found() => {} // Expected on first run
-        Err(e) => eprintln!("Warning: Failed to load manifest: {}", e),
-    }
+    let manifest_lsn = match manager.load_manifest_and_strings() {
+        Ok(manifest) => Some(manifest.lsn), // Successfully loaded
+        Err(e) => {
+            if !e.is_not_found() {
+                eprintln!("Warning: Failed to load manifest: {}", e);
+            }
+            None // Not found or error
+        }
+    };
 
     // Try to restore graph data even if manifest loading failed
     let graph_path = manager.graph_path().join("adjacency.idx");
@@ -895,4 +914,6 @@ pub(crate) fn load_indexes_startup(
             }
         }
     }
+
+    manifest_lsn
 }

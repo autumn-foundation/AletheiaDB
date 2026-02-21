@@ -35,7 +35,7 @@ fn test_persist_vector_indexes_with_none_tracker() {
     // This will likely fail on save_string_interner or empty indexes,
     // but the critical path we are testing is the None tracker handling
     // at the end of the function.
-    let _ = persist_vector_indexes(&current, &manager, None);
+    let _ = persist_vector_indexes(&current, &manager, None, 0);
 
     // If we reached here without panic, the Option check worked.
 }
@@ -51,7 +51,7 @@ fn test_persist_vector_indexes_with_tracker() {
     tracker.record_vector_mutation();
 
     // Even if persistence fails (e.g. IO error), we want to see if we attempted it
-    let _ = persist_vector_indexes(&current, &manager, Some(&tracker));
+    let _ = persist_vector_indexes(&current, &manager, Some(&tracker), 100);
 
     // NOTE: In the current implementation, if persistence fails early (e.g. IO),
     // the tracker reset might NOT be reached because of `?`.
@@ -86,7 +86,7 @@ fn test_graph_persist_keeps_interner_consistent_with_graph_string_ids() {
         .create_node("GraphPersistConsistency", properties)
         .expect("failed to create test node");
 
-    persist_graph_index(&current, &manager, None).expect("failed to persist graph index");
+    persist_graph_index(&current, &manager, None, 0).expect("failed to persist graph index");
 
     let interner_data =
         load_string_interner(&manager.interner_path()).expect("failed to load persisted interner");
@@ -115,6 +115,56 @@ fn test_graph_persist_keeps_interner_consistent_with_graph_string_ids() {
         .get(persisted_string_id as usize)
         .expect("persisted string id should index into persisted interner");
     assert_eq!(resolved, &unique_value);
+}
+
+#[test]
+fn test_persist_all_indexes_creates_manifest() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+    let current = Arc::new(CurrentStorage::new());
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    let temporal_indexes = Arc::new(TemporalIndexes::new());
+
+    // Use a separate temp dir for WAL to avoid conflicts
+    let wal_dir = tempfile::tempdir().unwrap();
+    let config =
+        crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig::new(wal_dir.path());
+    let wal =
+        Arc::new(crate::storage::wal::concurrent_system::ConcurrentWalSystem::new(config).unwrap());
+
+    let tracker = Arc::new(PersistenceTracker::new());
+
+    // Should succeed and create manifest
+    persist_all_indexes(
+        &current,
+        &historical,
+        &temporal_indexes,
+        &wal,
+        &manager,
+        &tracker,
+    )
+    .expect("persist_all_indexes failed");
+
+    // Verify manifest exists
+    // Note: IndexPersistenceManager adds "indexes" subdir and uses .idx extension
+    let manifest_path = manager.base_path().join("indexes").join("manifest.idx");
+    assert!(
+        manifest_path.exists(),
+        "Manifest file should be created by persist_all_indexes at {:?}",
+        manifest_path
+    );
+
+    // Verify string interner exists (created by default)
+    let interner_path = manager
+        .base_path()
+        .join("indexes")
+        .join("strings")
+        .join("interner.idx");
+    assert!(
+        interner_path.exists(),
+        "String interner should be persisted by persist_all_indexes at {:?}",
+        interner_path
+    );
 }
 
 #[test]
@@ -155,7 +205,7 @@ fn test_temporal_persist_keeps_interner_consistent_with_temporal_string_ids() {
         .add_node_version(node_id, version_id, now, now, label, properties, false)
         .expect("failed to add node version");
 
-    persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker)
+    persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker, 0)
         .expect("failed to persist temporal index");
 
     let interner_data =
