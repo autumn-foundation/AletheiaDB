@@ -603,6 +603,80 @@ sequenceDiagram
     Scribe-->>User: List<NarrativeEvent>
 ```
 
+### Semantic Physics & Pattern Matching
+
+**Semantic Stress (Dissonance)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class DissonanceEngine {
+            +calculate_dissonance(node, prop)
+        }
+    }
+    DissonanceEngine --> AletheiaDB : Uses
+```
+
+**Semantic Subgraph Matching (Gestalt)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class GestaltMatcher {
+            +find_matches(pattern)
+        }
+        class Pattern {
+            +nodes: Vec<PatternNode>
+            +edges: Vec<PatternEdge>
+        }
+        class Match {
+            +nodes: Map
+            +score: f32
+        }
+    }
+    GestaltMatcher --> Pattern : Consumes
+    GestaltMatcher ..> Match : Produces
+    GestaltMatcher --> AletheiaDB : Uses
+```
+
+**Sequence: Gestalt Matching**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Gestalt as GestaltMatcher
+    participant DB as AletheiaDB
+
+    User->>Gestalt: find_matches(pattern)
+    Gestalt->>Gestalt: select_anchor()
+    Gestalt->>DB: search_vectors(anchor_vec)
+    DB-->>Gestalt: candidates
+    loop Every Candidate
+        Gestalt->>Gestalt: backtrack(match)
+        alt Match Complete
+            Gestalt-->>User: Match Found
+        end
+    end
+```
+
+**Semantic Influence (Gravity)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class GravityWell {
+            +analyze_orbit(center, prop, window)
+        }
+        class OrbitMetrics {
+            +velocity: f32
+            +start_dist: f32
+            +end_dist: f32
+        }
+    }
+    GravityWell --> AletheiaDB : Uses
+    GravityWell ..> OrbitMetrics : Produces
+```
+
 ### Temporal Query Processing
 
 **Query Types:**

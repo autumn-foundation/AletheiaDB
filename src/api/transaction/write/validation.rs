@@ -55,13 +55,29 @@ pub(crate) fn validate(tx: &WriteTransaction) -> Result<()> {
             | crate::api::transaction::BufferedWrite::UpdateEdge { source, target, .. } => {
                 // Check that source and target nodes exist
                 // They might exist in current storage or be created in this transaction
-                if !tx.buffer.has_modified_node(*source) && tx.current.get_node(*source).is_err() {
+                let node_exists = |node_id: &crate::core::NodeId| -> bool {
+                    if tx.buffer.has_modified_node(*node_id) {
+                        // Check buffered operation - fail if deleted
+                        match tx.buffer.get_node_write(*node_id) {
+                            Some(crate::api::transaction::BufferedWrite::DeleteNode { .. }) => {
+                                false
+                            }
+                            _ => true, // Created or Updated means it exists
+                        }
+                    } else {
+                        // Check storage
+                        tx.current.get_node(*node_id).is_ok()
+                    }
+                };
+
+                if !node_exists(source) {
                     return Err(TransactionError::ValidationFailed {
                         reason: format!("Edge source node {:?} does not exist", source),
                     }
                     .into());
                 }
-                if !tx.buffer.has_modified_node(*target) && tx.current.get_node(*target).is_err() {
+
+                if !node_exists(target) {
                     return Err(TransactionError::ValidationFailed {
                         reason: format!("Edge target node {:?} does not exist", target),
                     }

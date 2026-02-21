@@ -222,7 +222,7 @@ impl AletheiaDB {
         if let Some(ref manager) = persistence_manager
             && config.persistence.load_on_startup
         {
-            crate::storage::index_persistence::operations::load_indexes_startup(
+            let loaded_lsn = crate::storage::index_persistence::operations::load_indexes_startup(
                 manager,
                 &db.current,
                 &db.historical,
@@ -230,6 +230,13 @@ impl AletheiaDB {
                 &db.edge_id_gen,
                 &db.version_id_gen,
             );
+
+            // Initialize tracker LSNs from the loaded manifest
+            if let Some(ref tracker) = persistence_tracker
+                && let Some(lsn) = loaded_lsn
+            {
+                tracker.set_start_lsn(lsn);
+            }
         }
 
         // Start background persistence thread if enabled

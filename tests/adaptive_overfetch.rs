@@ -282,11 +282,52 @@ fn test_adaptive_overfetch_statistics_tracking() {
     assert!(db.__test_get_filter_stats("B").is_none());
 }
 
+fn adaptive_overfetch_concurrent_timeout_secs() -> u64 {
+    if std::env::var("CI").is_ok() { 180 } else { 30 }
+}
+
 #[test]
+#[serial_test::serial]
 fn test_adaptive_overfetch_concurrent_safety() {
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    let progress = Arc::new(AtomicUsize::new(0));
+    let progress_worker = Arc::clone(&progress);
+
+    let (tx, rx) = mpsc::channel::<std::thread::Result<()>>();
+    std::thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            run_adaptive_overfetch_concurrent_safety(progress_worker);
+        }));
+        let _ = tx.send(result);
+    });
+
+    let timeout_secs = adaptive_overfetch_concurrent_timeout_secs();
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(())) => {}
+        Ok(Err(panic_payload)) => {
+            resume_unwind(panic_payload);
+        }
+        Err(_) => {
+            let completed = progress.load(Ordering::Relaxed);
+            panic!(
+                "Potential deadlock in adaptive overfetch concurrent test: timed out after {}s ({} searches completed)",
+                timeout_secs, completed
+            );
+        }
+    }
+}
+
+fn run_adaptive_overfetch_concurrent_safety(
+    progress: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
     // Verify that concurrent searches don't cause panics or data corruption
     // Reduced workload for CI performance
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::thread;
 
     let db = Arc::new(AletheiaDB::new().unwrap());
@@ -314,6 +355,7 @@ fn test_adaptive_overfetch_concurrent_safety() {
 
     for thread_id in 0..4 {
         let db_clone = Arc::clone(&db);
+        let progress_clone = Arc::clone(&progress);
         let handle = thread::spawn(move || {
             let label = if thread_id % 2 == 0 { "TypeA" } else { "TypeB" };
             let query_embedding = vec![0.5f32, 0.5, 0.3, 0.2];
@@ -326,6 +368,7 @@ fn test_adaptive_overfetch_concurrent_safety() {
 
                 // Basic sanity check
                 assert!(results.len() <= 3);
+                progress_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
 

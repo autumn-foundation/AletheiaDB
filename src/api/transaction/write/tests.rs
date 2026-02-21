@@ -2418,6 +2418,7 @@ mod conflict_detection_tests {
 mod clock_skew_tests {
     use super::*;
     use crate::api::transaction::TxIdGenerator;
+    use crate::core::hlc::ClockSkewAutoHealTestGuard;
     use crate::core::property::PropertyMapBuilder;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
     use std::time::{Duration, Instant};
@@ -2515,6 +2516,7 @@ mod clock_skew_tests {
 
     #[test]
     fn test_clock_skew_backward_error() {
+        let _auto_heal_guard = ClockSkewAutoHealTestGuard::force(false);
         let harness = TestHarness::new();
         let mut tx = harness.create_tx();
 
@@ -2547,6 +2549,7 @@ mod clock_skew_tests {
 
     #[test]
     fn test_clock_skew_forward_error() {
+        let _auto_heal_guard = ClockSkewAutoHealTestGuard::force(false);
         let harness = TestHarness::new();
         let mut tx = harness.create_tx();
 
@@ -2578,6 +2581,7 @@ mod clock_skew_tests {
 
     #[test]
     fn test_clock_skew_failure_does_not_advance_observation_timestamp() {
+        let _auto_heal_guard = ClockSkewAutoHealTestGuard::force(false);
         let harness = TestHarness::new();
         let mut tx = harness.create_tx_with_shared_observation_clock();
 
@@ -2615,6 +2619,7 @@ mod clock_skew_tests {
 
     #[test]
     fn test_clock_skew_allows_idle_forward_drift_with_shared_observation_clock() {
+        let _auto_heal_guard = ClockSkewAutoHealTestGuard::force(false);
         let harness = TestHarness::new();
         let mut tx = harness.create_tx_with_shared_observation_clock();
 

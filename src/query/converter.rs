@@ -871,10 +871,20 @@ impl AstConverter {
                 Expression::Property(prop) => {
                     projections.push(prop.property.clone());
                 }
-                Expression::Identifier(name) => {
-                    // Bare variable (e.g., RETURN n) - store the variable name.
-                    // The executor handles returning the full node for bare variables.
-                    projections.push(name.clone());
+                Expression::Identifier(_) => {
+                    // Bare variable (e.g., RETURN n).
+                    // We DO NOT add this to projections, because Project op
+                    // assumes all strings are property keys.
+                    // If we have a bare variable, it implies returning the whole entity
+                    // (or at least not filtering it out).
+
+                    // Note: If we have mixed RETURN n, n.prop, the behavior
+                    // depends on whether Project applies intersection or union.
+                    // Current ProjectIterator creates a NEW node with ONLY the listed properties.
+                    // So if we have bare variable, we shouldn't use Project op at all?
+
+                    // For now, ignoring identifiers means we don't treat them as property keys.
+                    // If the projection list is empty, we don't generate QueryOp::Project.
                 }
                 _ => {
                     // Other expressions are computed at execution time
@@ -2029,5 +2039,61 @@ mod sentry_tests {
 
         assert!(has_start_node, "Should use StartNode");
         assert!(has_label_filter, "Should preserve 'Secret' label check");
+    }
+
+    #[test]
+    fn test_pagination_order() {
+        // 🎯 Target: convert_pagination order (Skip before Limit)
+        // 💣 Risk: Semantic change (Skip 5 then Take 10 vs Take 10 then Skip 5)
+        // 🧪 Strategy: Parse query with both and check IR order
+
+        let ast = Parser::parse("MATCH (n) RETURN n SKIP 5 LIMIT 10").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let skip_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Skip(_)));
+        let limit_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Limit(_)));
+
+        assert!(skip_idx.is_some(), "Skip op missing");
+        assert!(limit_idx.is_some(), "Limit op missing");
+
+        assert!(
+            skip_idx.unwrap() < limit_idx.unwrap(),
+            "Skip operation must precede Limit operation"
+        );
+    }
+
+    #[test]
+    fn test_filter_before_project() {
+        // 🎯 Target: Pipeline order (Filter before Project)
+        // 💣 Risk: Filtering on projected-away columns
+        // 🧪 Strategy: Parse query with WHERE and RETURN specific property
+
+        let ast = Parser::parse("MATCH (n) WHERE n.age > 10 RETURN n.name").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let filter_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Filter(_)));
+        let project_idx = query
+            .ops
+            .iter()
+            .position(|op| matches!(op, QueryOp::Project(_)));
+
+        assert!(filter_idx.is_some(), "Filter op missing");
+        assert!(project_idx.is_some(), "Project op missing");
+
+        assert!(
+            filter_idx.unwrap() < project_idx.unwrap(),
+            "Filter operation must precede Project operation"
+        );
     }
 }

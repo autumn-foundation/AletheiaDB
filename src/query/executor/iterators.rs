@@ -1292,6 +1292,51 @@ impl ResultIterator for ProvenanceFilterIterator {
     }
 }
 
+/// Iterator for projecting specific properties from query results.
+pub struct ProjectIterator {
+    input: Box<dyn ResultIterator>,
+    properties: Vec<String>,
+}
+
+impl ProjectIterator {
+    pub fn new(input: Box<dyn ResultIterator>, mut properties: Vec<String>) -> Self {
+        // Deduplicate properties to prevent errors when projecting same property multiple times
+        properties.sort();
+        properties.dedup();
+        ProjectIterator { input, properties }
+    }
+}
+
+impl ResultIterator for ProjectIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        match self.input.next() {
+            Some(Ok(mut row)) => {
+                if let Some(node) = row.entity.as_node() {
+                    let mut new_props = crate::core::PropertyMapBuilder::new();
+                    for prop in &self.properties {
+                        if let Some(val) = node.properties.get(prop) {
+                            new_props = new_props.try_insert(prop, val.clone()).unwrap();
+                        }
+                    }
+                    let new_node = crate::core::graph::Node::new(
+                        node.id,
+                        node.label,
+                        new_props.build(),
+                        node.current_version,
+                    );
+                    row.entity = EntityResult::Node(new_node);
+                }
+                Some(Ok(row))
+            }
+            other => other,
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.input.size_hint()
+    }
+}
+
 /// Convert a `PredicateValue` to a `PropertyValue` for storage-level lookups.
 fn predicate_to_property_value(pv: &PredicateValue) -> PropertyValue {
     match pv {
@@ -2131,6 +2176,88 @@ mod tests {
         let (lower, upper) = rerank.size_hint();
         assert_eq!(lower, 0);
         assert_eq!(upper, Some(5));
+    }
+
+    // ==================== ProjectIterator Tests ====================
+
+    #[test]
+    fn test_project_iterator_filters_properties() {
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30)
+            .insert("city", "Paris")
+            .build();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        let input = MockIterator::from_nodes(vec![node]);
+        let mut project = ProjectIterator::new(
+            Box::new(input),
+            vec!["name".to_string(), "city".to_string()],
+        );
+
+        let row = project.next().unwrap().unwrap();
+        let projected_node = row.entity.as_node().unwrap();
+
+        assert_eq!(
+            projected_node
+                .properties
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "Alice"
+        );
+        assert_eq!(
+            projected_node
+                .properties
+                .get("city")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "Paris"
+        );
+        assert!(projected_node.properties.get("age").is_none());
+    }
+
+    #[test]
+    fn test_project_iterator_missing_property() {
+        let node = test_node(1, "Alice"); // Only has "name"
+        let input = MockIterator::from_nodes(vec![node]);
+        let mut project =
+            ProjectIterator::new(Box::new(input), vec!["name".to_string(), "age".to_string()]);
+
+        let row = project.next().unwrap().unwrap();
+        let projected_node = row.entity.as_node().unwrap();
+
+        assert_eq!(
+            projected_node
+                .properties
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "Alice"
+        );
+        assert!(projected_node.properties.get("age").is_none());
+    }
+
+    #[test]
+    fn test_project_iterator_non_node_pass_through() {
+        // Projecting on non-node entities (like EdgeId) should be a no-op currently
+        // as the implementation only checks for Node
+        let row = QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()));
+        let input = MockIterator::from_results(vec![Ok(row)]);
+
+        let mut project = ProjectIterator::new(Box::new(input), vec!["name".to_string()]);
+
+        let result = project.next().unwrap().unwrap();
+        assert!(matches!(result.entity, EntityResult::NodeId(_)));
     }
 
     // ==================== MockIterator Tests ====================

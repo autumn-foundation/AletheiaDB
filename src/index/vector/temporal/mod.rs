@@ -3415,28 +3415,23 @@ mod tests {
     // ==================== Config Validation Tests ====================
 
     #[test]
-    fn test_config_validation_full_snapshot_interval_too_large() {
+    fn test_config_validation_full_snapshot_interval_allowed_large() {
+        // This test verifies that we can set full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH
+        // because the implementation uses a Star Topology (depth=1), so large intervals
+        // do not cause deep traversals.
         let config = TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
-            full_snapshot_interval: 100, // Exceeds MAX_DELTA_CHAIN_DEPTH (10)
+            full_snapshot_interval: 100, // Exceeds MAX_DELTA_CHAIN_DEPTH (50)
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
 
         let result = TemporalVectorIndex::new(config);
         assert!(
-            result.is_err(),
-            "Should reject config with full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH"
+            result.is_ok(),
+            "Should accept config with large full_snapshot_interval"
         );
-
-        if let Err(err) = result {
-            let err_msg = err.to_string();
-            assert!(
-                err_msg.contains("exceeds MAX_DELTA_CHAIN_DEPTH"),
-                "Error message should mention MAX_DELTA_CHAIN_DEPTH"
-            );
-        }
     }
 
     #[test]
@@ -3617,25 +3612,17 @@ mod tests {
             snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
             retention_policy: RetentionPolicy::KeepN(50),
             max_snapshots: 50,
-            full_snapshot_interval: 100, // Would normally never create full snapshots
+            full_snapshot_interval: 100, // High interval, should rely on memory fallback
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
 
-        // This should fail due to validation (full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH)
-        let result = TemporalVectorIndex::new(config);
-        assert!(result.is_err(), "Should reject invalid config");
-
-        // Use valid config instead
-        let config = TemporalVectorConfig {
-            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
-            retention_policy: RetentionPolicy::KeepN(50),
-            max_snapshots: 50,
-            full_snapshot_interval: 10, // Valid
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
-        };
         let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
-        // Add vectors - with full_snapshot_interval=10, we get full snapshots periodically
+        // Add vectors - with full_snapshot_interval=100, we normally wouldn't snapshot fully
+        // until 100 snapshots. But we want to test if memory limits force one earlier.
+        // NOTE: Since MAX_ACCUMULATED_CHANGES is 100,000, we can't easily trigger it
+        // in a unit test without mocking constants or adding huge data.
+        // Instead, we verify that the config is now accepted.
         for i in 0..15 {
             let node_id = NodeId::new(i as u64).unwrap();
             let timestamp = 1000 + (i * 100);

@@ -732,7 +732,14 @@ fn bench_wal_append(c: &mut Criterion) {
                         valid_from: time::now(),
                     },
                 };
-                wal.append_async(operation).unwrap();
+                // Guard against sync-mode append_async footgun: in synchronous mode
+                // there is no background flusher, so repeated append_async can block
+                // on ring-buffer backpressure once full.
+                if matches!(wal.durability_mode(), DurabilityMode::Synchronous) {
+                    wal.append(operation).unwrap();
+                } else {
+                    wal.append_async(operation).unwrap();
+                }
             });
         });
     }

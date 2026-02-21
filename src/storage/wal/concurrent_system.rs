@@ -847,20 +847,23 @@ mod tests {
     }
 
     #[test]
-    fn test_append_sync_isolated_mode() {
+    fn test_append_sync_mode_handles_more_than_stripe_capacity() {
         let dir = tempdir().unwrap();
-        let config = ConcurrentWalSystemConfig::new(dir.path())
+        let mut config = ConcurrentWalSystemConfig::new(dir.path())
             .with_durability_mode(DurabilityMode::Synchronous);
+        // Keep capacity intentionally tiny to regression-test the benchmark footgun:
+        // mode-aware `append()` must continue making progress even when the buffered
+        // async path would hit backpressure quickly.
+        config.stripe_capacity = 8;
         let wal = ConcurrentWalSystem::new(config).unwrap();
 
-        let lsn = wal.append_sync_isolated(create_test_operation(1)).unwrap();
-        assert_eq!(lsn, LSN(1));
-        assert_eq!(wal.total_appends(), 1);
-        assert_eq!(wal.total_flushed(), 1);
+        for i in 1..=64 {
+            let lsn = wal.append(create_test_operation(i)).unwrap();
+            assert_eq!(lsn, LSN(i));
+        }
 
-        // Isolated path should flush directly, leaving buffered queue empty.
-        let stats = wal.flush().unwrap();
-        assert_eq!(stats.entries_flushed, 0);
+        assert_eq!(wal.total_appends(), 64);
+        assert_eq!(wal.total_flushed(), 64);
     }
 
     #[test]
