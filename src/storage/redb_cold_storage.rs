@@ -45,7 +45,7 @@
 
 use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
-use crate::core::version::{EdgeVersion, NodeVersion};
+use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use rayon::prelude::*;
 use redb::{ReadableDatabase, ReadableTable};
@@ -72,11 +72,36 @@ const FLUSHED_LSN_KEY: &str = "flushed_lsn";
 /// Batch size threshold where parallel pre-compression becomes worthwhile.
 const PARALLEL_COMPRESSION_THRESHOLD: usize = 1_024;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PreparedVersionBatch {
     entries: Vec<(u64, Vec<u8>)>,
     raw_size_bytes: u64,
     compressed_size_bytes: u64,
+}
+
+impl PreparedVersionBatch {
+    #[inline]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+            raw_size_bytes: 0,
+            compressed_size_bytes: 0,
+        }
+    }
+
+    #[inline]
+    fn add_entry(&mut self, version_id: VersionId, payload: Vec<u8>, raw_size_bytes: u64) {
+        self.raw_size_bytes += raw_size_bytes;
+        self.compressed_size_bytes += payload.len() as u64;
+        self.entries.push((version_id.as_u64(), payload));
+    }
+
+    #[inline]
+    fn merge(&mut self, mut other: Self) {
+        self.raw_size_bytes += other.raw_size_bytes;
+        self.compressed_size_bytes += other.compressed_size_bytes;
+        self.entries.append(&mut other.entries);
+    }
 }
 
 // ============================================================================
@@ -426,112 +451,56 @@ impl RedbColdStorage {
             && batch_len >= PARALLEL_COMPRESSION_THRESHOLD
     }
 
+    fn prepare_batch<V, EncodeFn>(
+        &self,
+        versions: &[V],
+        encode_version: EncodeFn,
+    ) -> Result<PreparedVersionBatch>
+    where
+        V: EntityVersion + Sync,
+        EncodeFn: Fn(&V) -> Vec<u8> + Sync + Send,
+    {
+        let cold_config = self.config.to_cold_storage_config();
+
+        if self.should_parallel_compress(versions.len()) {
+            versions
+                .par_iter()
+                .try_fold(PreparedVersionBatch::default, |mut prepared, version| {
+                    let encoded = encode_version(version);
+                    let raw_size_bytes = encoded.len() as u64;
+                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
+                    prepared.add_entry(version.version_id(), compressed, raw_size_bytes);
+                    Ok::<_, crate::core::error::Error>(prepared)
+                })
+                .try_reduce(PreparedVersionBatch::default, |mut left, right| {
+                    left.merge(right);
+                    Ok::<_, crate::core::error::Error>(left)
+                })
+        } else {
+            let mut prepared = PreparedVersionBatch::with_capacity(versions.len());
+            for version in versions {
+                let encoded = encode_version(version);
+                let raw_size_bytes = encoded.len() as u64;
+                let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
+                prepared.add_entry(version.version_id(), compressed, raw_size_bytes);
+            }
+
+            Ok(prepared)
+        }
+    }
+
     fn prepare_node_versions_batch(
         &self,
         versions: &[NodeVersion],
     ) -> Result<PreparedVersionBatch> {
-        let cold_config = self.config.to_cold_storage_config();
-
-        let entries_with_sizes: Vec<(u64, Vec<u8>, u64, u64)> = if self
-            .should_parallel_compress(versions.len())
-        {
-            versions
-                .par_iter()
-                .map(|version| {
-                    let encoded = encode_node_version(version);
-                    let raw_size = encoded.len() as u64;
-                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
-                    let compressed_size = compressed.len() as u64;
-                    Ok::<_, crate::core::error::Error>((
-                        version.id.as_u64(),
-                        compressed,
-                        raw_size,
-                        compressed_size,
-                    ))
-                })
-                .collect::<Result<_>>()?
-        } else {
-            versions
-                .iter()
-                .map(|version| {
-                    let encoded = encode_node_version(version);
-                    let raw_size = encoded.len() as u64;
-                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
-                    let compressed_size = compressed.len() as u64;
-                    Ok((version.id.as_u64(), compressed, raw_size, compressed_size))
-                })
-                .collect::<Result<_>>()?
-        };
-
-        let raw_size_bytes = entries_with_sizes.iter().map(|(_, _, raw, _)| *raw).sum();
-        let compressed_size_bytes = entries_with_sizes
-            .iter()
-            .map(|(_, _, _, compressed)| *compressed)
-            .sum();
-        let entries = entries_with_sizes
-            .into_iter()
-            .map(|(id, payload, _, _)| (id, payload))
-            .collect();
-
-        Ok(PreparedVersionBatch {
-            entries,
-            raw_size_bytes,
-            compressed_size_bytes,
-        })
+        self.prepare_batch(versions, encode_node_version)
     }
 
     fn prepare_edge_versions_batch(
         &self,
         versions: &[EdgeVersion],
     ) -> Result<PreparedVersionBatch> {
-        let cold_config = self.config.to_cold_storage_config();
-
-        let entries_with_sizes: Vec<(u64, Vec<u8>, u64, u64)> = if self
-            .should_parallel_compress(versions.len())
-        {
-            versions
-                .par_iter()
-                .map(|version| {
-                    let encoded = encode_edge_version(version);
-                    let raw_size = encoded.len() as u64;
-                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
-                    let compressed_size = compressed.len() as u64;
-                    Ok::<_, crate::core::error::Error>((
-                        version.id.as_u64(),
-                        compressed,
-                        raw_size,
-                        compressed_size,
-                    ))
-                })
-                .collect::<Result<_>>()?
-        } else {
-            versions
-                .iter()
-                .map(|version| {
-                    let encoded = encode_edge_version(version);
-                    let raw_size = encoded.len() as u64;
-                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
-                    let compressed_size = compressed.len() as u64;
-                    Ok((version.id.as_u64(), compressed, raw_size, compressed_size))
-                })
-                .collect::<Result<_>>()?
-        };
-
-        let raw_size_bytes = entries_with_sizes.iter().map(|(_, _, raw, _)| *raw).sum();
-        let compressed_size_bytes = entries_with_sizes
-            .iter()
-            .map(|(_, _, _, compressed)| *compressed)
-            .sum();
-        let entries = entries_with_sizes
-            .into_iter()
-            .map(|(id, payload, _, _)| (id, payload))
-            .collect();
-
-        Ok(PreparedVersionBatch {
-            entries,
-            raw_size_bytes,
-            compressed_size_bytes,
-        })
+        self.prepare_batch(versions, encode_edge_version)
     }
 
     /// Set fault injection flag for write operations (Test only).
