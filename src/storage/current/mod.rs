@@ -310,7 +310,7 @@ impl CurrentStorage {
 
     /// Get a reference to the HNSW index and its config for a specific property.
     ///
-    /// Used for persistence operations. Returns (index, config, vector_count, mappings).
+    /// Used for persistence operations. Returns (index, config, vector_count).
     #[allow(clippy::type_complexity)]
     pub(crate) fn get_vector_index_for_persistence(
         &self,
@@ -319,7 +319,6 @@ impl CurrentStorage {
         Arc<crate::index::vector::HnswIndex>,
         crate::index::vector::HnswConfig,
         usize,
-        Vec<(u64, u64)>,
     )> {
         use crate::index::vector::VectorIndex;
         self.vector_indexes.get(property_name).map(|entry| {
@@ -327,10 +326,7 @@ impl CurrentStorage {
             let config = entry.value().config.clone();
             let count = index.len();
 
-            // Extract ID mappings from the index
-            let mappings = index.get_id_mappings();
-
-            (index, config, count, mappings)
+            (index, config, count)
         })
     }
 
