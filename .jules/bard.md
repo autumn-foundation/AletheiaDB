@@ -35,3 +35,7 @@
 ## 2024-05-27 - Experimental Feature Opacity
 **Confusion:** The `Chronos` (pathfinding) and `Dreamer` (vector extrapolation) experimental modules lacked explanations of their underlying algorithms, making them opaque "black boxes."
 **Clarification:** Added detailed algorithmic explanations to `Chronos` (Snapshot Pathfinding, Path Stability) and clarified `Dreamer`'s dependency on `search_vectors_in`.
+
+## 2024-05-28 - Broken Links in Feature-Gated Modules
+**Confusion:** Running `cargo doc` without features enabled resulted in broken intra-doc links to experimental modules (like `sherlock` or `hindsight`), causing warnings and confusion about missing items.
+**Clarification:** Documentation generation for experimental features requires enabling the `nova` feature flag (e.g., `cargo doc --features nova`).
