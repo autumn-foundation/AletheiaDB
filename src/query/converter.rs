@@ -395,49 +395,85 @@ impl AstConverter {
 
         // 3. Convert WHERE clause to filter operations
         if let Some(ref where_clause) = ast.where_clause {
-            let predicate = self.convert_predicate(&where_clause.predicate)?;
-            ops.push(QueryOp::Filter(predicate));
+            self.convert_where_clause(where_clause, &mut ops)?;
         }
 
         // 4. Convert RANK BY SIMILARITY clause
         if let Some(ref rank) = ast.rank {
-            let embedding = self.resolve_embedding(&rank.embedding)?;
-            ops.push(QueryOp::RankBySimilarity {
-                embedding,
-                top_k: rank.top_k,
-                property_key: None,
-            });
+            self.convert_rank_clause(rank, &mut ops)?;
         }
 
         // 5. Convert RETURN clause to projection
         if let Some(ref return_clause) = ast.return_clause {
-            let projection = self.convert_return(return_clause)?;
-            if !projection.is_empty() {
-                ops.push(QueryOp::Project(projection));
-            }
-            if return_clause.distinct {
-                ops.push(QueryOp::Distinct);
-            }
+            self.convert_return_clause_ops(return_clause, &mut ops)?;
         }
 
         // 6. Convert ORDER BY clause
         if let Some(ref order_clause) = ast.order {
-            self.convert_order(order_clause, &mut ops)?;
+            self.convert_order_clause(order_clause, &mut ops)?;
         }
 
         // 7. Convert SKIP and LIMIT
-        if let Some(skip) = ast.skip {
-            ops.push(QueryOp::Skip(skip));
-        }
-        if let Some(limit) = ast.limit {
-            ops.push(QueryOp::Limit(limit));
-        }
+        self.convert_pagination(ast.skip, ast.limit, &mut ops);
 
         Ok(Query {
             ops,
             temporal_context,
             hints,
         })
+    }
+
+    fn convert_where_clause(
+        &self,
+        where_clause: &super::ast::WhereClause,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<()> {
+        let predicate = self.convert_predicate(&where_clause.predicate)?;
+        ops.push(QueryOp::Filter(predicate));
+        Ok(())
+    }
+
+    fn convert_rank_clause(
+        &self,
+        rank: &super::ast::RankClause,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<()> {
+        let embedding = self.resolve_embedding(&rank.embedding)?;
+        ops.push(QueryOp::RankBySimilarity {
+            embedding,
+            top_k: rank.top_k,
+            property_key: None,
+        });
+        Ok(())
+    }
+
+    fn convert_return_clause_ops(
+        &self,
+        return_clause: &ReturnClause,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<()> {
+        let projection = self.convert_return(return_clause)?;
+        if !projection.is_empty() {
+            ops.push(QueryOp::Project(projection));
+        }
+        if return_clause.distinct {
+            ops.push(QueryOp::Distinct);
+        }
+        Ok(())
+    }
+
+    fn convert_pagination(
+        &self,
+        skip: Option<usize>,
+        limit: Option<usize>,
+        ops: &mut Vec<QueryOp>,
+    ) {
+        if let Some(skip) = skip {
+            ops.push(QueryOp::Skip(skip));
+        }
+        if let Some(limit) = limit {
+            ops.push(QueryOp::Limit(limit));
+        }
     }
 
     /// Convert temporal clause to TemporalContext.
@@ -672,6 +708,41 @@ impl AstConverter {
             PredicateExpr::Exists(prop) => Ok(Predicate::Exists(prop.property.clone())),
             PredicateExpr::IsNull(prop) => Ok(Predicate::NotExists(prop.property.clone())),
             PredicateExpr::IsNotNull(prop) => Ok(Predicate::Exists(prop.property.clone())),
+            PredicateExpr::Contains { .. }
+            | PredicateExpr::StartsWith { .. }
+            | PredicateExpr::EndsWith { .. } => self.convert_string_predicate(expr),
+            PredicateExpr::In { property, values } => self.convert_in_predicate(property, values),
+            PredicateExpr::And(_, _) | PredicateExpr::Or(_, _) | PredicateExpr::Not(_) => {
+                self.convert_logic_predicate(expr)
+            }
+            PredicateExpr::Grouped(inner) => self.convert_predicate(inner),
+        }
+    }
+
+    /// Convert logic predicates (AND, OR, NOT).
+    fn convert_logic_predicate(&self, expr: &PredicateExpr) -> Result<Predicate> {
+        match expr {
+            PredicateExpr::And(left, right) => {
+                let l = self.convert_predicate(left)?;
+                let r = self.convert_predicate(right)?;
+                Ok(l.and(r))
+            }
+            PredicateExpr::Or(left, right) => {
+                let l = self.convert_predicate(left)?;
+                let r = self.convert_predicate(right)?;
+                Ok(l.or(r))
+            }
+            PredicateExpr::Not(inner) => {
+                let p = self.convert_predicate(inner)?;
+                Ok(!p)
+            }
+            _ => unreachable!("convert_logic_predicate called on non-logic expr"),
+        }
+    }
+
+    /// Convert string predicates (CONTAINS, STARTS WITH, ENDS WITH).
+    fn convert_string_predicate(&self, expr: &PredicateExpr) -> Result<Predicate> {
+        match expr {
             PredicateExpr::Contains {
                 property,
                 substring,
@@ -687,32 +758,24 @@ impl AstConverter {
                 key: property.property.clone(),
                 suffix: suffix.clone(),
             }),
-            PredicateExpr::In { property, values } => {
-                let pred_values: Result<Vec<PredicateValue>> = values
-                    .iter()
-                    .map(|v| self.convert_property_value(v))
-                    .collect();
-                Ok(Predicate::In {
-                    key: property.property.clone(),
-                    values: pred_values?,
-                })
-            }
-            PredicateExpr::And(left, right) => {
-                let l = self.convert_predicate(left)?;
-                let r = self.convert_predicate(right)?;
-                Ok(l.and(r))
-            }
-            PredicateExpr::Or(left, right) => {
-                let l = self.convert_predicate(left)?;
-                let r = self.convert_predicate(right)?;
-                Ok(l.or(r))
-            }
-            PredicateExpr::Not(inner) => {
-                let p = self.convert_predicate(inner)?;
-                Ok(!p)
-            }
-            PredicateExpr::Grouped(inner) => self.convert_predicate(inner),
+            _ => unreachable!("convert_string_predicate called on non-string expr"),
         }
+    }
+
+    /// Convert IN predicate.
+    fn convert_in_predicate(
+        &self,
+        property: &super::ast::PropertyAccess,
+        values: &[PropertyValue],
+    ) -> Result<Predicate> {
+        let pred_values: Result<Vec<PredicateValue>> = values
+            .iter()
+            .map(|v| self.convert_property_value(v))
+            .collect();
+        Ok(Predicate::In {
+            key: property.property.clone(),
+            values: pred_values?,
+        })
     }
 
     /// Convert a comparison expression.
@@ -822,7 +885,11 @@ impl AstConverter {
     }
 
     /// Convert ORDER BY clause to Sort operations.
-    fn convert_order(&self, order_clause: &OrderClause, ops: &mut Vec<QueryOp>) -> Result<()> {
+    fn convert_order_clause(
+        &self,
+        order_clause: &OrderClause,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<()> {
         for item in &order_clause.items {
             let sort_key = match &item.expression {
                 Expression::Property(prop) => SortKey::Property(prop.property.clone()),
