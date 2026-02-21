@@ -116,6 +116,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
@@ -997,99 +998,119 @@ impl VectorIndex for HnswIndex {
                 // This prevents lock ordering inversion (dashmap -> inner is FORBIDDEN)
                 drop(entry);
 
-                // Step 1: Atomically allocate a unique key (no locks held)
-                let key = loop {
-                    let current = self.next_key.load(Ordering::SeqCst);
-                    if current > MAX_VALID_KEY {
+                let mut collisions = 0;
+                loop {
+                    // Step 1: Atomically allocate a unique key (no locks held)
+                    let key = loop {
+                        let current = self.next_key.load(Ordering::SeqCst);
+                        if current > MAX_VALID_KEY {
+                            return Err(Error::Vector(VectorError::IndexError(
+                                "Maximum number of vectors exceeded (key overflow protection)"
+                                    .to_string(),
+                            )));
+                        }
+                        // Try to atomically increment; retry if another thread beat us
+                        match self.next_key.compare_exchange(
+                            current,
+                            current + 1,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(key) => break key,
+                            Err(_) => continue, // Retry with new current value
+                        }
+                    };
+
+                    // Note: save_lock is already held at start of function.
+
+                    // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant).
+                    // Vacant path updates the index before claiming the map entry (Inner -> Map).
+                    let index = self.inner.write();
+
+                    // Ensure capacity exists. The optimistic check in check_and_expand_capacity
+                    // might have been raced by other threads. Since we hold the write lock now,
+                    // we are the source of truth.
+                    if index.size() >= index.capacity() {
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        self.retry_usearch(
+                            || index.reserve(new_capacity),
+                            "Failed to expand capacity (race recovery)",
+                        )?;
+                    }
+
+                    // Step 3: Add to inner usearch index while holding write lock
+                    // Handle "Duplicate keys" error by retrying with new key (Robustness fix)
+                    match self.retry_usearch(|| index.add(key, vector), "Failed to add vector") {
+                        Ok(_) => {} // Success, continue
+                        Err(e) => {
+                            if e.to_string().contains("Duplicate keys") {
+                                // Collision detected! (Likely due to persistence mismatch)
+                                // Drop lock, increment retry count, and continue loop to get new key
+                                drop(index);
+                                collisions += 1;
+                                if collisions > 1000 {
+                                    return Err(Error::Vector(VectorError::IndexError(
+                                        "Too many key collisions (index corruption likely)"
+                                            .to_string(),
+                                    )));
+                                }
+                                continue; // Loop again, get new key
+                            }
+                            return Err(e); // Propagate other errors
+                        }
+                    }
+
+                    #[cfg(test)]
+                    {
+                        // Hook to simulate race condition: simulate another thread adding mapping
+                        // after we checked it was vacant but before we inserted our mapping.
+                        if let Some(hook) = TEST_RACE_HOOK.with(|h| h.get()) {
+                            hook(self, id);
+                        }
+                    }
+
+                    // Step 4: Insert to mappings (dashmap) WHILE HOLDING INNER LOCK
+                    // We keep the inner lock held to ensure atomicity with respect to save_internal().
+                    // If we dropped the lock here, save_internal() could run, see the new vector in inner,
+                    // but miss the mapping in id_mapping (Zombie Vector bug).
+                    //
+                    // Lock order check: Inner -> Map (via entry()). This is consistent with other operations.
+                    let race_detected = match self.id_mapping.entry(id) {
+                        dashmap::mapref::entry::Entry::Occupied(_) => true,
+                        dashmap::mapref::entry::Entry::Vacant(e) => {
+                            // Success: we claimed the ID
+                            e.insert(key);
+                            // Drop the entry lock implicitly here when e is consumed/scope ends
+                            false
+                        }
+                    };
+
+                    if race_detected {
+                        // Race detected: Another thread added this NodeId concurrently
+                        // Our vector is in inner with key=key, but someone else claimed the ID.
+                        // We must rollback our addition to avoid phantom vectors.
+
+                        // We already hold the inner write lock, so we can remove directly.
+                        self.retry_usearch(
+                            || index.remove(key),
+                            "Failed to rollback vector after concurrent add",
+                        )?;
                         return Err(Error::Vector(VectorError::IndexError(
-                            "Maximum number of vectors exceeded (key overflow protection)"
+                            "Concurrent add detected for same NodeId, vector already exists"
                                 .to_string(),
                         )));
                     }
-                    // Try to atomically increment; retry if another thread beat us
-                    match self.next_key.compare_exchange(
-                        current,
-                        current + 1,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(key) => break key,
-                        Err(_) => continue, // Retry with new current value
-                    }
-                };
 
-                // Note: save_lock is already held at start of function.
+                    // If no race, we successfully inserted into id_mapping.
+                    // Now insert reverse mapping.
+                    self.reverse_mapping.insert(key, id);
+                    self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
 
-                // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant).
-                // Vacant path updates the index before claiming the map entry (Inner -> Map).
-                let index = self.inner.write();
+                    // Explicitly drop index lock (though it would drop at end of scope)
+                    drop(index);
 
-                // Ensure capacity exists. The optimistic check in check_and_expand_capacity
-                // might have been raced by other threads. Since we hold the write lock now,
-                // we are the source of truth.
-                if index.size() >= index.capacity() {
-                    let new_capacity = (index.capacity() * 2).max(1024);
-                    self.retry_usearch(
-                        || index.reserve(new_capacity),
-                        "Failed to expand capacity (race recovery)",
-                    )?;
+                    return Ok(());
                 }
-
-                // Step 3: Add to inner usearch index while holding write lock
-                self.retry_usearch(|| index.add(key, vector), "Failed to add vector")?;
-
-                #[cfg(test)]
-                {
-                    // Hook to simulate race condition: simulate another thread adding mapping
-                    // after we checked it was vacant but before we inserted our mapping.
-                    if let Some(hook) = TEST_RACE_HOOK.with(|h| h.get()) {
-                        hook(self, id);
-                    }
-                }
-
-                // Step 4: Insert to mappings (dashmap) WHILE HOLDING INNER LOCK
-                // We keep the inner lock held to ensure atomicity with respect to save_internal().
-                // If we dropped the lock here, save_internal() could run, see the new vector in inner,
-                // but miss the mapping in id_mapping (Zombie Vector bug).
-                //
-                // Lock order check: Inner -> Map (via entry()). This is consistent with other operations.
-                let race_detected = match self.id_mapping.entry(id) {
-                    dashmap::mapref::entry::Entry::Occupied(_) => true,
-                    dashmap::mapref::entry::Entry::Vacant(e) => {
-                        // Success: we claimed the ID
-                        e.insert(key);
-                        // Drop the entry lock implicitly here when e is consumed/scope ends
-                        false
-                    }
-                };
-
-                if race_detected {
-                    // Race detected: Another thread added this NodeId concurrently
-                    // Our vector is in inner with key=key, but someone else claimed the ID.
-                    // We must rollback our addition to avoid phantom vectors.
-
-                    // We already hold the inner write lock, so we can remove directly.
-                    self.retry_usearch(
-                        || index.remove(key),
-                        "Failed to rollback vector after concurrent add",
-                    )?;
-
-                    // The existing mapping wins; return error to indicate retry needed
-                    return Err(Error::Vector(VectorError::IndexError(
-                        "Concurrent add detected for same NodeId, vector already exists"
-                            .to_string(),
-                    )));
-                }
-
-                // If no race, we successfully inserted into id_mapping.
-                // Now insert reverse mapping.
-                self.reverse_mapping.insert(key, id);
-                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
-
-                // Explicitly drop index lock (though it would drop at end of scope)
-                drop(index);
-
-                Ok(())
             }
         }
     }
@@ -1609,6 +1630,17 @@ impl HnswIndex {
     /// - **Binary Index**: Saved directly by usearch C++ library.
     /// - **Mappings File**: Saved by Rust with CRC32 checksum.
     fn save_internal(&self, path: &Path) -> Result<()> {
+        // Generate unique suffix for atomic save
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let suffix = format!("{}", timestamp);
+
+        let index_tmp_path = path.with_extension(format!("usearch.{}.tmp", suffix));
+        let mappings_tmp_path = path.with_extension(format!("usearch.mappings.{}.tmp", suffix));
+        let mappings_path = path.with_extension("usearch.mappings");
+
         // Acquire save_lock (exclusive) to prevent concurrent adds/removes.
         // This ensures consistency between the index snapshot and the ID mappings.
         let _save_guard = self.save_lock.write();
@@ -1625,28 +1657,27 @@ impl HnswIndex {
             .collect();
         let count = mappings.len();
 
+        // Save usearch index to temporary file
         index
-            .save(path.to_str().ok_or_else(|| {
+            .save(index_tmp_path.to_str().ok_or_else(|| {
                 Error::Vector(VectorError::IndexError(
                     "Path contains invalid UTF-8".to_string(),
                 ))
             })?)
             .map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
-                    "Failed to save index: {}",
+                    "Failed to save index to temp file: {}",
                     e
                 )))
             })?;
-        // Explicit drop to release lock before I/O
+
+        // Explicit drop to release lock before I/O (mappings write)
         drop(index);
+        // We drop save_lock here to allow concurrency.
+        // Temp files are unique, so no conflict.
         drop(_save_guard);
 
-        // Save mappings to companion file with integrity checks
-        // Format: [MAGIC:4][VERSION:2][DIMS:8][QUANT:1][METRIC:1][COUNT:8][DATA:16*count][CRC32:4]
-        let mappings_path = path.with_extension("usearch.mappings");
-
-        // Calculate total size: Magic(4) + Version(1) + Dims(8) + Quant(1) + Metric(1) + Count(8) + Data(count * 16) + CRC(4)
-        // Use checked arithmetic to prevent overflow
+        // Calculate expected size for integrity check (logic preserved)
         let count_size = count
             .checked_mul(16)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
@@ -1654,17 +1685,46 @@ impl HnswIndex {
             .checked_add(4 + 1 + 8 + 1 + 1 + 8 + 4)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
 
-        // Open file with streaming writer
-        let file = File::create(&mappings_path).map_err(|e| {
+        // Save mappings to temporary companion file
+        let file = File::create(&mappings_tmp_path).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
-                "Failed to create mappings file: {}",
+                "Failed to create temp mappings file: {}",
                 e
             )))
         })?;
         let mut writer = BufWriter::new(file);
 
         // Use Vec iterator instead of DashMap iterator
-        Self::write_mappings_to_writer(&mut writer, mappings.into_iter(), count, &self.config)
+        Self::write_mappings_to_writer(&mut writer, mappings.into_iter(), count, &self.config)?;
+
+        // Atomic Rename Sequence: Mappings FIRST, then Index
+        // This ensures that if we crash, we might have (New Mappings, Old Index)
+        // which prevents key collision on recovery (next_key will be high).
+        // If we did Index first, we could have (New Index, Old Mappings),
+        // causing next_key to be low, leading to collisions.
+
+        std::fs::rename(&mappings_tmp_path, &mappings_path).map_err(|e| {
+            // Attempt to clean up temp files on error
+            let _ = std::fs::remove_file(&index_tmp_path);
+            let _ = std::fs::remove_file(&mappings_tmp_path);
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to rename mappings file: {}",
+                e
+            )))
+        })?;
+
+        std::fs::rename(&index_tmp_path, path).map_err(|e| {
+            // Attempt to clean up temp files on error
+            let _ = std::fs::remove_file(&index_tmp_path);
+            // Note: mappings file is already renamed, so we can't rollback easily without risk.
+            // But we are in "New Mappings, Old Index" state, which is safe for collision.
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to rename index file: {}",
+                e
+            )))
+        })?;
+
+        Ok(())
     }
 
     /// Helper method to stream mappings to a writer with CRC calculation.
