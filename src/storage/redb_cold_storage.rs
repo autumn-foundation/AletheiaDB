@@ -2722,6 +2722,67 @@ mod tests {
     }
 
     #[test]
+    fn test_error_parent_directory_creation_fails_conflict() {
+        // More robust test: create a file, then try to create a directory with the same name
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("conflict_file");
+        std::fs::write(&file_path, b"").unwrap();
+
+        // Try to use the file as a directory for the DB path
+        // e.g. "conflict_file/db.redb"
+        let invalid_path = file_path.join("db.redb");
+
+        let result = RedbColdStorage::with_default_config(invalid_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_node_versions_batch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let v1 = create_test_node_version(1);
+        let v2 = create_test_node_version(2);
+        let v3 = create_test_node_version(3);
+
+        storage
+            .store_node_versions_batch(&[v1.clone(), v2.clone(), v3.clone()])
+            .unwrap();
+
+        let ids = vec![v1.id, v2.id, v3.id, VersionId::new(999).unwrap()];
+        let results = storage.get_node_versions_batch(&ids).unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert!(results[0].is_some());
+        assert!(results[1].is_some());
+        assert!(results[2].is_some());
+        assert!(results[3].is_none());
+        assert_eq!(results[0].as_ref().unwrap().id, v1.id);
+    }
+
+    #[test]
+    fn test_get_edge_versions_batch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let v1 = create_test_edge_version(1);
+        let v2 = create_test_edge_version(2);
+
+        storage
+            .store_edge_versions_batch(&[v1.clone(), v2.clone()])
+            .unwrap();
+
+        let ids = vec![v1.id, v2.id];
+        let results = storage.get_edge_versions_batch(&ids).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_some());
+        assert_eq!(results[0].as_ref().unwrap().id, v1.id);
+    }
+
+    #[test]
     fn test_corrupted_database_recovery() {
         use std::fs;
         let temp_dir = tempfile::tempdir().unwrap();
