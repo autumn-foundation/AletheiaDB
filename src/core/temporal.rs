@@ -380,7 +380,7 @@ impl BiTemporalInterval {
     /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
     pub fn is_current(&self) -> bool {
-        self.is_currently_valid() || self.is_currently_recorded()
+        self.is_currently_valid() && self.is_currently_recorded()
     }
 
     /// Check if this interval is visible at the given valid time.
