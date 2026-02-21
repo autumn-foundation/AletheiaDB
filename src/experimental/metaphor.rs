@@ -277,9 +277,7 @@ mod tests {
         let y = db.create_node("Target", props_y).unwrap();
 
         let metaphor = Metaphor::new(&db);
-        let alignment = metaphor
-            .align(&[a], &[x, y], "vec", 0.5)
-            .unwrap();
+        let alignment = metaphor.align(&[a], &[x, y], "vec", 0.5).unwrap();
 
         assert_eq!(alignment.mappings.len(), 1);
         assert_eq!(alignment.mappings[0].source, a);
@@ -339,7 +337,7 @@ mod tests {
                 &[c, a, b],
                 &[z, x, y],
                 "vec",
-                0.5 // Structural weight
+                0.5, // Structural weight
             )
             .unwrap();
 
