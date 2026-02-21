@@ -1,3 +1,23 @@
+//! Graph Context Generation for LLMs
+//!
+//! This module provides tools to generate rich, textual descriptions of
+//! graph nodes and their surroundings.
+//!
+//! # Purpose
+//!
+//! Large Language Models (LLMs) often need context to answer questions about
+//! entities in a knowledge graph. This module generates a "context window"
+//! for a specific node, including:
+//! - **Identity**: Label and ID.
+//! - **State**: Current property values.
+//! - **History**: How the node has evolved over time (narrative).
+//! - **Neighborhood**: Connected nodes and edges.
+//!
+//! # Format
+//!
+//! The output is formatted as Markdown, optimized for readability by both
+//! humans and LLMs.
+
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
@@ -10,6 +30,28 @@ use std::fmt::Write;
 /// This generates a Markdown-formatted string containing the node's current state,
 /// recent history (evolution), and immediate neighborhood. It is designed for
 /// injecting context into LLM prompts.
+///
+/// # Example
+///
+/// ```rust
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::graph_context::GraphContextBuilder;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+/// // ... create node ...
+/// # let props = aletheiadb::properties! { "name" => "Alice" };
+/// # let node_id = db.create_node("Person", props)?;
+///
+/// let context = GraphContextBuilder::new(&db, node_id)
+///     .with_history_limit(5)
+///     .with_neighbor_limit(10)
+///     .build()?;
+///
+/// println!("{}", context);
+/// # Ok(())
+/// # }
+/// ```
 pub struct GraphContextBuilder<'a> {
     db: &'a AletheiaDB,
     center_node: NodeId,
@@ -47,6 +89,12 @@ impl<'a> GraphContextBuilder<'a> {
     }
 
     /// Build the context string (Markdown).
+    ///
+    /// The output includes:
+    /// 1. **Header**: Node ID and Label.
+    /// 2. **Properties**: Current key-value pairs.
+    /// 3. **Evolution**: Narrative history of changes (up to `history_limit`).
+    /// 4. **Neighborhood**: Outgoing edges and target nodes (up to `neighbor_limit`).
     pub fn build(&self) -> Result<String> {
         let mut output = String::new();
         let node = self.db.get_node(self.center_node)?;

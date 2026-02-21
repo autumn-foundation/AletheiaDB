@@ -80,6 +80,11 @@ pub use stats::Statistics;
 /// - converting the high-level `Query` IR into a `LogicalPlan`
 /// - applying optimization rules to the `LogicalPlan`
 /// - selecting the most efficient `PhysicalPlan` based on a cost model
+///
+/// # Thread Safety
+///
+/// The planner is designed to be thread-safe and can be shared across threads.
+/// It holds an `Arc<Statistics>` and `Arc<CurrentStorage>`.
 pub struct QueryPlanner {
     /// Statistics for cardinality estimation (e.g., node counts, property histograms).
     stats: Arc<Statistics>,
@@ -107,6 +112,8 @@ impl QueryPlanner {
     }
 
     /// Create a planner with custom cost model.
+    ///
+    /// Useful for testing or specialized workloads.
     #[must_use]
     pub fn with_cost_model(mut self, cost_model: CostModel) -> Self {
         self.cost_model = cost_model;
@@ -114,6 +121,8 @@ impl QueryPlanner {
     }
 
     /// Create a planner with custom optimization rules.
+    ///
+    /// Allows injecting specific rules or disabling default rules for testing.
     #[must_use]
     pub fn with_rules(mut self, rules: Vec<Box<dyn OptimizationRule>>) -> Self {
         self.rules = rules;
@@ -146,7 +155,10 @@ impl QueryPlanner {
         Ok(physical)
     }
 
-    /// Convert a Query to a LogicalPlan
+    /// Convert a `Query` (IR) to an initial `LogicalPlan`.
+    ///
+    /// This step translates the linear list of `QueryOp`s into a tree of `LogicalOp`s.
+    /// It handles the implicit source/pipe connections in the query builder API.
     fn to_logical_plan(&self, query: &Query) -> Result<LogicalPlan> {
         if query.ops.is_empty() {
             return Err(Error::Query(QueryError::SyntaxError {
@@ -178,7 +190,11 @@ impl QueryPlanner {
         Ok(plan)
     }
 
-    /// Apply a QueryOp to the current logical plan
+    /// Apply a `QueryOp` to the current logical plan state.
+    ///
+    /// This acts as a state machine transition:
+    /// - If `current` is `None`, the op MUST be a source operation (e.g., `StartNode`).
+    /// - If `current` is `Some`, the op is applied as a transformation (unary) on top of it.
     fn apply_query_op(&self, current: Option<LogicalOp>, op: &QueryOp) -> Result<LogicalOp> {
         // Check if it is a source operation (starts a new pipeline)
         if let Some(source_op) = self.apply_source_op(op)? {
@@ -191,8 +207,10 @@ impl QueryPlanner {
         self.apply_unary_op(input, op)
     }
 
-    /// Try to apply a source operation. Returns Ok(Some(op)) if successful,
-    /// Ok(None) if it's not a source operation.
+    /// Try to apply a source operation.
+    ///
+    /// Returns `Ok(Some(op))` if the operation is a valid source (can start a pipeline).
+    /// Returns `Ok(None)` if it's not a source operation (must be a transformation).
     fn apply_source_op(&self, op: &QueryOp) -> Result<Option<LogicalOp>> {
         match op {
             QueryOp::StartNode(id) => Ok(Some(LogicalOp::Scan(ScanOp::NodeLookup(vec![*id])))),
@@ -237,7 +255,10 @@ impl QueryPlanner {
         }
     }
 
-    /// Apply a unary operation to an input logical op.
+    /// Apply a unary operation (transformation) to an input logical op.
+    ///
+    /// This handles operations like `Filter`, `Limit`, `Traverse`, etc., which
+    /// take an existing stream of results and transform it.
     fn apply_unary_op(&self, input: LogicalOp, op: &QueryOp) -> Result<LogicalOp> {
         match op {
             // Graph operations
@@ -364,7 +385,10 @@ impl QueryPlanner {
         })
     }
 
-    /// Apply optimization rules iteratively until no more changes
+    /// Apply optimization rules iteratively until fixed point or max iterations.
+    ///
+    /// This uses a greedy approach where rules are applied in order. If any rule
+    /// modifies the plan, the loop restarts to allow other rules to react to the change.
     fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let mut current = plan;
         let mut changed = true;
@@ -395,7 +419,12 @@ impl QueryPlanner {
         Ok(current)
     }
 
-    /// Convert logical plan to physical plan
+    /// Convert optimized logical plan to executable physical plan.
+    ///
+    /// This step selects concrete physical operators for each logical operator.
+    /// Currently, this is a 1:1 mapping, but in the future it could involve
+    /// selecting between multiple physical implementations (e.g., HashJoin vs MergeJoin)
+    /// based on cost.
     fn to_physical_plan(&self, logical: &LogicalPlan) -> Result<PhysicalPlan> {
         let physical_op = self.to_physical_op(&logical.root, &logical.temporal_context)?;
         let cost = self.cost_model.estimate(&physical_op, &self.stats);
@@ -409,7 +438,7 @@ impl QueryPlanner {
         })
     }
 
-    /// Convert a logical operator to a physical operator
+    /// Convert a logical operator to a physical operator.
     fn to_physical_op(
         &self,
         logical: &LogicalOp,
