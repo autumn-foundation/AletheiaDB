@@ -1,7 +1,7 @@
 // Regression Test: PropertyMap Recursion and Memory Limits
 // Ensures that PropertyMap deserialization handles malicious inputs gracefully.
 
-use aletheiadb::core::property::{PropertyValue, MAX_RECURSION_DEPTH, TAG_ARRAY, TAG_NULL};
+use aletheiadb::core::property::{MAX_RECURSION_DEPTH, PropertyValue, TAG_ARRAY, TAG_NULL};
 
 #[test]
 fn regression_recursion_limit_enforced() {

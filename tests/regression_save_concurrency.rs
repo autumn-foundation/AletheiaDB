@@ -2,11 +2,11 @@
 // Ensures that `HnswIndex::save` does not block search operations.
 // Fixes "Stop the World" DoS vulnerability where save held a write lock on the index.
 
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
-use aletheiadb::core::id::NodeId;
 
 #[test]
 fn regression_save_allows_concurrent_search() {
@@ -14,11 +14,13 @@ fn regression_save_allows_concurrent_search() {
     let path = dir.path().join("regression.index");
 
     // Create index
-    let index = Arc::new(HnswIndexBuilder::new(384, DistanceMetric::Cosine)
-        .m(16)
-        .ef_construction(100)
-        .build()
-        .unwrap());
+    let index = Arc::new(
+        HnswIndexBuilder::new(384, DistanceMetric::Cosine)
+            .m(16)
+            .ef_construction(100)
+            .build()
+            .unwrap(),
+    );
 
     // Populate with significant data (100k vectors)
     // This makes save take non-trivial time
@@ -75,7 +77,10 @@ fn regression_save_allows_concurrent_search() {
 
     // If save was too fast (< 50ms), the test is inconclusive because search started after save finished.
     if save_duration < Duration::from_millis(50) {
-        println!("WARNING: Save was too fast ({:?}) to effectively test concurrency.", save_duration);
+        println!(
+            "WARNING: Save was too fast ({:?}) to effectively test concurrency.",
+            save_duration
+        );
         // We can't fail here, but we should note it.
         return;
     }
@@ -83,9 +88,14 @@ fn regression_save_allows_concurrent_search() {
     // Search should be much faster than save if concurrent.
     // If search > 100ms and save > 100ms, it was likely blocked.
     if search_duration > Duration::from_millis(100) {
-        panic!("Search was blocked by Save operation! Latency: {:?} (Save took {:?})",
-               search_duration, save_duration);
+        panic!(
+            "Search was blocked by Save operation! Latency: {:?} (Save took {:?})",
+            search_duration, save_duration
+        );
     } else {
-        println!("SUCCESS: Search was fast ({:?}) while save took {:?}.", search_duration, save_duration);
+        println!(
+            "SUCCESS: Search was fast ({:?}) while save took {:?}.",
+            search_duration, save_duration
+        );
     }
 }
