@@ -41,7 +41,24 @@ pub struct VersionInfo {
 
 /// Complete history of an entity (node or edge).
 ///
-/// Contains all versions in chronological order.
+/// Represents the full timeline of an entity, containing all versions sorted chronologically
+/// by version number (oldest first).
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use aletheiadb::core::history::EntityHistory;
+/// # fn analyze_history(history: &EntityHistory) {
+/// println!("Entity has {} versions", history.version_count());
+///
+/// for version in &history.versions {
+///     println!("Version {}: Valid from {}",
+///         version.version_number,
+///         version.temporal.valid_time().start()
+///     );
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct EntityHistory {
     /// All versions ordered by version_number (oldest first)
@@ -70,18 +87,40 @@ impl EntityHistory {
 
 /// Difference between two versions of an entity.
 ///
-/// Shows what properties were added, removed, or modified.
+/// Computes the semantic difference (delta) between the property maps of two versions.
+/// Useful for auditing changes, generating changelogs, or debugging.
+///
+/// # Change Categories
+///
+/// - **Added**: Key exists in `to` but not in `from`.
+/// - **Removed**: Key exists in `from` but not in `to`.
+/// - **Modified**: Key exists in both, but values are semantically different (using `semantically_equal`).
+///   - Note: Floating point `NaN`s are considered equal to each other.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use aletheiadb::core::history::VersionDiff;
+/// # fn check_changes(diff: &VersionDiff) {
+/// if diff.has_changes() {
+///     println!("Changes detected:");
+///     println!("  Added: {} properties", diff.added.len());
+///     println!("  Removed: {} properties", diff.removed.len());
+///     println!("  Modified: {} properties", diff.modified.len());
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct VersionDiff {
-    /// The older version ID (from)
+    /// The older version ID (baseline)
     pub from_version: VersionId,
-    /// The newer version ID (to)
+    /// The newer version ID (comparison target)
     pub to_version: VersionId,
-    /// Properties that were added (key -> new value)
+    /// Properties that were added in the newer version.
     pub added: PropertyMap,
-    /// Properties that were removed (key -> old value)
+    /// Properties that were removed in the newer version.
     pub removed: PropertyMap,
-    /// Properties that were modified (key -> (old value, new value))
+    /// Properties that were modified (Key, OldValue, NewValue).
     pub modified: Vec<(InternedString, PropertyValue, PropertyValue)>,
 }
 
