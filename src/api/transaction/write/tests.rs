@@ -3417,11 +3417,31 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
 
         // Pre-populate storage for update/delete tests
-        let existing_node = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
-        let existing_node_vt = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
-        let existing_edge = current.create_edge(existing_node, existing_node_vt, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
-        let existing_edge_vt = current.create_edge(existing_node_vt, existing_node, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
-        let cascade_node = current.create_node("Cascade", PropertyMapBuilder::new().build()).unwrap();
+        let existing_node = current
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let existing_node_vt = current
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let existing_edge = current
+            .create_edge(
+                existing_node,
+                existing_node_vt,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+        let existing_edge_vt = current
+            .create_edge(
+                existing_node_vt,
+                existing_node,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+        let cascade_node = current
+            .create_node("Cascade", PropertyMapBuilder::new().build())
+            .unwrap();
 
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
@@ -3443,63 +3463,79 @@ mod find_nodes_by_property_tests {
         );
 
         // Test create_node
-        let _ = tx.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+        let _ = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Test create_node_with_valid_time
-        let _ = tx.create_node_with_valid_time(
-            "Person",
-            PropertyMapBuilder::new().build(),
-            None
-        ).unwrap();
+        let _ = tx
+            .create_node_with_valid_time("Person", PropertyMapBuilder::new().build(), None)
+            .unwrap();
 
         // Test update_node
-        tx.update_node(existing_node, PropertyMapBuilder::new().insert("a", 1i64).build()).unwrap();
+        tx.update_node(
+            existing_node,
+            PropertyMapBuilder::new().insert("a", 1i64).build(),
+        )
+        .unwrap();
 
         // Test update_node_with_valid_time
         tx.update_node_with_valid_time(
             existing_node_vt,
             PropertyMapBuilder::new().insert("b", 2i64).build(),
-            None
-        ).unwrap();
+            None,
+        )
+        .unwrap();
 
         // Test create_edge
-        let _ = tx.create_edge(
-            existing_node,
-            existing_node_vt,
-            "KNOWS",
-            PropertyMapBuilder::new().build()
-        ).unwrap();
+        let _ = tx
+            .create_edge(
+                existing_node,
+                existing_node_vt,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
 
         // Test create_edge_with_valid_time
-        let _ = tx.create_edge_with_valid_time(
-            existing_node_vt,
-            existing_node,
-            "KNOWS",
-            PropertyMapBuilder::new().build(),
-            None
-        ).unwrap();
+        let _ = tx
+            .create_edge_with_valid_time(
+                existing_node_vt,
+                existing_node,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+                None,
+            )
+            .unwrap();
 
         // Test update_edge
-        tx.update_edge(existing_edge, PropertyMapBuilder::new().insert("w", 1i64).build()).unwrap();
+        tx.update_edge(
+            existing_edge,
+            PropertyMapBuilder::new().insert("w", 1i64).build(),
+        )
+        .unwrap();
 
         // Test update_edge_with_valid_time
         tx.update_edge_with_valid_time(
             existing_edge_vt,
             PropertyMapBuilder::new().insert("w", 2i64).build(),
-            None
-        ).unwrap();
+            None,
+        )
+        .unwrap();
 
         // Test delete_edge
         tx.delete_edge(existing_edge).unwrap();
 
         // Test delete_edge_with_valid_time
-        tx.delete_edge_with_valid_time(existing_edge_vt, None).unwrap();
+        tx.delete_edge_with_valid_time(existing_edge_vt, None)
+            .unwrap();
 
         // Test delete_node
         tx.delete_node(existing_node).unwrap();
 
         // Test delete_node_with_valid_time
-        tx.delete_node_with_valid_time(existing_node_vt, None).unwrap();
+        tx.delete_node_with_valid_time(existing_node_vt, None)
+            .unwrap();
 
         // Test delete_node_cascade
         tx.delete_node_cascade(cascade_node).unwrap();

@@ -623,14 +623,23 @@ mod tests {
         let found = tx.find_nodes_by_property(
             "Person",
             "name",
-            &crate::core::property::PropertyValue::String("Alice".into())
+            &crate::core::property::PropertyValue::String("Alice".into()),
         );
         assert_eq!(found.len(), 1);
         assert_eq!(found[0], node_id);
 
         // Create edge for edge tests
-        let other_id = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
-        let edge_id = current.create_edge(node_id, other_id, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+        let other_id = current
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = current
+            .create_edge(
+                node_id,
+                other_id,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
 
         // Test inherent get_edge
         let edge = tx.get_edge(edge_id).unwrap();
