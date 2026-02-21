@@ -76,12 +76,16 @@ pub fn load_snapshot_meta(path: &Path) -> Result<VectorSnapshotMeta> {
 /// Returns an error if any required file (meta.idx, mappings.idx) is missing or corrupted.
 pub fn load_vector_index(path: &Path) -> Result<VectorIndexData> {
     let meta_path = path.join("meta.idx");
-    let mappings_path = path.join("mappings.idx");
+    // mappings.idx is no longer used, as HnswIndex saves its own mappings
+    // However, VectorIndexData expects mappings. We return empty mappings as placeholder
+    // since HnswIndex::load will handle the actual ID restoration from usearch.mappings
     // usearch index is just a file path, we don't load it into memory here generally
     let index_path = path.join("current.usearch");
 
     let meta = load_vector_meta(&meta_path)?;
-    let mappings = load_vector_mappings(&mappings_path)?;
+
+    // Return empty mappings as placeholder
+    let mappings = new_vector_mappings();
 
     Ok(VectorIndexData {
         meta,
