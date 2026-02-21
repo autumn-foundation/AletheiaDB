@@ -1,8 +1,7 @@
-
 #[cfg(test)]
 mod warden_repro {
-    use crate::api::transaction::{TransactionSnapshot, TxVisibilityManager, WriteOps};
     use crate::api::transaction::write::WriteTransaction;
+    use crate::api::transaction::{TransactionSnapshot, TxVisibilityManager, WriteOps};
     use crate::core::id::IdGenerator;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::temporal::TemporalIndexes;
@@ -102,13 +101,19 @@ mod warden_repro {
 
         // Commit should fail
         let result = tx2.commit();
-        assert!(result.is_err(), "Commit should fail when creating edge from deleted node");
+        assert!(
+            result.is_err(),
+            "Commit should fail when creating edge from deleted node"
+        );
 
         // Check error message
         if let Err(e) = result {
-             let err_str = format!("{}", e);
-             assert!(err_str.contains("Edge source node") || err_str.contains("does not exist"),
-                     "Unexpected error: {}", err_str);
+            let err_str = format!("{}", e);
+            assert!(
+                err_str.contains("Edge source node") || err_str.contains("does not exist"),
+                "Unexpected error: {}",
+                err_str
+            );
         }
     }
 }
