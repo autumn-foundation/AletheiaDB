@@ -56,7 +56,7 @@ use crate::core::id::VersionId;
 use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use rayon::prelude::*;
-use redb::{ReadableDatabase, ReadableTable};
+use redb::{ReadableDatabase, ReadableTable, TableHandle};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -620,13 +620,20 @@ impl RedbColdStorage {
     // Logic moved from ColdStorage trait impl
     // ========================================================================
 
-    /// Store a single node version.
-    ///
-    /// Encodes and compresses the version before writing it to the `node_versions` table.
-    pub fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
+    fn store_entry_internal<V, F>(
+        &self,
+        version: &V,
+        encode_fn: F,
+        table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+        stats_counter: &AtomicU64,
+    ) -> Result<()>
+    where
+        V: EntityVersion,
+        F: Fn(&V) -> Vec<u8>,
+    {
         self.check_fail_writes()?;
 
-        let encoded = encode_node_version(version);
+        let encoded = encode_fn(version);
         let raw_size = encoded.len();
         let compressed = self.compress(&encoded)?;
         let compressed_size = compressed.len();
@@ -637,25 +644,28 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
         {
-            let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
-                |e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open node_versions table: {}", e))
+            let mut table =
+                write_txn
+                    .open_table(table_def)
+                    .map_err(|e| -> crate::core::error::Error {
+                        StorageError::io_error(format!(
+                            "Failed to open table '{}': {}",
+                            table_def.name(),
+                            e
+                        ))
                         .into()
-                },
-            )?;
+                    })?;
 
             table
-                .insert(version.id.as_u64(), compressed.as_slice())
-                .map_err(map_storage_error("Failed to store node version"))?;
+                .insert(version.version_id().as_u64(), compressed.as_slice())
+                .map_err(map_storage_error("Failed to store version"))?;
         }
 
         write_txn
             .commit()
             .map_err(map_commit_error("Failed to commit"))?;
 
-        self.stats
-            .node_versions_stored
-            .fetch_add(1, Ordering::Relaxed);
+        stats_counter.fetch_add(1, Ordering::Relaxed);
         self.stats
             .bytes_written_raw
             .fetch_add(raw_size as u64, Ordering::Relaxed);
@@ -666,26 +676,33 @@ impl RedbColdStorage {
         Ok(())
     }
 
-    /// Retrieve a node version by its ID.
-    ///
-    /// Returns `Ok(None)` if the version does not exist.
-    pub fn get_node_version(&self, id: VersionId) -> Result<Option<NodeVersion>> {
-        self.stats
-            .node_version_reads
-            .fetch_add(1, Ordering::Relaxed);
+    fn get_entry_internal<V, F>(
+        &self,
+        id: VersionId,
+        decode_fn: F,
+        table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+        stats_counter: &AtomicU64,
+    ) -> Result<Option<V>>
+    where
+        F: Fn(&[u8]) -> Result<V>,
+    {
+        stats_counter.fetch_add(1, Ordering::Relaxed);
 
         let read_txn = self
             .db
             .begin_read()
             .map_err(map_transaction_error("Failed to begin read transaction"))?;
 
-        let table =
-            read_txn
-                .open_table(NODE_VERSIONS_TABLE)
-                .map_err(|e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open node_versions table: {}", e))
-                        .into()
-                })?;
+        let table = read_txn
+            .open_table(table_def)
+            .map_err(|e| -> crate::core::error::Error {
+                StorageError::io_error(format!(
+                    "Failed to open table '{}': {}",
+                    table_def.name(),
+                    e
+                ))
+                .into()
+            })?;
 
         match table.get(id.as_u64()) {
             Ok(Some(value)) => {
@@ -699,14 +716,36 @@ impl RedbColdStorage {
                     .bytes_read_decompressed
                     .fetch_add(decompressed.len() as u64, Ordering::Relaxed);
 
-                let version = decode_node_version(&decompressed)?;
+                let version = decode_fn(&decompressed)?;
                 Ok(Some(version))
             }
             Ok(None) => Ok(None),
-            Err(e) => {
-                Err(StorageError::io_error(format!("Failed to read node version: {}", e)).into())
-            }
+            Err(e) => Err(StorageError::io_error(format!("Failed to read version: {}", e)).into()),
         }
+    }
+
+    /// Store a single node version.
+    ///
+    /// Encodes and compresses the version before writing it to the `node_versions` table.
+    pub fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
+        self.store_entry_internal(
+            version,
+            encode_node_version,
+            NODE_VERSIONS_TABLE,
+            &self.stats.node_versions_stored,
+        )
+    }
+
+    /// Retrieve a node version by its ID.
+    ///
+    /// Returns `Ok(None)` if the version does not exist.
+    pub fn get_node_version(&self, id: VersionId) -> Result<Option<NodeVersion>> {
+        self.get_entry_internal(
+            id,
+            decode_node_version,
+            NODE_VERSIONS_TABLE,
+            &self.stats.node_version_reads,
+        )
     }
 
     /// Retrieve multiple node versions efficiently.
@@ -716,87 +755,22 @@ impl RedbColdStorage {
 
     /// Store a single edge version.
     pub fn store_edge_version(&self, version: &EdgeVersion) -> Result<()> {
-        self.check_fail_writes()?;
-
-        let encoded = encode_edge_version(version);
-        let raw_size = encoded.len();
-        let compressed = self.compress(&encoded)?;
-        let compressed_size = compressed.len();
-
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(map_transaction_error("Failed to begin write transaction"))?;
-
-        {
-            let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
-                |e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
-                        .into()
-                },
-            )?;
-
-            table
-                .insert(version.id.as_u64(), compressed.as_slice())
-                .map_err(map_storage_error("Failed to store edge version"))?;
-        }
-
-        write_txn
-            .commit()
-            .map_err(map_commit_error("Failed to commit"))?;
-
-        self.stats
-            .edge_versions_stored
-            .fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .bytes_written_raw
-            .fetch_add(raw_size as u64, Ordering::Relaxed);
-        self.stats
-            .bytes_written_compressed
-            .fetch_add(compressed_size as u64, Ordering::Relaxed);
-
-        Ok(())
+        self.store_entry_internal(
+            version,
+            encode_edge_version,
+            EDGE_VERSIONS_TABLE,
+            &self.stats.edge_versions_stored,
+        )
     }
 
     /// Retrieve an edge version by its ID.
     pub fn get_edge_version(&self, id: VersionId) -> Result<Option<EdgeVersion>> {
-        self.stats
-            .edge_version_reads
-            .fetch_add(1, Ordering::Relaxed);
-
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(map_transaction_error("Failed to begin read transaction"))?;
-
-        let table =
-            read_txn
-                .open_table(EDGE_VERSIONS_TABLE)
-                .map_err(|e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
-                        .into()
-                })?;
-
-        match table.get(id.as_u64()) {
-            Ok(Some(value)) => {
-                let compressed: &[u8] = value.value();
-                self.stats
-                    .bytes_read_compressed
-                    .fetch_add(compressed.len() as u64, Ordering::Relaxed);
-
-                let decompressed = self.decompress(compressed)?;
-                self.stats
-                    .bytes_read_decompressed
-                    .fetch_add(decompressed.len() as u64, Ordering::Relaxed);
-
-                let version = decode_edge_version(&decompressed)?;
-                Ok(Some(version))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => {
-                Err(StorageError::io_error(format!("Failed to read edge version: {}", e)).into())
-            }
-        }
+        self.get_entry_internal(
+            id,
+            decode_edge_version,
+            EDGE_VERSIONS_TABLE,
+            &self.stats.edge_version_reads,
+        )
     }
 
     /// Retrieve multiple edge versions efficiently.
@@ -804,118 +778,156 @@ impl RedbColdStorage {
         ids.iter().map(|id| self.get_edge_version(*id)).collect()
     }
 
-    /// Check if a node version exists in cold storage.
-    pub fn contains_node_version(&self, id: VersionId) -> Result<bool> {
+    fn contains_entry_internal(
+        &self,
+        id: VersionId,
+        table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+    ) -> Result<bool> {
         let read_txn = self
             .db
             .begin_read()
             .map_err(map_transaction_error("Failed to begin read transaction"))?;
 
-        let table =
-            read_txn
-                .open_table(NODE_VERSIONS_TABLE)
-                .map_err(|e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open node_versions table: {}", e))
-                        .into()
-                })?;
+        let table = read_txn
+            .open_table(table_def)
+            .map_err(|e| -> crate::core::error::Error {
+                StorageError::io_error(format!("Failed to open table: {}", e)).into()
+            })?;
 
         match table.get(id.as_u64()) {
             Ok(Some(_)) => Ok(true),
             Ok(None) => Ok(false),
-            Err(e) => {
-                Err(StorageError::io_error(format!("Failed to check node version: {}", e)).into())
-            }
+            Err(e) => Err(StorageError::io_error(format!("Failed to check version: {}", e)).into()),
         }
+    }
+
+    fn delete_entry_internal(
+        &self,
+        id: VersionId,
+        table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+    ) -> Result<bool> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        let deleted = {
+            let mut table =
+                write_txn
+                    .open_table(table_def)
+                    .map_err(|e| -> crate::core::error::Error {
+                        StorageError::io_error(format!(
+                            "Failed to open table '{}': {}",
+                            table_def.name(),
+                            e
+                        ))
+                        .into()
+                    })?;
+
+            match table.remove(id.as_u64()) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    return Err(map_storage_error("Failed to delete version")(e));
+                }
+            }
+        };
+
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit"))?;
+
+        Ok(deleted)
+    }
+
+    /// Check if a node version exists in cold storage.
+    pub fn contains_node_version(&self, id: VersionId) -> Result<bool> {
+        self.contains_entry_internal(id, NODE_VERSIONS_TABLE)
     }
 
     /// Check if an edge version exists in cold storage.
     pub fn contains_edge_version(&self, id: VersionId) -> Result<bool> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(map_transaction_error("Failed to begin read transaction"))?;
-
-        let table =
-            read_txn
-                .open_table(EDGE_VERSIONS_TABLE)
-                .map_err(|e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
-                        .into()
-                })?;
-
-        match table.get(id.as_u64()) {
-            Ok(Some(_)) => Ok(true),
-            Ok(None) => Ok(false),
-            Err(e) => {
-                Err(StorageError::io_error(format!("Failed to check edge version: {}", e)).into())
-            }
-        }
+        self.contains_entry_internal(id, EDGE_VERSIONS_TABLE)
     }
 
     /// Delete a node version.
     ///
     /// Returns `true` if the version existed and was deleted, `false` otherwise.
     pub fn delete_node_version(&self, id: VersionId) -> Result<bool> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(map_transaction_error("Failed to begin write transaction"))?;
-
-        let deleted = {
-            let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
-                |e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open node_versions table: {}", e))
-                        .into()
-                },
-            )?;
-
-            match table.remove(id.as_u64()) {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(e) => {
-                    return Err(map_storage_error("Failed to delete node version")(e));
-                }
-            }
-        };
-
-        write_txn
-            .commit()
-            .map_err(map_commit_error("Failed to commit"))?;
-
-        Ok(deleted)
+        self.delete_entry_internal(id, NODE_VERSIONS_TABLE)
     }
 
     /// Delete an edge version.
     ///
     /// Returns `true` if the version existed and was deleted, `false` otherwise.
     pub fn delete_edge_version(&self, id: VersionId) -> Result<bool> {
+        self.delete_entry_internal(id, EDGE_VERSIONS_TABLE)
+    }
+
+    fn write_prepared_batch_to_table(
+        txn: &redb::WriteTransaction,
+        table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+        batch: &PreparedVersionBatch,
+    ) -> Result<()> {
+        let mut table = txn
+            .open_table(table_def)
+            .map_err(|e| -> crate::core::error::Error {
+                StorageError::io_error(format!(
+                    "Failed to open table '{}': {}",
+                    table_def.name(),
+                    e
+                ))
+                .into()
+            })?;
+
+        for (id, compressed) in &batch.entries {
+            table
+                .insert(*id, compressed.as_slice())
+                .map_err(map_storage_error("Failed to store version"))?;
+        }
+        Ok(())
+    }
+
+    fn store_entries_batch_internal<V, PrepareFn>(
+        &self,
+        versions: &[V],
+        prepare_fn: PrepareFn,
+        table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+        stats_counter: &AtomicU64,
+    ) -> Result<()>
+    where
+        V: EntityVersion,
+        PrepareFn: Fn(&[V]) -> Result<PreparedVersionBatch>,
+    {
+        self.check_fail_writes()?;
+
+        if versions.is_empty() {
+            return Ok(());
+        }
+
+        let prepared = prepare_fn(versions)?;
+        let version_count = prepared.entries.len() as u64;
+
         let write_txn = self
             .db
             .begin_write()
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
-        let deleted = {
-            let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
-                |e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
-                        .into()
-                },
-            )?;
-
-            match table.remove(id.as_u64()) {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(e) => {
-                    return Err(map_storage_error("Failed to delete edge version")(e));
-                }
-            }
-        };
+        Self::write_prepared_batch_to_table(&write_txn, table_def, &prepared)?;
 
         write_txn
             .commit()
-            .map_err(map_commit_error("Failed to commit"))?;
+            .map_err(map_commit_error("Failed to commit batch"))?;
 
-        Ok(deleted)
+        stats_counter.fetch_add(version_count, Ordering::Relaxed);
+        self.stats
+            .bytes_written_raw
+            .fetch_add(prepared.raw_size_bytes, Ordering::Relaxed);
+        self.stats
+            .bytes_written_compressed
+            .fetch_add(prepared.compressed_size_bytes, Ordering::Relaxed);
+
+        Ok(())
     }
 
     /// Store a batch of node versions.
@@ -923,50 +935,12 @@ impl RedbColdStorage {
     /// Encodes and compresses versions in parallel (if batch size exceeds threshold),
     /// then writes them in a single transaction.
     pub fn store_node_versions_batch(&self, versions: &[NodeVersion]) -> Result<()> {
-        self.check_fail_writes()?;
-
-        if versions.is_empty() {
-            return Ok(());
-        }
-
-        let prepared = self.prepare_node_versions_batch(versions)?;
-        let version_count = prepared.entries.len() as u64;
-
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(map_transaction_error("Failed to begin write transaction"))?;
-
-        {
-            let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
-                |e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open node_versions table: {}", e))
-                        .into()
-                },
-            )?;
-
-            for (id, compressed) in &prepared.entries {
-                table
-                    .insert(*id, compressed.as_slice())
-                    .map_err(map_storage_error("Failed to store node version"))?;
-            }
-        }
-
-        write_txn
-            .commit()
-            .map_err(map_commit_error("Failed to commit batch"))?;
-
-        self.stats
-            .node_versions_stored
-            .fetch_add(version_count, Ordering::Relaxed);
-        self.stats
-            .bytes_written_raw
-            .fetch_add(prepared.raw_size_bytes, Ordering::Relaxed);
-        self.stats
-            .bytes_written_compressed
-            .fetch_add(prepared.compressed_size_bytes, Ordering::Relaxed);
-
-        Ok(())
+        self.store_entries_batch_internal(
+            versions,
+            |v| self.prepare_node_versions_batch(v),
+            NODE_VERSIONS_TABLE,
+            &self.stats.node_versions_stored,
+        )
     }
 
     /// Store a batch of edge versions.
@@ -974,50 +948,12 @@ impl RedbColdStorage {
     /// Encodes and compresses versions in parallel (if batch size exceeds threshold),
     /// then writes them in a single transaction.
     pub fn store_edge_versions_batch(&self, versions: &[EdgeVersion]) -> Result<()> {
-        self.check_fail_writes()?;
-
-        if versions.is_empty() {
-            return Ok(());
-        }
-
-        let prepared = self.prepare_edge_versions_batch(versions)?;
-        let version_count = prepared.entries.len() as u64;
-
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(map_transaction_error("Failed to begin write transaction"))?;
-
-        {
-            let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
-                |e| -> crate::core::error::Error {
-                    StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
-                        .into()
-                },
-            )?;
-
-            for (id, compressed) in &prepared.entries {
-                table
-                    .insert(*id, compressed.as_slice())
-                    .map_err(map_storage_error("Failed to store edge version"))?;
-            }
-        }
-
-        write_txn
-            .commit()
-            .map_err(map_commit_error("Failed to commit batch"))?;
-
-        self.stats
-            .edge_versions_stored
-            .fetch_add(version_count, Ordering::Relaxed);
-        self.stats
-            .bytes_written_raw
-            .fetch_add(prepared.raw_size_bytes, Ordering::Relaxed);
-        self.stats
-            .bytes_written_compressed
-            .fetch_add(prepared.compressed_size_bytes, Ordering::Relaxed);
-
-        Ok(())
+        self.store_entries_batch_internal(
+            versions,
+            |v| self.prepare_edge_versions_batch(v),
+            EDGE_VERSIONS_TABLE,
+            &self.stats.edge_versions_stored,
+        )
     }
 
     /// Get usage statistics.
@@ -1097,30 +1033,10 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
         // Store node versions
-        {
-            let mut table = write_txn
-                .open_table(NODE_VERSIONS_TABLE)
-                .map_err(map_table_error("Failed to open node_versions table"))?;
-
-            for (id, compressed) in &prepared_nodes.entries {
-                table
-                    .insert(*id, compressed.as_slice())
-                    .map_err(map_storage_error("Failed to store node version"))?;
-            }
-        }
+        Self::write_prepared_batch_to_table(&write_txn, NODE_VERSIONS_TABLE, &prepared_nodes)?;
 
         // Store edge versions
-        {
-            let mut table = write_txn
-                .open_table(EDGE_VERSIONS_TABLE)
-                .map_err(map_table_error("Failed to open edge_versions table"))?;
-
-            for (id, compressed) in &prepared_edges.entries {
-                table
-                    .insert(*id, compressed.as_slice())
-                    .map_err(map_storage_error("Failed to store edge version"))?;
-            }
-        }
+        Self::write_prepared_batch_to_table(&write_txn, EDGE_VERSIONS_TABLE, &prepared_edges)?;
 
         // Update flushed_lsn atomically with the batch
         {
