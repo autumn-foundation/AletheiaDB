@@ -478,6 +478,10 @@ impl PropertyValue {
                 }
             }
             (PropertyValue::Vector(a), PropertyValue::Vector(b)) => {
+                // Optimization: If they point to the same allocation, they must be equal.
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
                 if a.len() != b.len() {
                     return false;
                 }
