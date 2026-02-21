@@ -479,7 +479,7 @@ impl RedbColdStorage {
     ) -> Result<PreparedVersionBatch>
     where
         V: EntityVersion + Sync,
-        EncodeFn: Fn(&V) -> Vec<u8> + Sync + Send,
+        EncodeFn: Fn(&V) -> Result<Vec<u8>> + Sync + Send,
     {
         let cold_config = self.config.to_cold_storage_config();
 
@@ -487,7 +487,7 @@ impl RedbColdStorage {
             versions
                 .par_iter()
                 .try_fold(PreparedVersionBatch::default, |mut prepared, version| {
-                    let encoded = encode_version(version);
+                    let encoded = encode_version(version)?;
                     let raw_size_bytes = encoded.len() as u64;
                     let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
                     prepared.add_entry(version.version_id(), compressed, raw_size_bytes);
@@ -500,7 +500,7 @@ impl RedbColdStorage {
         } else {
             let mut prepared = PreparedVersionBatch::with_capacity(versions.len());
             for version in versions {
-                let encoded = encode_version(version);
+                let encoded = encode_version(version)?;
                 let raw_size_bytes = encoded.len() as u64;
                 let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
                 prepared.add_entry(version.version_id(), compressed, raw_size_bytes);
@@ -626,7 +626,7 @@ impl RedbColdStorage {
     pub fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
         self.check_fail_writes()?;
 
-        let encoded = encode_node_version(version);
+        let encoded = encode_node_version(version)?;
         let raw_size = encoded.len();
         let compressed = self.compress(&encoded)?;
         let compressed_size = compressed.len();
@@ -718,7 +718,7 @@ impl RedbColdStorage {
     pub fn store_edge_version(&self, version: &EdgeVersion) -> Result<()> {
         self.check_fail_writes()?;
 
-        let encoded = encode_edge_version(version);
+        let encoded = encode_edge_version(version)?;
         let raw_size = encoded.len();
         let compressed = self.compress(&encoded)?;
         let compressed_size = compressed.len();
@@ -1242,7 +1242,7 @@ enum SerializablePropertyValue {
 /// Encode a NodeVersion to bytes for storage.
 ///
 /// This function is public for use by all cold storage implementations.
-pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
+pub fn encode_node_version(version: &NodeVersion) -> Result<Vec<u8>> {
     use crate::core::interning::GLOBAL_INTERNER;
 
     let serializable = SerializableNodeVersion {
@@ -1254,13 +1254,15 @@ pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
         temporal_tx_end: version.temporal.transaction_time().end().wallclock(),
         label: GLOBAL_INTERNER
             .resolve_with(version.label, |s| s.to_string())
-            .unwrap_or_default(),
-        data: encode_version_data(&version.data),
+            .ok_or_else(|| StorageError::InconsistentState {
+                reason: format!("Label ID {} not found in interner", version.label.as_u32()),
+            })?,
+        data: encode_version_data(&version.data)?,
         next_version: version.next_version.map(|v| v.as_u64()),
         prev_version: version.prev_version.map(|v| v.as_u64()),
     };
 
-    bitcode::encode(&serializable)
+    Ok(bitcode::encode(&serializable))
 }
 
 /// Decode a NodeVersion from bytes.
@@ -1312,7 +1314,7 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
 /// Encode an EdgeVersion to bytes for storage.
 ///
 /// This function is public for use by all cold storage implementations.
-pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
+pub fn encode_edge_version(version: &EdgeVersion) -> Result<Vec<u8>> {
     use crate::core::interning::GLOBAL_INTERNER;
 
     let serializable = SerializableEdgeVersion {
@@ -1324,15 +1326,17 @@ pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
         temporal_tx_end: version.temporal.transaction_time().end().wallclock(),
         label: GLOBAL_INTERNER
             .resolve_with(version.label, |s| s.to_string())
-            .unwrap_or_default(),
+            .ok_or_else(|| StorageError::InconsistentState {
+                reason: format!("Label ID {} not found in interner", version.label.as_u32()),
+            })?,
         source: version.source.as_u64(),
         target: version.target.as_u64(),
-        data: encode_version_data(&version.data),
+        data: encode_version_data(&version.data)?,
         next_version: version.next_version.map(|v| v.as_u64()),
         prev_version: version.prev_version.map(|v| v.as_u64()),
     };
 
-    bitcode::encode(&serializable)
+    Ok(bitcode::encode(&serializable))
 }
 
 /// Decode an EdgeVersion from bytes.
@@ -1385,7 +1389,9 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
     })
 }
 
-fn encode_version_data(data: &crate::storage::version::VersionData) -> SerializableVersionData {
+fn encode_version_data(
+    data: &crate::storage::version::VersionData,
+) -> Result<SerializableVersionData> {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::storage::version::VersionData;
 
@@ -1393,43 +1399,45 @@ fn encode_version_data(data: &crate::storage::version::VersionData) -> Serializa
         VersionData::Anchor {
             properties,
             vector_snapshot_id,
-        } => SerializableVersionData::Anchor {
-            properties: properties
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        GLOBAL_INTERNER
-                            .resolve_with(*k, |s| s.to_string())
-                            .unwrap_or_default(),
-                        encode_property_value(v),
-                    )
-                })
-                .collect(),
-            vector_snapshot_id: vector_snapshot_id.map(|id| id as u64),
-        },
-        VersionData::Delta { delta } => SerializableVersionData::Delta {
-            changed: delta
-                .changed
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        GLOBAL_INTERNER
-                            .resolve_with(*k, |s| s.to_string())
-                            .unwrap_or_default(),
-                        encode_property_value(v),
-                    )
-                })
-                .collect(),
-            removed: delta
-                .removed
-                .iter()
-                .map(|k| {
-                    GLOBAL_INTERNER
-                        .resolve_with(*k, |s| s.to_string())
-                        .unwrap_or_default()
-                })
-                .collect(),
-        },
+        } => {
+            let mut props = Vec::with_capacity(properties.len());
+            for (k, v) in properties.iter() {
+                let key_str = GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s.to_string())
+                    .ok_or_else(|| StorageError::InconsistentState {
+                        reason: format!("Property key ID {} not found in interner", k.as_u32()),
+                    })?;
+                props.push((key_str, encode_property_value(v)));
+            }
+
+            Ok(SerializableVersionData::Anchor {
+                properties: props,
+                vector_snapshot_id: vector_snapshot_id.map(|id| id as u64),
+            })
+        }
+        VersionData::Delta { delta } => {
+            let mut changed = Vec::with_capacity(delta.changed.len());
+            for (k, v) in delta.changed.iter() {
+                let key_str = GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s.to_string())
+                    .ok_or_else(|| StorageError::InconsistentState {
+                        reason: format!("Property key ID {} not found in interner", k.as_u32()),
+                    })?;
+                changed.push((key_str, encode_property_value(v)));
+            }
+
+            let mut removed = Vec::with_capacity(delta.removed.len());
+            for k in delta.removed.iter() {
+                let key_str = GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s.to_string())
+                    .ok_or_else(|| StorageError::InconsistentState {
+                        reason: format!("Property key ID {} not found in interner", k.as_u32()),
+                    })?;
+                removed.push(key_str);
+            }
+
+            Ok(SerializableVersionData::Delta { changed, removed })
+        }
     }
 }
 
@@ -3457,5 +3465,55 @@ mod tests {
 
         assert!(result.is_err());
         assert!(storage.was_write_attempted());
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::id::{NodeId, VersionId};
+    use crate::core::interning::InternedString;
+    use crate::core::property::PropertyMap;
+    use crate::core::temporal::BiTemporalInterval;
+
+    #[test]
+    fn test_encode_node_version_with_invalid_interned_string_corruption() {
+        // 🛡️ Sentry Test: Verify that using an invalid InternedString results in an error (FIXED behavior).
+        // This test ensures that we catch invalid IDs instead of silently corrupting data.
+
+        // Create a forged InternedString ID that definitely doesn't exist
+        // We use a very large number that shouldn't be in the interner
+        let invalid_label_id = InternedString::from_raw(999_999_999);
+
+        // Create a NodeVersion with this invalid label
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(100).unwrap(),
+            BiTemporalInterval::current(1000.into()),
+            invalid_label_id,
+            PropertyMap::default(),
+        );
+
+        // Encode
+        // FIXED: This should now return an error
+        let result = encode_node_version(&version);
+
+        assert!(result.is_err(), "Should return error for invalid label ID");
+
+        match result {
+            Err(crate::core::error::Error::Storage(
+                crate::core::error::StorageError::InconsistentState { reason },
+            )) => {
+                assert!(
+                    reason.contains("Label ID"),
+                    "Error message should mention Label ID"
+                );
+                assert!(
+                    reason.contains("not found in interner"),
+                    "Error message should mention missing from interner"
+                );
+            }
+            _ => panic!("Expected StorageError::InconsistentState, got {:?}", result),
+        }
     }
 }
