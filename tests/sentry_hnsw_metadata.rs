@@ -1,7 +1,7 @@
-use aletheiadb::core::property::MAX_VECTOR_DIMENSIONS;
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, HnswIndex};
+use aletheiadb::core::property::MAX_VECTOR_DIMENSIONS;
 use aletheiadb::index::VectorIndex;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndex, HnswIndexBuilder};
 use tempfile::tempdir;
 
 #[test]
@@ -35,7 +35,10 @@ fn test_hnsw_max_dimensions_load() {
 
     let loaded = HnswIndex::load(&path, config_template);
 
-    assert!(loaded.is_ok(), "Should successfully load index with MAX_VECTOR_DIMENSIONS");
+    assert!(
+        loaded.is_ok(),
+        "Should successfully load index with MAX_VECTOR_DIMENSIONS"
+    );
     let loaded_index = loaded.unwrap();
     assert_eq!(loaded_index.config().dimensions, dims);
 }

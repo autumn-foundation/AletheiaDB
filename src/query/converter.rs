@@ -2107,8 +2107,14 @@ mod sentry_tests {
         let converter = AstConverter::new();
         let query = converter.convert(&ast).unwrap();
 
-        let has_start_node = query.ops.iter().any(|op| matches!(op, QueryOp::StartNode(_)));
-        assert!(!has_start_node, "Should not use StartNode for non-id property");
+        let has_start_node = query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::StartNode(_)));
+        assert!(
+            !has_start_node,
+            "Should not use StartNode for non-id property"
+        );
 
         // Also ensure it produces a Filter
         let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_)));
