@@ -139,18 +139,10 @@ impl PartialEq for PropertyValue {
             (PropertyValue::Bool(a), PropertyValue::Bool(b)) => a == b,
             (PropertyValue::Int(a), PropertyValue::Int(b)) => a == b,
             (PropertyValue::Float(a), PropertyValue::Float(b)) => a == b,
-            (PropertyValue::String(a), PropertyValue::String(b)) => {
-                Arc::ptr_eq(a, b) || a == b
-            }
-            (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) => {
-                Arc::ptr_eq(a, b) || a == b
-            }
-            (PropertyValue::Array(a), PropertyValue::Array(b)) => {
-                Arc::ptr_eq(a, b) || a == b
-            }
-            (PropertyValue::Vector(a), PropertyValue::Vector(b)) => {
-                Arc::ptr_eq(a, b) || a == b
-            }
+            (PropertyValue::String(a), PropertyValue::String(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::Array(a), PropertyValue::Array(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::Vector(a), PropertyValue::Vector(b)) => Arc::ptr_eq(a, b) || a == b,
             (PropertyValue::SparseVector(a), PropertyValue::SparseVector(b)) => {
                 Arc::ptr_eq(a, b) || a == b
             }
@@ -3551,7 +3543,8 @@ mod sentry_tests {
             "Dense vector with NaN SHOULD equal itself (identity optimization)"
         );
         assert_eq!(
-            dense_nan, dense_nan.clone(),
+            dense_nan,
+            dense_nan.clone(),
             "Cloned (shared) dense vector with NaN SHOULD equal itself (identity optimization)"
         );
 
@@ -3577,7 +3570,10 @@ mod sentry_tests {
         // It does NOT check values for NaN.
         let vec_nan = PropertyValue::vector([f32::NAN]);
         // Optimized behavior:
-        assert_eq!(vec_nan, vec_nan, "Vector with NaN SHOULD equal itself (identity)");
+        assert_eq!(
+            vec_nan, vec_nan,
+            "Vector with NaN SHOULD equal itself (identity)"
+        );
     }
 
     /// 🎯 Target: PropertyMapBuilder::insert panic
