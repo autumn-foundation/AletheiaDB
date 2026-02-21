@@ -10,14 +10,13 @@ use std::time::Duration;
 /// Maximum number of retries when creating a snapshot due to races (default: 3)
 pub const MAX_SNAPSHOT_RETRIES: usize = 3;
 
-/// Maximum depth of delta chain traversal before forcing full snapshot.
-/// Increased from 10 to 50 to support business scenarios:
-/// - Frequently updated embeddings (re-training cycles, continuous learning)
-/// - Live document embeddings with frequent updates
-/// - A/B testing with multiple variant updates
+/// Safety limit for delta chain traversal.
 ///
-///   This prevents unbounded delta chains while reducing compaction frequency
-///   for high-update workloads.
+/// **Note**: This value does NOT limit `full_snapshot_interval`. The implementation enforces a
+/// "Star Topology" where all delta snapshots point directly to the last full snapshot (depth=1).
+///
+/// This constant is used only as a safety sentinel during traversal to prevent infinite loops
+/// in case of memory corruption or future implementation changes that might introduce chains.
 pub const MAX_DELTA_CHAIN_DEPTH: usize = 50;
 
 /// Minimum capacity estimate for HashMap pre-allocation (default: 100)
@@ -98,23 +97,8 @@ impl TemporalVectorConfig {
     ///
     /// # Errors
     /// Returns an error if:
-    /// - `full_snapshot_interval` exceeds `MAX_DELTA_CHAIN_DEPTH`
     /// - `max_snapshots` is 0
-    ///
-    /// # Safety
-    /// This validation prevents delta chain depth from exceeding the hard limit,
-    /// which would cause get_vector() and to_hashmap() to return partial/empty results.
     pub fn validate(&self) -> Result<()> {
-        if self.full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH {
-            return Err(VectorError::IndexError(format!(
-                "full_snapshot_interval ({}) exceeds MAX_DELTA_CHAIN_DEPTH ({}). \
-                     This would cause delta chains to exceed traversal depth limits, \
-                     leading to silent data loss. Reduce full_snapshot_interval to at most {}.",
-                self.full_snapshot_interval, MAX_DELTA_CHAIN_DEPTH, MAX_DELTA_CHAIN_DEPTH
-            ))
-            .into());
-        }
-
         if self.max_snapshots == 0 {
             return Err(
                 VectorError::IndexError("max_snapshots must be at least 1".to_string()).into(),
