@@ -2096,4 +2096,22 @@ mod sentry_tests {
             "Filter operation must precede Project operation"
         );
     }
+
+    #[test]
+    fn test_inline_property_filter_does_not_use_start_node() {
+        // 🎯 Target: convert_node_pattern "id" check
+        // 💣 Risk: Treating other properties as ID -> StartNode optimization -> Wrong results
+        // 🧪 Strategy: Match with inline property (not id), ensure StartNode is NOT used.
+
+        let ast = Parser::parse("MATCH (n {age: 30}) RETURN n").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let has_start_node = query.ops.iter().any(|op| matches!(op, QueryOp::StartNode(_)));
+        assert!(!has_start_node, "Should not use StartNode for non-id property");
+
+        // Also ensure it produces a Filter
+        let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_)));
+        assert!(has_filter, "Should produce Filter for age");
+    }
 }
