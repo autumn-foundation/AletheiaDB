@@ -307,8 +307,8 @@
     <div class="meta">
       <span><span class="meta-label">commit</span> 198c57d</span>
       <span><span class="meta-label">branch</span> jules-3069904928789557752-7bfd23b2</span>
-      <span><span class="meta-label">generated</span> 2026-02-21 18:07 UTC</span>
-      <span><span class="meta-label">history</span> 1 runs</span>
+      <span><span class="meta-label">generated</span> 2026-02-21 18:56 UTC</span>
+      <span><span class="meta-label">history</span> 2 runs</span>
     </div>
   </header>
 
@@ -319,7 +319,7 @@
 
   <div class="stats-row">
     <div class="stat-card stat-total">
-      <div class="stat-value">6</div>
+      <div class="stat-value">47</div>
       <div class="stat-label">Total</div>
     </div>
     <div class="stat-card stat-improved">
@@ -327,7 +327,7 @@
       <div class="stat-label">Improved</div>
     </div>
     <div class="stat-card stat-stable">
-      <div class="stat-value">0</div>
+      <div class="stat-value">6</div>
       <div class="stat-label">Stable</div>
     </div>
     <div class="stat-card stat-regressed">
@@ -335,7 +335,7 @@
       <div class="stat-label">Regressed</div>
     </div>
     <div class="stat-card stat-new">
-      <div class="stat-value">6</div>
+      <div class="stat-value">41</div>
       <div class="stat-label">New</div>
     </div>
   </div>
@@ -355,44 +355,331 @@
       <tbody>
 
         <tr class="row-new">
+            <td class="bench-name">closure_write_single_node</td>
+            <td class="numeric">—</td>
+            <td class="numeric">2.81 ms</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/10000_versions/2_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">133.88 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/10000_versions/4_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">474.74 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/1000_versions/16_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">767.65 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/1000_versions/2_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">130.10 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/1000_versions/4_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">220.64 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/1000_versions/8_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">422.91 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/100_versions/16_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">696.72 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/100_versions/2_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">130.26 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/100_versions/4_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">203.70 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_reads_same_entity/100_versions/8_readers</td>
+            <td class="numeric">—</td>
+            <td class="numeric">383.87 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_writes/different_entities/2</td>
+            <td class="numeric">—</td>
+            <td class="numeric">139.71 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_writes/different_entities/4</td>
+            <td class="numeric">—</td>
+            <td class="numeric">220.01 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_writes/different_entities/8</td>
+            <td class="numeric">—</td>
+            <td class="numeric">417.36 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_writes/same_entity_contention/2</td>
+            <td class="numeric">—</td>
+            <td class="numeric">214.57 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_writes/same_entity_contention/4</td>
+            <td class="numeric">—</td>
+            <td class="numeric">1.23 ms</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">concurrent_writes/same_entity_contention/8</td>
+            <td class="numeric">—</td>
+            <td class="numeric">9.48 ms</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search/k/1</td>
+            <td class="numeric">—</td>
+            <td class="numeric">126.51 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search/k/10</td>
+            <td class="numeric">—</td>
+            <td class="numeric">121.11 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search/k/20</td>
+            <td class="numeric">—</td>
+            <td class="numeric">123.29 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search/k/5</td>
+            <td class="numeric">—</td>
+            <td class="numeric">119.25 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search/k/50</td>
+            <td class="numeric">—</td>
+            <td class="numeric">122.09 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search_index_size/index_size/100</td>
+            <td class="numeric">—</td>
+            <td class="numeric">21.02 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search_index_size/index_size/1000</td>
+            <td class="numeric">—</td>
+            <td class="numeric">120.52 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search_index_size/index_size/10000</td>
+            <td class="numeric">—</td>
+            <td class="numeric">313.17 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search_index_size/index_size/500</td>
+            <td class="numeric">—</td>
+            <td class="numeric">68.08 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">knn_search_index_size/index_size/5000</td>
+            <td class="numeric">—</td>
+            <td class="numeric">242.32 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">read_transaction_creation</td>
+            <td class="numeric">—</td>
+            <td class="numeric">339.2 ns</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">read_under_write_contention/concurrent_writers/0</td>
+            <td class="numeric">—</td>
+            <td class="numeric">4.46 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">read_under_write_contention/concurrent_writers/2</td>
+            <td class="numeric">—</td>
+            <td class="numeric">56.66 ms</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">read_under_write_contention/concurrent_writers/4</td>
+            <td class="numeric">—</td>
+            <td class="numeric">114.75 ms</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-stable">
             <td class="bench-name">target_3_hop/traverse_three_hops</td>
-            <td class="numeric">—</td>
             <td class="numeric">282.2 ns</td>
-            <td class="change">NEW</td>
-            <td class="status-cell">🆕</td>
+            <td class="numeric">282.2 ns</td>
+            <td class="change">+0.0%</td>
+            <td class="status-cell">🟡</td>
         </tr>
-        <tr class="row-new">
+        <tr class="row-stable">
             <td class="bench-name">target_batch_insertion/insert_1000_edges</td>
-            <td class="numeric">—</td>
             <td class="numeric">781.38 µs</td>
-            <td class="change">NEW</td>
-            <td class="status-cell">🆕</td>
+            <td class="numeric">781.38 µs</td>
+            <td class="change">+0.0%</td>
+            <td class="status-cell">🟡</td>
         </tr>
-        <tr class="row-new">
+        <tr class="row-stable">
             <td class="bench-name">target_single_hop/traverse_one_hop</td>
-            <td class="numeric">—</td>
             <td class="numeric">42.6 ns</td>
-            <td class="change">NEW</td>
-            <td class="status-cell">🆕</td>
+            <td class="numeric">42.6 ns</td>
+            <td class="change">+0.0%</td>
+            <td class="status-cell">🟡</td>
         </tr>
-        <tr class="row-new">
+        <tr class="row-stable">
             <td class="bench-name">target_time_travel/at_anchor</td>
-            <td class="numeric">—</td>
             <td class="numeric">282.6 ns</td>
-            <td class="change">NEW</td>
-            <td class="status-cell">🆕</td>
+            <td class="numeric">282.6 ns</td>
+            <td class="change">+0.0%</td>
+            <td class="status-cell">🟡</td>
         </tr>
-        <tr class="row-new">
+        <tr class="row-stable">
             <td class="bench-name">target_time_travel/with_5_deltas</td>
-            <td class="numeric">—</td>
             <td class="numeric">275.1 ns</td>
+            <td class="numeric">275.1 ns</td>
+            <td class="change">+0.0%</td>
+            <td class="status-cell">🟡</td>
+        </tr>
+        <tr class="row-stable">
+            <td class="bench-name">target_time_travel/worst_case_9_deltas</td>
+            <td class="numeric">286.2 ns</td>
+            <td class="numeric">286.2 ns</td>
+            <td class="change">+0.0%</td>
+            <td class="status-cell">🟡</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">temporal_insert/append_only/100</td>
+            <td class="numeric">—</td>
+            <td class="numeric">20.52 µs</td>
             <td class="change">NEW</td>
             <td class="status-cell">🆕</td>
         </tr>
         <tr class="row-new">
-            <td class="bench-name">target_time_travel/worst_case_9_deltas</td>
+            <td class="bench-name">temporal_insert/append_only/1000</td>
             <td class="numeric">—</td>
-            <td class="numeric">286.2 ns</td>
+            <td class="numeric">210.75 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">temporal_insert/append_only/10000</td>
+            <td class="numeric">—</td>
+            <td class="numeric">2.17 ms</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">temporal_insert/retroactive/100</td>
+            <td class="numeric">—</td>
+            <td class="numeric">147.47 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">temporal_insert/retroactive/1000</td>
+            <td class="numeric">—</td>
+            <td class="numeric">12.55 ms</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">temporal_insert/retroactive/10000</td>
+            <td class="numeric">—</td>
+            <td class="numeric">1.287 s</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">valid_at_query/10000_versions</td>
+            <td class="numeric">—</td>
+            <td class="numeric">22.36 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">valid_at_query/1000_versions</td>
+            <td class="numeric">—</td>
+            <td class="numeric">3.90 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">valid_at_query/100_versions</td>
+            <td class="numeric">—</td>
+            <td class="numeric">1.53 µs</td>
+            <td class="change">NEW</td>
+            <td class="status-cell">🆕</td>
+        </tr>
+        <tr class="row-new">
+            <td class="bench-name">write_transaction_creation</td>
+            <td class="numeric">—</td>
+            <td class="numeric">462.4 ns</td>
             <td class="change">NEW</td>
             <td class="status-cell">🆕</td>
         </tr>
@@ -413,7 +700,7 @@
 </div>
 
 <script>
-  const datasets = [{"label": "target_3_hop/traverse_three_hops", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.282, "commit": "198c57d"}], "borderColor": "#22d3ee", "backgroundColor": "#22d3ee33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_batch_insertion/insert_1000_edges", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 781.382, "commit": "198c57d"}], "borderColor": "#a78bfa", "backgroundColor": "#a78bfa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_single_hop/traverse_one_hop", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.043, "commit": "198c57d"}], "borderColor": "#f472b6", "backgroundColor": "#f472b633", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/at_anchor", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.283, "commit": "198c57d"}], "borderColor": "#34d399", "backgroundColor": "#34d39933", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/with_5_deltas", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.275, "commit": "198c57d"}], "borderColor": "#fbbf24", "backgroundColor": "#fbbf2433", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/worst_case_9_deltas", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.286, "commit": "198c57d"}], "borderColor": "#f87171", "backgroundColor": "#f8717133", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}];
+  const datasets = [{"label": "closure_write_single_node", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 2805.76, "commit": "198c57d"}], "borderColor": "#22d3ee", "backgroundColor": "#22d3ee33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/10000_versions/2_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 133.878, "commit": "198c57d"}], "borderColor": "#a78bfa", "backgroundColor": "#a78bfa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/10000_versions/4_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 474.741, "commit": "198c57d"}], "borderColor": "#f472b6", "backgroundColor": "#f472b633", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/1000_versions/16_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 767.646, "commit": "198c57d"}], "borderColor": "#34d399", "backgroundColor": "#34d39933", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/1000_versions/2_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 130.103, "commit": "198c57d"}], "borderColor": "#fbbf24", "backgroundColor": "#fbbf2433", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/1000_versions/4_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 220.644, "commit": "198c57d"}], "borderColor": "#f87171", "backgroundColor": "#f8717133", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/1000_versions/8_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 422.905, "commit": "198c57d"}], "borderColor": "#60a5fa", "backgroundColor": "#60a5fa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/100_versions/16_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 696.718, "commit": "198c57d"}], "borderColor": "#c084fc", "backgroundColor": "#c084fc33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/100_versions/2_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 130.264, "commit": "198c57d"}], "borderColor": "#fb923c", "backgroundColor": "#fb923c33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/100_versions/4_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 203.703, "commit": "198c57d"}], "borderColor": "#4ade80", "backgroundColor": "#4ade8033", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_reads_same_entity/100_versions/8_readers", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 383.868, "commit": "198c57d"}], "borderColor": "#e879f9", "backgroundColor": "#e879f933", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_writes/different_entities/2", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 139.707, "commit": "198c57d"}], "borderColor": "#38bdf8", "backgroundColor": "#38bdf833", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_writes/different_entities/4", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 220.015, "commit": "198c57d"}], "borderColor": "#a3e635", "backgroundColor": "#a3e63533", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_writes/different_entities/8", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 417.36, "commit": "198c57d"}], "borderColor": "#f43f5e", "backgroundColor": "#f43f5e33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_writes/same_entity_contention/2", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 214.574, "commit": "198c57d"}], "borderColor": "#14b8a6", "backgroundColor": "#14b8a633", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_writes/same_entity_contention/4", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 1225.713, "commit": "198c57d"}], "borderColor": "#22d3ee", "backgroundColor": "#22d3ee33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "concurrent_writes/same_entity_contention/8", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 9476.39, "commit": "198c57d"}], "borderColor": "#a78bfa", "backgroundColor": "#a78bfa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search/k/1", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 126.51, "commit": "198c57d"}], "borderColor": "#f472b6", "backgroundColor": "#f472b633", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search/k/10", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 121.112, "commit": "198c57d"}], "borderColor": "#34d399", "backgroundColor": "#34d39933", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search/k/20", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 123.289, "commit": "198c57d"}], "borderColor": "#fbbf24", "backgroundColor": "#fbbf2433", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search/k/5", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 119.25, "commit": "198c57d"}], "borderColor": "#f87171", "backgroundColor": "#f8717133", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search/k/50", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 122.094, "commit": "198c57d"}], "borderColor": "#60a5fa", "backgroundColor": "#60a5fa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search_index_size/index_size/100", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 21.022, "commit": "198c57d"}], "borderColor": "#c084fc", "backgroundColor": "#c084fc33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search_index_size/index_size/1000", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 120.522, "commit": "198c57d"}], "borderColor": "#fb923c", "backgroundColor": "#fb923c33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search_index_size/index_size/10000", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 313.174, "commit": "198c57d"}], "borderColor": "#4ade80", "backgroundColor": "#4ade8033", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search_index_size/index_size/500", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 68.085, "commit": "198c57d"}], "borderColor": "#e879f9", "backgroundColor": "#e879f933", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "knn_search_index_size/index_size/5000", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 242.319, "commit": "198c57d"}], "borderColor": "#38bdf8", "backgroundColor": "#38bdf833", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "read_transaction_creation", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 0.339, "commit": "198c57d"}], "borderColor": "#a3e635", "backgroundColor": "#a3e63533", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "read_under_write_contention/concurrent_writers/0", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 4.455, "commit": "198c57d"}], "borderColor": "#f43f5e", "backgroundColor": "#f43f5e33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "read_under_write_contention/concurrent_writers/2", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 56660.317, "commit": "198c57d"}], "borderColor": "#14b8a6", "backgroundColor": "#14b8a633", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "read_under_write_contention/concurrent_writers/4", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 114751.007, "commit": "198c57d"}], "borderColor": "#22d3ee", "backgroundColor": "#22d3ee33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_3_hop/traverse_three_hops", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.282, "commit": "198c57d"}, {"x": "2026-02-21T18:56:59.315967+00:00", "y": 0.282, "commit": "198c57d"}], "borderColor": "#a78bfa", "backgroundColor": "#a78bfa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_batch_insertion/insert_1000_edges", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 781.382, "commit": "198c57d"}, {"x": "2026-02-21T18:56:59.315967+00:00", "y": 781.382, "commit": "198c57d"}], "borderColor": "#f472b6", "backgroundColor": "#f472b633", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_single_hop/traverse_one_hop", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.043, "commit": "198c57d"}, {"x": "2026-02-21T18:56:59.315967+00:00", "y": 0.043, "commit": "198c57d"}], "borderColor": "#34d399", "backgroundColor": "#34d39933", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/at_anchor", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.283, "commit": "198c57d"}, {"x": "2026-02-21T18:56:59.315967+00:00", "y": 0.283, "commit": "198c57d"}], "borderColor": "#fbbf24", "backgroundColor": "#fbbf2433", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/with_5_deltas", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.275, "commit": "198c57d"}, {"x": "2026-02-21T18:56:59.315967+00:00", "y": 0.275, "commit": "198c57d"}], "borderColor": "#f87171", "backgroundColor": "#f8717133", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "target_time_travel/worst_case_9_deltas", "data": [{"x": "2026-02-21T18:07:48.283497+00:00", "y": 0.286, "commit": "198c57d"}, {"x": "2026-02-21T18:56:59.315967+00:00", "y": 0.286, "commit": "198c57d"}], "borderColor": "#60a5fa", "backgroundColor": "#60a5fa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "temporal_insert/append_only/100", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 20.522, "commit": "198c57d"}], "borderColor": "#c084fc", "backgroundColor": "#c084fc33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "temporal_insert/append_only/1000", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 210.752, "commit": "198c57d"}], "borderColor": "#fb923c", "backgroundColor": "#fb923c33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "temporal_insert/append_only/10000", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 2170.105, "commit": "198c57d"}], "borderColor": "#4ade80", "backgroundColor": "#4ade8033", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "temporal_insert/retroactive/100", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 147.472, "commit": "198c57d"}], "borderColor": "#e879f9", "backgroundColor": "#e879f933", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "temporal_insert/retroactive/1000", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 12548.726, "commit": "198c57d"}], "borderColor": "#38bdf8", "backgroundColor": "#38bdf833", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "temporal_insert/retroactive/10000", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 1286764.102, "commit": "198c57d"}], "borderColor": "#a3e635", "backgroundColor": "#a3e63533", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "valid_at_query/10000_versions", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 22.355, "commit": "198c57d"}], "borderColor": "#f43f5e", "backgroundColor": "#f43f5e33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "valid_at_query/1000_versions", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 3.901, "commit": "198c57d"}], "borderColor": "#14b8a6", "backgroundColor": "#14b8a633", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "valid_at_query/100_versions", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 1.53, "commit": "198c57d"}], "borderColor": "#22d3ee", "backgroundColor": "#22d3ee33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}, {"label": "write_transaction_creation", "data": [{"x": "2026-02-21T18:56:59.315967+00:00", "y": 0.462, "commit": "198c57d"}], "borderColor": "#a78bfa", "backgroundColor": "#a78bfa33", "fill": false, "tension": 0.3, "pointRadius": 4, "pointHoverRadius": 7}];
 
   const ctx = document.getElementById('timeseriesChart').getContext('2d');
   new Chart(ctx, {

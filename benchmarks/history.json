@@ -41,5 +41,294 @@
         "std_dev_ns": 114686.11563005627
       }
     }
+  },
+  {
+    "timestamp": "2026-02-21T18:56:59.315967+00:00",
+    "commit": "198c57d",
+    "branch": "jules-3069904928789557752-7bfd23b2",
+    "benchmarks": {
+      "write_transaction_creation": {
+        "point_estimate_ns": 462.437451192751,
+        "ci_lower_ns": 461.99519122365655,
+        "ci_upper_ns": 462.94956434670564,
+        "std_dev_ns": 1.8428791358821337
+      },
+      "read_transaction_creation": {
+        "point_estimate_ns": 339.2398020202676,
+        "ci_lower_ns": 335.7963868551652,
+        "ci_upper_ns": 343.7172284630253,
+        "std_dev_ns": 18.818965872716934
+      },
+      "closure_write_single_node": {
+        "point_estimate_ns": 2805759.5909726266,
+        "ci_lower_ns": 2796347.4384530853,
+        "ci_upper_ns": 2816012.120000868,
+        "std_dev_ns": 34097.21087582842
+      },
+      "target_time_travel/with_5_deltas": {
+        "point_estimate_ns": 275.12280051091363,
+        "ci_lower_ns": 273.3902260088697,
+        "ci_upper_ns": 276.6861536595373,
+        "std_dev_ns": 6.1668907832569655
+      },
+      "target_time_travel/at_anchor": {
+        "point_estimate_ns": 282.59198327344984,
+        "ci_lower_ns": 281.1666674124893,
+        "ci_upper_ns": 284.00000178026704,
+        "std_dev_ns": 5.874914585597326
+      },
+      "target_time_travel/worst_case_9_deltas": {
+        "point_estimate_ns": 286.22596070579993,
+        "ci_lower_ns": 285.2287895292346,
+        "ci_upper_ns": 287.1850984284939,
+        "std_dev_ns": 5.5773781190774185
+      },
+      "read_under_write_contention/concurrent_writers/0": {
+        "point_estimate_ns": 4455.426772706844,
+        "ci_lower_ns": 4228.904255243324,
+        "ci_upper_ns": 4747.023021532846,
+        "std_dev_ns": 593.7576979858123
+      },
+      "read_under_write_contention/concurrent_writers/2": {
+        "point_estimate_ns": 56660316.7,
+        "ci_lower_ns": 56342906.459,
+        "ci_upper_ns": 57013083.076,
+        "std_dev_ns": 1234746.7595733292
+      },
+      "read_under_write_contention/concurrent_writers/4": {
+        "point_estimate_ns": 114751007.08,
+        "ci_lower_ns": 114185925.59750001,
+        "ci_upper_ns": 115377109.3205,
+        "std_dev_ns": 2190986.5817636866
+      },
+      "knn_search/k/50": {
+        "point_estimate_ns": 122093.90440761723,
+        "ci_lower_ns": 121492.29242675022,
+        "ci_upper_ns": 122907.09339724136,
+        "std_dev_ns": 2652.666291309944
+      },
+      "knn_search/k/1": {
+        "point_estimate_ns": 126509.63519457828,
+        "ci_lower_ns": 122083.13383962188,
+        "ci_upper_ns": 132789.85542901038,
+        "std_dev_ns": 19356.090456311176
+      },
+      "knn_search/k/20": {
+        "point_estimate_ns": 123289.13095568381,
+        "ci_lower_ns": 122098.07132619909,
+        "ci_upper_ns": 124403.67722678144,
+        "std_dev_ns": 3430.693861973091
+      },
+      "knn_search/k/5": {
+        "point_estimate_ns": 119250.1898455728,
+        "ci_lower_ns": 118895.43223975068,
+        "ci_upper_ns": 119590.96809472723,
+        "std_dev_ns": 866.5413190063905
+      },
+      "knn_search/k/10": {
+        "point_estimate_ns": 121112.20972699476,
+        "ci_lower_ns": 119567.8092913403,
+        "ci_upper_ns": 123386.16247473622,
+        "std_dev_ns": 4584.707344926931
+      },
+      "target_3_hop/traverse_three_hops": {
+        "point_estimate_ns": 282.15733606030585,
+        "ci_lower_ns": 279.7025671955745,
+        "ci_upper_ns": 285.15103732210275,
+        "std_dev_ns": 13.343540038507856
+      },
+      "valid_at_query/1000_versions": {
+        "point_estimate_ns": 3901.2447142025126,
+        "ci_lower_ns": 3697.8750605947957,
+        "ci_upper_ns": 4082.71623580502,
+        "std_dev_ns": 1058.362185703034
+      },
+      "valid_at_query/100_versions": {
+        "point_estimate_ns": 1529.9313631966777,
+        "ci_lower_ns": 1373.0330513962904,
+        "ci_upper_ns": 1654.4851320116004,
+        "std_dev_ns": 426.82645254257915
+      },
+      "valid_at_query/10000_versions": {
+        "point_estimate_ns": 22355.149504950496,
+        "ci_lower_ns": 21471.26207518374,
+        "ci_upper_ns": 23090.904627556694,
+        "std_dev_ns": 4686.36815458784
+      },
+      "target_single_hop/traverse_one_hop": {
+        "point_estimate_ns": 42.60678833115437,
+        "ci_lower_ns": 42.38483333115782,
+        "ci_upper_ns": 42.83175020908999,
+        "std_dev_ns": 0.9908401654190784
+      },
+      "temporal_insert/append_only/100": {
+        "point_estimate_ns": 20522.29958305742,
+        "ci_lower_ns": 20385.267113086968,
+        "ci_upper_ns": 20631.394888370593,
+        "std_dev_ns": 684.2967464825315
+      },
+      "temporal_insert/append_only/1000": {
+        "point_estimate_ns": 210751.62610075713,
+        "ci_lower_ns": 209314.34380635383,
+        "ci_upper_ns": 211873.80906999423,
+        "std_dev_ns": 5680.652576793
+      },
+      "temporal_insert/append_only/10000": {
+        "point_estimate_ns": 2170104.954571928,
+        "ci_lower_ns": 2162071.2235821434,
+        "ci_upper_ns": 2177642.346841939,
+        "std_dev_ns": 99951.82828220678
+      },
+      "temporal_insert/retroactive/100": {
+        "point_estimate_ns": 147472.24641996325,
+        "ci_lower_ns": 146592.02753194023,
+        "ci_upper_ns": 149223.88182725324,
+        "std_dev_ns": 9805.6702862456
+      },
+      "temporal_insert/retroactive/1000": {
+        "point_estimate_ns": 12548726.1525,
+        "ci_lower_ns": 12526667.3475625,
+        "ci_upper_ns": 12577634.3285,
+        "std_dev_ns": 93777.24757700117
+      },
+      "temporal_insert/retroactive/10000": {
+        "point_estimate_ns": 1286764102.48,
+        "ci_lower_ns": 1269283391.64,
+        "ci_upper_ns": 1309601746.974,
+        "std_dev_ns": 74452411.39648002
+      },
+      "concurrent_reads_same_entity/1000_versions/4_readers": {
+        "point_estimate_ns": 220643.6706594189,
+        "ci_lower_ns": 218651.07300263204,
+        "ci_upper_ns": 222611.5618024858,
+        "std_dev_ns": 4865.43768344186
+      },
+      "concurrent_reads_same_entity/1000_versions/2_readers": {
+        "point_estimate_ns": 130103.11400194137,
+        "ci_lower_ns": 129418.02343327574,
+        "ci_upper_ns": 130803.55000659086,
+        "std_dev_ns": 3216.3649522275277
+      },
+      "concurrent_reads_same_entity/1000_versions/16_readers": {
+        "point_estimate_ns": 767645.7277732479,
+        "ci_lower_ns": 764525.121111043,
+        "ci_upper_ns": 770778.2599352465,
+        "std_dev_ns": 15584.005291488184
+      },
+      "concurrent_reads_same_entity/1000_versions/8_readers": {
+        "point_estimate_ns": 422905.2037297612,
+        "ci_lower_ns": 420854.7629823159,
+        "ci_upper_ns": 424934.40866369667,
+        "std_dev_ns": 11425.593512367848
+      },
+      "concurrent_reads_same_entity/100_versions/4_readers": {
+        "point_estimate_ns": 203703.20611648224,
+        "ci_lower_ns": 202440.93124589915,
+        "ci_upper_ns": 205194.36245293386,
+        "std_dev_ns": 5225.996708479067
+      },
+      "concurrent_reads_same_entity/100_versions/2_readers": {
+        "point_estimate_ns": 130264.34551336728,
+        "ci_lower_ns": 129534.23520270771,
+        "ci_upper_ns": 131028.28359908394,
+        "std_dev_ns": 4798.764901425062
+      },
+      "concurrent_reads_same_entity/100_versions/16_readers": {
+        "point_estimate_ns": 696718.4900718307,
+        "ci_lower_ns": 693914.9793091253,
+        "ci_upper_ns": 699715.2173716048,
+        "std_dev_ns": 15491.27050133308
+      },
+      "concurrent_reads_same_entity/100_versions/8_readers": {
+        "point_estimate_ns": 383867.5403632128,
+        "ci_lower_ns": 382497.37839177676,
+        "ci_upper_ns": 385170.55045344535,
+        "std_dev_ns": 7710.20248888855
+      },
+      "concurrent_reads_same_entity/10000_versions/4_readers": {
+        "point_estimate_ns": 474740.6933333331,
+        "ci_lower_ns": 421344.7715,
+        "ci_upper_ns": 528949.2962499999,
+        "std_dev_ns": 196782.40339912684
+      },
+      "concurrent_reads_same_entity/10000_versions/2_readers": {
+        "point_estimate_ns": 133878.10658767296,
+        "ci_lower_ns": 133460.23790329424,
+        "ci_upper_ns": 134345.93190582373,
+        "std_dev_ns": 2175.063729742513
+      },
+      "concurrent_writes/same_entity_contention/8": {
+        "point_estimate_ns": 9476390.287272723,
+        "ci_lower_ns": 9148257.177181816,
+        "ci_upper_ns": 9844934.79586364,
+        "std_dev_ns": 1278310.3311533588
+      },
+      "concurrent_writes/same_entity_contention/2": {
+        "point_estimate_ns": 214574.15811153175,
+        "ci_lower_ns": 181185.43486848514,
+        "ci_upper_ns": 248623.72722661766,
+        "std_dev_ns": 52568.23054200384
+      },
+      "concurrent_writes/same_entity_contention/4": {
+        "point_estimate_ns": 1225713.092424772,
+        "ci_lower_ns": 1166934.228398231,
+        "ci_upper_ns": 1295075.5195692186,
+        "std_dev_ns": 191882.99420482724
+      },
+      "concurrent_writes/different_entities/8": {
+        "point_estimate_ns": 417359.9350203844,
+        "ci_lower_ns": 408207.3261324403,
+        "ci_upper_ns": 426214.2611504691,
+        "std_dev_ns": 21102.406923544866
+      },
+      "concurrent_writes/different_entities/2": {
+        "point_estimate_ns": 139706.9219879635,
+        "ci_lower_ns": 138856.87105457723,
+        "ci_upper_ns": 140629.48944885316,
+        "std_dev_ns": 3793.6545388626446
+      },
+      "concurrent_writes/different_entities/4": {
+        "point_estimate_ns": 220014.88403028538,
+        "ci_lower_ns": 218937.17862020747,
+        "ci_upper_ns": 220928.03934378288,
+        "std_dev_ns": 6023.820497545809
+      },
+      "target_batch_insertion/insert_1000_edges": {
+        "point_estimate_ns": 781381.9847088103,
+        "ci_lower_ns": 676902.9034657464,
+        "ci_upper_ns": 878073.2895045202,
+        "std_dev_ns": 114686.11563005627
+      },
+      "knn_search_index_size/index_size/500": {
+        "point_estimate_ns": 68084.75761452413,
+        "ci_lower_ns": 67886.98221119061,
+        "ci_upper_ns": 68321.7698030196,
+        "std_dev_ns": 461.9275418261912
+      },
+      "knn_search_index_size/index_size/100": {
+        "point_estimate_ns": 21022.150894363203,
+        "ci_lower_ns": 20982.212180073308,
+        "ci_upper_ns": 21064.357180164658,
+        "std_dev_ns": 111.01539429908154
+      },
+      "knn_search_index_size/index_size/5000": {
+        "point_estimate_ns": 242319.20836616535,
+        "ci_lower_ns": 241147.3793878223,
+        "ci_upper_ns": 243454.87890109434,
+        "std_dev_ns": 3766.520173643887
+      },
+      "knn_search_index_size/index_size/1000": {
+        "point_estimate_ns": 120521.5449432149,
+        "ci_lower_ns": 120146.73582292297,
+        "ci_upper_ns": 120989.84363510176,
+        "std_dev_ns": 2840.1279841366995
+      },
+      "knn_search_index_size/index_size/10000": {
+        "point_estimate_ns": 313174.4962286636,
+        "ci_lower_ns": 310656.7263447485,
+        "ci_upper_ns": 316856.41957542504,
+        "std_dev_ns": 27171.71107871942
+      }
+    }
   }
 ]
