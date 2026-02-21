@@ -587,9 +587,16 @@ impl FlushCoordinator {
     /// # Returns
     ///
     /// Statistics about the flush operation.
-    pub fn flush(&self, entries: Vec<PendingEntry>, sync: bool) -> Result<FlushStats> {
+    pub fn flush(&self, mut entries: Vec<PendingEntry>, sync: bool) -> Result<FlushStats> {
         if entries.is_empty() {
             return Ok(FlushStats::default());
+        }
+
+        if entries.len() == 1 {
+            let entry = entries
+                .pop()
+                .expect("entries.len() == 1 should always yield one entry");
+            return self.flush_single(entry, sync);
         }
 
         let start = Instant::now();
@@ -697,6 +704,96 @@ impl FlushCoordinator {
                 for entry in entries {
                     entry.notify_error(&error_msg);
                 }
+                Err(e)
+            }
+        }
+    }
+
+    /// Flush exactly one entry to disk.
+    ///
+    /// This is a latency-oriented path used by synchronous single-entry commits to
+    /// avoid vector allocation and generic batch iteration overhead.
+    pub fn flush_single(&self, entry: PendingEntry, sync: bool) -> Result<FlushStats> {
+        let start = Instant::now();
+        let entry_lsn = entry.lsn.0;
+
+        // Inner function to perform I/O operations.
+        // This allows us to catch errors and notify pending entries before returning.
+        let do_flush = || -> Result<FlushStats> {
+            // Acquire lock once for the entire operation to ensure thread safety
+            let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+
+            // Ensure segment is open
+            self.ensure_segment_open(&mut writer_guard)?;
+
+            let writer = writer_guard.as_mut().ok_or_else(|| {
+                Error::Storage(StorageError::WalError {
+                    reason: "WAL writer not initialized".to_string(),
+                })
+            })?;
+
+            writer.write_all(&entry.data).map_err(|e| {
+                Error::Storage(StorageError::IoError(format!(
+                    "Failed to write WAL entry: {}",
+                    e
+                )))
+            })?;
+            let bytes_written = entry.data.len();
+
+            // Flush buffer to OS
+            writer.flush().map_err(|e| {
+                Error::Storage(StorageError::IoError(format!(
+                    "Failed to flush WAL buffer: {}",
+                    e
+                )))
+            })?;
+
+            // Update segment LSN tracking (ADR-0025)
+            self.current_segment_min_lsn
+                .fetch_min(entry_lsn, Ordering::Relaxed);
+            self.current_segment_max_lsn
+                .fetch_max(entry_lsn, Ordering::Relaxed);
+            self.current_segment_entry_count
+                .fetch_add(1, Ordering::Relaxed);
+
+            // Sync to disk if requested.
+            // We sync via the active writer file handle to avoid extra mutex traffic.
+            if sync && self.config.sync_on_flush {
+                writer.get_ref().sync_data().map_err(|e| {
+                    Error::Storage(StorageError::IoError(format!("Failed to sync WAL: {}", e)))
+                })?;
+            }
+
+            // Update size
+            self.current_segment_size
+                .fetch_add(bytes_written as u64, Ordering::Relaxed);
+
+            // Check for rotation
+            let segment_rotated = self.maybe_rotate_segment(&mut writer_guard)?;
+
+            // Update metrics
+            self.total_entries_flushed.fetch_add(1, Ordering::Relaxed);
+            self.total_bytes_written
+                .fetch_add(bytes_written as u64, Ordering::Relaxed);
+            self.total_flushes.fetch_add(1, Ordering::Relaxed);
+
+            Ok(FlushStats {
+                entries_flushed: 1,
+                bytes_written,
+                flush_duration: start.elapsed(),
+                segment_rotated,
+            })
+        };
+
+        // Execute flush logic
+        match do_flush() {
+            Ok(stats) => {
+                entry.notify_completion();
+                Ok(stats)
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                entry.notify_error(&error_msg);
                 Err(e)
             }
         }

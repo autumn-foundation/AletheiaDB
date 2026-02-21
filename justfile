@@ -29,6 +29,10 @@ bench-tables:
     @echo "✓ Benchmark tables generated in benchmark-results/"
     @echo "  Open benchmark-results/index.html to view results"
 
+# Run fused group-commit threshold benchmark check and save baseline
+bench-group-commit-fused-check:
+    python scripts/check_group_commit_fused_benchmark.py --baseline-name fused_commit_wait_threshold
+
 # Build the project
 build:
     cargo build
@@ -312,3 +316,4 @@ worktree-pr TITLE BODY="":
     else
         bash scripts/worktree-pr.sh "{{TITLE}}" "{{BODY}}"
     fi
+

@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use super::concurrent::{ConcurrentWal, ConcurrentWalConfig};
 use super::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig, FlushStats};
-use super::group_commit::GroupCommitCoordinator;
+use super::group_commit::{GroupCommitConfig, GroupCommitCoordinator};
 use super::{LSN, WalOperation};
 use crate::core::error::{Error, Result, StorageError};
 use crate::storage::wal::DurabilityMode;
@@ -73,6 +73,11 @@ pub struct ConcurrentWalSystemConfig {
     pub flush_interval_ms: u64,
     /// Durability mode.
     pub durability_mode: DurabilityMode,
+    /// Optional override for immediate group-commit flush trigger threshold.
+    ///
+    /// When `None`, the system uses an adaptive threshold derived from
+    /// `max_batch_size`.
+    pub group_commit_flush_trigger_batch_size: Option<usize>,
     /// Write buffer size for segment files.
     pub write_buffer_size: usize,
 }
@@ -87,6 +92,7 @@ impl Default for ConcurrentWalSystemConfig {
             segments_to_retain: 10,
             flush_interval_ms: 10,
             durability_mode: DurabilityMode::Synchronous,
+            group_commit_flush_trigger_batch_size: None,
             write_buffer_size: 64 * 1024, // 64 KB
         }
     }
@@ -116,6 +122,12 @@ impl ConcurrentWalSystemConfig {
     /// Set the flush interval in milliseconds.
     pub fn with_flush_interval_ms(mut self, ms: u64) -> Self {
         self.flush_interval_ms = ms;
+        self
+    }
+
+    /// Override group-commit immediate flush trigger threshold.
+    pub fn with_group_commit_flush_trigger_batch_size(mut self, threshold: usize) -> Self {
+        self.group_commit_flush_trigger_batch_size = Some(threshold);
         self
     }
 }
@@ -318,18 +330,36 @@ impl ConcurrentWalSystem {
             DurabilityMode::GroupCommit {
                 max_batch_size,
                 max_delay_ms,
-            } => Some(Arc::new(GroupCommitCoordinator::new(
-                max_delay_ms,
-                max_batch_size,
-            ))),
+            } => {
+                let flush_trigger_batch_size = config
+                    .group_commit_flush_trigger_batch_size
+                    .unwrap_or(max_batch_size.max(1));
+                Some(Arc::new(GroupCommitCoordinator::with_config(
+                    GroupCommitConfig {
+                        max_delay_ms,
+                        max_batch_size,
+                        flush_trigger_batch_size,
+                        ..GroupCommitConfig::default()
+                    },
+                )))
+            }
             DurabilityMode::AsyncBatched {
                 max_batch_size,
                 max_delay_ms,
                 ..
-            } => Some(Arc::new(GroupCommitCoordinator::new(
-                max_delay_ms,
-                max_batch_size,
-            ))),
+            } => {
+                let flush_trigger_batch_size = config
+                    .group_commit_flush_trigger_batch_size
+                    .unwrap_or(max_batch_size.max(1));
+                Some(Arc::new(GroupCommitCoordinator::with_config(
+                    GroupCommitConfig {
+                        max_delay_ms,
+                        max_batch_size,
+                        flush_trigger_batch_size,
+                        ..GroupCommitConfig::default()
+                    },
+                )))
+            }
             _ => None,
         };
 
@@ -446,6 +476,27 @@ impl ConcurrentWalSystem {
             self.coordinator.flush(entries, true)?;
         }
 
+        Ok(lsn)
+    }
+
+    /// Append an operation via synchronous isolated fast path.
+    ///
+    /// This bypasses stripe buffers and flushes the serialized entry directly when
+    /// there are no pending buffered entries. If buffered entries exist, it falls
+    /// back to normal synchronous append semantics that drain and flush all pending data.
+    pub fn append_sync_isolated(&self, operation: WalOperation) -> Result<LSN> {
+        if !matches!(self.durability_mode, DurabilityMode::Synchronous) {
+            return self.append(operation);
+        }
+
+        // Preserve existing semantics if there is already buffered work.
+        if self.wal.has_pending_entries() {
+            return self.append_sync(operation);
+        }
+
+        let entry = self.wal.prepare_direct_entry(operation)?;
+        let lsn = entry.lsn;
+        self.coordinator.flush_single(entry, true)?;
         Ok(lsn)
     }
 
@@ -614,11 +665,66 @@ impl ConcurrentWalSystem {
         }
     }
 
+    /// Commit and wait for durability in GroupCommit mode using a fused control path.
+    ///
+    /// This avoids the separate `register_transaction()` and `wait_for_flush()` lock
+    /// round-trips on hot transaction commit paths.
+    pub fn commit_group_commit_and_wait(&self) -> Result<()> {
+        if !matches!(self.durability_mode, DurabilityMode::GroupCommit { .. }) {
+            let wait_epoch = self.commit()?;
+            if let Some(epoch) = wait_epoch
+                && let Some(gc) = self.group_commit_coordinator()
+                && self.durability_mode.waits_for_durability()
+            {
+                gc.wait_for_flush(epoch)?;
+            }
+            return Ok(());
+        }
+
+        if let Some(ref gc) = self.group_commit {
+            gc.register_transaction_and_wait(|| self.flush_notifier.notify())
+                .map_err(|e| {
+                    Error::Storage(StorageError::WalError {
+                        reason: format!("GroupCommit fused commit/wait failed: {}", e),
+                    })
+                })?;
+            Ok(())
+        } else {
+            // Fallback to sync if no coordinator (shouldn't happen)
+            let entries = self.wal.drain_all();
+            if !entries.is_empty() {
+                self.coordinator.flush(entries, true)?;
+            }
+            Ok(())
+        }
+    }
+
     /// Get the group commit coordinator for waiting on epochs.
     ///
     /// Returns `None` for modes that don't use group commit.
     pub fn group_commit_coordinator(&self) -> Option<&Arc<GroupCommitCoordinator>> {
         self.group_commit.as_ref()
+    }
+
+    /// Snapshot internal group-commit coordination metrics, if enabled for this mode.
+    pub fn group_commit_metrics_snapshot(
+        &self,
+    ) -> Option<super::group_commit::GroupCommitMetricsSnapshot> {
+        self.group_commit.as_ref().map(|gc| gc.metrics_snapshot())
+    }
+
+    /// Reset internal group-commit coordination metrics.
+    pub fn reset_group_commit_metrics(&self) {
+        if let Some(gc) = self.group_commit.as_ref() {
+            gc.reset_metrics();
+        }
+    }
+
+    /// Enable or disable internal group-commit metrics instrumentation.
+    pub fn set_group_commit_metrics_enabled(&self, enabled: bool) {
+        if let Some(gc) = self.group_commit.as_ref() {
+            gc.set_metrics_enabled(enabled);
+        }
     }
 
     /// Get the current (next to be allocated) LSN.
@@ -738,6 +844,23 @@ mod tests {
         let lsn = wal.append(create_test_operation(1)).unwrap();
         assert_eq!(lsn, LSN(1));
         assert_eq!(wal.total_appends(), 1);
+    }
+
+    #[test]
+    fn test_append_sync_isolated_mode() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous);
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let lsn = wal.append_sync_isolated(create_test_operation(1)).unwrap();
+        assert_eq!(lsn, LSN(1));
+        assert_eq!(wal.total_appends(), 1);
+        assert_eq!(wal.total_flushed(), 1);
+
+        // Isolated path should flush directly, leaving buffered queue empty.
+        let stats = wal.flush().unwrap();
+        assert_eq!(stats.entries_flushed, 0);
     }
 
     #[test]
@@ -875,6 +998,100 @@ mod tests {
             timeout.as_millis(),
             wal.total_flushed()
         );
+
+        wal.shutdown();
+    }
+
+    #[test]
+    fn test_group_commit_default_flush_trigger_matches_max_batch_size() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
+            DurabilityMode::GroupCommit {
+                max_batch_size: 20,
+                max_delay_ms: 10,
+            },
+        );
+        let mut wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let threshold = wal
+            .group_commit_coordinator()
+            .expect("group commit coordinator should be available")
+            .flush_trigger_batch_size();
+        assert_eq!(threshold, 20);
+
+        wal.shutdown();
+    }
+
+    #[test]
+    fn test_group_commit_flush_trigger_threshold_override() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::GroupCommit {
+                max_batch_size: 20,
+                max_delay_ms: 10,
+            })
+            .with_group_commit_flush_trigger_batch_size(20);
+        let mut wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let threshold = wal
+            .group_commit_coordinator()
+            .expect("group commit coordinator should be available")
+            .flush_trigger_batch_size();
+        assert_eq!(threshold, 20);
+
+        wal.shutdown();
+    }
+
+    #[test]
+    fn test_commit_group_commit_and_wait() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::GroupCommit {
+                max_batch_size: 8,
+                max_delay_ms: 5,
+            })
+            .with_flush_interval_ms(2);
+        let mut wal = ConcurrentWalSystem::new(config).unwrap();
+        wal.set_group_commit_metrics_enabled(true);
+
+        wal.append_async(create_test_operation(1)).unwrap();
+        wal.commit_group_commit_and_wait().unwrap();
+
+        assert!(
+            wal.total_flushed() >= 1,
+            "Expected at least one flushed entry after fused commit/wait"
+        );
+
+        wal.shutdown();
+    }
+
+    #[test]
+    fn test_group_commit_metrics_snapshot() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::GroupCommit {
+                max_batch_size: 8,
+                max_delay_ms: 5,
+            })
+            .with_flush_interval_ms(2);
+        let mut wal = ConcurrentWalSystem::new(config).unwrap();
+        wal.set_group_commit_metrics_enabled(true);
+
+        wal.append_async(create_test_operation(1)).unwrap();
+        wal.commit_group_commit_and_wait().unwrap();
+
+        let metrics = wal
+            .group_commit_metrics_snapshot()
+            .expect("group commit metrics should be available");
+        assert!(metrics.wait_calls > 0);
+        assert!(metrics.epoch_completions > 0);
+
+        wal.reset_group_commit_metrics();
+        let reset = wal
+            .group_commit_metrics_snapshot()
+            .expect("group commit metrics should be available");
+        assert_eq!(reset.wait_calls, 0);
+        assert_eq!(reset.epoch_completions, 0);
 
         wal.shutdown();
     }

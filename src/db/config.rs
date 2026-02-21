@@ -166,6 +166,7 @@ impl AletheiaDB {
                 _ => config.wal.flush_interval_ms, // Use config default
             },
             durability_mode,
+            group_commit_flush_trigger_batch_size: config.wal.group_commit_flush_trigger_batch_size,
             write_buffer_size: config.wal.write_buffer_size,
         };
 
@@ -314,6 +315,7 @@ impl AletheiaDB {
                 _ => wal_config.flush_interval_ms,
             },
             durability_mode,
+            group_commit_flush_trigger_batch_size: wal_config.group_commit_flush_trigger_batch_size,
             write_buffer_size: wal_config.write_buffer_size,
         };
 

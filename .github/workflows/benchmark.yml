@@ -111,6 +111,16 @@ jobs:
             exit 1
           fi
 
+      - name: Check fused group-commit threshold benchmark
+        env:
+          BENCH_SAMPLE_SIZE: 10
+          BENCH_MEASUREMENT_TIME: 1
+          BENCH_WARMUP_TIME: 1
+        run: |
+          python scripts/check_group_commit_fused_benchmark.py \
+            --baseline-name fused_commit_wait_threshold \
+            --max-ratio 0.70
+
       - name: Generate benchmark JSON
         run: |
           python scripts/generate_benchmark_tables.py \

@@ -473,7 +473,7 @@ impl WriteTransaction {
 
             // Log operations to WAL (lock-free striped append!)
             // This must happen BEFORE applying changes for durability.
-            wal::log_operations_to_wal(&self, commit)?;
+            let wal_disposition = wal::log_operations_to_wal(&self, commit)?;
 
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
@@ -482,7 +482,19 @@ impl WriteTransaction {
             // For Sync: drains and flushes immediately
             // For Async: returns immediately
             // For GroupCommit: registers and returns epoch
-            let wait_epoch = self.wal.commit()?;
+            let wait_epoch = match wal_disposition {
+                wal::WalLogDisposition::NeedsCommit => {
+                    if matches!(self.durability_mode, DurabilityMode::GroupCommit { .. })
+                        && self.durability_mode.waits_for_durability()
+                    {
+                        self.wal.commit_group_commit_and_wait()?;
+                        None
+                    } else {
+                        self.wal.commit()?
+                    }
+                }
+                wal::WalLogDisposition::AlreadyDurable => None,
+            };
 
             #[cfg(feature = "observability")]
             let wal_commit_completed = std::time::Instant::now();

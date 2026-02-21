@@ -422,6 +422,36 @@ fn test_with_unified_config_returns_result() {
 }
 
 #[test]
+fn test_with_unified_config_propagates_group_commit_flush_trigger_threshold() {
+    use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+    use crate::storage::wal::DurabilityMode;
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let wal_dir = temp_dir.path().join("wal");
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(wal_dir)
+                .durability_mode(DurabilityMode::GroupCommit {
+                    max_delay_ms: 10,
+                    max_batch_size: 20,
+                })
+                .group_commit_flush_trigger_batch_size(7)
+                .expect("threshold must be valid")
+                .build(),
+        )
+        .build();
+
+    let db = AletheiaDB::with_unified_config(config).expect("database should initialize");
+    let threshold = db
+        .wal
+        .group_commit_coordinator()
+        .expect("group commit coordinator should exist")
+        .flush_trigger_batch_size();
+    assert_eq!(threshold, 7);
+}
+
+#[test]
 fn test_cold_storage_configuration() {
     use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
     use std::time::Duration;

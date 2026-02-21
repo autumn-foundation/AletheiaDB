@@ -23,7 +23,10 @@ use aletheiadb::{
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use tempfile::TempDir;
 
@@ -283,6 +286,67 @@ fn bench_concurrent_writes(c: &mut Criterion) {
                         }
                     });
                     handles.push(handle);
+                }
+
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark the fused GroupCommit path (`append_async` + `commit_group_commit_and_wait`)
+/// under concurrent load, comparing adaptive trigger thresholds against timer-only behavior.
+fn bench_group_commit_fused_concurrent(c: &mut Criterion) {
+    let mut group = c.benchmark_group("group_commit_fused_concurrent");
+    group.throughput(Throughput::Elements(100));
+
+    let thread_count = 10usize;
+    let ops_per_thread = 10usize;
+    let max_delay_ms = 10u64;
+    let max_batch_size = 20usize;
+    let half_batch_threshold = max_batch_size.max(1).saturating_add(1) / 2;
+
+    for (name, trigger_threshold) in [
+        ("half_batch_threshold", half_batch_threshold),
+        ("timer_only_threshold", max_batch_size),
+    ] {
+        group.bench_function(BenchmarkId::from_parameter(name), |b| {
+            let temp_dir = TempDir::new().unwrap();
+            let config = ConcurrentWalSystemConfig::new(temp_dir.path().to_path_buf())
+                .with_durability_mode(DurabilityMode::GroupCommit {
+                    max_delay_ms,
+                    max_batch_size,
+                })
+                .with_flush_interval_ms(max_delay_ms)
+                .with_group_commit_flush_trigger_batch_size(trigger_threshold);
+
+            let wal = Arc::new(ConcurrentWalSystem::new(config).unwrap());
+            let id_alloc = Arc::new(AtomicU64::new(1));
+            let label = GLOBAL_INTERNER.intern("FusedConcurrent").unwrap();
+
+            b.iter(|| {
+                let mut handles = Vec::with_capacity(thread_count);
+                for _ in 0..thread_count {
+                    let wal = Arc::clone(&wal);
+                    let id_alloc = Arc::clone(&id_alloc);
+                    let thread_label = label;
+                    handles.push(thread::spawn(move || {
+                        for _ in 0..ops_per_thread {
+                            let node_id = id_alloc.fetch_add(1, Ordering::Relaxed);
+                            let operation = WalOperation::CreateNode {
+                                node_id: aletheiadb::core::id::NodeId::new(node_id).unwrap(),
+                                label: thread_label,
+                                properties: PropertyMapBuilder::new().build(),
+                                valid_from: time::now(),
+                            };
+                            wal.append_async(operation).unwrap();
+                            wal.commit_group_commit_and_wait().unwrap();
+                        }
+                    }));
                 }
 
                 for handle in handles {
@@ -762,6 +826,7 @@ criterion_group!(
     targets = bench_single_transaction_latency,
     bench_batch_throughput,
     bench_concurrent_writes,
+    bench_group_commit_fused_concurrent,
     bench_group_commit_batch_sizes,
     bench_group_commit_delays,
     bench_async_batched_batch_sizes,

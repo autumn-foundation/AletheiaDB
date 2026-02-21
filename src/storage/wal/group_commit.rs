@@ -27,9 +27,10 @@
 //! The flush thread uses `.expect()` to panic on lock poisoning because silent
 //! degradation is worse than fail-fast behavior for background infrastructure.
 
-use std::collections::VecDeque;
-use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::core::error::{Error, StorageError};
 
@@ -61,10 +62,83 @@ use crate::core::error::{Error, StorageError};
 pub struct GroupCommitCoordinator {
     /// State protected by mutex
     state: Mutex<GroupCommitState>,
-    /// Condition variable for flush completion
-    flush_complete: Condvar,
+    /// Per-epoch wait latches protected separately from coordinator state.
+    waiters: Mutex<HashMap<u64, Arc<EpochLatch>>>,
+    /// Lightweight internal metrics for profiling group-commit coordination.
+    metrics: GroupCommitMetrics,
+    /// Enables internal metrics instrumentation on hot paths.
+    metrics_enabled: AtomicBool,
     /// Configuration
     config: GroupCommitConfig,
+    /// Precomputed wait timeout used by `wait_for_flush`.
+    wait_timeout: Duration,
+}
+
+/// Per-epoch wait latch.
+///
+/// Transactions waiting for a specific epoch block on that epoch's latch so a
+/// completed flush only wakes relevant waiters (no global thundering-herd wakeup).
+struct EpochLatch {
+    state: Mutex<EpochLatchState>,
+    condvar: Condvar,
+}
+
+#[derive(Default)]
+struct EpochLatchState {
+    completed: bool,
+    error: Option<String>,
+}
+
+impl EpochLatch {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(EpochLatchState::default()),
+            condvar: Condvar::new(),
+        }
+    }
+
+    fn complete(&self, result: Result<(), Error>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.completed {
+            return;
+        }
+        state.completed = true;
+        if let Err(e) = result {
+            state.error = Some(e.to_string());
+        }
+        self.condvar.notify_all();
+    }
+
+    fn wait(&self, timeout: Duration, epoch: u64) -> Result<(), Error> {
+        let mut state = self.state.lock().map_err(|_| {
+            Error::Storage(StorageError::LockPoisoned {
+                resource: "group_commit_epoch_latch".to_string(),
+            })
+        })?;
+
+        while !state.completed {
+            let (new_state, timeout_result) =
+                self.condvar.wait_timeout(state, timeout).map_err(|_| {
+                    Error::Storage(StorageError::LockPoisoned {
+                        resource: "group_commit_epoch_latch".to_string(),
+                    })
+                })?;
+            state = new_state;
+            if timeout_result.timed_out() && !state.completed {
+                return Err(Error::Storage(StorageError::WalError {
+                    reason: format!("Group commit timeout waiting for epoch {}", epoch),
+                }));
+            }
+        }
+
+        if let Some(error_msg) = &state.error {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: format!("Group commit flush failed: {}", error_msg),
+            }));
+        }
+
+        Ok(())
+    }
 }
 
 /// Configuration for group commit behavior.
@@ -74,6 +148,11 @@ pub struct GroupCommitConfig {
     pub max_delay_ms: u64,
     /// Maximum transactions to batch before forcing a flush.
     pub max_batch_size: usize,
+    /// Batch size threshold that triggers an immediate flush wakeup.
+    ///
+    /// Values greater than `max_batch_size` are clamped to `max_batch_size`.
+    /// A value of `0` is treated as `1`.
+    pub flush_trigger_batch_size: usize,
 
     /// Multiplier for max_delay_ms to calculate base timeout.
     pub timeout_multiplier: u32,
@@ -92,6 +171,7 @@ impl Default for GroupCommitConfig {
         Self {
             max_delay_ms: 10,
             max_batch_size: 200,
+            flush_trigger_batch_size: 200,
             timeout_multiplier: 50,
             timeout_base_ms: 5000,
             timeout_min_ms: 10000,
@@ -116,12 +196,61 @@ struct GroupCommitState {
     oldest_error_epoch: u64,
 }
 
+#[derive(Debug, Default)]
+struct GroupCommitMetrics {
+    state_lock_wait_ns: AtomicU64,
+    state_lock_acquires: AtomicU64,
+    waiters_lock_wait_ns: AtomicU64,
+    waiters_lock_acquires: AtomicU64,
+    wait_calls: AtomicU64,
+    wait_successes: AtomicU64,
+    wait_timeouts: AtomicU64,
+    wait_errors: AtomicU64,
+    wait_total_ns: AtomicU64,
+    waiter_created: AtomicU64,
+    waiter_removed: AtomicU64,
+    trigger_flush_calls: AtomicU64,
+    epoch_completions: AtomicU64,
+}
+
+/// Snapshot of internal group-commit coordination metrics.
+#[derive(Debug, Clone, Default)]
+pub struct GroupCommitMetricsSnapshot {
+    /// Total nanoseconds spent waiting to acquire the coordinator state lock.
+    pub state_lock_wait_ns: u64,
+    /// Number of successful coordinator state lock acquisitions.
+    pub state_lock_acquires: u64,
+    /// Total nanoseconds spent waiting to acquire the waiters map lock.
+    pub waiters_lock_wait_ns: u64,
+    /// Number of successful waiters map lock acquisitions.
+    pub waiters_lock_acquires: u64,
+    /// Total number of commit wait operations started.
+    pub wait_calls: u64,
+    /// Number of successful commit wait operations.
+    pub wait_successes: u64,
+    /// Number of commit wait operations that timed out.
+    pub wait_timeouts: u64,
+    /// Number of commit wait operations that completed with an error.
+    pub wait_errors: u64,
+    /// Total nanoseconds spent waiting in commit wait operations.
+    pub wait_total_ns: u64,
+    /// Number of epoch waiter latches created.
+    pub waiter_created: u64,
+    /// Number of epoch waiter latches removed.
+    pub waiter_removed: u64,
+    /// Number of times group commit requested a flush trigger.
+    pub trigger_flush_calls: u64,
+    /// Number of epochs marked as completed by flush.
+    pub epoch_completions: u64,
+}
+
 impl GroupCommitCoordinator {
     /// Create a new GroupCommitCoordinator with the given configuration.
     pub fn new(max_delay_ms: u64, max_batch_size: usize) -> Self {
         Self::with_config(GroupCommitConfig {
             max_delay_ms,
             max_batch_size,
+            flush_trigger_batch_size: max_batch_size,
             recent_errors_capacity: 1024,
             ..GroupCommitConfig::default()
         })
@@ -129,6 +258,13 @@ impl GroupCommitCoordinator {
 
     /// Create a new GroupCommitCoordinator with the given full configuration.
     pub fn with_config(config: GroupCommitConfig) -> Self {
+        let base_timeout =
+            Duration::from_millis(config.max_delay_ms * config.timeout_multiplier as u64)
+                + Duration::from_millis(config.timeout_base_ms);
+        let wait_timeout = base_timeout
+            .max(Duration::from_millis(config.timeout_min_ms))
+            .min(Duration::from_millis(config.timeout_max_ms));
+
         Self {
             state: Mutex::new(GroupCommitState {
                 current_epoch: 1, // Start at 1 so flushed_epoch=0 means "nothing flushed yet"
@@ -137,8 +273,11 @@ impl GroupCommitCoordinator {
                 recent_errors: VecDeque::new(),
                 oldest_error_epoch: 0,
             }),
-            flush_complete: Condvar::new(),
+            waiters: Mutex::new(HashMap::new()),
+            metrics: GroupCommitMetrics::default(),
+            metrics_enabled: AtomicBool::new(false),
             config,
+            wait_timeout,
         }
     }
 
@@ -148,10 +287,192 @@ impl GroupCommitCoordinator {
         Self::new(config.max_delay_ms, config.max_batch_size)
     }
 
+    #[inline]
+    fn metrics_enabled(&self) -> bool {
+        self.metrics_enabled.load(Ordering::Relaxed)
+    }
+
+    fn lock_state(&self) -> Result<MutexGuard<'_, GroupCommitState>, Error> {
+        if self.metrics_enabled() {
+            let start = Instant::now();
+            let guard = self.state.lock().map_err(|_| {
+                Error::Storage(StorageError::LockPoisoned {
+                    resource: "group_commit_state".to_string(),
+                })
+            })?;
+            self.metrics
+                .state_lock_wait_ns
+                .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            self.metrics
+                .state_lock_acquires
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(guard)
+        } else {
+            self.state.lock().map_err(|_| {
+                Error::Storage(StorageError::LockPoisoned {
+                    resource: "group_commit_state".to_string(),
+                })
+            })
+        }
+    }
+
+    fn lock_waiters(&self) -> Result<MutexGuard<'_, HashMap<u64, Arc<EpochLatch>>>, Error> {
+        if self.metrics_enabled() {
+            let start = Instant::now();
+            let guard = self.waiters.lock().map_err(|_| {
+                Error::Storage(StorageError::LockPoisoned {
+                    resource: "group_commit_waiters".to_string(),
+                })
+            })?;
+            self.metrics
+                .waiters_lock_wait_ns
+                .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            self.metrics
+                .waiters_lock_acquires
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(guard)
+        } else {
+            self.waiters.lock().map_err(|_| {
+                Error::Storage(StorageError::LockPoisoned {
+                    resource: "group_commit_waiters".to_string(),
+                })
+            })
+        }
+    }
+
+    fn wait_on_epoch_latch(&self, waiter: &Arc<EpochLatch>, epoch: u64) -> Result<(), Error> {
+        if self.metrics_enabled() {
+            self.metrics.wait_calls.fetch_add(1, Ordering::Relaxed);
+            let start = Instant::now();
+            let result = waiter.wait(self.wait_timeout, epoch);
+            self.metrics
+                .wait_total_ns
+                .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+            match &result {
+                Ok(()) => {
+                    self.metrics.wait_successes.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("timeout waiting for epoch") {
+                        self.metrics.wait_timeouts.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        self.metrics.wait_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+
+            result
+        } else {
+            waiter.wait(self.wait_timeout, epoch)
+        }
+    }
+
+    /// Snapshot current internal coordination metrics.
+    pub fn metrics_snapshot(&self) -> GroupCommitMetricsSnapshot {
+        GroupCommitMetricsSnapshot {
+            state_lock_wait_ns: self.metrics.state_lock_wait_ns.load(Ordering::Relaxed),
+            state_lock_acquires: self.metrics.state_lock_acquires.load(Ordering::Relaxed),
+            waiters_lock_wait_ns: self.metrics.waiters_lock_wait_ns.load(Ordering::Relaxed),
+            waiters_lock_acquires: self.metrics.waiters_lock_acquires.load(Ordering::Relaxed),
+            wait_calls: self.metrics.wait_calls.load(Ordering::Relaxed),
+            wait_successes: self.metrics.wait_successes.load(Ordering::Relaxed),
+            wait_timeouts: self.metrics.wait_timeouts.load(Ordering::Relaxed),
+            wait_errors: self.metrics.wait_errors.load(Ordering::Relaxed),
+            wait_total_ns: self.metrics.wait_total_ns.load(Ordering::Relaxed),
+            waiter_created: self.metrics.waiter_created.load(Ordering::Relaxed),
+            waiter_removed: self.metrics.waiter_removed.load(Ordering::Relaxed),
+            trigger_flush_calls: self.metrics.trigger_flush_calls.load(Ordering::Relaxed),
+            epoch_completions: self.metrics.epoch_completions.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Reset internal coordination metrics to zero.
+    pub fn reset_metrics(&self) {
+        self.metrics.state_lock_wait_ns.store(0, Ordering::Relaxed);
+        self.metrics.state_lock_acquires.store(0, Ordering::Relaxed);
+        self.metrics
+            .waiters_lock_wait_ns
+            .store(0, Ordering::Relaxed);
+        self.metrics
+            .waiters_lock_acquires
+            .store(0, Ordering::Relaxed);
+        self.metrics.wait_calls.store(0, Ordering::Relaxed);
+        self.metrics.wait_successes.store(0, Ordering::Relaxed);
+        self.metrics.wait_timeouts.store(0, Ordering::Relaxed);
+        self.metrics.wait_errors.store(0, Ordering::Relaxed);
+        self.metrics.wait_total_ns.store(0, Ordering::Relaxed);
+        self.metrics.waiter_created.store(0, Ordering::Relaxed);
+        self.metrics.waiter_removed.store(0, Ordering::Relaxed);
+        self.metrics.trigger_flush_calls.store(0, Ordering::Relaxed);
+        self.metrics.epoch_completions.store(0, Ordering::Relaxed);
+    }
+
+    /// Enable or disable metrics instrumentation.
+    pub fn set_metrics_enabled(&self, enabled: bool) {
+        self.metrics_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    fn validate_epoch_outcome(state: &GroupCommitState, epoch: u64) -> Result<(), Error> {
+        // Check for flush errors specifically for this epoch.
+        for (failed_epoch, error_msg) in &state.recent_errors {
+            if *failed_epoch == epoch {
+                return Err(Error::Storage(StorageError::WalError {
+                    reason: format!("Group commit flush failed: {}", error_msg),
+                }));
+            }
+        }
+
+        // Check for history eviction (False Success protection).
+        if epoch < state.oldest_error_epoch {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: format!(
+                    "Group commit status unknown: epoch {} evicted from error history (history starts at {})",
+                    epoch, state.oldest_error_epoch
+                ),
+            }));
+        }
+
+        Ok(())
+    }
+
+    fn get_or_create_waiter(&self, epoch: u64) -> Result<Arc<EpochLatch>, Error> {
+        let mut waiters = self.lock_waiters()?;
+        if let Some(waiter) = waiters.get(&epoch) {
+            return Ok(waiter.clone());
+        }
+        let waiter = Arc::new(EpochLatch::new());
+        waiters.insert(epoch, waiter.clone());
+        if self.metrics_enabled() {
+            self.metrics.waiter_created.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(waiter)
+    }
+
+    fn remove_waiter(&self, epoch: u64) -> Result<Option<Arc<EpochLatch>>, Error> {
+        let mut waiters = self.lock_waiters()?;
+        let removed = waiters.remove(&epoch);
+        if removed.is_some() && self.metrics_enabled() {
+            self.metrics.waiter_removed.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(removed)
+    }
+
+    fn immediate_flush_threshold(&self) -> usize {
+        if self.config.max_batch_size == 0 {
+            return 1;
+        }
+        self.config
+            .flush_trigger_batch_size
+            .max(1)
+            .min(self.config.max_batch_size)
+    }
+
     /// Register a transaction for group commit.
     ///
     /// Returns the epoch number that this transaction should wait for.
-    /// If the batch is full, returns `true` in the second element to signal
+    /// If the immediate flush threshold is reached, returns `true` in the second element to signal
     /// that an immediate flush should be triggered.
     ///
     /// # Returns
@@ -162,19 +483,63 @@ impl GroupCommitCoordinator {
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
     pub fn register_transaction(&self) -> Result<(u64, bool), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.lock_state()?;
 
         state.batch_count += 1;
         let epoch = state.current_epoch;
 
-        // Check if we should trigger immediate flush (batch full)
-        let should_flush = state.batch_count >= self.config.max_batch_size;
+        // Check if we should trigger immediate flush (threshold reached)
+        let should_flush = state.batch_count >= self.immediate_flush_threshold();
 
         Ok((epoch, should_flush))
+    }
+
+    /// Register a transaction and synchronously wait for its epoch to flush.
+    ///
+    /// This fuses the control path of `register_transaction()` + `wait_for_flush()`
+    /// into one lock acquisition path to reduce mutex round-trips on hot commit paths.
+    ///
+    /// The provided callback is invoked when the batch reaches max size and an
+    /// immediate flush should be triggered (e.g., wake the flush thread).
+    pub fn register_transaction_and_wait<F>(&self, trigger_flush: F) -> Result<(), Error>
+    where
+        F: FnOnce(),
+    {
+        let (epoch, should_trigger) = {
+            let mut state = self.lock_state()?;
+
+            state.batch_count += 1;
+            let epoch = state.current_epoch;
+            (epoch, state.batch_count >= self.immediate_flush_threshold())
+        };
+
+        let waiter = self.get_or_create_waiter(epoch)?;
+
+        if should_trigger {
+            if self.metrics_enabled() {
+                self.metrics
+                    .trigger_flush_calls
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            trigger_flush();
+        }
+
+        {
+            let state = self.lock_state()?;
+            if state.flushed_epoch >= epoch {
+                let outcome = Self::validate_epoch_outcome(&state, epoch);
+                drop(state);
+                let completion = match &outcome {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(Error::other(e.to_string())),
+                };
+                waiter.complete(completion);
+                let _ = self.remove_waiter(epoch)?;
+                return outcome;
+            }
+        }
+
+        self.wait_on_epoch_latch(&waiter, epoch)
     }
 
     /// Wait for the specified epoch to be flushed.
@@ -204,76 +569,60 @@ impl GroupCommitCoordinator {
     /// - The flush for this epoch failed
     /// - The wait times out (indicates a stuck flush thread or excessive system load)
     pub fn wait_for_flush(&self, epoch: u64) -> Result<(), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
-
-        // Deadlock detection timeout (NOT a performance SLA)
-        let base_timeout =
-            Duration::from_millis(self.config.max_delay_ms * self.config.timeout_multiplier as u64)
-                + Duration::from_millis(self.config.timeout_base_ms);
-        let timeout = base_timeout
-            .max(Duration::from_millis(self.config.timeout_min_ms))
-            .min(Duration::from_millis(self.config.timeout_max_ms));
-
-        // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
-        // and this wait (rare but possible on fast systems), this loop exits immediately since
-        // flushed_epoch >= epoch, and we return Ok(()) without waiting.
-        //
-        // EPOCH SEMANTICS: flushed_epoch = N means "epoch N has been flushed".
-        // Transaction at epoch E waits while flushed_epoch < E (i.e., E has not been flushed yet).
-        while state.flushed_epoch < epoch {
-            let (new_state, timeout_result) = self
-                .flush_complete
-                .wait_timeout(state, timeout)
-                .map_err(|_| {
-                    Error::Storage(StorageError::LockPoisoned {
-                        resource: "group_commit_state".to_string(),
-                    })
-                })?;
-
-            state = new_state;
-
-            if timeout_result.timed_out() && state.flushed_epoch < epoch {
-                return Err(Error::Storage(StorageError::WalError {
-                    reason: format!(
-                        "Group commit timeout waiting for epoch {} (current flushed: {})",
-                        epoch, state.flushed_epoch
-                    ),
-                }));
+        {
+            let state = self.lock_state()?;
+            if state.flushed_epoch >= epoch {
+                return Self::validate_epoch_outcome(&state, epoch);
             }
         }
 
-        // Check for flush errors specifically for this epoch
-        for (failed_epoch, error_msg) in &state.recent_errors {
-            if *failed_epoch == epoch {
-                return Err(Error::Storage(StorageError::WalError {
-                    reason: format!("Group commit flush failed: {}", error_msg),
-                }));
+        let waiter = self.get_or_create_waiter(epoch)?;
+
+        // Re-check after registering waiter to avoid missed flush completion races.
+        {
+            let state = self.lock_state()?;
+            if state.flushed_epoch >= epoch {
+                let outcome = Self::validate_epoch_outcome(&state, epoch);
+                drop(state);
+                let completion = match &outcome {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(Error::other(e.to_string())),
+                };
+                waiter.complete(completion);
+                let _ = self.remove_waiter(epoch)?;
+                return outcome;
             }
         }
 
-        // Check for history eviction (False Success protection)
-        // We only lose certainty about an epoch's status if its error record was EVICTED.
-        // state.oldest_error_epoch tracks the threshold of lost history.
-        // If epoch < state.oldest_error_epoch, it might have failed and been forgotten.
-        //
-        // Note: We do NOT check against recent_errors.front() because a sparse error list
-        // is valid. If epoch 1 succeeded and epoch 2 failed, recent_errors = [(2, ...)].
-        // epoch 1 < 2, but it shouldn't fail unless 1 < oldest_error_epoch.
+        self.wait_on_epoch_latch(&waiter, epoch)
+    }
 
-        if epoch < state.oldest_error_epoch {
-            return Err(Error::Storage(StorageError::WalError {
-                reason: format!(
-                    "Group commit status unknown: epoch {} evicted from error history (history starts at {})",
-                    epoch, state.oldest_error_epoch
-                ),
-            }));
+    fn record_flush_result(
+        state: &mut GroupCommitState,
+        config: &GroupCommitConfig,
+        epoch: u64,
+        result: Result<(), Error>,
+    ) {
+        if let Err(e) = result {
+            state.recent_errors.push_back((epoch, e.to_string()));
+
+            // Keep history limited
+            while state.recent_errors.len() > config.recent_errors_capacity {
+                if let Some((evicted_epoch, _)) = state.recent_errors.pop_front() {
+                    // Track the newest evicted epoch to know what we've lost
+                    // We set oldest_error_epoch to evicted_epoch + 1 because if
+                    // evicted_epoch is gone, any check for it (or older) is invalid.
+                    state.oldest_error_epoch = evicted_epoch + 1;
+                }
+            }
         }
 
-        Ok(())
+        // Advance flushed_epoch to wake up waiters for this epoch
+        // Note: We use max to handle potential out-of-order completions if we ever support that,
+        // though currently flushes are serialized.
+        if epoch > state.flushed_epoch {
+            state.flushed_epoch = epoch;
+        }
     }
 
     /// Start a flush operation.
@@ -287,11 +636,7 @@ impl GroupCommitCoordinator {
     ///
     /// The epoch number that is being flushed.
     pub fn start_flush(&self) -> Result<u64, Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.lock_state()?;
 
         let epoch_to_flush = state.current_epoch;
 
@@ -311,51 +656,69 @@ impl GroupCommitCoordinator {
     /// * `epoch` - The epoch that was flushed (returned by `start_flush`).
     /// * `result` - The result of the flush operation.
     pub fn finish_flush(&self, epoch: u64, result: Result<(), Error>) -> Result<(), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let completion_error = result.err().map(|e| e.to_string());
+        {
+            let mut state = self.lock_state()?;
 
-        // Store error if any
-        if let Err(e) = result {
-            state.recent_errors.push_back((epoch, e.to_string()));
-
-            // Keep history limited
-            while state.recent_errors.len() > self.config.recent_errors_capacity {
-                if let Some((evicted_epoch, _)) = state.recent_errors.pop_front() {
-                    // Track the newest evicted epoch to know what we've lost
-                    // We set oldest_error_epoch to evicted_epoch + 1 because if
-                    // evicted_epoch is gone, any check for it (or older) is invalid.
-                    state.oldest_error_epoch = evicted_epoch + 1;
-                }
-            }
+            let state_result = match &completion_error {
+                Some(msg) => Err(Error::other(msg.clone())),
+                None => Ok(()),
+            };
+            Self::record_flush_result(&mut state, &self.config, epoch, state_result);
         }
 
-        // Advance flushed_epoch to wake up waiters for this epoch
-        // Note: We use max to handle potential out-of-order completions if we ever support that,
-        // though currently flushes are serialized.
-        if epoch > state.flushed_epoch {
-            state.flushed_epoch = epoch;
+        if self.metrics_enabled() {
+            self.metrics
+                .epoch_completions
+                .fetch_add(1, Ordering::Relaxed);
         }
 
-        // Wake all waiting transactions
-        self.flush_complete.notify_all();
+        if let Some(waiter) = self.remove_waiter(epoch)? {
+            let waiter_result = match completion_error {
+                Some(msg) => Err(Error::other(msg)),
+                None => Ok(()),
+            };
+            waiter.complete(waiter_result);
+        }
 
         Ok(())
     }
 
     /// Mark the current batch as flushed (Legacy/Combined Helper).
     ///
-    /// WARNING: This method combines `start_flush` and `finish_flush` but IS NOT SAFE
-    /// against the race condition described in security review (transactions registering
-    /// during the flush).
-    ///
-    /// It is kept for backward compatibility with existing tests but `start_flush`
-    /// and `finish_flush` should be used in production.
+    /// This is a convenience method for tests and simple callers.
+    /// It advances epoch and stores flush result under one lock acquisition.
     pub fn mark_flushed(&self, result: Result<(), Error>) -> Result<(), Error> {
-        let epoch = self.start_flush()?;
-        self.finish_flush(epoch, result)
+        let completion_error = result.err().map(|e| e.to_string());
+        let epoch_to_flush = {
+            let mut state = self.lock_state()?;
+
+            let epoch_to_flush = state.current_epoch;
+            state.current_epoch += 1;
+            state.batch_count = 0;
+
+            let state_result = match &completion_error {
+                Some(msg) => Err(Error::other(msg.clone())),
+                None => Ok(()),
+            };
+            Self::record_flush_result(&mut state, &self.config, epoch_to_flush, state_result);
+            epoch_to_flush
+        };
+
+        if self.metrics_enabled() {
+            self.metrics
+                .epoch_completions
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        if let Some(waiter) = self.remove_waiter(epoch_to_flush)? {
+            let waiter_result = match completion_error {
+                Some(msg) => Err(Error::other(msg)),
+                None => Ok(()),
+            };
+            waiter.complete(waiter_result);
+        }
+        Ok(())
     }
 
     /// Get the current batch size.
@@ -366,11 +729,7 @@ impl GroupCommitCoordinator {
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
     pub fn current_batch_size(&self) -> Result<usize, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let state = self.lock_state()?;
         Ok(state.batch_count)
     }
 
@@ -382,11 +741,7 @@ impl GroupCommitCoordinator {
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
     pub fn current_epoch(&self) -> Result<u64, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let state = self.lock_state()?;
         Ok(state.current_epoch)
     }
 
@@ -398,15 +753,11 @@ impl GroupCommitCoordinator {
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
     pub fn flushed_epoch(&self) -> Result<u64, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let state = self.lock_state()?;
         Ok(state.flushed_epoch)
     }
 
-    /// Check if a flush should be triggered based on batch size.
+    /// Check if an immediate flush should be triggered based on batch threshold.
     ///
     /// Called by the flush thread to check if the batch is full.
     ///
@@ -414,17 +765,18 @@ impl GroupCommitCoordinator {
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
     pub fn should_flush(&self) -> Result<bool, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
-        Ok(state.batch_count >= self.config.max_batch_size)
+        let state = self.lock_state()?;
+        Ok(state.batch_count >= self.immediate_flush_threshold())
     }
 
     /// Get the maximum delay for this coordinator.
     pub fn max_delay(&self) -> Duration {
         Duration::from_millis(self.config.max_delay_ms)
+    }
+
+    /// Get the effective immediate flush trigger threshold.
+    pub fn flush_trigger_batch_size(&self) -> usize {
+        self.immediate_flush_threshold()
     }
 }
 
@@ -459,6 +811,34 @@ mod tests {
         let (epoch, should_flush) = coord.register_transaction().unwrap();
         assert_eq!(epoch, 1); // Still in epoch 1
         assert!(should_flush, "should flush when batch is full");
+    }
+
+    #[test]
+    fn test_register_transaction_with_custom_trigger_threshold() {
+        let config = GroupCommitConfig {
+            max_delay_ms: 10,
+            max_batch_size: 20,
+            flush_trigger_batch_size: 5,
+            timeout_multiplier: 50,
+            timeout_base_ms: 5000,
+            timeout_min_ms: 10000,
+            timeout_max_ms: 60000,
+            recent_errors_capacity: 1024,
+        };
+        let coord = GroupCommitCoordinator::with_config(config);
+
+        for i in 0..4 {
+            let (_, should_flush) = coord.register_transaction().unwrap();
+            assert!(
+                !should_flush,
+                "should not flush before threshold, batch size {}",
+                i + 1
+            );
+        }
+
+        let (_, should_flush) = coord.register_transaction().unwrap();
+        assert!(should_flush, "should flush when threshold is reached");
+        assert_eq!(coord.flush_trigger_batch_size(), 5);
     }
 
     #[test]
@@ -499,6 +879,53 @@ mod tests {
     }
 
     #[test]
+    fn test_register_transaction_and_wait_success() {
+        let coord = Arc::new(GroupCommitCoordinator::new(100, 1));
+        let coord_clone = Arc::clone(&coord);
+        let triggered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let triggered_clone = Arc::clone(&triggered);
+
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            coord_clone.mark_flushed(Ok(())).unwrap();
+        });
+
+        let result = coord.register_transaction_and_wait(move || {
+            triggered_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert!(result.is_ok());
+        assert!(triggered.load(std::sync::atomic::Ordering::Relaxed));
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_register_transaction_and_wait_propagates_error() {
+        let coord = Arc::new(GroupCommitCoordinator::new(100, 100));
+        let coord_clone = Arc::clone(&coord);
+
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            coord_clone
+                .mark_flushed(Err(Error::Storage(StorageError::WalError {
+                    reason: "injected flush error".to_string(),
+                })))
+                .unwrap();
+        });
+
+        let result = coord.register_transaction_and_wait(|| {});
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected flush error")
+        );
+
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn test_wait_for_flush_error_propagation() {
         let coord = Arc::new(GroupCommitCoordinator::new(100, 100));
         let coord_clone = Arc::clone(&coord);
@@ -530,6 +957,7 @@ mod tests {
         let config = GroupCommitConfig {
             max_delay_ms: 10,
             max_batch_size: 100,
+            flush_trigger_batch_size: 100,
             timeout_multiplier: 2, // 10 * 2 = 20ms
             timeout_base_ms: 10,   // + 10 = 30ms
             timeout_min_ms: 20,    // clamp min
@@ -640,6 +1068,7 @@ mod tests {
         let config = GroupCommitConfig {
             max_delay_ms: 1,
             max_batch_size: 100,
+            flush_trigger_batch_size: 100,
             timeout_multiplier: 2,
             timeout_base_ms: 10,
             timeout_min_ms: 20,
@@ -671,6 +1100,7 @@ mod tests {
         let config = GroupCommitConfig {
             max_delay_ms: 10,
             max_batch_size: 100,
+            flush_trigger_batch_size: 100,
             timeout_multiplier: 2,
             timeout_base_ms: 10,
             timeout_min_ms: 20,
@@ -769,5 +1199,36 @@ mod tests {
 
         // 8. Transaction B should be done
         assert!(coord.wait_for_flush(epoch_b).is_ok());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_and_reset() {
+        let coord = Arc::new(GroupCommitCoordinator::new(100, 1));
+        coord.set_metrics_enabled(true);
+        let coord_clone = Arc::clone(&coord);
+
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            coord_clone.mark_flushed(Ok(())).unwrap();
+        });
+
+        coord
+            .register_transaction_and_wait(|| {})
+            .expect("register_transaction_and_wait should succeed");
+        handle.join().unwrap();
+
+        let snapshot = coord.metrics_snapshot();
+        assert!(snapshot.state_lock_acquires > 0);
+        assert!(snapshot.waiters_lock_acquires > 0);
+        assert!(snapshot.wait_calls > 0);
+        assert_eq!(snapshot.wait_successes, 1);
+        assert_eq!(snapshot.wait_errors, 0);
+        assert!(snapshot.epoch_completions > 0);
+
+        coord.reset_metrics();
+        let reset = coord.metrics_snapshot();
+        assert_eq!(reset.state_lock_acquires, 0);
+        assert_eq!(reset.wait_calls, 0);
+        assert_eq!(reset.epoch_completions, 0);
     }
 }

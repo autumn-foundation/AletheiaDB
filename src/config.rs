@@ -91,6 +91,14 @@ pub struct WalConfig {
     /// This determines the tradeoff between durability guarantees and performance.
     /// Default: GroupCommit (10ms delay, 200 batch size)
     pub durability_mode: crate::storage::wal::DurabilityMode,
+
+    /// Optional immediate flush trigger threshold for GroupCommit/AsyncBatched modes.
+    ///
+    /// When `None`, runtime uses the durability mode's `max_batch_size` as the trigger.
+    /// When set, this value wakes the flush thread earlier once the in-epoch batch reaches
+    /// the threshold, while preserving epoch durability guarantees.
+    /// Default: None
+    pub group_commit_flush_trigger_batch_size: Option<usize>,
 }
 
 impl Default for WalConfig {
@@ -104,6 +112,7 @@ impl Default for WalConfig {
             wal_dir: std::path::PathBuf::from("aletheiadb/wal"),
             segments_to_retain: 10,
             durability_mode: crate::storage::wal::DurabilityMode::group_commit_default(),
+            group_commit_flush_trigger_batch_size: None,
         }
     }
 }
@@ -297,6 +306,24 @@ impl WalConfigBuilder {
     pub fn durability_mode(mut self, mode: crate::storage::wal::DurabilityMode) -> Self {
         self.config.durability_mode = mode;
         self
+    }
+
+    /// Set optional immediate flush trigger threshold for GroupCommit/AsyncBatched modes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `threshold` is 0.
+    pub fn group_commit_flush_trigger_batch_size(
+        mut self,
+        threshold: usize,
+    ) -> Result<Self, ConfigError> {
+        if threshold == 0 {
+            return Err(ConfigError::InvalidValue(
+                "group_commit_flush_trigger_batch_size must be greater than 0".into(),
+            ));
+        }
+        self.config.group_commit_flush_trigger_batch_size = Some(threshold);
+        Ok(self)
     }
 
     /// Build the configuration.
@@ -869,6 +896,7 @@ mod tests {
         assert_eq!(config.write_buffer_size, 64 * 1024);
         assert_eq!(config.segment_size, 64 * 1024 * 1024);
         assert_eq!(config.flush_interval_ms, 10);
+        assert_eq!(config.group_commit_flush_trigger_batch_size, None);
     }
 
     #[test]
@@ -884,6 +912,8 @@ mod tests {
             .unwrap()
             .flush_interval_ms(20)
             .unwrap()
+            .group_commit_flush_trigger_batch_size(50)
+            .unwrap()
             .build();
 
         assert_eq!(config.num_stripes, 32);
@@ -891,6 +921,7 @@ mod tests {
         assert_eq!(config.write_buffer_size, 128 * 1024);
         assert_eq!(config.segment_size, 128 * 1024 * 1024);
         assert_eq!(config.flush_interval_ms, 20);
+        assert_eq!(config.group_commit_flush_trigger_batch_size, Some(50));
     }
 
     #[test]
@@ -1171,6 +1202,7 @@ stripe_capacity = 2048
 write_buffer_size = 131072
 segment_size = 134217728
 flush_interval_ms = 20
+group_commit_flush_trigger_batch_size = 75
 
 [historical]
 max_versions_per_entity = 5000
@@ -1192,6 +1224,7 @@ max_layer = 32
         assert_eq!(config.wal.write_buffer_size, 131072);
         assert_eq!(config.wal.segment_size, 134217728);
         assert_eq!(config.wal.flush_interval_ms, 20);
+        assert_eq!(config.wal.group_commit_flush_trigger_batch_size, Some(75));
 
         // Historical config
         assert_eq!(config.historical.max_versions_per_entity, 5000);
@@ -1433,6 +1466,13 @@ wal_dir = "/custom/path/to/wal"
     #[test]
     fn test_wal_config_zero_flush_interval() {
         let result = WalConfigBuilder::new().flush_interval_ms(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_wal_config_zero_group_commit_flush_trigger_batch_size() {
+        let result = WalConfigBuilder::new().group_commit_flush_trigger_batch_size(0);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
     }

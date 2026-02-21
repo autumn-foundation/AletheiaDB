@@ -299,6 +299,27 @@ impl ConcurrentWal {
         }
     }
 
+    /// Check whether any stripe currently has buffered entries.
+    pub(crate) fn has_pending_entries(&self) -> bool {
+        self.stripes.iter().any(|stripe| !stripe.is_empty())
+    }
+
+    /// Prepare a serialized WAL entry without enqueueing it in stripe buffers.
+    ///
+    /// This is used by synchronous fast paths that flush a single entry directly.
+    pub(crate) fn prepare_direct_entry(&self, operation: WalOperation) -> Result<PendingEntry> {
+        if self.is_closed() {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "WAL buffer closed".to_string(),
+            }));
+        }
+
+        let lsn = self.lsn_allocator.allocate();
+        let data = self.serialize_entry(lsn, &operation)?;
+        self.total_appends.fetch_add(1, Ordering::Relaxed);
+        Ok(PendingEntry::new_async(lsn, data))
+    }
+
     /// Append an operation with a completion handle (for group commit).
     ///
     /// Returns with a handle that can be used to wait for durability later.
