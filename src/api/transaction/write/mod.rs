@@ -630,6 +630,162 @@ impl WriteTransaction {
     fn detect_conflicts(&self) -> Result<()> {
         conflict::detect_conflicts(self)
     }
+
+    // ========================================================================
+    // Inherent ReadOps methods (avoids trait import)
+    // ========================================================================
+
+    /// Get a node by ID.
+    pub fn get_node(&self, id: NodeId) -> Result<Node> {
+        <Self as ReadOps>::get_node(self, id)
+    }
+
+    /// Get an edge by ID.
+    pub fn get_edge(&self, id: EdgeId) -> Result<Edge> {
+        <Self as ReadOps>::get_edge(self, id)
+    }
+
+    /// Get outgoing edges from a node.
+    pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
+        <Self as ReadOps>::get_outgoing_edges(self, node_id)
+    }
+
+    /// Get incoming edges to a node.
+    pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
+        <Self as ReadOps>::get_incoming_edges(self, node_id)
+    }
+
+    /// Get outgoing edges with a specific label.
+    pub fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
+        <Self as ReadOps>::get_outgoing_edges_with_label(self, node_id, label)
+    }
+
+    /// Get the approximate number of nodes.
+    pub fn node_count(&self) -> usize {
+        <Self as ReadOps>::node_count(self)
+    }
+
+    /// Get the approximate number of edges.
+    pub fn edge_count(&self) -> usize {
+        <Self as ReadOps>::edge_count(self)
+    }
+
+    /// Find nodes by label and property value.
+    pub fn find_nodes_by_property(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &crate::core::property::PropertyValue,
+    ) -> Vec<NodeId> {
+        <Self as ReadOps>::find_nodes_by_property(self, label, property_key, property_value)
+    }
+
+    // ========================================================================
+    // Inherent WriteOps methods (avoids trait import)
+    // ========================================================================
+
+    /// Create a new node.
+    pub fn create_node(&mut self, label: &str, properties: PropertyMap) -> Result<NodeId> {
+        <Self as WriteOps>::create_node(self, label, properties)
+    }
+
+    /// Create a new node with explicit valid_from time.
+    pub fn create_node_with_valid_time(
+        &mut self,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<NodeId> {
+        <Self as WriteOps>::create_node_with_valid_time(self, label, properties, valid_from)
+    }
+
+    /// Create a new edge.
+    pub fn create_edge(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        label: &str,
+        properties: PropertyMap,
+    ) -> Result<EdgeId> {
+        <Self as WriteOps>::create_edge(self, source, target, label, properties)
+    }
+
+    /// Create a new edge with explicit valid_from time.
+    pub fn create_edge_with_valid_time(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<EdgeId> {
+        <Self as WriteOps>::create_edge_with_valid_time(
+            self, source, target, label, properties, valid_from,
+        )
+    }
+
+    /// Update a node's properties.
+    pub fn update_node(&mut self, node_id: NodeId, properties: PropertyMap) -> Result<()> {
+        <Self as WriteOps>::update_node(self, node_id, properties)
+    }
+
+    /// Update a node's properties with explicit valid_from time.
+    pub fn update_node_with_valid_time(
+        &mut self,
+        node_id: NodeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        <Self as WriteOps>::update_node_with_valid_time(self, node_id, properties, valid_from)
+    }
+
+    /// Update an edge's properties.
+    pub fn update_edge(&mut self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
+        <Self as WriteOps>::update_edge(self, edge_id, properties)
+    }
+
+    /// Update an edge's properties with explicit valid_from time.
+    pub fn update_edge_with_valid_time(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        <Self as WriteOps>::update_edge_with_valid_time(self, edge_id, properties, valid_from)
+    }
+
+    /// Delete a node.
+    pub fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
+        <Self as WriteOps>::delete_node(self, node_id)
+    }
+
+    /// Delete a node with explicit valid_from time.
+    pub fn delete_node_with_valid_time(
+        &mut self,
+        node_id: NodeId,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        <Self as WriteOps>::delete_node_with_valid_time(self, node_id, valid_from)
+    }
+
+    /// Delete a node and all connected edges (cascade delete).
+    pub fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()> {
+        <Self as WriteOps>::delete_node_cascade(self, node_id)
+    }
+
+    /// Delete an edge.
+    pub fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
+        <Self as WriteOps>::delete_edge(self, edge_id)
+    }
+
+    /// Delete an edge with explicit valid_from time.
+    pub fn delete_edge_with_valid_time(
+        &mut self,
+        edge_id: EdgeId,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        <Self as WriteOps>::delete_edge_with_valid_time(self, edge_id, valid_from)
+    }
 }
 
 impl ReadOps for WriteTransaction {

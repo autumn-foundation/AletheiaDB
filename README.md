@@ -449,7 +449,7 @@ See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** f
 ### Semantic Drift Tracking
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps};
+use aletheiadb::{AletheiaDB, properties};
 use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::{DriftMetric, TemporalVectorConfig, SnapshotStrategy};
 use aletheiadb::core::temporal::TimeRange;
@@ -511,7 +511,7 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps};
+use aletheiadb::{AletheiaDB, properties};
 // ⚠️ REQUIRES FEATURE 'NOVA' IN CARGO.TOML
 // [dependencies]
 // aletheiadb = { version = "0.1", features = ["nova"] }
@@ -700,10 +700,8 @@ See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)
 
 For complex operations involving multiple updates, use explicit transactions.
 
-**Note**: The `WriteOps` trait must be imported to use methods on the transaction object.
-
 ```rust
-use aletheiadb::{PropertyMap, WriteOps};
+use aletheiadb::PropertyMap;
 
 // Explicit read transaction
 let result = db.read(|tx| {

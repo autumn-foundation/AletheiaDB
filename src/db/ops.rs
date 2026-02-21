@@ -1,4 +1,3 @@
-use crate::api::transaction::WriteOps;
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};

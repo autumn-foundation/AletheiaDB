@@ -200,6 +200,55 @@ impl ReadTransaction {
             }
         }
     }
+
+    // ========================================================================
+    // Inherent ReadOps methods (avoids trait import)
+    // ========================================================================
+
+    /// Get a node by ID.
+    pub fn get_node(&self, id: NodeId) -> Result<Node> {
+        <Self as ReadOps>::get_node(self, id)
+    }
+
+    /// Get an edge by ID.
+    pub fn get_edge(&self, id: EdgeId) -> Result<Edge> {
+        <Self as ReadOps>::get_edge(self, id)
+    }
+
+    /// Get outgoing edges from a node.
+    pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
+        <Self as ReadOps>::get_outgoing_edges(self, node_id)
+    }
+
+    /// Get incoming edges to a node.
+    pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
+        <Self as ReadOps>::get_incoming_edges(self, node_id)
+    }
+
+    /// Get outgoing edges with a specific label.
+    pub fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
+        <Self as ReadOps>::get_outgoing_edges_with_label(self, node_id, label)
+    }
+
+    /// Get the approximate number of nodes.
+    pub fn node_count(&self) -> usize {
+        <Self as ReadOps>::node_count(self)
+    }
+
+    /// Get the approximate number of edges.
+    pub fn edge_count(&self) -> usize {
+        <Self as ReadOps>::edge_count(self)
+    }
+
+    /// Find nodes by label and property value.
+    pub fn find_nodes_by_property(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &PropertyValue,
+    ) -> Vec<NodeId> {
+        <Self as ReadOps>::find_nodes_by_property(self, label, property_key, property_value)
+    }
 }
 
 impl ReadOps for ReadTransaction {

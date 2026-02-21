@@ -121,6 +121,17 @@ impl Node {
     }
 }
 
+impl std::fmt::Display for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Cypher style: (:Label {props})
+        write!(f, "(:{}", self.label)?;
+        if !self.properties.is_empty() {
+            write!(f, " {}", self.properties)?;
+        }
+        write!(f, ")")
+    }
+}
+
 impl std::fmt::Debug for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let label_str = crate::core::interning::GLOBAL_INTERNER
@@ -256,6 +267,17 @@ impl Edge {
     #[inline]
     pub fn connects(&self, source: NodeId, target: NodeId) -> bool {
         self.source == source && self.target == target
+    }
+}
+
+impl std::fmt::Display for Edge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Cypher style: [:TYPE {props}]
+        write!(f, "[:{}", self.label)?;
+        if !self.properties.is_empty() {
+            write!(f, " {}", self.properties)?;
+        }
+        write!(f, "]")
     }
 }
 

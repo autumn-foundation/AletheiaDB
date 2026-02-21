@@ -1436,6 +1436,42 @@ impl fmt::Debug for PropertyMap {
     }
 }
 
+impl fmt::Display for PropertyMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{{")?;
+
+        // Collect entries and pre-resolve keys to sort them for deterministic output
+        // Reuse similar logic to Debug but use Display for values
+        let mut entries: Vec<_> = self
+            .inner
+            .iter()
+            .map(|(key, value)| {
+                let resolved = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string());
+                (resolved, *key, value)
+            })
+            .collect();
+
+        entries.sort_by(|(s1, k1, _), (s2, k2, _)| match (s1, s2) {
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => k1.cmp(k2),
+        });
+
+        for (i, (resolved, key, value)) in entries.into_iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            if let Some(key_str) = resolved {
+                write!(f, "{}: {}", key_str, value)?;
+            } else {
+                write!(f, "{}: {}", key, value)?;
+            }
+        }
+        write!(f, "}}")
+    }
+}
+
 impl Default for PropertyMap {
     fn default() -> Self {
         Self::new()

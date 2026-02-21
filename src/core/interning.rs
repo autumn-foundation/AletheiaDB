@@ -58,6 +58,19 @@ impl InternedString {
     pub const fn as_u32(self) -> u32 {
         self.0
     }
+
+    /// Resolve this ID to its string value using the global interner.
+    ///
+    /// This is a convenience method that allows resolving an `InternedString` directly
+    /// without manually accessing `GLOBAL_INTERNER`.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(String)`: The original string if the ID is valid in the global interner.
+    /// - `None`: If the ID is not found (e.g., from a different interner instance).
+    pub fn resolve(&self) -> Option<String> {
+        GLOBAL_INTERNER.resolve_with(*self, |s| s.to_string())
+    }
 }
 
 impl fmt::Display for InternedString {
@@ -70,7 +83,7 @@ impl fmt::Display for InternedString {
         // If resolution failed (e.g. ID from a local interner), fallback to showing ID
         match result {
             Some(res) => res,
-            None => write!(f, "Interned({})", self.0),
+            None => write!(f, "UnresolvedInternedString({})", self.0),
         }
     }
 }
@@ -1117,7 +1130,7 @@ mod tests {
         // We assume 1 billion is not used yet
         let raw_id = 1_000_000_000;
         let id = InternedString::from_raw(raw_id);
-        assert_eq!(format!("{}", id), format!("Interned({})", raw_id));
+        assert_eq!(format!("{}", id), format!("UnresolvedInternedString({})", raw_id));
     }
 }
 
