@@ -1416,6 +1416,13 @@ fn encode_version_data(
             })
         }
         VersionData::Delta { delta } => {
+            if !delta.vector_deltas.is_empty() {
+                return Err(StorageError::InconsistentState {
+                    reason: "Vector deltas must be materialized before serialization".to_string(),
+                }
+                .into());
+            }
+
             let mut changed = Vec::with_capacity(delta.changed.len());
             for (k, v) in delta.changed.iter() {
                 let key_str = GLOBAL_INTERNER
@@ -3512,6 +3519,54 @@ mod sentry_tests {
                     reason.contains("not found in interner"),
                     "Error message should mention missing from interner"
                 );
+            }
+            _ => panic!("Expected StorageError::InconsistentState, got {:?}", result),
+        }
+    }
+}
+
+#[cfg(test)]
+mod sentry_vector_tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::id::{NodeId, VersionId};
+    use crate::core::temporal::BiTemporalInterval;
+    use crate::core::property::PropertyMap;
+    use crate::core::version::{VectorDelta, PropertyDelta, VersionData};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_encode_node_version_fails_with_unmaterialized_vector_deltas() {
+        // 🛡️ Sentry Test: Verify that unmaterialized vector deltas prevent serialization.
+        // This ensures we don't silently drop vector changes.
+
+        let mut delta = PropertyDelta::new();
+        let key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        // Add a vector delta
+        let vec_delta = VectorDelta::Sparse {
+            dimension: 10,
+            changes: Arc::new(vec![(0, 1.0)]),
+        };
+        delta.vector_deltas.insert(key, vec_delta);
+
+        let version = NodeVersion {
+            id: VersionId::new(2).unwrap(),
+            node_id: NodeId::new(100).unwrap(),
+            temporal: BiTemporalInterval::current(2000.into()),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            data: VersionData::Delta { delta },
+            next_version: None,
+            prev_version: Some(VersionId::new(1).unwrap()),
+        };
+
+        let result = encode_node_version(&version);
+
+        assert!(result.is_err(), "Should fail serialization with unmaterialized vector deltas");
+
+        match result {
+            Err(crate::core::error::Error::Storage(crate::core::error::StorageError::InconsistentState { reason })) => {
+                assert!(reason.contains("Vector deltas must be materialized"), "Error message should mention materialization requirement");
             }
             _ => panic!("Expected StorageError::InconsistentState, got {:?}", result),
         }
