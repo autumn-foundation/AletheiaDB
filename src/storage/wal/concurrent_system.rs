@@ -741,6 +741,26 @@ mod tests {
     }
 
     #[test]
+    fn test_append_sync_mode_handles_more_than_stripe_capacity() {
+        let dir = tempdir().unwrap();
+        let mut config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous);
+        // Keep capacity intentionally tiny to regression-test the benchmark footgun:
+        // mode-aware `append()` must continue making progress even when the buffered
+        // async path would hit backpressure quickly.
+        config.stripe_capacity = 8;
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        for i in 1..=64 {
+            let lsn = wal.append(create_test_operation(i)).unwrap();
+            assert_eq!(lsn, LSN(i));
+        }
+
+        assert_eq!(wal.total_appends(), 64);
+        assert_eq!(wal.total_flushed(), 64);
+    }
+
+    #[test]
     fn test_append_async_mode() {
         let dir = tempdir().unwrap();
         let config = ConcurrentWalSystemConfig::new(dir.path())
