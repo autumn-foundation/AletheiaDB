@@ -12,8 +12,8 @@
 use dashmap::DashMap;
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 /// Default maximum number of interned strings (DoS protection)
 pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
@@ -1130,7 +1130,23 @@ mod tests {
         // We assume 1 billion is not used yet
         let raw_id = 1_000_000_000;
         let id = InternedString::from_raw(raw_id);
-        assert_eq!(format!("{}", id), format!("UnresolvedInternedString({})", raw_id));
+        assert_eq!(
+            format!("{}", id),
+            format!("UnresolvedInternedString({})", raw_id)
+        );
+    }
+
+    #[test]
+    fn test_resolve_method() {
+        let s = "resolve_method_test";
+        let id = GLOBAL_INTERNER.intern(s).unwrap();
+
+        // Should resolve correctly
+        assert_eq!(id.resolve(), Some(s.to_string()));
+
+        // Should return None for unknown ID
+        let unknown_id = InternedString::from_raw(2_000_000_000);
+        assert_eq!(unknown_id.resolve(), None);
     }
 }
 

@@ -3435,6 +3435,32 @@ mod tests {
             "Debug output should fallback for unknown key"
         );
     }
+
+    #[test]
+    fn test_property_map_display() {
+        // Empty map
+        let map_empty = PropertyMap::new();
+        assert_eq!(format!("{}", map_empty), "{}");
+
+        // Map with values
+        let map = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+
+        let display = format!("{}", map);
+        assert!(display.starts_with("{"));
+        assert!(display.ends_with("}"));
+        assert!(display.contains("name: \"Alice\""));
+        assert!(display.contains("age: 30"));
+
+        // Sorting check (a before n)
+        // "{age: 30, name: "Alice"}" or "{name: "Alice", age: 30}"?
+        // Implementation sorts keys.
+        let pos_age = display.find("age").unwrap();
+        let pos_name = display.find("name").unwrap();
+        assert!(pos_age < pos_name, "Display output should be sorted");
+    }
 }
 
 #[cfg(test)]

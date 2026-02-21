@@ -601,4 +601,54 @@ mod tests {
         );
         assert!(results.is_empty());
     }
+
+    #[test]
+    fn test_inherent_read_ops_methods() {
+        let current = Arc::new(CurrentStorage::new());
+
+        // Setup data
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node_id = current.create_node("Person", props).unwrap();
+
+        let tx = create_test_read_tx(TxId::new(1), Arc::clone(&current));
+
+        // Test inherent get_node
+        let node = tx.get_node(node_id).unwrap();
+        assert_eq!(node.id, node_id);
+
+        // Test inherent node_count
+        assert_eq!(tx.node_count(), 1);
+
+        // Test inherent find_nodes_by_property
+        let found = tx.find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::property::PropertyValue::String("Alice".into())
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], node_id);
+
+        // Create edge for edge tests
+        let other_id = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+        let edge_id = current.create_edge(node_id, other_id, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+        // Test inherent get_edge
+        let edge = tx.get_edge(edge_id).unwrap();
+        assert_eq!(edge.id, edge_id);
+
+        // Test inherent edge_count
+        assert_eq!(tx.edge_count(), 1);
+
+        // Test inherent get_outgoing_edges
+        let outgoing = tx.get_outgoing_edges(node_id);
+        assert_eq!(outgoing.len(), 1);
+
+        // Test inherent get_incoming_edges
+        let incoming = tx.get_incoming_edges(other_id);
+        assert_eq!(incoming.len(), 1);
+
+        // Test inherent get_outgoing_edges_with_label
+        let outgoing_labeled = tx.get_outgoing_edges_with_label(node_id, "KNOWS");
+        assert_eq!(outgoing_labeled.len(), 1);
+    }
 }

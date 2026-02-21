@@ -615,6 +615,62 @@ mod tests {
             "Should return false when source mismatches even if target matches"
         );
     }
+
+    #[test]
+    fn test_node_display() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Case 1: Node with properties
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            VersionId::new(1).unwrap(),
+        );
+        let display = format!("{}", node);
+        assert!(display.starts_with("(:Person {"));
+        assert!(display.contains("name: \"Alice\""));
+        assert!(display.ends_with("})"));
+
+        // Case 2: Node without properties
+        let node_empty = Node::new(
+            NodeId::new(2).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+        assert_eq!(format!("{}", node_empty), "(:Person)");
+    }
+
+    #[test]
+    fn test_edge_display() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Case 1: Edge with properties
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().insert("since", 2024).build(),
+            VersionId::new(1).unwrap(),
+        );
+        let display = format!("{}", edge);
+        assert!(display.starts_with("[:KNOWS {"));
+        assert!(display.contains("since: 2024"));
+        assert!(display.ends_with("]"));
+
+        // Case 2: Edge without properties
+        let edge_empty = Edge::new(
+            EdgeId::new(2).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+        assert_eq!(format!("{}", edge_empty), "[:KNOWS]");
+    }
 }
 
 #[cfg(test)]
