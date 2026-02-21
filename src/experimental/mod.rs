@@ -31,6 +31,7 @@
 //! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
 //! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
 //! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
+//! | [`omen`] | **Omen** | Property Transition Prediction. "If status is 'Pending', what's next?" |
 //! | [`chronos`] | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
 //! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
 //! | [`echo`] | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
@@ -108,6 +109,9 @@ pub mod hindsight;
 #[cfg(feature = "nova")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
+#[cfg(feature = "nova")]
+/// Omen: Predictive model for node property transitions.
+pub mod omen;
 #[cfg(feature = "nova")]
 /// Prism: Semantic Spectroscopy for Vectors.
 pub mod prism;
