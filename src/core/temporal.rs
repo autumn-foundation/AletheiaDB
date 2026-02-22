@@ -1724,8 +1724,17 @@ mod sentry_tests {
         let point = TimeRange::at(100.into());
         let wide = TimeRange::new(0.into(), 200.into()).unwrap();
 
-        assert!(!point.overlaps(&wide), "Empty range should not overlap anything");
-        assert!(!wide.overlaps(&point), "Range should not overlap empty range");
-        assert!(!point.overlaps(&point), "Empty range should not overlap itself");
+        assert!(
+            !point.overlaps(&wide),
+            "Empty range should not overlap anything"
+        );
+        assert!(
+            !wide.overlaps(&point),
+            "Range should not overlap empty range"
+        );
+        assert!(
+            !point.overlaps(&point),
+            "Empty range should not overlap itself"
+        );
     }
 }
