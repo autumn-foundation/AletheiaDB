@@ -78,7 +78,8 @@ impl fmt::Display for InternedString {
 impl fmt::Debug for InternedString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Try to resolve using the global interner first
-        let result = GLOBAL_INTERNER.resolve_with(*self, |s| write!(f, "InternedString(\"{}\")", s));
+        let result =
+            GLOBAL_INTERNER.resolve_with(*self, |s| write!(f, "InternedString(\"{}\")", s));
 
         match result {
             Some(res) => res,
