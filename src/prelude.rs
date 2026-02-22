@@ -13,7 +13,10 @@ pub use crate::AletheiaDB;
 pub use crate::api::{ReadOps, ReadTransaction, WriteOps, WriteTransaction};
 pub use crate::core::error::{Error, Result};
 pub use crate::core::id::{EdgeId, NodeId, VersionId};
-pub use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+pub use crate::core::interning::InternedString;
 pub use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp, time};
+// Re-export the properties! macro. It is exported at the crate root because of #[macro_export],
+// so we re-export it from there.
+pub use crate::properties;
 pub use crate::storage::wal::{DurabilityMode, WriteOptions};
