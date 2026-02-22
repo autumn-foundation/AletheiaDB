@@ -148,6 +148,12 @@ impl<'a> Muse<'a> {
         );
     }
 
+    /// Internal constructor for testing panic behavior.
+    #[cfg(test)]
+    fn new_internal(db: &'a AletheiaDB) -> Self {
+        Self { db }
+    }
+
     /// Inspire a new concept based on the input nodes.
     pub fn inspire(
         &self,
@@ -240,5 +246,27 @@ mod tests {
         // Nearest neighbor is C (sim = 1.0)
         // Novelty should be 0.0
         assert!(inspiration.novelty_score < 0.01);
+    }
+}
+
+#[cfg(all(test, not(feature = "nova")))]
+mod stub_tests {
+    use super::*;
+    use crate::AletheiaDB;
+
+    #[test]
+    #[should_panic(expected = "Experimental feature 'Muse' requires the 'nova' feature")]
+    fn test_stub_new_panics() {
+        let db = AletheiaDB::new().unwrap();
+        let _ = Muse::new(&db);
+    }
+
+    #[test]
+    #[should_panic(expected = "Experimental feature 'Muse' requires the 'nova' feature")]
+    fn test_stub_inspire_panics() {
+        let db = AletheiaDB::new().unwrap();
+        // Use internal constructor to bypass new's panic
+        let muse = Muse::new_internal(&db);
+        let _ = muse.inspire(&[], None, 0);
     }
 }
