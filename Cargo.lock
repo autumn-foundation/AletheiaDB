@@ -247,6 +247,7 @@ dependencies = [
  "crossbeam-channel",
  "crossterm",
  "dashmap",
+ "futures",
  "lazy_static",
  "loom",
  "memmap2",
@@ -809,6 +810,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 

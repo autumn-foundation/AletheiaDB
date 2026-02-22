@@ -145,11 +145,10 @@ pub trait EmbeddingProvider: Send + Sync {
     /// The default implementation calls `embed()` sequentially. Providers
     /// should override this for true batch processing when supported.
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-        let mut results = Vec::with_capacity(texts.len());
-        for text in texts {
-            results.push(self.embed(text).await?);
-        }
-        Ok(results)
+        use futures::future::join_all;
+        let futures = texts.iter().map(|text| self.embed(text));
+        let results = join_all(futures).await;
+        results.into_iter().collect()
     }
 
     /// Check if this provider normalizes embeddings to unit length by default.

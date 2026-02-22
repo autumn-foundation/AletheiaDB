@@ -10,6 +10,7 @@ keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations"]
 
 [dependencies]
+futures = "0.3"
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
