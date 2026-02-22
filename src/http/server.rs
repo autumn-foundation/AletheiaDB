@@ -1,6 +1,7 @@
 //! HTTP server creation and management.
 
 use actix_cors::Cors;
+use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::{
     App, HttpServer,
     dev::Server,
@@ -9,7 +10,7 @@ use actix_web::{
 };
 use tokio::sync::oneshot;
 
-use super::config::{CorsConfig, ServerConfig};
+use super::config::{CorsConfig, RateLimitConfig, ServerConfig};
 use super::handlers::{configure_health_routes, handle_query};
 
 /// Handle for gracefully shutting down the server.
@@ -103,6 +104,21 @@ fn build_cors(cors_config: &CorsConfig) -> Cors {
     cors.max_age(cors_config.get_max_age() as usize)
 }
 
+/// Build rate limiting middleware from configuration.
+fn build_rate_limit(
+    rate_limit_config: &RateLimitConfig,
+) -> Governor<
+    actix_governor::PeerIpKeyExtractor,
+    actix_governor::governor::middleware::NoOpMiddleware,
+> {
+    let governor_conf = GovernorConfigBuilder::default()
+        .requests_per_second(u64::from(rate_limit_config.requests_per_second()))
+        .burst_size(rate_limit_config.burst_size())
+        .finish()
+        .expect("Failed to build rate limit configuration");
+    Governor::new(&governor_conf)
+}
+
 /// Create a configured Actix-web application factory with all middleware.
 ///
 /// This creates an app with **permissive CORS** suitable for development/testing.
@@ -127,10 +143,12 @@ pub fn create_app() -> App<
     >,
 > {
     let cors_config = CorsConfig::permissive();
+    let rate_limit_config = RateLimitConfig::default();
     App::new()
         .wrap(Logger::default())
         .wrap(build_security_headers())
         .wrap(build_cors(&cors_config))
+        .wrap(build_rate_limit(&rate_limit_config))
         .configure(configure_app)
 }
 
@@ -169,12 +187,14 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
 
     let bind_address = config.bind_address();
     let cors_config = config.cors().clone();
+    let rate_limit_config = config.rate_limit().clone();
 
     let server = HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
             .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
+            .wrap(build_rate_limit(&rate_limit_config))
             .configure(configure_app)
     })
     .bind(&bind_address)?
@@ -216,6 +236,7 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
 pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     let bind_address = config.bind_address();
     let cors_config = config.cors().clone();
+    let rate_limit_config = config.rate_limit().clone();
 
     eprintln!("Starting AletheiaDB HTTP server on {}", bind_address);
     if cors_config.is_permissive() {
@@ -230,6 +251,7 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
             .wrap(Logger::default())
             .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
+            .wrap(build_rate_limit(&rate_limit_config))
             .configure(configure_app)
     })
     .bind(&bind_address)?
@@ -246,7 +268,10 @@ mod tests {
     async fn test_configure_app_has_health_endpoint() {
         let app = test::init_service(App::new().configure(configure_app)).await;
 
-        let req = test::TestRequest::get().uri("/status").to_request();
+        let req = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/status")
+            .to_request();
         let resp = test::call_service(&app, req).await;
 
         assert!(resp.status().is_success());
@@ -257,6 +282,7 @@ mod tests {
         let app = test::init_service(create_app()).await;
 
         let req = test::TestRequest::default()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
             .method(actix_web::http::Method::OPTIONS)
             .uri("/status")
             .insert_header(("Origin", "http://example.com"))
@@ -273,7 +299,10 @@ mod tests {
     async fn test_unknown_route_returns_404() {
         let app = test::init_service(create_app()).await;
 
-        let req = test::TestRequest::get().uri("/nonexistent").to_request();
+        let req = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/nonexistent")
+            .to_request();
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status().as_u16(), 404);
@@ -297,7 +326,10 @@ mod tests {
     async fn test_security_headers() {
         let app = test::init_service(create_app()).await;
 
-        let req = test::TestRequest::get().uri("/status").to_request();
+        let req = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/status")
+            .to_request();
         let resp = test::call_service(&app, req).await;
 
         assert!(resp.status().is_success());
@@ -308,6 +340,74 @@ mod tests {
         assert_eq!(
             headers.get("Content-Security-Policy").unwrap(),
             "default-src 'none'; frame-ancestors 'none'"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn test_rate_limiting() {
+        // Configure a very strict rate limit: 1 request per second, burst 1
+        let rate_limit_config = RateLimitConfig::new(1, 1);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(build_rate_limit(&rate_limit_config))
+                .configure(configure_app),
+        )
+        .await;
+
+        // First request should succeed
+        let req1 = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/status")
+            .to_request();
+        let resp1 = test::call_service(&app, req1).await;
+        assert!(resp1.status().is_success());
+
+        // Second request immediately after should fail with 429 Too Many Requests
+        let req2 = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/status")
+            .to_request();
+        let resp2 = test::call_service(&app, req2).await;
+        assert_eq!(resp2.status().as_u16(), 429);
+    }
+
+    #[actix_rt::test]
+    async fn test_rate_limit_replenishment() {
+        // 2 requests per second, burst 1
+        // If per_second(2) means 2 req/s, then after 500ms we should have 1 token.
+        // If per_second(2) means 1 req per 2s, then after 500ms we have 0.25 tokens.
+        let rate_limit_config = RateLimitConfig::new(2, 1);
+
+        let app = test::init_service(
+            App::new()
+                .wrap(build_rate_limit(&rate_limit_config))
+                .configure(configure_app),
+        )
+        .await;
+
+        // First request
+        let req1 = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/status")
+            .to_request();
+        let resp1 = test::call_service(&app, req1).await;
+        assert!(resp1.status().is_success());
+
+        // Wait 600ms
+        actix_rt::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        // Second request
+        let req2 = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/status")
+            .to_request();
+        let resp2 = test::call_service(&app, req2).await;
+
+        // If this succeeds, it confirms per_second(2) means 2 req/s
+        assert!(
+            resp2.status().is_success(),
+            "Rate limit did not replenish in time"
         );
     }
 }

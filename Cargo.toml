@@ -52,6 +52,7 @@ base64 = { version = "0.22", optional = true }
 actix-web = { version = "4.9", optional = true }
 actix-cors = { version = "0.7", optional = true }
 actix-rt = { version = "2.10", optional = true }
+actix-governor = { version = "0.6", optional = true }
 
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
@@ -144,7 +145,7 @@ sharding-rpc = ["dep:reqwest", "dep:serde"]
 sql = ["dep:sqlparser"]
 
 # HTTP server support (Issue #465)
-http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde"]
+http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde", "dep:actix-governor"]
 
 # MVCC snapshot-focused integration tests
 mvcc-snapshots-tdd = []
