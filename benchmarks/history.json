@@ -1729,5 +1729,96 @@
         "std_dev_ns": 27171.71107871942
       }
     }
+  },
+  {
+    "timestamp": "2026-02-22T06:14:54.044437+00:00",
+    "commit": "4cb59d2",
+    "branch": "jules-10933905635795937010-eabddc52",
+    "benchmarks": {
+      "node_lookup": {
+        "point_estimate_ns": 84.0537119053312,
+        "ci_lower_ns": 81.195801611323,
+        "ci_upper_ns": 86.25452808565805,
+        "std_dev_ns": 9.360441676567703
+      },
+      "out_degree": {
+        "point_estimate_ns": 467.9225733974088,
+        "ci_lower_ns": 451.7686064762265,
+        "ci_upper_ns": 484.26528494146174,
+        "std_dev_ns": 47.68204934830176
+      },
+      "labeled_traversal": {
+        "point_estimate_ns": 529.0442460272936,
+        "ci_lower_ns": 512.3907345361763,
+        "ci_upper_ns": 548.0276597044254,
+        "std_dev_ns": 53.97653629844868
+      },
+      "edge_lookup": {
+        "point_estimate_ns": 66.93412904134323,
+        "ci_lower_ns": 65.52527830251073,
+        "ci_upper_ns": 69.0683748419898,
+        "std_dev_ns": 10.837293375253314
+      },
+      "3_hop_traversal": {
+        "point_estimate_ns": 57687.43187579864,
+        "ci_lower_ns": 57545.6197626875,
+        "ci_upper_ns": 57843.90737222164,
+        "std_dev_ns": 476.622786036508
+      },
+      "find_neighbors": {
+        "point_estimate_ns": 1315.5848580323884,
+        "ci_lower_ns": 1288.4327035401964,
+        "ci_upper_ns": 1356.6224274050269,
+        "std_dev_ns": 280.71448038427
+      },
+      "in_degree": {
+        "point_estimate_ns": 517.5761769415514,
+        "ci_lower_ns": 508.8814298245596,
+        "ci_upper_ns": 527.3426861770532,
+        "std_dev_ns": 28.91450628295963
+      },
+      "node_creation": {
+        "point_estimate_ns": 5941.528624590013,
+        "ci_lower_ns": 5793.920881907765,
+        "ci_upper_ns": 6045.823164542334,
+        "std_dev_ns": 1216.9928989593311
+      },
+      "edge_creation": {
+        "point_estimate_ns": 5625.3041313879285,
+        "ci_lower_ns": 5436.208681960688,
+        "ci_upper_ns": 5763.702471064489,
+        "std_dev_ns": 1179.3667620365832
+      },
+      "get_outgoing_allocation/degree_1": {
+        "point_estimate_ns": 35.85671855763853,
+        "ci_lower_ns": 35.77369159198463,
+        "ci_upper_ns": 35.94560572760297,
+        "std_dev_ns": 0.26595908786908784
+      },
+      "get_outgoing_allocation/degree_10": {
+        "point_estimate_ns": 37.33937500273484,
+        "ci_lower_ns": 36.49823289579541,
+        "ci_upper_ns": 38.6084338075728,
+        "std_dev_ns": 9.346648987288784
+      },
+      "single_hop_traversal/10000_nodes": {
+        "point_estimate_ns": 443.2196295323165,
+        "ci_lower_ns": 442.07805772987274,
+        "ci_upper_ns": 444.4152317157744,
+        "std_dev_ns": 5.0247054319810704
+      },
+      "single_hop_traversal/100_nodes": {
+        "point_estimate_ns": 683.8957503062223,
+        "ci_lower_ns": 631.2322962517939,
+        "ci_upper_ns": 724.4130394614813,
+        "std_dev_ns": 169.456269399721
+      },
+      "single_hop_traversal/1000_nodes": {
+        "point_estimate_ns": 734.0107839254514,
+        "ci_lower_ns": 705.4035062738357,
+        "ci_upper_ns": 762.8997489321455,
+        "std_dev_ns": 65.53743710534505
+      }
+    }
   }
 ]
