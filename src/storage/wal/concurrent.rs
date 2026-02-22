@@ -396,6 +396,62 @@ impl ConcurrentWal {
         Ok(lsns)
     }
 
+    /// Append a batch of operations efficiently (sync mode - returns handles to wait on).
+    ///
+    /// This method mirrors `append_batch` but returns completion handles for each operation,
+    /// allowing the caller to wait for durability.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - Vector of allocated LSNs
+    /// - Vector of completion handles corresponding to each operation
+    pub fn append_batch_with_handles(
+        &self,
+        operations: Vec<WalOperation>,
+    ) -> Result<(Vec<LSN>, Vec<CompletionHandle>)> {
+        // Handle empty batch early
+        if operations.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let count = operations.len() as u64;
+
+        // Defensive check: ensure count > 0 to prevent panic in allocate_batch
+        debug_assert!(count > 0, "count should be > 0 after empty check");
+
+        // Allocate all LSNs in a single atomic operation
+        let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
+
+        // Pre-allocate result vectors
+        let mut lsns = Vec::with_capacity(operations.len());
+        let mut handles = Vec::with_capacity(operations.len());
+
+        // Serialize and append each operation individually since each entry has its own LSN.
+        // The main optimization is the single batch LSN allocation above (vs N atomic operations).
+        for (idx, operation) in operations.into_iter().enumerate() {
+            let lsn = LSN(first_lsn.0 + idx as u64);
+            lsns.push(lsn);
+
+            let data = self.serialize_entry(lsn, &operation)?;
+            let stripe = self.get_stripe();
+
+            match stripe.append_sync_blocking(lsn, data) {
+                Ok(handle) => {
+                    self.total_appends.fetch_add(1, Ordering::Relaxed);
+                    handles.push(handle);
+                }
+                Err(_entry) => {
+                    return Err(Error::Storage(StorageError::WalError {
+                        reason: "WAL buffer closed".to_string(),
+                    }));
+                }
+            }
+        }
+
+        Ok((lsns, handles))
+    }
+
     /// Serialize a WAL entry to bytes.
     ///
     /// # Performance Optimization
