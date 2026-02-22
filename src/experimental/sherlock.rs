@@ -74,6 +74,7 @@ pub struct Sherlock<'a> {
     db: &'a AletheiaDB,
 }
 
+#[cfg(feature = "nova")]
 impl<'a> Sherlock<'a> {
     /// Create a new Sherlock instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -188,14 +189,46 @@ impl<'a> Sherlock<'a> {
     }
 }
 
+#[cfg(not(feature = "nova"))]
+impl<'a> Sherlock<'a> {
+    /// Create a new Sherlock instance.
+    ///
+    /// # Panics
+    ///
+    /// This function **will always panic** because the `nova` feature is not enabled.
+    pub fn new(_db: &'a AletheiaDB) -> Self {
+        panic!(
+            "Experimental features like Sherlock require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n"
+        );
+    }
+
+    #[cfg(test)]
+    fn new_internal(db: &'a AletheiaDB) -> Self {
+        Self { db }
+    }
+
+    /// Investigate a specific node for the given Mystery.
+    ///
+    /// # Panics
+    ///
+    /// This function **will always panic** because the `nova` feature is not enabled.
+    pub fn investigate(&self, _node_id: NodeId, _mystery: &Mystery) -> Result<Vec<Deduction>> {
+        let _ = self.db;
+        panic!("Experimental features like Sherlock require the 'nova' feature.");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
+    #[cfg(feature = "nova")]
     use crate::core::property::PropertyMapBuilder;
+    #[cfg(feature = "nova")]
     use crate::core::temporal::time;
 
     #[test]
+    #[cfg(feature = "nova")]
     fn test_sherlock_detects_sequence() {
         let db = AletheiaDB::new().unwrap();
         let t0 = time::from_millis(1_000);
@@ -254,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "nova")]
     fn test_sherlock_time_window_constraint() {
         let db = AletheiaDB::new().unwrap();
         let t0 = time::from_millis(10_000);
@@ -306,5 +340,25 @@ mod tests {
         assert_eq!(results_pass.len(), 1, "Should match within 500ms");
         assert_eq!(results_pass[0].node_id, node_id);
         assert_eq!(results_pass[0].event_times, vec![t0, t1]);
+    }
+
+    #[test]
+    #[cfg(not(feature = "nova"))]
+    #[should_panic(expected = "Experimental features like Sherlock require the 'nova' feature")]
+    fn test_stub_new_panics() {
+        let db = AletheiaDB::new().unwrap();
+        let _ = Sherlock::new(&db);
+    }
+
+    #[test]
+    #[cfg(not(feature = "nova"))]
+    #[should_panic(expected = "Experimental features like Sherlock require the 'nova' feature")]
+    fn test_stub_investigate_panics() {
+        let db = AletheiaDB::new().unwrap();
+        // Use default (creates PropertyMap::new()) which is fine
+        let node_id = db.write(|tx| tx.create_node("T", Default::default())).unwrap();
+        // Use new_internal to bypass the panic in new()
+        let sherlock = Sherlock::new_internal(&db);
+        let _ = sherlock.investigate(node_id, &Mystery::new(Duration::from_secs(1)));
     }
 }

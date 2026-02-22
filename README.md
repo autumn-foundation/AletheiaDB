@@ -30,6 +30,16 @@ AletheiaDB tracks both **valid time** (when facts were true in reality) and **tr
 
 ## Quick Start
 
+> ⚠️ **IMPORTANT: EXPERIMENTAL FEATURES**
+>
+> Advanced AI features like **Narrative Generation**, **Sherlock**, and **Semantic Navigation** require the `nova` feature flag.
+> If you encounter "Not found" errors or panics mentioning `nova`, please add `features = ["nova"]` to your `Cargo.toml`.
+>
+> ```toml
+> [dependencies]
+> aletheiadb = { version = "0.1", features = ["nova"] }
+> ```
+
 ### Prerequisites
 
 - Rust 1.92+ (edition 2024)
