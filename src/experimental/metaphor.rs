@@ -74,19 +74,24 @@ impl<'a> Metaphor<'a> {
 
         // 2. Compute initial similarity matrix (Semantic Score)
         // Map: (SourceIdx, TargetIdx) -> Score
-        let mut scores: HashMap<(usize, usize), f32> = HashMap::new();
+        // We use a flat vector for O(1) access and better cache locality.
+        // Index = s_idx * target_len + t_idx
+        let target_len = target_nodes.len();
+        let mut scores = vec![0.0f32; source_nodes.len() * target_len];
 
         for s_idx in 0..source_nodes.len() {
-            for t_idx in 0..target_nodes.len() {
+            for t_idx in 0..target_len {
                 let s_vec = &source_data[s_idx].vector;
                 let t_vec = &target_data[t_idx].vector;
 
                 let sim = if let (Some(sv), Some(tv)) = (s_vec, t_vec) {
-                    cosine_similarity(sv, tv).unwrap_or(0.0)
+                    let s = cosine_similarity(sv, tv).unwrap_or(0.0);
+                    // Sanitize NaN to prevent logic errors in greedy selection
+                    if s.is_nan() { 0.0 } else { s }
                 } else {
                     0.0 // No vector match possible
                 };
-                scores.insert((s_idx, t_idx), sim);
+                scores[s_idx * target_len + t_idx] = sim;
             }
         }
 
@@ -124,16 +129,15 @@ impl<'a> Metaphor<'a> {
                     continue;
                 }
 
-                for t in 0..target_nodes.len() {
+                for t in 0..target_len {
                     if target_mapped[t] {
                         continue;
                     }
 
-                    if let Some(&score) = scores.get(&(s, t)) {
-                        if score > best_score {
-                            best_score = score;
-                            best_pair = Some((s, t));
-                        }
+                    let score = scores[s * target_len + t];
+                    if score > best_score {
+                        best_score = score;
+                        best_pair = Some((s, t));
                     }
                 }
             }
@@ -169,10 +173,12 @@ impl<'a> Metaphor<'a> {
                                 }
 
                                 // Boost the score
-                                if let Some(score) =
-                                    scores.get_mut(&(s_neighbor_idx, t_neighbor_idx))
+                                // Bounds check for safety (though maps should guarantee this)
+                                if s_neighbor_idx < source_nodes.len()
+                                    && t_neighbor_idx < target_len
                                 {
-                                    *score += structural_weight;
+                                    scores[s_neighbor_idx * target_len + t_neighbor_idx] +=
+                                        structural_weight;
                                 }
                             }
                         }
