@@ -281,6 +281,10 @@ impl CompletionNotifier {
 
     /// Notify successful completion.
     pub fn notify_success(&self) {
+        // Acquire mutex to prevent lost wakeups
+        // We must hold the mutex to ensure the waiter sees the state change
+        // immediately after waking up or before going to sleep.
+        let _guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
         self.state
             .store(CompletionState::Complete as u64, Ordering::Release);
         self.condvar.notify_all();
@@ -288,6 +292,10 @@ impl CompletionNotifier {
 
     /// Notify completion with error.
     pub fn notify_error(&self, error: &str) {
+        // Acquire mutex to prevent lost wakeups
+        // Note: We acquire wait_mutex BEFORE error mutex to match the lock order in wait()
+        // wait(): locks wait_mutex -> locks error mutex (if state is Error)
+        let _guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
         {
             let mut err = self.error.lock().unwrap_or_else(|e| e.into_inner());
             *err = Some(error.to_string());
