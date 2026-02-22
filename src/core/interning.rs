@@ -40,7 +40,7 @@ pub const COMMON_STRINGS: &[&str] = &[
 ///
 /// This is just a u32 ID that can be used to look up the original string
 /// in the interner. It's Copy, so passing it around is very cheap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InternedString(u32);
 
 impl InternedString {
@@ -71,6 +71,18 @@ impl fmt::Display for InternedString {
         match result {
             Some(res) => res,
             None => write!(f, "Interned({})", self.0),
+        }
+    }
+}
+
+impl fmt::Debug for InternedString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Try to resolve using the global interner first
+        let result = GLOBAL_INTERNER.resolve_with(*self, |s| write!(f, "InternedString(\"{}\")", s));
+
+        match result {
+            Some(res) => res,
+            None => write!(f, "InternedString({})", self.0),
         }
     }
 }

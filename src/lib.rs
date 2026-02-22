@@ -86,6 +86,9 @@ pub mod http;
 #[cfg(test)]
 pub mod test_utils;
 
+/// Prelude for convenient imports of common types and traits.
+pub mod prelude;
+
 // Re-export commonly used types at the crate root
 pub use config::{
     AletheiaDBConfig, AletheiaDBConfigBuilder, ConfigError, HistoricalConfig,
