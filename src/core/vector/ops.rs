@@ -645,7 +645,8 @@ pub fn normalize_in_place(v: &mut [f32]) {
     // Use squared magnitude threshold to avoid denormal number issues.
     // See SQUARED_MAGNITUDE_THRESHOLD for details.
     if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {
-        // Leave zero/near-zero vector unchanged
+        // Zero out the vector to match normalize() behavior
+        v.fill(0.0);
         return;
     }
     // Compute 1/sqrt(sq_mag) directly to avoid intermediate variable
