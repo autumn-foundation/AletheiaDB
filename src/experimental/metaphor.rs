@@ -115,7 +115,7 @@ impl<'a> Metaphor<'a> {
         while mapped_count < min_len {
             // Find best pair
             let mut best_pair = None;
-            let mut best_score = -1.0;
+            let mut best_score = f32::NEG_INFINITY;
 
             // Deterministic iteration: 0..N
             for s in 0..source_nodes.len() {
@@ -353,5 +353,161 @@ mod tests {
         // Check B -> Y (Leftover)
         let map_b = alignment.mappings.iter().find(|m| m.source == b).unwrap();
         assert_eq!(map_b.target, y);
+    }
+
+    #[test]
+    fn test_metaphor_global_score_calculation() {
+        let db = AletheiaDB::new().unwrap();
+        // Enable vector index
+        let config = HnswConfig::new(2, DistanceMetric::Cosine);
+        db.enable_vector_index("vec", config).unwrap();
+
+        // Create 3 pairs with known scores.
+        // Pair 1: 1.0 (Identical)
+        let props_a = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let a = db.create_node("S", props_a).unwrap();
+        let props_x = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let x = db.create_node("T", props_x).unwrap();
+
+        // Pair 2: 1.0 (Identical) - Different axis
+        let props_b = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 1.0])
+            .build();
+        let b = db.create_node("S", props_b).unwrap();
+        let props_y = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 1.0])
+            .build();
+        let y = db.create_node("T", props_y).unwrap();
+
+        // Pair 3: 0.5 (60 degrees)
+        // [1, 0] vs [0.5, sqrt(3)/2]
+        let props_c = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let c = db.create_node("S", props_c).unwrap();
+        let props_z = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.5, 0.8660254])
+            .build();
+        let z = db.create_node("T", props_z).unwrap();
+
+        let metaphor = Metaphor::new(&db);
+        let alignment = metaphor
+            .align(
+                &[a, b, c],
+                &[x, y, z],
+                "vec",
+                0.0, // No structural weight to keep math simple
+            )
+            .unwrap();
+
+        // Expected scores: 1.0, 1.0, 0.5.
+        // Global score = (1.0 + 1.0 + 0.5) / 3 = 2.5 / 3 = 0.8333...
+
+        assert_eq!(alignment.mappings.len(), 3);
+
+        // Floating point comparison
+        let expected_global = (1.0 + 1.0 + 0.5) / 3.0;
+        assert!(
+            (alignment.global_score - expected_global).abs() < 1e-4,
+            "Global score mismatch: got {}, expected {}",
+            alignment.global_score,
+            expected_global
+        );
+    }
+
+    #[test]
+    fn test_metaphor_negative_boundary() {
+        let db = AletheiaDB::new().unwrap();
+        let config = HnswConfig::new(2, DistanceMetric::Cosine);
+        db.enable_vector_index("vec", config).unwrap();
+
+        // Vectors are exactly opposite: [1, 0] and [-1, 0]. Similarity -1.0.
+        let props_a = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let a = db.create_node("S", props_a).unwrap();
+
+        let props_x = PropertyMapBuilder::new()
+            .insert_vector("vec", &[-1.0, 0.0])
+            .build();
+        let x = db.create_node("T", props_x).unwrap();
+
+        let metaphor = Metaphor::new(&db);
+        let alignment = metaphor.align(&[a], &[x], "vec", 0.0).unwrap();
+
+        // Current implementation bug check:
+        // If bug exists, len() == 0.
+        // We assert that it SHOULD be 1.
+        assert_eq!(
+            alignment.mappings.len(),
+            1,
+            "Should align even perfectly opposite vectors if they are candidates"
+        );
+        assert!((alignment.mappings[0].score - (-1.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_metaphor_structural_boost_accumulation() {
+        let db = AletheiaDB::new().unwrap();
+        let config = HnswConfig::new(2, DistanceMetric::Cosine);
+        db.enable_vector_index("vec", config).unwrap();
+
+        // A -> B
+        // X -> Y
+        // A and X are identical (1.0).
+        // B and Y are orthogonal (0.0).
+        // Structural weight = 0.5.
+        // A->X aligns first (score 1.0).
+        // Then boosts neighbors (B->Y).
+        // B->Y base score 0.0. Boost +0.5. Final score 0.5.
+
+        let props_vec1 = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let props_vec2 = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 1.0])
+            .build();
+
+        let a = db.create_node("S", props_vec1.clone()).unwrap();
+        let b = db.create_node("S", props_vec2.clone()).unwrap();
+        db.create_edge(a, b, "LINK", Default::default()).unwrap();
+
+        let x = db.create_node("T", props_vec1.clone()).unwrap(); // Same as A
+        // We need X->Z where Z is similar to B but starts with low score.
+        // If Z is orthogonal to B, score is 0.0.
+        let props_vec3 = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build(); // Orthogonal to [0,1]
+        let z = db.create_node("T", props_vec3).unwrap(); // Z is orthogonal to B
+        db.create_edge(x, z, "LINK", Default::default()).unwrap(); // X->Z
+
+        // Align A,B with X,Z
+        let metaphor = Metaphor::new(&db);
+        let alignment = metaphor
+            .align(
+                &[a, b],
+                &[x, z],
+                "vec",
+                0.5, // Structural weight
+            )
+            .unwrap();
+
+        // A->X (1.0)
+        let map_a = alignment.mappings.iter().find(|m| m.source == a).unwrap();
+        assert_eq!(map_a.target, x);
+        assert!((map_a.score - 1.0).abs() < 1e-4);
+
+        // B->Z (0.0 base + 0.5 boost = 0.5)
+        let map_b = alignment.mappings.iter().find(|m| m.source == b).unwrap();
+        assert_eq!(map_b.target, z);
+        assert!(
+            (map_b.score - 0.5).abs() < 1e-4,
+            "Score was {}, expected 0.5 (0.0 + 0.5)",
+            map_b.score
+        );
     }
 }

@@ -47,3 +47,9 @@
 **Summary:** `Node::with_metadata` and `Edge::with_metadata` functions were untested; replacing the `metadata` argument with `VersionMetadata::default()` would survive.
 **Diagnosis:** **Missing Coverage**. No unit tests existed for these specific constructor variants.
 **Kill Shot:** Added `test_node_with_metadata` and `test_edge_with_metadata` to verify that the provided metadata is actually stored.
+
+**[Metaphor Alignment Boundary and Score]**
+**Module:** `src/experimental/metaphor.rs`
+**Summary:** `Metaphor::align` excluded vector pairs with similarity exactly `-1.0` due to `best_score = -1.0` initialization and strict `score > best_score` comparison. Also, `global_score` calculation was not verified.
+**Diagnosis:** **Suspected Bug**. The initialization prevented alignment of perfectly opposite vectors even if they were the only candidates. Also **Weak Test** for `global_score`.
+**Kill Shot:** Changed initialization to `f32::NEG_INFINITY` and added `test_metaphor_negative_boundary` to verify alignment of opposite vectors, plus `test_metaphor_global_score_calculation` to verify score averaging.
