@@ -2063,3 +2063,27 @@ mod coverage_gap_tests {
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Failed to save index") || msg.contains("Is a directory") || msg.contains("create mappings file"));
     }
+
+    #[test]
+    fn test_internal_helpers_coverage() {
+        use super::config::*;
+        use super::*;
+        use usearch::{MetricKind, ScalarKind};
+
+        // Test to_usearch_metric
+        assert!(matches!(to_usearch_metric(DistanceMetric::Cosine), MetricKind::Cos));
+        assert!(matches!(to_usearch_metric(DistanceMetric::Euclidean), MetricKind::L2sq));
+        assert!(matches!(to_usearch_metric(DistanceMetric::DotProduct), MetricKind::IP));
+        assert!(matches!(to_usearch_metric(DistanceMetric::Haversine), MetricKind::Haversine));
+        assert!(matches!(to_usearch_metric(DistanceMetric::Hamming), MetricKind::Hamming));
+        assert!(matches!(to_usearch_metric(DistanceMetric::Tanimoto), MetricKind::Tanimoto));
+
+        // Test to_usearch_scalar
+        assert!(matches!(to_usearch_scalar(Quantization::F32), ScalarKind::F32));
+        assert!(matches!(to_usearch_scalar(Quantization::F16), ScalarKind::F16));
+        assert!(matches!(to_usearch_scalar(Quantization::I8), ScalarKind::I8));
+
+        // Test is_retryable_usearch_error
+        assert!(is_retryable_usearch_error("No available threads to lock"));
+        assert!(!is_retryable_usearch_error("Some other error"));
+    }
