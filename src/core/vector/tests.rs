@@ -337,10 +337,16 @@ fn test_cosine_similarity_overflow_resilience() {
     // Verify squared magnitude is finite but large
     let mag_sq: f32 = a.iter().map(|x| x * x).sum();
     assert!(mag_sq.is_finite(), "Squared magnitude should be finite");
-    assert!(mag_sq > 1.8e19, "Squared magnitude should be large enough to trigger overflow risk");
+    assert!(
+        mag_sq > 1.8e19,
+        "Squared magnitude should be large enough to trigger overflow risk"
+    );
 
     // Verify product of squared magnitudes WOULD overflow
-    assert!((mag_sq * mag_sq).is_infinite(), "Product of squared magnitudes should overflow");
+    assert!(
+        (mag_sq * mag_sq).is_infinite(),
+        "Product of squared magnitudes should overflow"
+    );
 
     let sim = cosine_similarity(&a, &b).unwrap();
 
