@@ -15,10 +15,14 @@
 //! - **Digital Twins**: Align a simulation graph with a real-world graph.
 //! - **Recommender Systems**: "You liked Movie A (Graph A). Movie B (Graph B) has a similar character dynamic."
 
+#![allow(clippy::needless_range_loop, clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
+#[cfg(feature = "nova")]
 use crate::core::vector::cosine_similarity;
+#[cfg(feature = "nova")]
 use std::collections::{HashMap, HashSet};
 
 /// A single mapping in the alignment.
@@ -43,9 +47,11 @@ pub struct Alignment {
 
 /// The Metaphor Engine.
 pub struct Metaphor<'a> {
+    #[allow(dead_code)]
     db: &'a AletheiaDB,
 }
 
+#[cfg(feature = "nova")]
 impl<'a> Metaphor<'a> {
     /// Create a new Metaphor engine.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -115,7 +121,7 @@ impl<'a> Metaphor<'a> {
         while mapped_count < min_len {
             // Find best pair
             let mut best_pair = None;
-            let mut best_score = -1.0;
+            let mut best_score = f32::NEG_INFINITY;
 
             // Deterministic iteration: 0..N
             for s in 0..source_nodes.len() {
@@ -239,11 +245,34 @@ impl<'a> Metaphor<'a> {
     }
 }
 
+#[cfg(not(feature = "nova"))]
+impl<'a> Metaphor<'a> {
+    /// Create a new Metaphor engine.
+    pub fn new(_db: &'a AletheiaDB) -> Self {
+        panic!(
+            "Experimental features like Metaphor require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n"
+        );
+    }
+
+    /// Align a source subgraph to a target subgraph.
+    pub fn align(
+        &self,
+        _source_nodes: &[NodeId],
+        _target_nodes: &[NodeId],
+        _vector_property: &str,
+        _structural_weight: f32,
+    ) -> Result<Alignment> {
+        panic!("Experimental features like Metaphor require the 'nova' feature.");
+    }
+}
+
+#[cfg(feature = "nova")]
 struct NodeData {
     vector: Option<Vec<f32>>,
     neighbors: Vec<NodeId>,
 }
 
+#[cfg(feature = "nova")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +312,36 @@ mod tests {
         assert_eq!(alignment.mappings[0].source, a);
         assert_eq!(alignment.mappings[0].target, x);
         assert!(alignment.mappings[0].score > 0.9);
+    }
+
+    #[test]
+    fn test_metaphor_exact_opposite_score() {
+        // Regression test for issue where best_score was initialized to -1.0,
+        // causing valid mappings with score -1.0 to be ignored.
+        let db = AletheiaDB::new().unwrap();
+        let config = HnswConfig::new(2, DistanceMetric::Cosine);
+        db.enable_vector_index("vec", config).unwrap();
+
+        // Source: A [1, 0]
+        // Target: X [-1, 0] (Opposite, score -1.0)
+        let props_a = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let a = db.create_node("Source", props_a).unwrap();
+
+        let props_x = PropertyMapBuilder::new()
+            .insert_vector("vec", &[-1.0, 0.0])
+            .build();
+        let x = db.create_node("Target", props_x).unwrap();
+
+        let metaphor = Metaphor::new(&db);
+        let alignment = metaphor.align(&[a], &[x], "vec", 0.0).unwrap();
+
+        assert_eq!(alignment.mappings.len(), 1);
+        assert_eq!(alignment.mappings[0].source, a);
+        assert_eq!(alignment.mappings[0].target, x);
+        // Score should be exactly -1.0 (clamped)
+        assert!((alignment.mappings[0].score - -1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -353,5 +412,19 @@ mod tests {
         // Check B -> Y (Leftover)
         let map_b = alignment.mappings.iter().find(|m| m.source == b).unwrap();
         assert_eq!(map_b.target, y);
+    }
+}
+
+#[cfg(not(feature = "nova"))]
+#[cfg(test)]
+mod stub_tests {
+    use super::*;
+    use crate::AletheiaDB;
+
+    #[test]
+    #[should_panic(expected = "Experimental features like Metaphor require the 'nova' feature")]
+    fn test_stub_new_panics() {
+        let db = AletheiaDB::new().unwrap();
+        let _ = Metaphor::new(&db);
     }
 }
