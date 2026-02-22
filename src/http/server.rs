@@ -105,18 +105,43 @@ fn build_cors(cors_config: &CorsConfig) -> Cors {
 
 /// Create a configured Actix-web application factory with all middleware.
 ///
-/// This creates an app with **permissive CORS** suitable for development/testing.
-/// For production use, prefer [`create_app_with_config`] with proper CORS settings.
+/// This creates an app with the provided configuration.
+///
+/// # Arguments
+///
+/// * `config` - Server configuration including CORS settings.
+pub fn create_app_with_config(
+    config: ServerConfig,
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
+> {
+    let cors_config = config.cors();
+    App::new()
+        .wrap(Logger::default())
+        .wrap(build_security_headers())
+        .wrap(build_cors(cors_config))
+        .configure(configure_app)
+}
+
+/// Create a configured Actix-web application factory with all middleware.
+///
+/// This creates an app with **restrictive CORS** suitable for production.
 ///
 /// This includes:
 /// - Request logging middleware
-/// - Permissive CORS support (allows any origin)
+/// - Restrictive CORS support (allows only localhost:3000 by default)
 /// - All configured routes
 ///
-/// # Security Warning
+/// # Note
 ///
-/// This function uses permissive CORS settings. For production deployments,
-/// use [`create_app_with_config`] with a properly configured [`ServerConfig`].
+/// This uses `ServerConfig::default()` which is restrictive.
+/// To use a custom configuration, use [`create_app_with_config`].
 pub fn create_app() -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -126,12 +151,7 @@ pub fn create_app() -> App<
         InitError = (),
     >,
 > {
-    let cors_config = CorsConfig::permissive();
-    App::new()
-        .wrap(Logger::default())
-        .wrap(build_security_headers())
-        .wrap(build_cors(&cors_config))
-        .configure(configure_app)
+    create_app_with_config(ServerConfig::default())
 }
 
 /// Create an HTTP server with the given configuration.
@@ -253,9 +273,25 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_create_app_with_cors() {
+    async fn test_create_app_restrictive_by_default() {
         let app = test::init_service(create_app()).await;
 
+        // Test with allowed origin (localhost:3000)
+        let req = test::TestRequest::default()
+            .method(actix_web::http::Method::OPTIONS)
+            .uri("/status")
+            .insert_header(("Origin", "http://localhost:3000"))
+            .insert_header(("Access-Control-Request-Method", "GET"))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        assert_eq!(
+            resp.headers().get("Access-Control-Allow-Origin").unwrap(),
+            "http://localhost:3000"
+        );
+
+        // Test with disallowed origin (example.com)
         let req = test::TestRequest::default()
             .method(actix_web::http::Method::OPTIONS)
             .uri("/status")
@@ -264,9 +300,29 @@ mod tests {
             .to_request();
 
         let resp = test::call_service(&app, req).await;
+        // If origin is not allowed, no CORS headers are returned.
+        assert!(resp.headers().get("Access-Control-Allow-Origin").is_none());
+    }
 
-        // CORS preflight should succeed
-        assert!(resp.status().is_success() || resp.status().as_u16() == 204);
+    #[actix_rt::test]
+    async fn test_create_app_with_config_permissive() {
+        let config = ServerConfig::builder()
+            .cors(CorsConfig::permissive())
+            .build();
+        let app = test::init_service(create_app_with_config(config)).await;
+
+        let req = test::TestRequest::default()
+            .method(actix_web::http::Method::OPTIONS)
+            .uri("/status")
+            .insert_header(("Origin", "http://random-origin.com"))
+            .insert_header(("Access-Control-Request-Method", "GET"))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        // For permissive, it usually echoes the origin or uses *
+        let allow_origin = resp.headers().get("Access-Control-Allow-Origin").unwrap();
+        assert!(allow_origin == "*" || allow_origin == "http://random-origin.com");
     }
 
     #[actix_rt::test]
