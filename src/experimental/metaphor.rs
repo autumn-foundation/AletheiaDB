@@ -254,6 +254,11 @@ impl<'a> Metaphor<'a> {
         );
     }
 
+    #[cfg(test)]
+    fn new_internal(db: &'a AletheiaDB) -> Self {
+        Self { db }
+    }
+
     /// Align a source subgraph to a target subgraph.
     pub fn align(
         &self,
@@ -426,5 +431,13 @@ mod stub_tests {
     fn test_stub_new_panics() {
         let db = AletheiaDB::new().unwrap();
         let _ = Metaphor::new(&db);
+    }
+
+    #[test]
+    #[should_panic(expected = "Experimental features like Metaphor require the 'nova' feature")]
+    fn test_stub_align_panics() {
+        let db = AletheiaDB::new().unwrap();
+        let metaphor = Metaphor::new_internal(&db);
+        let _ = metaphor.align(&[], &[], "vec", 0.0);
     }
 }
