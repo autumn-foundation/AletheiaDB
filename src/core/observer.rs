@@ -591,3 +591,97 @@ mod tests {
         notify_observers(&observers, &event);
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::id::{NodeId, VersionId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TrackingObserver {
+        interested: bool,
+        should_fail: bool,
+        call_count: AtomicUsize,
+    }
+
+    impl TrackingObserver {
+        fn new(interested: bool, should_fail: bool) -> Self {
+            Self {
+                interested,
+                should_fail,
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl StorageObserver for TrackingObserver {
+        fn on_event(&self, _event: &StorageEvent) -> Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            if self.should_fail {
+                Err(crate::core::error::Error::Other("Intentional failure".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn interested_in(&self, _event: &StorageEvent) -> bool {
+            self.interested
+        }
+    }
+
+    #[test]
+    fn test_sentry_filtering_does_not_block_subsequent_observers() {
+        // 🛡️ Sentry Test: Verify that if an observer returns false for interested_in,
+        // the loop continues to the next observer (does not break).
+        // This targets mutants that replace `continue` with `break` in the loop.
+
+        let uninterested = Arc::new(TrackingObserver::new(false, false));
+        let interested = Arc::new(TrackingObserver::new(true, false));
+
+        let observers: Vec<Observer> = vec![
+            Arc::clone(&uninterested) as Observer,
+            Arc::clone(&interested) as Observer,
+        ];
+
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        notify_observers(&observers, &event);
+
+        assert_eq!(uninterested.count(), 0, "Uninterested observer should not be called");
+        assert_eq!(interested.count(), 1, "Subsequent interested observer SHOULD be called");
+    }
+
+    #[test]
+    fn test_sentry_error_does_not_block_subsequent_observers() {
+        // 🛡️ Sentry Test: Verify that if an observer returns an error,
+        // the loop continues to the next observer.
+        // This targets mutants that might abort notification on error.
+
+        let failing = Arc::new(TrackingObserver::new(true, true));
+        let success = Arc::new(TrackingObserver::new(true, false));
+
+        let observers: Vec<Observer> = vec![
+            Arc::clone(&failing) as Observer,
+            Arc::clone(&success) as Observer,
+        ];
+
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        notify_observers(&observers, &event);
+
+        assert_eq!(failing.count(), 1, "Failing observer should be called");
+        assert_eq!(success.count(), 1, "Subsequent observer SHOULD be called despite previous error");
+    }
+}
