@@ -1790,4 +1790,31 @@ mod sentry_tests {
             "Empty range should not overlap itself"
         );
     }
+
+    #[test]
+    fn test_sentry_duration_micros_overflow() {
+        // 🛡️ Sentry Test: Verify duration_micros saturates instead of panicking on overflow.
+        // This targets mutants that replace checked_sub with sub.
+
+        let start = HybridTimestamp::new_unchecked(i64::MIN, 0);
+        let end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+
+        let range =
+            TimeRange::new(start, end).expect("Should create valid range with extreme start");
+
+        assert_eq!(
+            range.duration_micros(),
+            Some(i64::MAX),
+            "Duration should saturate at i64::MAX on overflow"
+        );
+    }
+
+    #[test]
+    fn test_sentry_range_is_not_empty_for_valid_interval() {
+        // 🛡️ Sentry Test: Verify is_empty() returns false for non-empty ranges.
+        // This targets mutants that make is_empty() always return true.
+
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(!range.is_empty(), "Range [100, 200) should not be empty");
+    }
 }
