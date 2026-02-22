@@ -438,13 +438,25 @@ impl ConcurrentWalSystem {
     ///
     /// This flushes immediately and waits for fsync.
     pub fn append_sync(&self, operation: WalOperation) -> Result<LSN> {
-        let lsn = self.wal.append_async(operation)?;
+        // Use append_with_handle to get a completion handle so we can
+        // wait for durability even if another thread performs the flush.
+        let (lsn, handle) = self.wal.append_with_handle(operation)?;
 
-        // Drain and flush immediately for sync mode
+        // Drain and flush immediately for sync mode.
+        // We attempt to drive the flush ourselves, but if drain_all() returns
+        // empty (because another thread took the entries), we just wait on the handle.
         let entries = self.wal.drain_all();
         if !entries.is_empty() {
             self.coordinator.flush(entries, true)?;
         }
+
+        // Wait for durability.
+        // This ensures we don't return success until the data is actually on disk.
+        handle.wait().map_err(|e| {
+            Error::Storage(StorageError::WalError {
+                reason: format!("WAL flush failed: {}", e),
+            })
+        })?;
 
         Ok(lsn)
     }
@@ -507,8 +519,8 @@ impl ConcurrentWalSystem {
         // Use the underlying WAL's batch append for async modes
         match self.durability_mode {
             DurabilityMode::Synchronous => {
-                // For synchronous mode, append batch then flush all
-                let lsns = self.wal.append_batch(operations)?;
+                // For synchronous mode, use append_batch_with_handles so we can wait
+                let results = self.wal.append_batch_with_handles(operations)?;
 
                 // Drain and flush immediately for sync mode
                 let entries = self.wal.drain_all();
@@ -516,6 +528,17 @@ impl ConcurrentWalSystem {
                     self.coordinator.flush(entries, true).map_err(|e| {
                         Error::Storage(StorageError::WalError {
                             reason: format!("Failed to flush batch after drain: {}", e),
+                        })
+                    })?;
+                }
+
+                // Collect LSNs and wait for all handles
+                let mut lsns = Vec::with_capacity(results.len());
+                for (lsn, handle) in results {
+                    lsns.push(lsn);
+                    handle.wait().map_err(|e| {
+                        Error::Storage(StorageError::WalError {
+                            reason: format!("WAL batch flush failed: {}", e),
                         })
                     })?;
                 }

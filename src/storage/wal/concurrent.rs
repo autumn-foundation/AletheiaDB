@@ -396,6 +396,57 @@ impl ConcurrentWal {
         Ok(lsns)
     }
 
+    /// Append a batch of operations with completion handles (sync mode).
+    ///
+    /// This provides batch efficiency while allowing the caller to wait for durability.
+    /// Used by `ConcurrentWalSystem` in synchronous mode.
+    ///
+    /// # Returns
+    ///
+    /// Vector of (LSN, CompletionHandle) pairs.
+    pub fn append_batch_with_handles(
+        &self,
+        operations: Vec<WalOperation>,
+    ) -> Result<Vec<(LSN, CompletionHandle)>> {
+        // Handle empty batch early
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let count = operations.len() as u64;
+
+        // Defensive check: ensure count > 0 to prevent panic in allocate_batch
+        debug_assert!(count > 0, "count should be > 0 after empty check");
+
+        // Allocate all LSNs in a single atomic operation
+        let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
+
+        // Pre-allocate result vector
+        let mut results = Vec::with_capacity(operations.len());
+
+        // Serialize and append each operation individually
+        for (idx, operation) in operations.into_iter().enumerate() {
+            let lsn = LSN(first_lsn.0 + idx as u64);
+
+            let data = self.serialize_entry(lsn, &operation)?;
+            let stripe = self.get_stripe();
+
+            match stripe.append_sync_blocking(lsn, data) {
+                Ok(handle) => {
+                    self.total_appends.fetch_add(1, Ordering::Relaxed);
+                    results.push((lsn, handle));
+                }
+                Err(_entry) => {
+                    return Err(Error::Storage(StorageError::WalError {
+                        reason: "WAL buffer closed".to_string(),
+                    }));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Serialize a WAL entry to bytes.
     ///
     /// # Performance Optimization
@@ -840,6 +891,31 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].lsn, lsns[0]);
         assert_eq!(entries[1].lsn, lsns[1]);
+    }
+
+    #[test]
+    fn test_append_batch_with_handles() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalConfig::new(dir.path());
+        let wal = ConcurrentWal::new(config).unwrap();
+
+        let ops = vec![test_operation(), test_operation()];
+        let results = wal.append_batch_with_handles(ops).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, LSN(1));
+        assert!(!results[0].1.is_complete());
+        assert_eq!(results[1].0, LSN(2));
+        assert!(!results[1].1.is_complete());
+
+        // Drain and notify
+        let entries = wal.drain_all();
+        for entry in entries {
+            entry.notify_completion();
+        }
+
+        assert!(results[0].1.is_complete());
+        assert!(results[1].1.is_complete());
     }
 
     #[test]
