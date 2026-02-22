@@ -481,3 +481,57 @@ fn test_scale_in_place_zero_scalar() {
     assert!(v[2].is_nan()); // Inf * 0 = NaN
     assert!(v[3].is_nan()); // NaN * 0 = NaN
 }
+
+// ============================================================================
+// Regression Tests
+// ============================================================================
+
+#[test]
+fn test_cosine_similarity_underflow() {
+    // 🛡️ Sentry: Regression test for numeric instability where sqrt(a*b) underflows
+    // but sqrt(a)*sqrt(b) does not.
+
+    // 1e-20 * 1e-20 = 1e-40 (underflow to 0.0 or deep subnormal that squares to 0)
+    // sqrt(1e-20) = 1e-10 (normal)
+
+    let val = 1e-20;
+    let a = vec![val];
+    let b = vec![val];
+
+    let result = cosine_similarity(&a, &b).unwrap();
+
+    // Should be exactly 1.0 for identical vectors
+    assert!((result - 1.0).abs() < 1e-6, "Result was {}", result);
+}
+
+#[test]
+fn test_cosine_similarity_overflow() {
+    // 🛡️ Sentry: Regression test for numeric instability where mag_a_sq * mag_b_sq overflows
+    // but individual magnitudes do not.
+
+    // 1e19 * 1e19 = 1e38 (valid f32)
+    // mag_sq = 1e38.
+    // product = 1e76 (overflow to Inf).
+    // Old impl: sqrt(Inf) = Inf. dot/Inf = 0.0.
+    // New impl: sqrt(1e38)*sqrt(1e38) = 1e19*1e19 = 1e38. dot/1e38 = 1.0.
+
+    let val = 1e19;
+    let a = vec![val];
+    let b = vec![val];
+
+    let result = cosine_similarity(&a, &b).unwrap();
+
+    // Should be exactly 1.0 for identical vectors
+    assert!((result - 1.0).abs() < 1e-6, "Result was {}", result);
+}
+
+#[test]
+fn test_normalize_safety_regression() {
+    // 🛡️ Sentry: Regression test for normalize UB fix (using spare_capacity_mut).
+    // Ensure it produces correct results.
+    let v = vec![3.0, 4.0];
+    let normalized = normalize(&v);
+
+    assert!((normalized[0] - 0.6).abs() < 1e-6);
+    assert!((normalized[1] - 0.8).abs() < 1e-6);
+}

@@ -104,7 +104,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
-    let magnitude = (mag_a_sq * mag_b_sq).sqrt();
+    let magnitude = mag_a_sq.sqrt() * mag_b_sq.sqrt();
 
     // Handle zero vectors
     if magnitude == 0.0 {
@@ -600,9 +600,15 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
     // the `result` vector would be dropped, which is safe for `Vec<f32>` (no Drop impl for f32).
     // The only risk is if `scale_and_copy` returned early without initializing, but
     // its implementation guarantees full coverage via exact chunking and remainder handling.
+
+    // Use spare_capacity_mut to safely access uninitialized memory
+    let dst = result.spare_capacity_mut();
+    // We must limit the slice to v.len() because spare_capacity_mut returns the whole capacity
+    scale_and_copy(v, &mut dst[..v.len()], inv_mag);
+
+    // SAFETY: We initialized the elements using scale_and_copy.
     unsafe { result.set_len(v.len()) };
 
-    scale_and_copy(v, &mut result, inv_mag);
     result
 }
 
