@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 use aletheiadb::core::vector::ops::cosine_similarity;
 use proptest::prelude::*;
 
