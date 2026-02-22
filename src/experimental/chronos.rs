@@ -19,6 +19,60 @@
 //! 2. Compute the intersection of all interval sets: `I_path = ⋂ I_e`.
 //!    - This results in a set of disjoint intervals where *every* edge in the path was valid.
 //! 3. Sum the duration of intervals in `I_path` and divide by the duration of `W`.
+//!
+//! # Example: The Time-Traveling Detective 🕵️
+//!
+//! > ⚠️ **REQUIRES FEATURE 'NOVA'**
+//!
+//! ```rust
+//! use aletheiadb::{AletheiaDB, properties, ReadOps, WriteOps, Error};
+//! use aletheiadb::core::temporal::time;
+//! use aletheiadb::experimental::chronos::Chronos;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//!
+//! // 1. Establish the scene
+//! let (alice, bob, charlie) = db.write(|tx| {
+//!     let a = tx.create_node("Person", properties! { "name" => "Alice" })?;
+//!     let b = tx.create_node("Person", properties! { "name" => "Bob" })?;
+//!     let c = tx.create_node("Person", properties! { "name" => "Charlie" })?;
+//!
+//!     // Path: Alice -> Bob -> Charlie
+//!     tx.create_edge(a, b, "KNOWS", properties! {})?;
+//!     tx.create_edge(b, c, "KNOWS", properties! {})?;
+//!     Ok::<_, Error>((a, b, c))
+//! })?;
+//!
+//! // Capture the moment "Then" (T1)
+//! let t1 = time::now();
+//!
+//! // 2. Time passes... The bridge burns
+//! std::thread::sleep(std::time::Duration::from_millis(10));
+//! let t2 = time::now();
+//!
+//! db.write(|tx| {
+//!     // Delete the link between Bob and Charlie
+//!     let edges = tx.get_outgoing_edges(bob);
+//!     for e in edges { tx.delete_edge(e)?; }
+//!     Ok::<_, Error>(())
+//! })?;
+//!
+//! // 3. Analyze history with Chronos
+//! let chronos = Chronos::new(&db);
+//!
+//! // At T2 (present), the path is broken
+//! let path_now = chronos.find_path_at_time(alice, charlie, time::now(), time::now())?;
+//! assert!(path_now.is_none());
+//!
+//! // At T1 (past), the path existed!
+//! let path_then = chronos.find_path_at_time(alice, charlie, t1, t1)?;
+//! assert_eq!(path_then.unwrap(), vec![alice, bob, charlie]);
+//!
+//! println!("🕵️ Chronos confirmed: The connection existed in the past!");
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::AletheiaDB;
 use crate::core::error::Result;

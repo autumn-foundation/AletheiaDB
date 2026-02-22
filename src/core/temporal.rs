@@ -26,6 +26,46 @@
 //!
 //! 4. **Half-Open Intervals**: All ranges are `[start, end)`, meaning `start` is inclusive and
 //!    `end` is exclusive. `contains(end)` will always return false.
+//!
+//! # Common Pitfalls 🕳️
+//!
+//! ## ❌ OFF-BY-ONE: Range Exclusion
+//! The end of a `TimeRange` is **exclusive**.
+//!
+//! ```rust
+//! # use aletheiadb::core::temporal::{TimeRange, time};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let start = time::from_secs(100);
+//! let end = time::from_secs(200);
+//! let range = TimeRange::new(start, end)?;
+//!
+//! // ❌ Pitfall: Expecting the end timestamp to be included
+//! assert_eq!(range.contains(end), false);
+//!
+//! // ✅ Correct: Use end-1 or check < end
+//! assert_eq!(range.contains(time::from_secs(199)), true);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## ❌ MAX_VALID_TIMESTAMP Violation
+//! Timestamps cannot exceed `MAX_VALID_TIMESTAMP`.
+//!
+//! ```rust
+//! # use aletheiadb::core::temporal::{TimeRange, MAX_VALID_TIMESTAMP, time};
+//! # use aletheiadb::core::hlc::HybridTimestamp;
+//! # fn main() {
+//! // ❌ Pitfall: Trying to create a timestamp > MAX_VALID_TIMESTAMP
+//! let too_big_val = i64::MAX;
+//! // This will return an error (except for internal sentinels)
+//! assert!(HybridTimestamp::new(too_big_val, 0).is_err());
+//!
+//! // ✅ Correct: Use TimeRange::from(start) for open ranges
+//! let start = time::from_secs(100);
+//! let range = TimeRange::from(start); // Automatically uses TIMESTAMP_MAX
+//! assert!(range.is_current());
+//! # }
+//! ```
 
 use std::fmt;
 
