@@ -9,7 +9,11 @@ fn test_normalize_vs_normalize_in_place_consistency() {
 
     // normalize returns zero vector for small values
     let normalized = normalize(&v);
-    assert_eq!(normalized, vec![0.0], "normalize should return zero vector for small inputs");
+    assert_eq!(
+        normalized,
+        vec![0.0],
+        "normalize should return zero vector for small inputs"
+    );
 
     // normalize_in_place should behave consistently?
     let mut v_in_place = v.clone();
@@ -17,7 +21,10 @@ fn test_normalize_vs_normalize_in_place_consistency() {
 
     // If they are consistent, v_in_place should be zeroed out.
     // Currently, it is likely unchanged (failed to normalize but didn't zero).
-    assert_eq!(v_in_place, normalized,
+    assert_eq!(
+        v_in_place, normalized,
         "normalize_in_place should match normalize behavior for small inputs. \
-        Got {:?}, expected {:?}", v_in_place, normalized);
+        Got {:?}, expected {:?}",
+        v_in_place, normalized
+    );
 }

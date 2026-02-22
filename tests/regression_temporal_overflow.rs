@@ -1,5 +1,5 @@
-use aletheiadb::core::temporal::{TimeRange, TIMESTAMP_MAX};
 use aletheiadb::core::hlc::HybridTimestamp;
+use aletheiadb::core::temporal::{TIMESTAMP_MAX, TimeRange};
 
 #[test]
 fn test_timerange_duration_overflow() {
