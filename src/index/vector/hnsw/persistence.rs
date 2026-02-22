@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use usearch::{Index, IndexOptions};
 
-use super::config::{create_metric_wrapper, to_usearch_metric, to_usearch_scalar, HnswConfig};
+use super::config::{HnswConfig, create_metric_wrapper, to_usearch_metric, to_usearch_scalar};
 use super::{HnswIndex, IndexStats, MAX_K, NUM_ENTRY_LOCKS};
 
 /// Magic bytes for mapping file identification
@@ -305,9 +305,7 @@ pub(crate) fn open_mmap_index(path: &Path) -> Result<HnswIndex> {
     })
 }
 
-pub(crate) fn load_mappings_with_integrity(
-    mappings_path: &Path,
-) -> Result<LoadedMappings> {
+pub(crate) fn load_mappings_with_integrity(mappings_path: &Path) -> Result<LoadedMappings> {
     let id_mapping = DashMap::new();
     let reverse_mapping = DashMap::new();
     let mut max_key = 0u64;
@@ -491,7 +489,10 @@ pub(crate) fn load_mappings_with_integrity(
     })
 }
 
-pub(crate) fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswConfig) -> Result<()> {
+pub(crate) fn validate_metadata(
+    metadata: Option<IndexMetadata>,
+    config: &HnswConfig,
+) -> Result<()> {
     if let Some(meta) = metadata {
         if meta.dimensions > MAX_VECTOR_DIMENSIONS {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -521,8 +522,7 @@ pub(crate) fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswCo
         }
     } else if config.custom_metric.is_some() {
         return Err(Error::Vector(VectorError::IndexError(
-            "Cannot use custom metric with legacy index (missing metadata validation)"
-                .to_string(),
+            "Cannot use custom metric with legacy index (missing metadata validation)".to_string(),
         )));
     }
     Ok(())

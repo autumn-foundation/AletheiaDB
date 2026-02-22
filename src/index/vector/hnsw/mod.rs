@@ -417,44 +417,45 @@ impl VectorIndex for HnswIndex {
 
         let mut candidate_k = k_capped.min(max_candidates);
         loop {
-            let candidates = {
-                let index = self.inner.read();
-                let mut maybe_matches = None;
+            let candidates =
+                {
+                    let index = self.inner.read();
+                    let mut maybe_matches = None;
 
-                for attempt in 0..MAX_SEARCH_ATTEMPTS {
-                    match index.search(query, candidate_k) {
-                        Ok(found) => {
-                            maybe_matches = Some(found);
-                            break;
-                        }
-                        Err(e) => {
-                            let error_msg = e.to_string();
-                            if is_retryable_usearch_error(&error_msg)
-                                && attempt + 1 < MAX_SEARCH_ATTEMPTS
-                            {
-                                self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
-                                let delay_ms = 1u64 << attempt;
-                                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                                continue;
+                    for attempt in 0..MAX_SEARCH_ATTEMPTS {
+                        match index.search(query, candidate_k) {
+                            Ok(found) => {
+                                maybe_matches = Some(found);
+                                break;
                             }
+                            Err(e) => {
+                                let error_msg = e.to_string();
+                                if is_retryable_usearch_error(&error_msg)
+                                    && attempt + 1 < MAX_SEARCH_ATTEMPTS
+                                {
+                                    self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
+                                    let delay_ms = 1u64 << attempt;
+                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                                    continue;
+                                }
 
-                            if attempt > 0 {
-                                self.stats
-                                    .search_retry_failures
-                                    .fetch_add(1, Ordering::Relaxed);
+                                if attempt > 0 {
+                                    self.stats
+                                        .search_retry_failures
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                return Err(Error::Vector(VectorError::IndexError(format!(
+                                    "Filtered search failed: {}",
+                                    e
+                                ))));
                             }
-                            return Err(Error::Vector(VectorError::IndexError(format!(
-                                "Filtered search failed: {}",
-                                e
-                            ))));
                         }
                     }
-                }
 
-                self.convert_matches(maybe_matches.expect(
-                    "filtered search retry loop should have returned or produced matches",
-                ))
-            };
+                    self.convert_matches(maybe_matches.expect(
+                        "filtered search retry loop should have returned or produced matches",
+                    ))
+                };
 
             let mut filtered = Vec::with_capacity(k_capped.min(candidates.len()));
             for (node_id, similarity) in candidates {

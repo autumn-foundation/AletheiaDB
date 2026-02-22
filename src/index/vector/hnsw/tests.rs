@@ -1,7 +1,5 @@
 use super::config::create_metric_wrapper;
-use super::persistence::{
-    IndexMetadata, MAX_MAPPINGS_COUNT, write_mappings_to_writer,
-};
+use super::persistence::{IndexMetadata, MAX_MAPPINGS_COUNT, write_mappings_to_writer};
 use super::*;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::index::vector::StorageMode;
@@ -1937,7 +1935,8 @@ mod coverage_gap_tests {
 
         // Also test HnswConfig methods directly since they might be what's missing
         let mut raw_config = HnswConfig::new(128, DistanceMetric::Cosine);
-        raw_config = raw_config.with_m(32)
+        raw_config = raw_config
+            .with_m(32)
             .with_ef_construction(200)
             .with_ef_search(100)
             .with_capacity(5000)
@@ -1953,7 +1952,9 @@ mod coverage_gap_tests {
 
     #[test]
     fn test_add_batch_default_impl() {
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
         let items = vec![
             (NodeId::new(1).unwrap(), vec![1.0, 0.0, 0.0, 0.0]),
             (NodeId::new(2).unwrap(), vec![0.0, 1.0, 0.0, 0.0]),
@@ -1964,7 +1965,9 @@ mod coverage_gap_tests {
 
     #[test]
     fn test_remove_batch_default_impl() {
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
         let id1 = NodeId::new(1).unwrap();
         let id2 = NodeId::new(2).unwrap();
         index.add(id1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
@@ -1977,14 +1980,18 @@ mod coverage_gap_tests {
 
     #[test]
     fn test_memory_usage_coverage() {
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
         // Just ensure it doesn't panic
         let _usage = index.memory_usage();
     }
 
     #[test]
     fn test_restore_mapping_coverage() {
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
         let node_id = NodeId::new(1).unwrap();
         let key = 100;
 
@@ -1997,16 +2004,24 @@ mod coverage_gap_tests {
 
     #[test]
     fn test_search_with_filter_edge_cases() {
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
 
         // Empty index
-        let results = index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 10, |_| true).unwrap();
+        let results = index
+            .search_with_filter(&[1.0, 0.0, 0.0, 0.0], 10, |_| true)
+            .unwrap();
         assert!(results.is_empty());
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
 
         // k=0
-        let results = index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 0, |_| true).unwrap();
+        let results = index
+            .search_with_filter(&[1.0, 0.0, 0.0, 0.0], 0, |_| true)
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -2026,64 +2041,101 @@ mod coverage_gap_tests {
     }
 }
 
-    #[test]
-    fn test_load_dimension_mismatch_check() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dim_mismatch.index");
+#[test]
+fn test_load_dimension_mismatch_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dim_mismatch.index");
 
-        // Save with dim=4
-        {
-            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
-            index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-            index.save(&path).unwrap();
-        }
-
-        // Load with dim=5
-        let config = HnswConfig::new(5, DistanceMetric::Cosine);
-        let result = HnswIndex::load(&path, config);
-
-        // Either usearch load fails, or our explicit check fails
-        assert!(result.is_err());
-        let _msg = result.unwrap_err().to_string();
-        // It might be "Index dimension mismatch" or "Failed to load index" depending on usearch behavior
-        // But we want to cover lines.
+    // Save with dim=4
+    {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index.save(&path).unwrap();
     }
 
-    #[test]
-    fn test_save_fail_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("subdir");
-        std::fs::create_dir(&path).unwrap();
+    // Load with dim=5
+    let config = HnswConfig::new(5, DistanceMetric::Cosine);
+    let result = HnswIndex::load(&path, config);
 
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    // Either usearch load fails, or our explicit check fails
+    assert!(result.is_err());
+    let _msg = result.unwrap_err().to_string();
+    // It might be "Index dimension mismatch" or "Failed to load index" depending on usearch behavior
+    // But we want to cover lines.
+}
 
-        // Try to save to a path that is a directory
-        let result = index.save(&path);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Failed to save index") || msg.contains("Is a directory") || msg.contains("create mappings file"));
-    }
+#[test]
+fn test_save_fail_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("subdir");
+    std::fs::create_dir(&path).unwrap();
 
-    #[test]
-    fn test_internal_helpers_coverage() {
-        use super::config::*;
-        use super::*;
-        use usearch::{MetricKind, ScalarKind};
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
 
-        // Test to_usearch_metric
-        assert!(matches!(to_usearch_metric(DistanceMetric::Cosine), MetricKind::Cos));
-        assert!(matches!(to_usearch_metric(DistanceMetric::Euclidean), MetricKind::L2sq));
-        assert!(matches!(to_usearch_metric(DistanceMetric::DotProduct), MetricKind::IP));
-        assert!(matches!(to_usearch_metric(DistanceMetric::Haversine), MetricKind::Haversine));
-        assert!(matches!(to_usearch_metric(DistanceMetric::Hamming), MetricKind::Hamming));
-        assert!(matches!(to_usearch_metric(DistanceMetric::Tanimoto), MetricKind::Tanimoto));
+    // Try to save to a path that is a directory
+    let result = index.save(&path);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("Failed to save index")
+            || msg.contains("Is a directory")
+            || msg.contains("create mappings file")
+    );
+}
 
-        // Test to_usearch_scalar
-        assert!(matches!(to_usearch_scalar(Quantization::F32), ScalarKind::F32));
-        assert!(matches!(to_usearch_scalar(Quantization::F16), ScalarKind::F16));
-        assert!(matches!(to_usearch_scalar(Quantization::I8), ScalarKind::I8));
+#[test]
+fn test_internal_helpers_coverage() {
+    use super::config::*;
+    use super::*;
+    use usearch::{MetricKind, ScalarKind};
 
-        // Test is_retryable_usearch_error
-        assert!(is_retryable_usearch_error("No available threads to lock"));
-        assert!(!is_retryable_usearch_error("Some other error"));
-    }
+    // Test to_usearch_metric
+    assert!(matches!(
+        to_usearch_metric(DistanceMetric::Cosine),
+        MetricKind::Cos
+    ));
+    assert!(matches!(
+        to_usearch_metric(DistanceMetric::Euclidean),
+        MetricKind::L2sq
+    ));
+    assert!(matches!(
+        to_usearch_metric(DistanceMetric::DotProduct),
+        MetricKind::IP
+    ));
+    assert!(matches!(
+        to_usearch_metric(DistanceMetric::Haversine),
+        MetricKind::Haversine
+    ));
+    assert!(matches!(
+        to_usearch_metric(DistanceMetric::Hamming),
+        MetricKind::Hamming
+    ));
+    assert!(matches!(
+        to_usearch_metric(DistanceMetric::Tanimoto),
+        MetricKind::Tanimoto
+    ));
+
+    // Test to_usearch_scalar
+    assert!(matches!(
+        to_usearch_scalar(Quantization::F32),
+        ScalarKind::F32
+    ));
+    assert!(matches!(
+        to_usearch_scalar(Quantization::F16),
+        ScalarKind::F16
+    ));
+    assert!(matches!(
+        to_usearch_scalar(Quantization::I8),
+        ScalarKind::I8
+    ));
+
+    // Test is_retryable_usearch_error
+    assert!(is_retryable_usearch_error("No available threads to lock"));
+    assert!(!is_retryable_usearch_error("Some other error"));
+}
