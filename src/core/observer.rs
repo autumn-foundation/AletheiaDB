@@ -622,7 +622,9 @@ mod sentry_tests {
         fn on_event(&self, _event: &StorageEvent) -> Result<()> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             if self.should_fail {
-                Err(crate::core::error::Error::Other("Intentional failure".into()))
+                Err(crate::core::error::Error::Other(
+                    "Intentional failure".into(),
+                ))
             } else {
                 Ok(())
             }
@@ -655,8 +657,16 @@ mod sentry_tests {
 
         notify_observers(&observers, &event);
 
-        assert_eq!(uninterested.count(), 0, "Uninterested observer should not be called");
-        assert_eq!(interested.count(), 1, "Subsequent interested observer SHOULD be called");
+        assert_eq!(
+            uninterested.count(),
+            0,
+            "Uninterested observer should not be called"
+        );
+        assert_eq!(
+            interested.count(),
+            1,
+            "Subsequent interested observer SHOULD be called"
+        );
     }
 
     #[test]
@@ -682,6 +692,10 @@ mod sentry_tests {
         notify_observers(&observers, &event);
 
         assert_eq!(failing.count(), 1, "Failing observer should be called");
-        assert_eq!(success.count(), 1, "Subsequent observer SHOULD be called despite previous error");
+        assert_eq!(
+            success.count(),
+            1,
+            "Subsequent observer SHOULD be called despite previous error"
+        );
     }
 }
