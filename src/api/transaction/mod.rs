@@ -234,6 +234,27 @@ pub trait WriteOps: ReadOps {
     /// - `transaction_time` always starts at the **commit time**.
     /// - This means by default, facts are considered valid from the moment the transaction began.
     /// - If `valid_from` is Some(ts), valid_time starts at `ts`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// // Backdate a fact to 1 hour ago
+    /// let one_hour_ago = time::now().wallclock() - 3_600_000_000;
+    /// let valid_from = time::from_secs(one_hour_ago / 1_000_000);
+    ///
+    /// let node_id = tx.create_node_with_valid_time(
+    ///     "Person",
+    ///     properties! { "name" => "Alice" },
+    ///     Some(valid_from)
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn create_node_with_valid_time(
         &mut self,
         label: &str,
@@ -264,6 +285,31 @@ pub trait WriteOps: ReadOps {
     }
 
     /// Create a new edge with optional backdated valid_from time.
+    ///
+    /// Use this when loading historical data where relationships formed in the past.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let alice = NodeId::new(1)?;
+    /// # let bob = NodeId::new(2)?;
+    /// let past_time = time::from_secs(1609459200); // 2021-01-01
+    ///
+    /// let edge_id = tx.create_edge_with_valid_time(
+    ///     alice,
+    ///     bob,
+    ///     "KNOWS",
+    ///     properties! { "since" => 2021 },
+    ///     Some(past_time)
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn create_edge_with_valid_time(
         &mut self,
         source: NodeId,
@@ -309,6 +355,28 @@ pub trait WriteOps: ReadOps {
     ///
     /// This merges the new properties with existing ones (PATCH semantics).
     /// Existing properties not in the map are preserved.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let alice = NodeId::new(1)?;
+    /// // Update address effective from yesterday
+    /// let yesterday = time::now().wallclock() - 86_400_000_000;
+    /// let valid_from = time::from_secs(yesterday / 1_000_000);
+    ///
+    /// tx.update_node_with_valid_time(
+    ///     alice,
+    ///     properties! { "city" => "London" },
+    ///     Some(valid_from)
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn update_node_with_valid_time(
         &mut self,
         node_id: NodeId,
@@ -345,6 +413,27 @@ pub trait WriteOps: ReadOps {
     /// Update an edge's properties with optional backdated valid_from time.
     ///
     /// This merges the new properties with existing ones (PATCH semantics).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::EdgeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// // Retroactively increase relationship strength
+    /// let past_time = time::from_secs(1609459200);
+    ///
+    /// tx.update_edge_with_valid_time(
+    ///     edge_id,
+    ///     properties! { "strength" => 0.8 },
+    ///     Some(past_time)
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn update_edge_with_valid_time(
         &mut self,
         edge_id: EdgeId,
@@ -387,6 +476,24 @@ pub trait WriteOps: ReadOps {
     ///
     /// Only use this method if you explicitly need to preserve edges for some
     /// specialized use case.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let alice = NodeId::new(1)?;
+    /// // Mark node as deleted effective from 1 hour ago
+    /// let one_hour_ago = time::now().wallclock() - 3_600_000_000;
+    /// let valid_from = time::from_secs(one_hour_ago / 1_000_000);
+    ///
+    /// tx.delete_node_with_valid_time(alice, Some(valid_from))?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn delete_node_with_valid_time(
         &mut self,
         node_id: NodeId,
@@ -432,6 +539,23 @@ pub trait WriteOps: ReadOps {
     fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()>;
 
     /// Delete an edge with optional backdated valid_from time
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::EdgeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// // Mark edge as deleted in the past
+    /// let past_time = time::from_secs(1609459200);
+    ///
+    /// tx.delete_edge_with_valid_time(edge_id, Some(past_time))?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn delete_edge_with_valid_time(
         &mut self,
         edge_id: EdgeId,

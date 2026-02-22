@@ -162,7 +162,15 @@ aletheiadb = { version = "0.1", features = ["nova"] }
 
 | Feature | Description |
 |---------|-------------|
-| `nova` | Experimental features (Narrative Generator, Fishing, Semantic Pathfinding) |
+| `nova` | Experimental features (Sherlock, Chronos, Narrative Generator, Fishing, Semantic Pathfinding) |
+
+### Key Experimental Modules (`nova`)
+
+| Module | Description |
+|--------|-------------|
+| **Sherlock** | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
+| **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
+| **Bard** | Narrative Generator. "Tell me the story of this node." |
 
 Note: Tiered storage with Redb cold storage backend is included by default (no feature flag needed).
 
