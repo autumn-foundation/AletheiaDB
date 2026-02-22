@@ -323,6 +323,34 @@ fn test_cosine_similarity_large_dimension_opposite() {
     );
 }
 
+#[test]
+fn test_cosine_similarity_overflow_resilience() {
+    // Regression test for intermediate overflow in magnitude calculation.
+    // Values around 4.5e9 result in squared magnitude approx 2.0e19.
+    // Product of squared magnitudes would be approx 4.0e38, which exceeds f32::MAX (3.4e38).
+    // This previously caused the magnitude to be INF, resulting in similarity 0.0.
+
+    let val = 4.5e9_f32;
+    let a = vec![val];
+    let b = vec![val];
+
+    // Verify squared magnitude is finite but large
+    let mag_sq: f32 = a.iter().map(|x| x * x).sum();
+    assert!(mag_sq.is_finite(), "Squared magnitude should be finite");
+    assert!(mag_sq > 1.8e19, "Squared magnitude should be large enough to trigger overflow risk");
+
+    // Verify product of squared magnitudes WOULD overflow
+    assert!((mag_sq * mag_sq).is_infinite(), "Product of squared magnitudes should overflow");
+
+    let sim = cosine_similarity(&a, &b).unwrap();
+
+    assert!(
+        (sim - 1.0).abs() < 1e-6,
+        "Should correctly compute similarity 1.0 even with large values, got {}",
+        sim
+    );
+}
+
 // ========================================================================
 // NaN/Inf Propagation Tests
 // ========================================================================
