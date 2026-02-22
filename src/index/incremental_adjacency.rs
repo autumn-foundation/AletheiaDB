@@ -165,7 +165,7 @@ impl IncrementalAdjacencyIndex {
 
     /// Get frozen edge count.
     pub fn frozen_edge_count(&self) -> usize {
-        self.stats.frozen_edge_count.load(Ordering::Relaxed)
+        self.stats.frozen_edge_count.load(Ordering::Acquire)
     }
 
     /// Export frozen CSR data for persistence.
@@ -326,7 +326,7 @@ impl IncrementalAdjacencyIndex {
     /// - Tombstones exceed or equal `max_tombstones`
     pub fn should_compact(&self) -> bool {
         let delta = self.stats.delta_edge_count.load(Ordering::Relaxed);
-        let frozen = self.stats.frozen_edge_count.load(Ordering::Relaxed);
+        let frozen = self.stats.frozen_edge_count.load(Ordering::Acquire);
         let tombstones = self.stats.tombstone_count.load(Ordering::Relaxed);
 
         // Absolute delta threshold

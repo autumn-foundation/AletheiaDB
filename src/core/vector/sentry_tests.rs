@@ -499,11 +499,17 @@ fn test_is_normalized_lower_boundary() {
     // sq_mag = (1-0.1)^2 = 0.81
     // lower bound = (1-0.1)^2 = 0.81
     // sq_mag >= lower should be true
-    assert!(is_normalized(&v, tolerance), "Should accept magnitude exactly at lower bound");
+    assert!(
+        is_normalized(&v, tolerance),
+        "Should accept magnitude exactly at lower bound"
+    );
 
     // Slightly less should fail
     let v_less = vec![lower_mag - 1e-6, 0.0];
-    assert!(!is_normalized(&v_less, tolerance), "Should reject magnitude slightly below lower bound");
+    assert!(
+        !is_normalized(&v_less, tolerance),
+        "Should reject magnitude slightly below lower bound"
+    );
 }
 
 #[test]
@@ -516,11 +522,17 @@ fn test_is_normalized_upper_boundary() {
     // sq_mag = 1.21
     // upper bound = 1.21
     // sq_mag <= upper should be true
-    assert!(is_normalized(&v, tolerance), "Should accept magnitude exactly at upper bound");
+    assert!(
+        is_normalized(&v, tolerance),
+        "Should accept magnitude exactly at upper bound"
+    );
 
     // Slightly more should fail
     let v_more = vec![upper_mag + 1e-6, 0.0];
-    assert!(!is_normalized(&v_more, tolerance), "Should reject magnitude slightly above upper bound");
+    assert!(
+        !is_normalized(&v_more, tolerance),
+        "Should reject magnitude slightly above upper bound"
+    );
 }
 
 #[test]
@@ -534,7 +546,10 @@ fn test_normalize_threshold_boundary() {
     // sq_mag = 1e-14. 1e-14 < 1e-14 is false.
     // So normalize should happen.
     let normalized = normalize(&v);
-    assert!((normalized[0] - 1.0).abs() < 1e-6, "Should normalize at threshold");
+    assert!(
+        (normalized[0] - 1.0).abs() < 1e-6,
+        "Should normalize at threshold"
+    );
 
     // Slightly smaller magnitude
     // Use a value that squares to something definitely smaller than SQUARED_MAGNITUDE_THRESHOLD
