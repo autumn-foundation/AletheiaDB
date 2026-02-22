@@ -104,7 +104,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
-    let magnitude = (mag_a_sq * mag_b_sq).sqrt();
+    // Compute magnitude as product of individual square roots to avoid intermediate overflow.
+    // If we did (mag_a_sq * mag_b_sq).sqrt(), the product could overflow f32::MAX
+    // even if individual squared magnitudes are within range.
+    let magnitude = mag_a_sq.sqrt() * mag_b_sq.sqrt();
 
     // Handle zero vectors
     if magnitude == 0.0 {
