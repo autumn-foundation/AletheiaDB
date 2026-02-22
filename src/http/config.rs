@@ -103,23 +103,64 @@ impl Default for CorsConfig {
     }
 }
 
+/// Rate limiting configuration.
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Number of requests allowed per second per IP.
+    requests_per_second: u32,
+    /// Maximum burst size (concurrent requests) per IP.
+    burst_size: u32,
+}
+
+impl RateLimitConfig {
+    /// Create a new rate limit configuration.
+    pub fn new(requests_per_second: u32, burst_size: u32) -> Self {
+        Self {
+            requests_per_second,
+            burst_size,
+        }
+    }
+
+    /// Get requests per second.
+    pub fn requests_per_second(&self) -> u32 {
+        self.requests_per_second
+    }
+
+    /// Get burst size.
+    pub fn burst_size(&self) -> u32 {
+        self.burst_size
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_second: 10,
+            burst_size: 20,
+        }
+    }
+}
+
 /// Configuration for the HTTP server.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     port: u16,
     host: String,
     cors: CorsConfig,
+    rate_limit: RateLimitConfig,
 }
 
 impl ServerConfig {
     /// Create a new server config with the specified port.
     ///
-    /// Uses default host of "0.0.0.0" (all interfaces) and restrictive CORS.
+    /// Uses default host of "0.0.0.0" (all interfaces), restrictive CORS,
+    /// and default rate limiting (10 req/s, 20 burst).
     pub fn new(port: u16) -> Self {
         Self {
             port,
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
+            rate_limit: RateLimitConfig::default(),
         }
     }
 
@@ -136,6 +177,11 @@ impl ServerConfig {
     /// Get the CORS configuration.
     pub fn cors(&self) -> &CorsConfig {
         &self.cors
+    }
+
+    /// Get the rate limit configuration.
+    pub fn rate_limit(&self) -> &RateLimitConfig {
+        &self.rate_limit
     }
 
     /// Get the bind address as "host:port".
@@ -155,6 +201,7 @@ impl Default for ServerConfig {
             port: 8080,
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }
@@ -165,6 +212,7 @@ pub struct ServerConfigBuilder {
     port: Option<u16>,
     host: Option<String>,
     cors: Option<CorsConfig>,
+    rate_limit: Option<RateLimitConfig>,
 }
 
 impl ServerConfigBuilder {
@@ -205,12 +253,19 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set the rate limit configuration.
+    pub fn rate_limit(mut self, rate_limit: RateLimitConfig) -> Self {
+        self.rate_limit = Some(rate_limit);
+        self
+    }
+
     /// Build the server configuration.
     pub fn build(self) -> ServerConfig {
         ServerConfig {
             port: self.port.unwrap_or(8080),
             host: self.host.unwrap_or_else(|| "0.0.0.0".to_string()),
             cors: self.cors.unwrap_or_default(),
+            rate_limit: self.rate_limit.unwrap_or_default(),
         }
     }
 }
@@ -277,5 +332,20 @@ mod tests {
             .cors(CorsConfig::permissive())
             .build();
         assert!(config.cors().is_permissive());
+    }
+
+    #[test]
+    fn test_default_rate_limit() {
+        let config = ServerConfig::default();
+        assert_eq!(config.rate_limit().requests_per_second(), 10);
+        assert_eq!(config.rate_limit().burst_size(), 20);
+    }
+
+    #[test]
+    fn test_custom_rate_limit() {
+        let rate_limit = RateLimitConfig::new(100, 200);
+        let config = ServerConfig::builder().rate_limit(rate_limit).build();
+        assert_eq!(config.rate_limit().requests_per_second(), 100);
+        assert_eq!(config.rate_limit().burst_size(), 200);
     }
 }
