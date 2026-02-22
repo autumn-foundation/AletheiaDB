@@ -1036,4 +1036,54 @@ mod tests {
         assert_eq!(lsns[99], LSN(100));
         assert_eq!(wal.total_appends(), 100);
     }
+
+    #[test]
+    fn test_append_sync_with_pending_entries_triggers_flush() {
+        // Target: Lines 458-461 (drain_all not empty -> flush)
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous);
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        // We want to ensure drain_all returns something so the flush line is hit.
+        // In single-threaded test, append_with_handle puts entry in buffer.
+        // drain_all drains it.
+        // flush is called.
+
+        let lsn = wal.append_sync(create_test_operation(1)).unwrap();
+
+        // This is implicitly covered by normal append_sync, but maybe codecov
+        // thinks the branch where entries is EMPTY (race condition) is the only one hit?
+        // Actually, in single thread, it should ALWAYS be hit.
+        // Let's verify flushing happened.
+        assert_eq!(wal.total_flushed(), 1);
+        assert_eq!(lsn, LSN(1));
+    }
+
+    #[test]
+    fn test_append_batch_sync_split_logic() {
+        // Target: Lines 555-558 (drain_all not empty -> flush in batch)
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous);
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let ops = vec![
+            create_test_operation(1),
+            create_test_operation(2),
+            create_test_operation(3),
+        ];
+
+        let lsns = wal.append_batch(ops).unwrap();
+
+        // This should trigger the split logic:
+        // 1. Ops 1,2 appended async
+        // 2. Op 3 appended with handle
+        // 3. drain_all gets 1,2,3
+        // 4. flush called
+        // 5. wait on handle 3
+
+        assert_eq!(lsns.len(), 3);
+        assert_eq!(wal.total_flushed(), 3);
+    }
 }
