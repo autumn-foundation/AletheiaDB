@@ -98,6 +98,9 @@ pub mod concept_algebra;
 /// Dissonance: Semantic Stress Detector.
 pub mod dissonance;
 #[cfg(feature = "nova")]
+/// Highlander: Semantic Entity Resolution.
+pub mod highlander;
+#[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
 #[cfg(feature = "nova")]
