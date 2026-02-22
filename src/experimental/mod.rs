@@ -98,9 +98,6 @@ pub mod concept_algebra;
 /// Dissonance: Semantic Stress Detector.
 pub mod dissonance;
 #[cfg(feature = "nova")]
-/// Highlander: Semantic Entity Resolution.
-pub mod highlander;
-#[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
 #[cfg(feature = "nova")]
@@ -112,6 +109,9 @@ pub mod fishing;
 #[cfg(feature = "nova")]
 /// Graph context exporter for LLM integration.
 pub mod graph_context;
+#[cfg(feature = "nova")]
+/// Highlander: Semantic Entity Resolution.
+pub mod highlander;
 #[cfg(feature = "nova")]
 /// Hindsight: Counterfactual Graph Analysis Engine.
 pub mod hindsight;
