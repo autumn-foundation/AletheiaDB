@@ -356,7 +356,9 @@ mod tests {
     fn test_stub_investigate_panics() {
         let db = AletheiaDB::new().unwrap();
         // Use default (creates PropertyMap::new()) which is fine
-        let node_id = db.write(|tx| tx.create_node("T", Default::default())).unwrap();
+        let node_id = db
+            .write(|tx| tx.create_node("T", Default::default()))
+            .unwrap();
         // Use new_internal to bypass the panic in new()
         let sherlock = Sherlock::new_internal(&db);
         let _ = sherlock.investigate(node_id, &Mystery::new(Duration::from_secs(1)));
