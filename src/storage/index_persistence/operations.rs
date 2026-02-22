@@ -319,11 +319,14 @@ pub(crate) fn persist_graph_index(
     current_lsn: u64,
 ) -> Result<()> {
     use crate::storage::index_persistence::graph::{
-        new_graph_index_data, persist_property_map, save_graph_index,
+        new_graph_index_data_with_capacity, persist_property_map, save_graph_index,
     };
     use crate::storage::index_persistence::{PersistedEdge, PersistedNode};
 
-    let mut graph_data = new_graph_index_data();
+    let mut graph_data = new_graph_index_data_with_capacity(
+        current.node_count(),
+        current.edge_count(),
+    );
 
     // Stream all nodes without collecting into intermediate Vec (prevents OOM on large graphs)
     for node in current.all_nodes() {
@@ -410,7 +413,7 @@ pub(crate) fn persist_temporal_index(
     let historical_guard = historical.read();
 
     // Convert all node versions
-    let mut node_versions = Vec::new();
+    let mut node_versions = Vec::with_capacity(historical_guard.get_node_versions().len());
     for version in historical_guard.get_node_versions().values() {
         let entry = convert_node_version(version).map_err(|e| {
             StorageError::PersistenceError(format!(
@@ -423,7 +426,7 @@ pub(crate) fn persist_temporal_index(
     }
 
     // Convert all edge versions
-    let mut edge_versions = Vec::new();
+    let mut edge_versions = Vec::with_capacity(historical_guard.get_edge_versions().len());
     for version in historical_guard.get_edge_versions().values() {
         let entry = convert_edge_version(version).map_err(|e| {
             StorageError::PersistenceError(format!(

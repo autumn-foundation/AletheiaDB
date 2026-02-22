@@ -264,13 +264,18 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
 
 /// Create a new empty GraphIndexData.
 pub fn new_graph_index_data() -> GraphIndexData {
+    new_graph_index_data_with_capacity(0, 0)
+}
+
+/// Create a new GraphIndexData with pre-allocated capacity.
+pub fn new_graph_index_data_with_capacity(node_count: usize, edge_count: usize) -> GraphIndexData {
     GraphIndexData {
         magic: GRAPH_MAGIC,
         version: MANIFEST_VERSION,
         node_count: 0,
         edge_count: 0,
-        nodes: Vec::new(),
-        edges: Vec::new(),
+        nodes: Vec::with_capacity(node_count),
+        edges: Vec::with_capacity(edge_count),
         outgoing_node_ids: Vec::new(),
         outgoing_offsets: Vec::new(),
         outgoing_neighbors: Vec::new(),

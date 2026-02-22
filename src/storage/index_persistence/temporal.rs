@@ -525,12 +525,20 @@ pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
 
 /// Create a new empty TemporalIndexData.
 pub fn new_temporal_index_data() -> TemporalIndexData {
+    new_temporal_index_data_with_capacity(0, 0)
+}
+
+/// Create a new TemporalIndexData with pre-allocated capacity.
+pub fn new_temporal_index_data_with_capacity(
+    node_versions: usize,
+    edge_versions: usize,
+) -> TemporalIndexData {
     TemporalIndexData {
         magic: TEMPORAL_MAGIC,
         version: MANIFEST_VERSION,
-        node_versions: Vec::new(),
+        node_versions: Vec::with_capacity(node_versions),
         node_anchors: Vec::new(),
-        edge_versions: Vec::new(),
+        edge_versions: Vec::with_capacity(edge_versions),
         edge_anchors: Vec::new(),
     }
 }
