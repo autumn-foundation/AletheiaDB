@@ -2145,3 +2145,105 @@ fn test_internal_helpers_coverage() {
     assert!(is_retryable_usearch_error("No available threads to lock"));
     assert!(!is_retryable_usearch_error("Some other error"));
 }
+
+
+#[cfg(unix)]
+#[test]
+fn test_invalid_utf8_paths() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    // Create a path with invalid UTF-8
+    let invalid_bytes = b"invalid\x80path";
+    let invalid_path = PathBuf::from(OsStr::from_bytes(invalid_bytes));
+
+    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+
+    // Test load_index with invalid path
+    let result = HnswIndex::load(&invalid_path, config.clone());
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Path contains invalid UTF-8"));
+
+    // Test save_index (via save) with invalid path
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    let result = index.save(&invalid_path);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Path contains invalid UTF-8"));
+
+    // Test open_mmap with invalid path
+    let result = HnswIndex::open_mmap(&invalid_path);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Path contains invalid UTF-8"));
+
+    // Test config builder with storage (triggering build error)
+    let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .storage(StorageMode::MemoryMapped { path: invalid_path })
+        .build();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Path contains invalid UTF-8"));
+}
+
+#[test]
+fn test_load_nonexistent_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nonexistent.index");
+    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+
+    let result = HnswIndex::load(&path, config);
+    assert!(result.is_err());
+    // usearch error message for missing file
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("Failed to load index"));
+}
+
+#[test]
+fn test_write_mappings_header_errors() {
+    let mappings = [];
+    let config = HnswConfig::default();
+
+    // Magic (4) + Version (1) = 5 bytes written successfully.
+    // Next is Dimensions (8). Fail immediately.
+    let mut writer = MockFailWriter::new(5);
+    let result = write_mappings_to_writer(
+        &mut writer,
+        mappings.iter().copied(),
+        mappings.len(),
+        &config,
+    );
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Failed to write mappings"));
+
+    // Magic (4) + Version (1) + Dims (8) = 13 bytes.
+    // Next is Quantization (1).
+    let mut writer = MockFailWriter::new(13);
+    let result = write_mappings_to_writer(
+        &mut writer,
+        mappings.iter().copied(),
+        mappings.len(),
+        &config,
+    );
+    assert!(result.is_err());
+
+    // Magic (4) + Version (1) + Dims (8) + Quant (1) = 14 bytes.
+    // Next is Metric (1).
+    let mut writer = MockFailWriter::new(14);
+    let result = write_mappings_to_writer(
+        &mut writer,
+        mappings.iter().copied(),
+        mappings.len(),
+        &config,
+    );
+    assert!(result.is_err());
+
+    // Magic (4) + Version (1) + Dims (8) + Quant (1) + Metric (1) = 15 bytes.
+    // Next is Count (8).
+    let mut writer = MockFailWriter::new(15);
+    let result = write_mappings_to_writer(
+        &mut writer,
+        mappings.iter().copied(),
+        mappings.len(),
+        &config,
+    );
+    assert!(result.is_err());
+}
