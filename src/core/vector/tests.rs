@@ -2915,5 +2915,9 @@ fn test_cosine_similarity_overflow_stability() {
 
     let sim = cosine_similarity(&a, &b).unwrap();
     assert!(!sim.is_nan());
-    assert!(sim.abs() <= 1.0 + 1e-5, "Similarity {} exceeded bounds", sim);
+    assert!(
+        sim.abs() <= 1.0 + 1e-5,
+        "Similarity {} exceeded bounds",
+        sim
+    );
 }
