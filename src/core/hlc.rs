@@ -498,6 +498,14 @@ impl HybridTimestamp {
             )));
         }
 
+        // Validate that TIMESTAMP_MAX sentinel (i64::MAX) must have logical counter 0
+        if wallclock == i64::MAX && logical != 0 {
+            return Err(StorageError::CorruptedData(format!(
+                "Deserialized timestamp has wallclock i64::MAX but non-zero logical counter: {}",
+                logical
+            )));
+        }
+
         Ok((HybridTimestamp { wallclock, logical }, 12))
     }
 }

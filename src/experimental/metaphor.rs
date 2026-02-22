@@ -59,6 +59,7 @@ impl<'a> Metaphor<'a> {
     /// * `target_nodes` - The candidate nodes in the target graph.
     /// * `vector_property` - The property name containing vector embeddings.
     /// * `structural_weight` - How much structural consistency boosts the score (e.g., 0.5).
+    #[allow(clippy::needless_range_loop, clippy::collapsible_if)]
     pub fn align(
         &self,
         source_nodes: &[NodeId],

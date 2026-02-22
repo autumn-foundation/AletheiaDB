@@ -220,7 +220,12 @@ impl TimeRange {
         if self.is_current() {
             None
         } else {
-            Some(self.end.wallclock() - self.start.wallclock())
+            // Saturate at i64::MAX on overflow (e.g. extremely old start time)
+            // This prevents panics when start is close to i64::MIN
+            self.end
+                .wallclock()
+                .checked_sub(self.start.wallclock())
+                .or(Some(i64::MAX))
         }
     }
 
@@ -255,6 +260,14 @@ impl TimeRange {
         }
         let (start, _) = HybridTimestamp::deserialize(&bytes[0..12])?;
         let (end, _) = HybridTimestamp::deserialize(&bytes[12..24])?;
+
+        if start > end {
+            return Err(StorageError::CorruptedData(format!(
+                "Deserialized TimeRange invalid: start {} > end {}",
+                start, end
+            )));
+        }
+
         Ok((TimeRange { start, end }, 24))
     }
 }
