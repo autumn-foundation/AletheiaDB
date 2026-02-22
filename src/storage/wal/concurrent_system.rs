@@ -521,10 +521,6 @@ impl ConcurrentWalSystem {
         // Use the underlying WAL's batch append for async modes
         match self.durability_mode {
             DurabilityMode::Synchronous => {
-                if operations.is_empty() {
-                    return Ok(Vec::new());
-                }
-
                 // Split off the last operation to get a handle for it.
                 // We only need to wait for the LAST operation because WAL flush is
                 // strictly ordered by LSN. If the last operation is durable, all
