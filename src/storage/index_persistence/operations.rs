@@ -323,10 +323,8 @@ pub(crate) fn persist_graph_index(
     };
     use crate::storage::index_persistence::{PersistedEdge, PersistedNode};
 
-    let mut graph_data = new_graph_index_data_with_capacity(
-        current.node_count(),
-        current.edge_count(),
-    );
+    let mut graph_data =
+        new_graph_index_data_with_capacity(current.node_count(), current.edge_count());
 
     // Stream all nodes without collecting into intermediate Vec (prevents OOM on large graphs)
     for node in current.all_nodes() {
