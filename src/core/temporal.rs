@@ -174,12 +174,24 @@ impl TimeRange {
         timestamp >= self.start
     }
 
+    /// Returns true if the range is empty (start == end).
+    ///
+    /// An empty range contains no timestamps and has zero duration.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
     /// Returns true if this range overlaps with another range.
     ///
     /// Two ranges overlap if there exists any timestamp that is in both ranges.
+    /// Note: Returns false if either range is empty, as an empty set cannot overlap anything.
     /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
     pub fn overlaps(&self, other: &TimeRange) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return false;
+        }
         self.start < other.end && other.start < self.end
     }
 
@@ -1680,6 +1692,49 @@ mod sentry_tests {
         assert!(
             outer.contains_range(&same_range),
             "Should contain itself (reflexive)"
+        );
+    }
+
+    #[test]
+    fn test_sentry_max_valid_timestamp_constant() {
+        // 🛡️ Sentry Test: Verify MAX_VALID_TIMESTAMP is exactly i64::MAX - 1000.
+        // This pins the reserved range size to prevent accidental drift.
+        assert_eq!(
+            MAX_VALID_TIMESTAMP,
+            i64::MAX - 1000,
+            "MAX_VALID_TIMESTAMP must be exactly i64::MAX - 1000 to preserve sentinel space"
+        );
+    }
+
+    #[test]
+    fn test_sentry_point_range_is_empty() {
+        // 🛡️ Sentry Test: Verify point range behavior.
+        // A point range [T, T) is empty and contains nothing.
+        let point = TimeRange::at(100.into());
+        assert!(point.is_empty());
+        assert!(!point.contains(100.into()));
+        assert_eq!(point.duration_micros(), Some(0));
+    }
+
+    #[test]
+    fn test_sentry_point_range_no_overlap() {
+        // 🛡️ Sentry Test: Verify empty range overlap logic.
+        // An empty range cannot overlap any other range (intersection is empty).
+        // Before Elenchus fix, this would return true.
+        let point = TimeRange::at(100.into());
+        let wide = TimeRange::new(0.into(), 200.into()).unwrap();
+
+        assert!(
+            !point.overlaps(&wide),
+            "Empty range should not overlap anything"
+        );
+        assert!(
+            !wide.overlaps(&point),
+            "Range should not overlap empty range"
+        );
+        assert!(
+            !point.overlaps(&point),
+            "Empty range should not overlap itself"
         );
     }
 }

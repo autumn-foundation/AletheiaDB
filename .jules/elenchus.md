@@ -252,3 +252,17 @@
 **Finding:** `WalEntry::verify_checksum` only had a negative test case (short buffer). There was no positive confirmation that a validly serialized entry passes verification.
 **Evidence:** Only `test_verify_checksum_short_data` existed.
 **Recommendation:** Added `test_verify_checksum_success` which performs a full round-trip serialization and verification.
+
+## [TimeRange Overlap Inconsistency]
+**Module:** `src/core/temporal.rs`
+**Verdict:** 🟡 Suspect
+**Finding:** `TimeRange::overlaps` returned `true` for empty ranges (e.g., `TimeRange::at(100)`) overlapping non-empty ranges, violating the set-theoretic definition of overlap (non-empty intersection).
+**Evidence:** `TimeRange::at(100)` (empty) reported overlap with `[0, 200)`.
+**Resolution:** Updated `overlaps` to return `false` if `self.is_empty()` or `other.is_empty()`. Added regression tests in `src/core/temporal.rs`.
+
+## [Unpinned System Constant MAX_VALID_TIMESTAMP]
+**Module:** `src/core/temporal.rs`
+**Verdict:** 🟡 Suspect
+**Finding:** `MAX_VALID_TIMESTAMP` was used in logic but its value was not pinned by tests, allowing potential drift of the sentinel space.
+**Evidence:** Mutation analysis showed changing the constant value didn't fail existing tests.
+**Resolution:** Added sentry test explicitly asserting `MAX_VALID_TIMESTAMP == i64::MAX - 1000`.
