@@ -15,6 +15,9 @@
 //! - **Digital Twins**: Align a simulation graph with a real-world graph.
 //! - **Recommender Systems**: "You liked Movie A (Graph A). Movie B (Graph B) has a similar character dynamic."
 
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
