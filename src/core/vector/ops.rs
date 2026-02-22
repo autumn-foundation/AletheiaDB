@@ -589,20 +589,17 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
     // Allocate uninitialized vector to avoid zero-filling overhead.
     // This provides ~15% speedup for large vectors by avoiding an extra write pass.
     let mut result = Vec::with_capacity(v.len());
+    let dst = result.spare_capacity_mut();
+    // Ensure we only write to the part we need, and that we match src length
+    // to satisfy scale_and_copy assertion.
+    let dst = &mut dst[..v.len()];
 
-    // SAFETY: We immediately fill the entire vector using scale_and_copy.
-    // scale_and_copy internally asserts that src.len() == dst.len(), guaranteeing
-    // that all elements are written before the vector is exposed.
-    //
-    // The `result` vector is allocated with capacity `v.len()`, so `set_len` is
-    // within capacity bounds. `scale_and_copy` is a trusted function (verified by tests)
-    // that writes to every element of `result`. Even if `scale_and_copy` were to panic,
-    // the `result` vector would be dropped, which is safe for `Vec<f32>` (no Drop impl for f32).
-    // The only risk is if `scale_and_copy` returned early without initializing, but
-    // its implementation guarantees full coverage via exact chunking and remainder handling.
+    scale_and_copy(v, dst, inv_mag);
+
+    // SAFETY: scale_and_copy guarantees initializing all elements of dst (which has length v.len())
+    // because it iterates through the entire source slice and writes to the destination.
+    // We verified src.len() == dst.len() inside scale_and_copy (via assertion).
     unsafe { result.set_len(v.len()) };
-
-    scale_and_copy(v, &mut result, inv_mag);
     result
 }
 
