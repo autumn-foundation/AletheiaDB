@@ -27,7 +27,7 @@
 //! The flush thread uses `.expect()` to panic on lock poisoning because silent
 //! degradation is worse than fail-fast behavior for background infrastructure.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -114,6 +114,8 @@ struct GroupCommitState {
     /// The oldest epoch in the recent_errors list (or older if evicted).
     /// Used to detect if we've lost history.
     oldest_error_epoch: u64,
+    /// Set of completed epochs that are ahead of flushed_epoch
+    completed_epochs: BTreeSet<u64>,
 }
 
 impl GroupCommitCoordinator {
@@ -136,6 +138,7 @@ impl GroupCommitCoordinator {
                 flushed_epoch: 0,
                 recent_errors: VecDeque::new(),
                 oldest_error_epoch: 0,
+                completed_epochs: BTreeSet::new(),
             }),
             flush_complete: Condvar::new(),
             config,
@@ -332,11 +335,18 @@ impl GroupCommitCoordinator {
             }
         }
 
-        // Advance flushed_epoch to wake up waiters for this epoch
-        // Note: We use max to handle potential out-of-order completions if we ever support that,
-        // though currently flushes are serialized.
-        if epoch > state.flushed_epoch {
-            state.flushed_epoch = epoch;
+        // Mark this epoch as completed
+        if epoch > state.flushed_epoch { state.completed_epochs.insert(epoch); }
+
+        // Advance flushed_epoch contiguously to wake up waiters
+        // We only advance if we have a contiguous sequence of completed epochs.
+        // This prevents data loss scenarios where a later successful flush
+        // could mask an earlier failed (or still pending) flush.
+        let mut next_epoch = state.flushed_epoch + 1;
+        while state.completed_epochs.contains(&next_epoch) {
+            state.completed_epochs.remove(&next_epoch);
+            state.flushed_epoch = next_epoch;
+            next_epoch += 1;
         }
 
         // Wake all waiting transactions
