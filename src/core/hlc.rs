@@ -878,6 +878,61 @@ mod tests {
             SendWithSelfHealError::FallbackSend(TemporalError::InvalidTimestamp { .. })
         ));
     }
+
+    #[test]
+    fn test_receive_ignores_msg_logical_when_wallclock_behind() {
+        // Scenario: Local clock is ahead of message clock, but message has a huge logical counter.
+        // We must ensure that we don't accidentally pick up the message's logical counter.
+        //
+        // This targets a mutant that replaces `&&` with `||` in the collision check:
+        // `if new_wallclock == self.wallclock && new_wallclock == msg.wallclock`
+        // vs
+        // `if new_wallclock == self.wallclock || new_wallclock == msg.wallclock`
+
+        let local = HybridTimestamp::new(1000, 10).unwrap();
+        let msg = HybridTimestamp::new(900, 999).unwrap(); // Wallclock behind, but logical huge
+        let physical = 1000;
+
+        // new_wallclock should be 1000 (local).
+        // It matches local.wallclock, but NOT msg.wallclock.
+        // Should increment local.logical (10 -> 11).
+        // Should NOT consider msg.logical (999).
+
+        let result = local.receive(msg, physical).unwrap();
+
+        assert_eq!(result.wallclock(), 1000);
+        assert_eq!(
+            result.logical(),
+            11,
+            "Should increment local logical, ignoring msg logical"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_exact_boundaries() {
+        // Test exact boundaries for clock skew checks.
+        // Targets mutants changing `>` to `>=`.
+
+        let current = 1_000_000;
+
+        // Forward boundary: drift == max_jump
+        let max_jump = 100;
+        let frontier_forward = current - max_jump; // drift = 100
+        let result_forward = evaluate_clock_skew(current, frontier_forward, Some(max_jump), false);
+        assert!(
+            result_forward.is_ok(),
+            "Exact max forward jump should be allowed"
+        );
+
+        // Backward boundary: drift == -MAX_BACKWARD_DRIFT_US
+        // drift = -MAX_BACKWARD_DRIFT_US
+        let frontier_backward = current + MAX_BACKWARD_DRIFT_US;
+        let result_backward = evaluate_clock_skew(current, frontier_backward, None, false);
+        assert!(
+            result_backward.is_ok(),
+            "Exact max backward drift should be allowed"
+        );
+    }
 }
 
 #[cfg(test)]
