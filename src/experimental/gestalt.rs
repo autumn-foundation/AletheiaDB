@@ -1,4 +1,4 @@
-//! Gestalt: Semantic Subgraph Matching Engine.
+//! Gestalt: Semantic Subgraph Matching Engine 🧩
 //!
 //! "The whole is greater than the sum of its parts."
 //!
@@ -6,12 +6,58 @@
 //! not just by label, but by **semantic similarity** to a concept vector.
 //!
 //! This enables queries like:
-//! "Find a [Person ~ 'Engineer'] connected to a [Company ~ 'Startup'] via [WORKS_FOR]."
+//! "Find a `Person` (similar to 'Engineer') connected to a `Company` (similar to 'Startup') via `WORKS_FOR`."
 //!
 //! # Concepts
 //! - **Pattern**: A template subgraph with constraints.
 //! - **Anchor**: A node in the pattern with a vector constraint, used to seed the search.
 //! - **Match**: A concrete subgraph in the database that satisfies the pattern.
+//!
+//! # Usage
+//!
+//! ```rust
+//! // [dependencies]
+//! // aletheiadb = { version = "0.1", features = ["nova"] }
+//!
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+//! use aletheiadb::experimental::gestalt::{GestaltMatcher, Pattern};
+//! use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//! db.enable_vector_index("embedding", HnswConfig::new(2, DistanceMetric::Cosine))?;
+//!
+//! // 1. Create Data
+//! // Engineer [1, 0] works for Startup [0, 1]
+//! let engineer = db.create_node("Person", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build())?;
+//! let startup = db.create_node("Company", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 1.0]).build())?;
+//! db.create_edge(engineer, startup, "WORKS_FOR", Default::default())?;
+//!
+//! // 2. Define Pattern
+//! // Find: Person (~[1,0]) -> WORKS_FOR -> Company (~[0,1])
+//! let mut pattern = Pattern::new();
+//! let p_person = pattern.add_semantic_node(
+//!     Some("Person".to_string()),
+//!     "embedding".to_string(),
+//!     vec![1.0, 0.0],
+//!     0.9, // Threshold
+//! );
+//! let p_company = pattern.add_semantic_node(
+//!     Some("Company".to_string()),
+//!     "embedding".to_string(),
+//!     vec![0.0, 1.0],
+//!     0.9,
+//! );
+//! pattern.add_edge(p_person, p_company, Some("WORKS_FOR".to_string()));
+//!
+//! // 3. Match
+//! let matcher = GestaltMatcher::new(&db);
+//! let matches = matcher.find_matches(&pattern, 10)?;
+//!
+//! assert_eq!(matches.len(), 1);
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::AletheiaDB;
 use crate::core::error::Result;
@@ -148,6 +194,12 @@ impl<'a> GestaltMatcher<'a> {
     }
 
     /// Find occurrences of the pattern in the database.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. **Anchor Selection**: Identifies a node in the pattern with a vector constraint to use as a starting point.
+    /// 2. **Candidate Search**: Finds nodes in the database similar to the anchor's vector.
+    /// 3. **Backtracking**: Expands from the anchor, matching neighbors against the pattern structure.
     pub fn find_matches(&self, pattern: &Pattern, limit: usize) -> Result<Vec<Match>> {
         pattern.validate()?;
 

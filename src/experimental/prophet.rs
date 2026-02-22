@@ -1,10 +1,69 @@
-//! Prophet: Link Prediction Engine.
+//! "The Prophet" - Link Prediction Engine 🔮
 //!
-//! This module implements a link prediction engine that suggests missing connections
-//! in the graph based on topological structure (Adamic-Adar) and semantic similarity.
+//! The Prophet predicts missing connections in your graph by combining topological
+//! analysis with semantic similarity. It answers the question: "Who should be connected,
+//! but isn't?"
 //!
 //! # The Algorithm
+//!
+//! The Prophet uses a hybrid scoring function:
+//!
+//! ```text
 //! Score(A, B) = AdamicAdar(A, B) * (1.0 + VectorSimilarity(A, B))
+//! ```
+//!
+//! 1. **Adamic-Adar**: Measures topological closeness based on shared neighbors.
+//!    Two nodes are "close" if they share many neighbors, especially neighbors that
+//!    are themselves selective (low degree).
+//! 2. **Vector Similarity**: Measures semantic closeness based on embeddings.
+//!
+//! By multiplying these, the Prophet boosts candidates that are both structurally
+//! feasible (friends of friends) *and* semantically relevant.
+//!
+//! # Usage
+//!
+//! ```rust
+//! // [dependencies]
+//! // aletheiadb = { version = "0.1", features = ["nova"] }
+//!
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+//! use aletheiadb::experimental::prophet::Prophet;
+//! use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//! let config = HnswConfig::new(2, DistanceMetric::Cosine);
+//! db.enable_vector_index("embedding", config)?;
+//!
+//! // Create a "Diamond" graph: A -> B, A -> C, B -> D, C -> D
+//! // Prophet should predict A -> D because they share two neighbors (B, C)
+//! // and (optionally) have similar vectors.
+//!
+//! let props_similar = PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build();
+//! let props_neutral = PropertyMapBuilder::new().insert_vector("embedding", &[0.5, 0.5]).build();
+//!
+//! let a = db.create_node("Node", props_similar.clone())?; // A: [1, 0]
+//! let b = db.create_node("Node", props_neutral.clone())?;
+//! let c = db.create_node("Node", props_neutral.clone())?;
+//! let d = db.create_node("Node", props_similar.clone())?; // D: [1, 0]
+//!
+//! db.create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())?;
+//! db.create_edge(a, c, "KNOWS", PropertyMapBuilder::new().build())?;
+//! db.create_edge(b, d, "KNOWS", PropertyMapBuilder::new().build())?;
+//! db.create_edge(c, d, "KNOWS", PropertyMapBuilder::new().build())?;
+//!
+//! let prophet = Prophet::new(&db);
+//!
+//! // Predict top 5 missing links for A
+//! let predictions = prophet.predict_links(a, 5)?;
+//!
+//! if let Some((node_id, score)) = predictions.first() {
+//!     println!("Predicted connection to {} with score {:.3}", node_id, score);
+//!     assert_eq!(*node_id, d);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::AletheiaDB;
 use crate::core::error::Result;
@@ -126,6 +185,18 @@ impl<'a> Prophet<'a> {
     }
 
     /// Predict missing links for a target node.
+    ///
+    /// This method identifies candidate nodes (neighbors of neighbors) and ranks them
+    /// by the Prophet's hybrid score.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The node to find new connections for.
+    /// * `k` - The maximum number of predictions to return.
+    ///
+    /// # Returns
+    ///
+    /// A list of `(NodeId, Score)` tuples, sorted by score descending.
     pub fn predict_links(&self, target: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         let neighbors = self.get_neighbors(target)?;
 

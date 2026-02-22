@@ -1,7 +1,55 @@
-//! "The Cartographer" - Semantic Graph Clustering
+//! "The Cartographer" - Semantic Graph Clustering 🗺️
 //!
-//! This module implements functionality to analyze the vector space of the graph,
-//! identify natural clusters, and reify them as explicit "Region" nodes.
+//! The Cartographer analyzes the semantic landscape of your graph by clustering nodes
+//! based on their vector embeddings. It identifies natural groupings of concepts and
+//! can reify these clusters as explicit "Region" nodes in the graph.
+//!
+//! # Concept: Semantic Geography
+//!
+//! Just as physical geography groups locations into regions (mountains, valleys, cities),
+//! semantic geography groups concepts into thematic clusters. The Cartographer uses
+//! K-Means clustering to discover these regions automatically.
+//!
+//! # Usage
+//!
+//! ```rust
+//! // [dependencies]
+//! // aletheiadb = { version = "0.1", features = ["nova"] }
+//!
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+//! use aletheiadb::experimental::cartographer::Cartographer;
+//! use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//!
+//! // 1. Enable vector indexing (required for clustering)
+//! let config = HnswConfig::new(2, DistanceMetric::Euclidean);
+//! db.enable_vector_index("embedding", config)?;
+//!
+//! // 2. Create nodes with vectors
+//! // Cluster A (around 0,0)
+//! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 0.0]).build())?;
+//! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[0.1, 0.1]).build())?;
+//!
+//! // Cluster B (around 10,10)
+//! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[10.0, 10.0]).build())?;
+//! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[10.1, 10.1]).build())?;
+//!
+//! // 3. Initialize Cartographer
+//! let cartographer = Cartographer::new(&db);
+//!
+//! // 4. Analyze: Find 2 clusters
+//! let result = cartographer.analyze("embedding", 2)?;
+//! println!("Found {} clusters", result.centroids.len());
+//!
+//! // 5. Reify: Create "Region" nodes and link them
+//! let region_ids = cartographer.reify(&result)?;
+//!
+//! // Now the graph has "Region" nodes connected to the original points via "LOCATED_IN" edges.
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::core::NodeId;
 use crate::{AletheiaDB, PropertyMapBuilder, WriteOps};
@@ -17,6 +65,8 @@ pub struct ClusteringResult {
 }
 
 /// The Cartographer maps the semantic landscape of the graph.
+///
+/// It uses K-Means clustering to group nodes based on their vector properties.
 pub struct Cartographer<'a> {
     pub(crate) db: &'a AletheiaDB,
 }
@@ -28,6 +78,17 @@ impl<'a> Cartographer<'a> {
     }
 
     /// Analyzes the graph to find clusters based on the given vector property.
+    ///
+    /// This performs K-Means clustering on all nodes that have the specified vector property.
+    ///
+    /// # Arguments
+    ///
+    /// * `property` - The name of the vector property to cluster on.
+    /// * `k` - The number of clusters to find.
+    ///
+    /// # Returns
+    ///
+    /// A `ClusteringResult` containing the centroids and node assignments.
     pub fn analyze(
         &self,
         property: &str,
@@ -68,7 +129,17 @@ impl<'a> Cartographer<'a> {
     /// This method creates a "Region" node for each cluster and links all
     /// member nodes to it with a "LOCATED_IN" edge.
     ///
-    /// Returns the NodeIds of the created Region nodes.
+    /// # The "Region" Node
+    ///
+    /// Each created node has:
+    /// - Label: "Region"
+    /// - Property `name`: "Region {index}"
+    /// - Property `cluster_id`: The integer index of the cluster
+    /// - Property `centroid`: The vector centroid of the cluster (useful for hierarchical clustering)
+    ///
+    /// # Returns
+    ///
+    /// A list of `NodeId`s for the created Region nodes.
     pub fn reify(&self, clustering: &ClusteringResult) -> crate::core::error::Result<Vec<NodeId>> {
         self.db.write(|tx| {
             let mut region_ids = Vec::new();
@@ -109,6 +180,9 @@ impl<'a> Cartographer<'a> {
 }
 
 /// Simple K-Means implementation.
+///
+/// Uses deterministic initialization to ensure reproducible results without
+/// external random dependencies.
 pub(crate) struct KMeans {
     k: usize,
     max_iterations: usize,

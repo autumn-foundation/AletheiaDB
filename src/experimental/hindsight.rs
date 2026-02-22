@@ -1,4 +1,4 @@
-//! Hindsight: Counterfactual Graph Analysis Engine.
+//! "Hindsight" - Counterfactual Graph Analysis 🔮
 //!
 //! "Stop guessing. Start simulating."
 //!
@@ -7,10 +7,49 @@
 //! and edges, then run complex queries (pathfinding, vector search) on the
 //! virtual graph without mutating the actual data.
 //!
-//! # Use Cases
-//! - **LLM Reasoning**: "What if this fact were true?"
-//! - **Impact Analysis**: "If I delete this edge, is the graph disconnected?"
-//! - **Planning**: "If I add these 5 steps, does it create a valid plan?"
+//! # Concept: The Overlay
+//!
+//! Hindsight acts like a `git` staging area or a Docker layer on top of your
+//! database. Reads "fall through" to the database unless intercepted by the
+//! overlay (for modified/removed entities). Writes stay in the overlay.
+//!
+//! # Usage
+//!
+//! ```rust
+//! // [dependencies]
+//! // aletheiadb = { version = "0.1", features = ["nova"] }
+//!
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+//! use aletheiadb::experimental::hindsight::Hindsight;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//!
+//! // 1. Setup base state
+//! let node1 = db.create_node("City", PropertyMapBuilder::new().insert("name", "London").build())?;
+//! let node2 = db.create_node("City", PropertyMapBuilder::new().insert("name", "Paris").build())?;
+//!
+//! // 2. Create Hindsight session
+//! let mut hs = Hindsight::new(&db);
+//!
+//! // 3. Simulate a new connection (Tunnel)
+//! // This edge exists ONLY in the Hindsight session
+//! let tunnel = hs.add_edge(node1, node2, "CONNECTED_TO", PropertyMapBuilder::new().build())?;
+//!
+//! // 4. Verify connectivity in simulation
+//! let path = hs.find_path_bfs(node1, node2);
+//! assert!(path.is_some());
+//!
+//! // 5. Verify database is untouched
+//! let real_edges = db.get_outgoing_edges(node1);
+//! assert!(real_edges.is_empty());
+//!
+//! // 6. Get a diff report
+//! let diff = hs.diff()?;
+//! println!("Scenario adds {} edges", diff.added_edges.len());
+//! # Ok(())
+//! # }
+//! ```
 
 #![allow(clippy::collapsible_if)]
 
@@ -79,6 +118,10 @@ pub struct HindsightDiff {
     /// Nodes modified in this scenario, with their property patches.
     /// Note: This excludes nodes that were modified and subsequently removed.
     pub modified_nodes: HashMap<NodeId, PropertyMap>,
+    /// Edges added in this scenario.
+    pub added_edges: HashMap<EdgeId, Edge>,
+    /// Edges removed in this scenario.
+    pub removed_edges: HashSet<EdgeId>,
 }
 
 /// The Hindsight engine wrapping the database and a scenario.
@@ -125,6 +168,8 @@ impl<'a> Hindsight<'a> {
             added_nodes: self.scenario.added_nodes.clone(),
             removed_nodes: self.scenario.removed_nodes.clone(),
             modified_nodes: modified,
+            added_edges: self.scenario.added_edges.clone(),
+            removed_edges: self.scenario.removed_edges.clone(),
         })
     }
 

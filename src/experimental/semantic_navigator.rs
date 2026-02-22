@@ -1,8 +1,59 @@
-//! Semantic Navigator
+//! Semantic Navigator 🧭
 //!
-//! This experimental module implements A* pathfinding on the graph using vector similarity
-//! as the heuristic and cost function. It enables finding "semantically smooth" paths
-//! between concepts.
+//! The Semantic Navigator uses vector similarity to guide graph traversal. It implements
+//! the A* search algorithm where the "distance" between nodes is defined by their
+//! semantic dissimilarity (1.0 - cosine similarity).
+//!
+//! This allows you to find paths between concepts that make sense semantically,
+//! rather than just topologically shortest paths.
+//!
+//! # How it works
+//!
+//! 1. **Cost Function**: The cost to move from Node A to Node B is `1.0 - similarity(A, B)`.
+//!    Highly similar nodes are "close" to each other.
+//! 2. **Heuristic**: The estimated cost to the goal is `1.0 - similarity(current, goal)`.
+//!    This guides the search towards the target concept.
+//!
+//! # Usage
+//!
+//! ```rust
+//! // [dependencies]
+//! // aletheiadb = { version = "0.1", features = ["nova"] }
+//!
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+//! use aletheiadb::experimental::semantic_navigator::SemanticNavigator;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//!
+//! // 1. Create nodes with vector embeddings
+//! // Start: "King"
+//! let start = db.create_node("Concept", PropertyMapBuilder::new()
+//!     .insert_vector("embedding", &[1.0, 0.0])
+//!     .build())?;
+//!
+//! // Middle: "Queen" (Semantically close to King)
+//! let middle = db.create_node("Concept", PropertyMapBuilder::new()
+//!     .insert_vector("embedding", &[0.9, 0.1])
+//!     .build())?;
+//!
+//! // End: "Prince" (Close to Queen)
+//! let end = db.create_node("Concept", PropertyMapBuilder::new()
+//!     .insert_vector("embedding", &[0.8, 0.2])
+//!     .build())?;
+//!
+//! // 2. Connect them
+//! db.create_edge(start, middle, "RELATED_TO", PropertyMapBuilder::new().build())?;
+//! db.create_edge(middle, end, "RELATED_TO", PropertyMapBuilder::new().build())?;
+//!
+//! // 3. Find the semantic path
+//! let navigator = SemanticNavigator::new(&db);
+//! let path = navigator.find_path(start, end, "embedding")?;
+//!
+//! assert_eq!(path, vec![start, middle, end]);
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
@@ -54,6 +105,16 @@ impl<'a> SemanticNavigator<'a> {
     /// The heuristic is `1.0 - similarity(next, goal)`.
     ///
     /// If a node is missing the vector property, the transition cost is penalized (1.0).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The starting NodeId.
+    /// * `end` - The target NodeId.
+    /// * `vector_prop` - The name of the property containing the vector embedding.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `NodeId`s representing the path from start to end.
     pub fn find_path(&self, start: NodeId, end: NodeId, vector_prop: &str) -> Result<Vec<NodeId>> {
         // 1. Validate Start/End and get Goal Vector
         let start_node = self.db.get_node(start)?;
