@@ -26,61 +26,15 @@
 //!
 //! | Module | Code Name | Description |
 //! |--------|-----------|-------------|
-//! | [`sherlock`] | **Sherlock** | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
 //! | [`dreamer`] | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
-//! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
 //! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
 //! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
 //! | [`chronos`] | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
 //! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
 //! | [`echo`] | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
-//! | [`kaleidoscope`] | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
-//! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
-//! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
 //! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
 //! | [`gestalt`] | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
-//!
-//! # Example: Detecting Suspicious Patterns with Sherlock
-//!
-//! > ⚠️ **REQUIRES FEATURE 'NOVA'**
-//! >
-//! > This feature is experimental and requires the `nova` feature flag.
-//! > Add `features = ["nova"]` to your `Cargo.toml`.
-//!
-//! ```rust,ignore
-//! // [dependencies]
-//! // aletheiadb = { version = "0.1", features = ["nova"] }
-//!
-//! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
-//! use aletheiadb::core::property::PropertyValue;
-//! use std::time::Duration;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = AletheiaDB::new()?;
-//! # let node_id = db.create_node("User", Default::default())?;
-//!
-//! // Define a mystery: User logs in, then deletes file within 1 second
-//! let mystery = Mystery::new(Duration::from_secs(1))
-//!     .add_clue(Clue::PropertyState {
-//!         key: "status".to_string(),
-//!         value: Some(PropertyValue::from("LoggedIn")),
-//!     })
-//!     .add_clue(Clue::PropertyState {
-//!         key: "action".to_string(),
-//!         value: Some(PropertyValue::from("DeleteFile")),
-//!     });
-//!
-//! let sherlock = Sherlock::new(&db);
-//! let detections = sherlock.investigate(node_id, &mystery)?;
-//!
-//! if !detections.is_empty() {
-//!     println!("🕵️ Sherlock found {} suspicious sequences!", detections.len());
-//! }
-//! # Ok(())
-//! # }
-//! ```
 
 #[cfg(feature = "nova")]
 /// Ariadne: Semantic Thread Weaver.
@@ -91,12 +45,6 @@ pub mod cartographer;
 #[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
-#[cfg(feature = "nova")]
-/// Concept Algebra for semantic vector arithmetic.
-pub mod concept_algebra;
-#[cfg(feature = "nova")]
-/// Dissonance: Semantic Stress Detector.
-pub mod dissonance;
 #[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
@@ -113,9 +61,6 @@ pub mod graph_context;
 /// Hindsight: Counterfactual Graph Analysis Engine.
 pub mod hindsight;
 #[cfg(feature = "nova")]
-/// Kaleidoscope: Semantic Force-Directed Layout Engine.
-pub mod kaleidoscope;
-#[cfg(feature = "nova")]
 /// Prism: Semantic Spectroscopy for Vectors.
 pub mod prism;
 #[cfg(feature = "nova")]
@@ -124,12 +69,6 @@ pub mod prophet;
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
-#[cfg(feature = "nova")]
-/// Sherlock: Temporal Pattern Matching Engine.
-pub mod sherlock;
-#[cfg(feature = "nova")]
-/// Sybil: Memetic Propagation Engine.
-pub mod sybil;
 #[cfg(feature = "nova")]
 /// Telepathy: Semantic Spreading Activation Engine.
 pub mod telepathy;
@@ -233,18 +172,6 @@ pub mod temporal_narrative {
         }
     }
 }
-
-#[cfg(feature = "nova")]
-/// Thermos: Semantic Temperature & Volatility Gauge.
-pub mod thermos;
-
-#[cfg(feature = "nova")]
-/// Sentinel: Semantic Firewall for validating data insertion.
-pub mod sentinel;
-
-#[cfg(feature = "nova")]
-/// Wormhole: Detecting Semantic-Structural Gaps.
-pub mod wormhole;
 
 #[cfg(feature = "nova")]
 /// Gestalt: Semantic Subgraph Matching Engine.
