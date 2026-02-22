@@ -254,8 +254,13 @@ impl CheckpointManager {
 
         // 0. Create MVCC snapshots for isolation
         // This prevents fuzzy checkpointing (mixed state from different LSNs)
-        let current_snapshot = current.create_snapshot(lsn);
-        let historical_snapshot = historical.create_snapshot(lsn);
+        let (current_snapshot, historical_snapshot) = {
+            // Synchronize with concurrent writes to ensure consistency
+            let _lock = current.snapshot_lock.write();
+            let c = current.create_snapshot(lsn);
+            let h = historical.create_snapshot(lsn);
+            (c, h)
+        };
 
         // 1. Save string interner first (other indexes depend on it)
         self.persistence_manager
