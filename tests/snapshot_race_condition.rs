@@ -17,7 +17,6 @@ use std::thread;
 use tempfile::tempdir;
 
 #[test]
-#[ignore] // Will fail until fix is implemented
 fn test_concurrent_write_during_snapshot_creation() {
     // Setup: Create storage with initial data
     let current = Arc::new(CurrentStorage::new());

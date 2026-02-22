@@ -71,6 +71,8 @@ pub struct CurrentStorage {
     /// **Recommendation**: Use a bounded set of labels for optimal performance.
     /// Future enhancement could add LRU eviction for unbounded scenarios.
     filter_stats: DashMap<String, Arc<FilterStats>>,
+    /// Lock to synchronize snapshot creation with concurrent writes
+    pub(crate) snapshot_lock: RwLock<()>,
 }
 
 impl CurrentStorage {
@@ -85,6 +87,7 @@ impl CurrentStorage {
             temporal_vector_indexes: DashMap::new(),
             temporal_vector_index_state: Arc::new(RwLock::new(TemporalVectorIndexState::new())),
             filter_stats: DashMap::new(),
+            snapshot_lock: RwLock::new(()),
         }
     }
 
@@ -416,6 +419,8 @@ impl CurrentStorage {
     ///
     /// Returns the ID of the newly created node.
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
         let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
@@ -441,6 +446,8 @@ impl CurrentStorage {
         label: &str,
         properties: PropertyMap,
     ) -> Result<EdgeId> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         // Verify nodes exist
         if !self.indexes.contains_node(source) {
             return Err(StorageError::NodeNotFound(source).into());
@@ -568,6 +575,8 @@ impl CurrentStorage {
     /// Only use this method if you explicitly need to preserve edges for some
     /// specialized use case (e.g., maintaining edge history for audit purposes).
     pub fn delete_node(&self, id: NodeId) -> Result<Node> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         let node = self
             .indexes
             .remove_node(id)
@@ -585,6 +594,8 @@ impl CurrentStorage {
 
     /// Delete an edge.
     pub fn delete_edge(&self, id: EdgeId) -> Result<Edge> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         let edge = self
             .indexes
             .remove_edge(id)
@@ -602,6 +613,8 @@ impl CurrentStorage {
     /// Insert a node directly (used by WriteTransaction).
     /// Does not generate IDs - caller must provide them.
     pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
         // we have not modified any graph state, so we can safely return error without rollback.
         // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
@@ -620,12 +633,16 @@ impl CurrentStorage {
     /// Insert an edge directly (used by WriteTransaction).
     /// Does not generate IDs or rebuild adjacency - caller must handle.
     pub fn insert_edge_direct(&self, edge: Edge) -> Result<()> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         self.indexes.insert_edge(edge);
         Ok(())
     }
 
     /// Update a node directly (used by WriteTransaction).
     pub fn update_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         // Save old node for vector index update
         let old_node = self.indexes.get_node(node.id);
 
@@ -646,6 +663,8 @@ impl CurrentStorage {
 
     /// Update an edge directly (used by WriteTransaction).
     pub fn update_edge_direct(&self, edge: Edge) -> Result<()> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         // Remove old version and insert new
         self.indexes.insert_edge(edge);
         Ok(())
@@ -653,6 +672,8 @@ impl CurrentStorage {
 
     /// Delete a node directly (used by WriteTransaction).
     pub fn delete_node_direct(&self, id: NodeId, timestamp: Timestamp) -> Result<()> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         self.indexes
             .remove_node(id)
             .ok_or(StorageError::NodeNotFound(id))?;
@@ -668,6 +689,8 @@ impl CurrentStorage {
 
     /// Delete an edge directly (used by WriteTransaction).
     pub fn delete_edge_direct(&self, id: EdgeId) -> Result<()> {
+        // Synchronize with snapshot creation
+        let _lock = self.snapshot_lock.read();
         self.indexes
             .remove_edge(id)
             .ok_or(StorageError::EdgeNotFound(id))?;
