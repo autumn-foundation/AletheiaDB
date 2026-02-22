@@ -1736,7 +1736,10 @@ mod sentry_tests {
         buffer.extend_from_slice(&0u32.to_le_bytes());
 
         let result = TimeRange::deserialize(&buffer);
-        assert!(result.is_err(), "Deserialization should reject timestamp > MAX_VALID_TIMESTAMP");
+        assert!(
+            result.is_err(),
+            "Deserialization should reject timestamp > MAX_VALID_TIMESTAMP"
+        );
     }
 
     #[test]
@@ -1752,6 +1755,9 @@ mod sentry_tests {
         let invalid_end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
 
         let result = range.close_at(invalid_end);
-        assert!(result.is_err(), "close_at should reject timestamp > MAX_VALID_TIMESTAMP");
+        assert!(
+            result.is_err(),
+            "close_at should reject timestamp > MAX_VALID_TIMESTAMP"
+        );
     }
 }
