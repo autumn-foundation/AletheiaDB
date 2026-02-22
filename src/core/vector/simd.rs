@@ -2,6 +2,8 @@
 // SIMD Support
 // ============================================================================
 
+use std::mem::MaybeUninit;
+
 /// SIMD-accelerated vector operations for x86/x86_64 platforms.
 ///
 /// Uses runtime feature detection to select the best available instruction set:
@@ -19,6 +21,7 @@
 /// where SIMD becomes beneficial is typically around 16-32 dimensions.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub(crate) mod x86_ops {
+    use std::mem::MaybeUninit;
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
     #[cfg(target_arch = "x86_64")]
@@ -431,7 +434,7 @@ pub(crate) mod x86_ops {
     /// Caller must ensure AVX2 is available. `src.len() == dst.len()`.
     #[target_feature(enable = "avx2")]
     #[inline]
-    pub unsafe fn scale_and_copy_avx2(src: &[f32], dst: &mut [f32], scalar: f32) {
+    pub unsafe fn scale_and_copy_avx2(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
         assert_eq!(src.len(), dst.len());
         unsafe {
             let scalar_vec = _mm256_set1_ps(scalar);
@@ -441,14 +444,16 @@ pub(crate) mod x86_ops {
             for (s_chunk, d_chunk) in src_chunks.by_ref().zip(dst_chunks.by_ref()) {
                 let va = _mm256_loadu_ps(s_chunk.as_ptr());
                 let result = _mm256_mul_ps(va, scalar_vec);
-                _mm256_storeu_ps(d_chunk.as_mut_ptr(), result);
+                // Cast *mut MaybeUninit<f32> to *mut f32.
+                // SAFETY: Layout is identical. We are writing to it, so uninit is fine.
+                _mm256_storeu_ps(d_chunk.as_mut_ptr() as *mut f32, result);
             }
 
             let src_rem = src_chunks.remainder();
             let dst_rem = dst_chunks.into_remainder();
 
             for (s, d) in src_rem.iter().zip(dst_rem.iter_mut()) {
-                *d = *s * scalar;
+                d.write(*s * scalar);
             }
         }
     }
@@ -459,7 +464,7 @@ pub(crate) mod x86_ops {
     /// Caller must ensure SSE2 is available. `src.len() == dst.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
-    pub unsafe fn scale_and_copy_sse2(src: &[f32], dst: &mut [f32], scalar: f32) {
+    pub unsafe fn scale_and_copy_sse2(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
         assert_eq!(src.len(), dst.len());
         unsafe {
             let scalar_vec = _mm_set1_ps(scalar);
@@ -469,14 +474,16 @@ pub(crate) mod x86_ops {
             for (s_chunk, d_chunk) in src_chunks.by_ref().zip(dst_chunks.by_ref()) {
                 let va = _mm_loadu_ps(s_chunk.as_ptr());
                 let result = _mm_mul_ps(va, scalar_vec);
-                _mm_storeu_ps(d_chunk.as_mut_ptr(), result);
+                // Cast *mut MaybeUninit<f32> to *mut f32.
+                // SAFETY: Layout is identical. We are writing to it, so uninit is fine.
+                _mm_storeu_ps(d_chunk.as_mut_ptr() as *mut f32, result);
             }
 
             let src_rem = src_chunks.remainder();
             let dst_rem = dst_chunks.into_remainder();
 
             for (s, d) in src_rem.iter().zip(dst_rem.iter_mut()) {
-                *d = *s * scalar;
+                d.write(*s * scalar);
             }
         }
     }
@@ -547,10 +554,10 @@ pub(crate) fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
-pub(crate) fn scale_and_copy_scalar(src: &[f32], dst: &mut [f32], scalar: f32) {
+pub(crate) fn scale_and_copy_scalar(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
     assert_eq!(src.len(), dst.len());
     for (s, d) in src.iter().zip(dst.iter_mut()) {
-        *d = *s * scalar;
+        d.write(*s * scalar);
     }
 }
 
@@ -588,7 +595,7 @@ pub(crate) fn scale_in_place(v: &mut [f32], scalar: f32) {
 
 /// Scales `src` by `scalar` and stores result in `dst` using the best available SIMD instructions.
 #[inline(always)]
-pub(crate) fn scale_and_copy(src: &[f32], dst: &mut [f32], scalar: f32) {
+pub(crate) fn scale_and_copy(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
     assert_eq!(src.len(), dst.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -720,30 +727,38 @@ mod tests {
     #[test]
     fn test_scale_and_copy_implementation_coverage() {
         let src = vec![1.0f32; 17]; // 17 to force remainder logic (8*2 + 1)
-        let mut dst = vec![0.0f32; 17];
+        let mut dst = Vec::with_capacity(17);
         let scalar = 2.0;
         let expected = vec![2.0f32; 17];
 
         // 1. Unconditional Scalar coverage
-        scale_and_copy_scalar(&src, &mut dst, scalar);
-        assert_eq!(dst, expected, "Scalar implementation failed");
-        dst.fill(0.0);
+        {
+            let dst_slice = dst.spare_capacity_mut();
+            scale_and_copy_scalar(&src, &mut dst_slice[..17], scalar);
+            unsafe { dst.set_len(17) };
+            assert_eq!(dst, expected, "Scalar implementation failed");
+            dst.clear();
+        }
 
         // 2. Conditional x86 SIMD coverage
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             // Try SSE2 if available
             if is_x86_feature_detected!("sse2") {
-                unsafe { x86_ops::scale_and_copy_sse2(&src, &mut dst, scalar) };
+                let dst_slice = dst.spare_capacity_mut();
+                unsafe { x86_ops::scale_and_copy_sse2(&src, &mut dst_slice[..17], scalar) };
+                unsafe { dst.set_len(17) };
                 assert_eq!(dst, expected, "SSE2 implementation failed");
-                dst.fill(0.0);
+                dst.clear();
             }
 
             // Try AVX2 if available
             if is_x86_feature_detected!("avx2") {
-                unsafe { x86_ops::scale_and_copy_avx2(&src, &mut dst, scalar) };
+                let dst_slice = dst.spare_capacity_mut();
+                unsafe { x86_ops::scale_and_copy_avx2(&src, &mut dst_slice[..17], scalar) };
+                unsafe { dst.set_len(17) };
                 assert_eq!(dst, expected, "AVX2 implementation failed");
-                dst.fill(0.0);
+                dst.clear();
             }
         }
     }
