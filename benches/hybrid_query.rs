@@ -22,6 +22,7 @@ use aletheiadb::query::hybrid::{find_similar_as_of, traverse_and_rank};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::cmp::Ordering;
 use std::hint::black_box;
+use std::time::Duration;
 
 // ============================================================================
 // Data Generation Helpers
@@ -290,6 +291,8 @@ type GraphBuilder = Box<dyn Fn(usize, usize) -> AletheiaDB>;
 /// graph structures and sizes.
 fn bench_traverse_and_rank_basic(c: &mut Criterion) {
     let mut group = c.benchmark_group("traverse_and_rank/basic");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     // Test matrix: 3 scales × 3 topologies = 9 combinations
     let scales = vec![("100", 100), ("1K", 1000), ("10K", 10000)];
@@ -302,11 +305,22 @@ fn bench_traverse_and_rank_basic(c: &mut Criterion) {
 
     for (scale_name, node_count) in scales {
         for (topo_name, builder) in &topologies {
+            // Skip large sparse graphs if too slow
+            if node_count == 10000 && *topo_name == "sparse" {
+                continue;
+            }
+
             let db = builder(node_count, 384);
             let source = NodeId::new(0).unwrap();
             let query_vec = gen_vector(384, 42);
 
             group.throughput(Throughput::Elements(node_count as u64));
+
+            // Reduce sample size for large graphs
+            if node_count >= 1000 {
+                group.sample_size(10);
+            }
+
             group.bench_function(
                 BenchmarkId::new(format!("{}/{}", scale_name, topo_name), node_count),
                 |b| {
@@ -345,6 +359,8 @@ fn bench_traverse_and_rank_basic(c: &mut Criterion) {
 /// - HNSW search efficiency at various k values
 fn bench_traverse_and_rank_k_values(c: &mut Criterion) {
     let mut group = c.benchmark_group("traverse_and_rank/k_values");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     // Fixed setup: 10K nodes, power-law topology
     let db = build_power_law_graph(10000, 384);
@@ -382,6 +398,8 @@ fn bench_traverse_and_rank_k_values(c: &mut Criterion) {
 /// Expected: Linear scaling with dimension size.
 fn bench_traverse_and_rank_dimensions(c: &mut Criterion) {
     let mut group = c.benchmark_group("traverse_and_rank/dimensions");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
     group.throughput(Throughput::Elements(1));
 
     for dim in [384, 768, 1536] {
@@ -415,6 +433,8 @@ fn bench_traverse_and_rank_dimensions(c: &mut Criterion) {
 /// to measure anchor+delta reconstruction overhead.
 fn bench_find_similar_as_of(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_similar_as_of");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     for snapshot_count in [10, 50, 100] {
         for (query_depth_name, query_depth_pct) in [
@@ -465,6 +485,8 @@ fn bench_find_similar_as_of(c: &mut Criterion) {
 /// - Memory overhead from temporal data structures
 fn bench_temporal_vs_current(c: &mut Criterion) {
     let mut group = c.benchmark_group("temporal_vs_current");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
     group.throughput(Throughput::Elements(1));
 
     let (temporal_db, timestamps) = build_temporal_graph(1000, 50, 384);
@@ -510,6 +532,8 @@ fn bench_temporal_vs_current(c: &mut Criterion) {
 /// - Multi-hop ranked traversal
 fn bench_chained_hybrid_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("chained_operations");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     // Pattern: traverse -> rank -> filter -> temporal lookup
     group.bench_function("traverse_rank_filter_temporal", |b| {
@@ -562,6 +586,8 @@ fn bench_chained_hybrid_operations(c: &mut Criterion) {
 /// Cold: fresh DB each iteration. Warm: repeated queries on same data.
 fn bench_cache_warmup_effects(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache_warmup");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     // Cold cache: first query after DB creation
     group.bench_function("cold_cache_traverse_rank", |b| {
@@ -623,6 +649,8 @@ criterion_group!(
 /// benefits over manual composition of separate operations.
 fn bench_hybrid_vs_sequential(c: &mut Criterion) {
     let mut group = c.benchmark_group("hybrid_vs_sequential");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     let db = build_uniform_graph(1000, 20, 384);
     let start = NodeId::new(100).unwrap();
@@ -674,6 +702,8 @@ fn bench_hybrid_vs_sequential(c: &mut Criterion) {
 /// Naive loads all neighbors, computes all similarities, sorts all (O(N log N)).
 fn bench_hybrid_vs_naive_composition(c: &mut Criterion) {
     let mut group = c.benchmark_group("hybrid_vs_naive");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     let db = build_uniform_graph(1000, 20, 384);
     let start = NodeId::new(100).unwrap();

@@ -15,16 +15,21 @@ use aletheiadb::{
     storage::wal::{
         WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
+        durability::DurabilityMode,
     },
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
+use std::time::Duration;
 use tempfile::TempDir;
 
 /// Helper to create a WAL instance for benchmarking
 fn create_wal() -> (ConcurrentWalSystem, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
-    let config = ConcurrentWalSystemConfig::new(temp_dir.path().to_path_buf());
+    let config = ConcurrentWalSystemConfig::new(temp_dir.path().to_path_buf())
+        .with_durability_mode(DurabilityMode::Async {
+            flush_interval_ms: 1000,
+        });
     let wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
     (wal, temp_dir)
 }
@@ -32,6 +37,8 @@ fn create_wal() -> (ConcurrentWalSystem, TempDir) {
 /// Benchmark serialization of CreateNode operations
 fn bench_serialize_create_node(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_serialize_create_node");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     // Benchmark with different property sizes to measure allocation overhead
     for prop_count in &[0, 5, 10, 50] {
@@ -65,6 +72,8 @@ fn bench_serialize_create_node(c: &mut Criterion) {
 /// Benchmark serialization of CreateEdge operations
 fn bench_serialize_create_edge(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_serialize_create_edge");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     for prop_count in &[0, 5, 10, 50] {
         group.bench_function(BenchmarkId::from_parameter(prop_count), |b| {
@@ -97,6 +106,8 @@ fn bench_serialize_create_edge(c: &mut Criterion) {
 /// Benchmark serialization of UpdateNode operations
 fn bench_serialize_update_node(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_serialize_update_node");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
 
     for prop_count in &[0, 5, 10, 50] {
         group.bench_function(BenchmarkId::from_parameter(prop_count), |b| {
@@ -128,6 +139,8 @@ fn bench_serialize_update_node(c: &mut Criterion) {
 /// Benchmark batch serialization to measure cumulative allocation overhead
 fn bench_serialize_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_serialize_batch");
+    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(10);
     group.throughput(Throughput::Elements(1000));
 
     group.bench_function("batch_1000_create_node", |b| {
@@ -152,13 +165,16 @@ fn bench_serialize_batch(c: &mut Criterion) {
 /// Benchmark high-frequency serialization (worst case for allocation overhead)
 fn bench_serialize_high_frequency(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_serialize_high_frequency");
-    group.throughput(Throughput::Elements(10000));
+    group.measurement_time(Duration::from_secs(2));
+    // Reduced to 1000 to prevent timeout on slow CI environments
+    group.throughput(Throughput::Elements(1000));
+    group.sample_size(10); // Reduce sample size for heavy benchmark
 
-    group.bench_function("sequential_10k_operations", |b| {
+    group.bench_function("sequential_1k_operations", |b| {
         let (wal, _guard) = create_wal();
 
         b.iter(|| {
-            for i in 0..10000 {
+            for i in 0..1000 {
                 let operation = WalOperation::CreateNode {
                     node_id: NodeId::new(i).unwrap(),
                     label: GLOBAL_INTERNER.intern("Test").unwrap(),
