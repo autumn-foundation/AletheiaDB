@@ -77,37 +77,10 @@ C4Context
 
 ```mermaid
 classDiagram
-    namespace Interfaces {
-        class MCPServer {
-            +serve_stdio()
-            +handle_tool_call()
-        }
-    }
-    namespace Core {
-        class AletheiaDB
-        class QueryEngine
-        class TemporalPlanner
-        class TraversalEngine
-    }
-    namespace Storage {
-        class CurrentStorage
-        class HistoricalStorage
-        class TieredStorage
-        class RedbColdStorage
-    }
-    namespace Observability {
-        class HoneycombClient {
-            +send_batch()
-        }
-    }
-
-    MCPServer --> QueryEngine : Uses
-    QueryEngine --> AletheiaDB : Uses
-    AletheiaDB --> CurrentStorage : "Owns (Arc)"
-    AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
-    %% Removed the circular dependency arrow
-    HistoricalStorage --> TieredStorage : Uses
-    TieredStorage --> RedbColdStorage : Uses
+  class Core
+  class Storage
+  Core --> Storage : Uses (Trait Bound)
+  %% Removed the circular dependency arrow
 ```
 
 **When to Use Each:**
