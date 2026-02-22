@@ -27,6 +27,7 @@
 //! | Module | Code Name | Description |
 //! |--------|-----------|-------------|
 //! | [`sherlock`] | **Sherlock** | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
+//! | [`diplomat`] | **Diplomat** | Semantic Bridge Detection. "Who connects the unconnected?" |
 //! | [`dreamer`] | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
 //! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
 //! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
@@ -94,6 +95,9 @@ pub mod chronos;
 #[cfg(feature = "nova")]
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
+#[cfg(feature = "nova")]
+/// Diplomat: Semantic Bridge Detection.
+pub mod diplomat;
 #[cfg(feature = "nova")]
 /// Dissonance: Semantic Stress Detector.
 pub mod dissonance;
