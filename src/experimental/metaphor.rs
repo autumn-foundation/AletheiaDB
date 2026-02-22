@@ -75,10 +75,10 @@ impl<'a> Metaphor<'a> {
         // Map: (SourceIdx, TargetIdx) -> Score
         let mut scores: HashMap<(usize, usize), f32> = HashMap::new();
 
-        for s_idx in 0..source_nodes.len() {
-            for t_idx in 0..target_nodes.len() {
-                let s_vec = &source_data[s_idx].vector;
-                let t_vec = &target_data[t_idx].vector;
+        for (s_idx, source) in source_data.iter().enumerate().take(source_nodes.len()) {
+            for (t_idx, target) in target_data.iter().enumerate().take(target_nodes.len()) {
+                let s_vec = &source.vector;
+                let t_vec = &target.vector;
 
                 let sim = if let (Some(sv), Some(tv)) = (s_vec, t_vec) {
                     cosine_similarity(sv, tv).unwrap_or(0.0)
@@ -118,16 +118,20 @@ impl<'a> Metaphor<'a> {
             let mut best_score = -1.0;
 
             // Deterministic iteration: 0..N
-            for s in 0..source_nodes.len() {
-                if source_mapped[s] {
+            for (s, &is_source_mapped) in source_mapped.iter().enumerate().take(source_nodes.len())
+            {
+                if is_source_mapped {
                     continue;
                 }
 
-                for t in 0..target_nodes.len() {
-                    if target_mapped[t] {
+                for (t, &is_target_mapped) in
+                    target_mapped.iter().enumerate().take(target_nodes.len())
+                {
+                    if is_target_mapped {
                         continue;
                     }
 
+                    #[allow(clippy::collapsible_if)]
                     if let Some(&score) = scores.get(&(s, t)) {
                         if score > best_score {
                             best_score = score;
