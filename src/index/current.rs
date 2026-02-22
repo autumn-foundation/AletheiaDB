@@ -804,11 +804,19 @@ impl CurrentIndexes {
             edges_map.insert(edge.id, (edge.target, edge.label));
         }
 
+        // ===== Phase 7: Reconstruct Delta Buffer =====
+        // Build set of edge IDs that are in frozen CSR
+        // Done before import to avoid cloning outgoing_edge_ids
+        let frozen_edge_ids: HashSet<EdgeId> = outgoing_edge_ids
+            .iter()
+            .map(|&id| EdgeId::new(id).unwrap())
+            .collect();
+
         // Import outgoing adjacency frozen CSR
         let outgoing_csr = crate::index::adjacency::AdjacencyIndex::import_csr(
             outgoing_node_ids,
-            outgoing_offsets.clone(),
-            outgoing_edge_ids.clone(),
+            outgoing_offsets,
+            outgoing_edge_ids,
             &edges_map,
         );
         self.outgoing.import_frozen_csr(Arc::new(outgoing_csr));
@@ -824,17 +832,10 @@ impl CurrentIndexes {
         let incoming_csr = crate::index::adjacency::AdjacencyIndex::import_csr(
             incoming_node_ids,
             incoming_offsets,
-            incoming_edge_ids.clone(),
+            incoming_edge_ids,
             &edges_map,
         );
         self.incoming.import_frozen_csr(Arc::new(incoming_csr));
-
-        // ===== Phase 7: Reconstruct Delta Buffer =====
-        // Build set of edge IDs that are in frozen CSR
-        let frozen_edge_ids: HashSet<EdgeId> = outgoing_edge_ids
-            .iter()
-            .map(|&id| EdgeId::new(id).unwrap())
-            .collect();
 
         // Iterate through all edges in DashMap
         // For edges NOT in frozen, insert into delta

@@ -382,3 +382,8 @@ required-features = []
 [[example]]
 name = "story_demo"
 # required-features = ["nova"]  <-- Removed to allow runtime error message
+
+[[bench]]
+name = "import_csr_benchmark"
+harness = false
+path = "benches/import_csr_benchmark.rs"
