@@ -104,7 +104,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
-    let magnitude = (mag_a_sq * mag_b_sq).sqrt();
+    // Compute magnitude as product of individual sqrts to prevent overflow/underflow
+    // of the squared product (e.g., if both magnitudes are very large or very small).
+    let magnitude = mag_a_sq.sqrt() * mag_b_sq.sqrt();
 
     // Handle zero vectors
     if magnitude == 0.0 {
@@ -590,19 +592,18 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
     // This provides ~15% speedup for large vectors by avoiding an extra write pass.
     let mut result = Vec::with_capacity(v.len());
 
-    // SAFETY: We immediately fill the entire vector using scale_and_copy.
-    // scale_and_copy internally asserts that src.len() == dst.len(), guaranteeing
-    // that all elements are written before the vector is exposed.
-    //
-    // The `result` vector is allocated with capacity `v.len()`, so `set_len` is
-    // within capacity bounds. `scale_and_copy` is a trusted function (verified by tests)
-    // that writes to every element of `result`. Even if `scale_and_copy` were to panic,
-    // the `result` vector would be dropped, which is safe for `Vec<f32>` (no Drop impl for f32).
-    // The only risk is if `scale_and_copy` returned early without initializing, but
-    // its implementation guarantees full coverage via exact chunking and remainder handling.
-    unsafe { result.set_len(v.len()) };
+    // SAFETY: We use spare_capacity_mut() to get a mutable slice to the uninitialized
+    // capacity of the vector. We then limit this slice to exactly `v.len()` elements.
+    // `scale_and_copy` writes to this uninitialized memory (converting to `MaybeUninit` internally).
+    // After `scale_and_copy` returns, we know all elements are initialized, so we can safely
+    // set the vector's length.
+    let dst = result.spare_capacity_mut();
+    let dst = &mut dst[..v.len()];
 
-    scale_and_copy(v, &mut result, inv_mag);
+    scale_and_copy(v, dst, inv_mag);
+
+    // SAFETY: All `v.len()` elements have been initialized by `scale_and_copy`.
+    unsafe { result.set_len(v.len()) };
     result
 }
 
@@ -711,4 +712,23 @@ pub fn is_normalized_default(v: &[f32]) -> bool {
     // We can't import NORMALIZATION_TOLERANCE from constants because of visibility/import loops?
     // Actually constants.rs is a sibling.
     is_normalized(v, super::constants::NORMALIZATION_TOLERANCE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cosine_similarity_underflow_resilience() {
+        // v1 = [1e-20, 0.0]
+        // v2 = [1e-20, 0.0]
+        // Mag sq = 1e-40.
+        // Prev: sqrt(1e-40 * 1e-40) = sqrt(0) = 0.
+        // New: sqrt(1e-40) * sqrt(1e-40).
+        // Result should be 1.0.
+
+        let v_small = vec![1e-20, 0.0];
+        let sim_small = cosine_similarity(&v_small, &v_small).unwrap();
+        assert!((sim_small - 1.0).abs() < 1e-5);
+    }
 }

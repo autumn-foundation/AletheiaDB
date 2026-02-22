@@ -1,5 +1,11 @@
 use super::ops::*;
 use super::simd::*;
+use std::mem::MaybeUninit;
+
+// Helper to get mutable uninit slice from vec
+fn as_uninit(v: &mut [f32]) -> &mut [MaybeUninit<f32>] {
+    unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut MaybeUninit<f32>, v.len()) }
+}
 
 #[test]
 fn test_normalize_nan_handling() {
@@ -49,7 +55,7 @@ fn test_scale_and_copy_correctness() {
     let src = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let mut dst = vec![0.0; 5]; // Pre-fill with 0 to verify overwrite
 
-    scale_and_copy(&src, &mut dst, 2.0);
+    scale_and_copy(&src, as_uninit(&mut dst), 2.0);
 
     assert_eq!(dst, vec![2.0, 4.0, 6.0, 8.0, 10.0]);
 }
@@ -61,7 +67,7 @@ fn test_scale_and_copy_large_vector() {
     let src: Vec<f32> = (0..len).map(|i| i as f32).collect();
     let mut dst = vec![0.0; len];
 
-    scale_and_copy(&src, &mut dst, 2.0);
+    scale_and_copy(&src, as_uninit(&mut dst), 2.0);
 
     for (i, val) in dst.iter().enumerate() {
         assert_eq!(*val, (i as f32) * 2.0);
