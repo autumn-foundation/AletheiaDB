@@ -21,10 +21,10 @@ mod loom_tests {
     //! If this model passes, the algorithm is sound, though the production implementation
     //! could still have typos or misuse of the algorithm.
 
-    use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use loom::sync::Arc;
-    use loom::thread;
     use loom::cell::UnsafeCell;
+    use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use loom::thread;
 
     // Simplified PendingEntry for Loom
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,7 +98,7 @@ mod loom_tests {
                     pos,
                     pos + 1, // wrapping_add not needed for small loom tests
                     Ordering::AcqRel,
-                    Ordering::Relaxed
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => {
                         // Success
@@ -134,11 +134,12 @@ mod loom_tests {
                         pos,
                         pos + 1,
                         Ordering::AcqRel,
-                        Ordering::Relaxed
+                        Ordering::Relaxed,
                     ) {
                         Ok(_) => {
                             let entry = slot.entry.with_mut(|ptr| unsafe { (*ptr).take() });
-                            slot.sequence.store(pos + self.capacity as u64, Ordering::Release);
+                            slot.sequence
+                                .store(pos + self.capacity as u64, Ordering::Release);
                             if let Some(e) = entry {
                                 entries.push(e);
                             }
