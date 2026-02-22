@@ -2902,3 +2902,18 @@ fn test_simd_mismatched_lengths_safety() {
         );
     }
 }
+
+#[test]
+fn test_cosine_similarity_overflow_stability() {
+    // Values derived from repro_search.rs that previously caused instability
+    let a_base = -8.161245e-22f32;
+    let b_base = -125.53673f32;
+
+    // Construct vectors that trigger large intermediate products
+    let a = vec![a_base];
+    let b = vec![b_base];
+
+    let sim = cosine_similarity(&a, &b).unwrap();
+    assert!(!sim.is_nan());
+    assert!(sim.abs() <= 1.0 + 1e-5, "Similarity {} exceeded bounds", sim);
+}

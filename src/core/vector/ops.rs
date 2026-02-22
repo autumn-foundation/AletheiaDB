@@ -104,7 +104,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
-    let magnitude = (mag_a_sq * mag_b_sq).sqrt();
+    // Compute magnitude as product of individual magnitudes to improve numerical stability
+    // and prevent intermediate overflow/underflow for extreme values.
+    // sqrt(a^2 * b^2) can overflow if a^2 * b^2 > f32::MAX, even if a^2 and b^2 are representable.
+    // sqrt(a^2) * sqrt(b^2) avoids this.
+    let magnitude = mag_a_sq.sqrt() * mag_b_sq.sqrt();
 
     // Handle zero vectors
     if magnitude == 0.0 {
@@ -590,19 +594,17 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
     // This provides ~15% speedup for large vectors by avoiding an extra write pass.
     let mut result = Vec::with_capacity(v.len());
 
-    // SAFETY: We immediately fill the entire vector using scale_and_copy.
-    // scale_and_copy internally asserts that src.len() == dst.len(), guaranteeing
-    // that all elements are written before the vector is exposed.
-    //
-    // The `result` vector is allocated with capacity `v.len()`, so `set_len` is
-    // within capacity bounds. `scale_and_copy` is a trusted function (verified by tests)
-    // that writes to every element of `result`. Even if `scale_and_copy` were to panic,
-    // the `result` vector would be dropped, which is safe for `Vec<f32>` (no Drop impl for f32).
-    // The only risk is if `scale_and_copy` returned early without initializing, but
-    // its implementation guarantees full coverage via exact chunking and remainder handling.
-    unsafe { result.set_len(v.len()) };
+    // SAFETY: We use spare_capacity_mut to safely access uninitialized memory.
+    // scale_and_copy writes to all elements, and we only set_len after successful completion.
+    // spare_capacity_mut returns slice of available capacity (>= v.len())
+    let dst = result.spare_capacity_mut();
+    // We strictly slice to v.len() to ensure length match with src
+    let dst = &mut dst[..v.len()];
 
-    scale_and_copy(v, &mut result, inv_mag);
+    scale_and_copy(v, dst, inv_mag);
+
+    // SAFETY: scale_and_copy has initialized v.len() elements.
+    unsafe { result.set_len(v.len()) };
     result
 }
 
