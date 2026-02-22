@@ -7,10 +7,11 @@ use crc32fast::Hasher;
 use std::io::Read;
 use std::sync::atomic::Ordering;
 
+type DistanceFn = dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync;
+
 #[test]
 fn test_metric_wrapper_safe_on_unaligned() {
-    let distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync> =
-        Arc::new(|_: &[f32], _: &[f32]| 0.0);
+    let distance_fn: Arc<DistanceFn> = Arc::new(|_: &[f32], _: &[f32]| 0.0);
     let wrapper = create_metric_wrapper(4, distance_fn);
 
     // Create a buffer and get an unaligned pointer
@@ -239,8 +240,7 @@ fn test_dot_product_similarity_metric() -> Result<()> {
 #[test]
 fn test_metric_wrapper_safe_on_unaligned_again() {
     // This test ensures that the metric wrapper correctly detects unaligned pointers.
-    let distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync> =
-        Arc::new(|_: &[f32], _: &[f32]| 0.0);
+    let distance_fn: Arc<DistanceFn> = Arc::new(|_: &[f32], _: &[f32]| 0.0);
     let wrapper = create_metric_wrapper(4, distance_fn);
 
     // Create a buffer that we can misalign
@@ -1384,8 +1384,7 @@ fn test_open_mmap_dimensions_too_large_in_metadata() {
 
 #[test]
 fn test_metric_wrapper_null_pointer() {
-    let distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync> =
-        Arc::new(|_: &[f32], _: &[f32]| 0.0);
+    let distance_fn: Arc<DistanceFn> = Arc::new(|_: &[f32], _: &[f32]| 0.0);
     let wrapper = create_metric_wrapper(4, distance_fn);
 
     let null_ptr: *const f32 = std::ptr::null();
@@ -1399,8 +1398,7 @@ fn test_metric_wrapper_null_pointer() {
 
 #[test]
 fn test_metric_wrapper_unaligned_pointer() {
-    let distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync> =
-        Arc::new(|_: &[f32], _: &[f32]| 0.0);
+    let distance_fn: Arc<DistanceFn> = Arc::new(|_: &[f32], _: &[f32]| 0.0);
     let wrapper = create_metric_wrapper(4, distance_fn);
 
     let data = [0u8; 32];
@@ -1443,10 +1441,9 @@ fn test_filter_callback_guard_manual_drop() {
 fn test_metric_wrapper_panic_resilience() {
     // Ensure that a panicking metric function doesn't crash the process
     // but returns f32::MAX instead.
-    let distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync> =
-        Arc::new(|_: &[f32], _: &[f32]| -> f32 {
-            panic!("Test panic");
-        });
+    let distance_fn: Arc<DistanceFn> = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+        panic!("Test panic");
+    });
     let wrapper = create_metric_wrapper(4, distance_fn);
 
     let data = [0.0f32; 4];
@@ -1463,10 +1460,9 @@ fn test_metric_wrapper_panic_resilience() {
 fn test_metric_wrapper_success_direct() {
     // Ensure that a non-panicking metric function works correctly.
     // This provides direct coverage of the Ok path in catch_unwind.
-    let distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync> =
-        Arc::new(|a: &[f32], b: &[f32]| -> f32 {
-            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
-        });
+    let distance_fn: Arc<DistanceFn> = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+    });
     let wrapper = create_metric_wrapper(4, distance_fn);
 
     let data_a = [1.0f32, 2.0, 3.0, 4.0];
@@ -2273,3 +2269,5 @@ fn test_write_mappings_header_errors() {
     );
     assert!(result.is_err());
 }
+
+// Typedef to simplify complex closures
