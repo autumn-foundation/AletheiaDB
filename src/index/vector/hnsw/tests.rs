@@ -2146,7 +2146,6 @@ fn test_internal_helpers_coverage() {
     assert!(!is_retryable_usearch_error("Some other error"));
 }
 
-
 #[cfg(unix)]
 #[test]
 fn test_invalid_utf8_paths() {
@@ -2163,25 +2162,47 @@ fn test_invalid_utf8_paths() {
     // Test load_index with invalid path
     let result = HnswIndex::load(&invalid_path, config.clone());
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Path contains invalid UTF-8"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Path contains invalid UTF-8")
+    );
 
     // Test save_index (via save) with invalid path
-    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
     let result = index.save(&invalid_path);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Path contains invalid UTF-8"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Path contains invalid UTF-8")
+    );
 
     // Test open_mmap with invalid path
     let result = HnswIndex::open_mmap(&invalid_path);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Path contains invalid UTF-8"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Path contains invalid UTF-8")
+    );
 
     // Test config builder with storage (triggering build error)
     let result = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
         .storage(StorageMode::MemoryMapped { path: invalid_path })
         .build();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Path contains invalid UTF-8"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Path contains invalid UTF-8")
+    );
 }
 
 #[test]
@@ -2212,7 +2233,12 @@ fn test_write_mappings_header_errors() {
         &config,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Failed to write mappings"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to write mappings")
+    );
 
     // Magic (4) + Version (1) + Dims (8) = 13 bytes.
     // Next is Quantization (1).
