@@ -1613,8 +1613,10 @@ impl HnswIndex {
         // This ensures consistency between the index snapshot and the ID mappings.
         let _save_guard = self.save_lock.write();
 
-        // Acquire inner write lock to serialize `save` with concurrent searches.
-        let index = self.inner.write();
+        // Acquire inner read lock to allow concurrent searches.
+        // Since we hold save_lock (exclusive), the graph structure is immutable
+        // (add/remove are blocked), so save() can safely run concurrently with search().
+        let index = self.inner.read();
 
         // Collect mappings while holding the locks.
         // Memory cost: O(N) allocation (~16MB for 1M nodes), acceptable for infrequent save operation.
