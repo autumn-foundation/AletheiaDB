@@ -263,6 +263,7 @@ impl GroupCommitCoordinator {
         // Note: We do NOT check against recent_errors.front() because a sparse error list
         // is valid. If epoch 1 succeeded and epoch 2 failed, recent_errors = [(2, ...)].
         // epoch 1 < 2, but it shouldn't fail unless 1 < oldest_error_epoch.
+        // See regression test: tests/regressions/wal_group_commit_epochs.rs
 
         if epoch < state.oldest_error_epoch {
             return Err(Error::Storage(StorageError::WalError {

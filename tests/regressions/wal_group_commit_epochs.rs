@@ -20,7 +20,7 @@ fn havoc_repro_group_commit_false_success() {
     // 5. T1 checks status.
     //
     // EXPECTED: T1 should receive an error.
-    // ACTUAL (BUG): T1 receives Ok.
+    // ACTUAL: T1 receives Error.
 
     let coord = Arc::new(GroupCommitCoordinator::new(100, 100));
     let barrier = Arc::new(Barrier::new(2));
@@ -85,7 +85,7 @@ fn havoc_repro_group_commit_false_failure() {
     // 5. T1 calls wait_for_flush(1).
     //
     // EXPECTED: T1 should receive Ok.
-    // ACTUAL (BUG): T1 receives Err.
+    // ACTUAL: T1 receives Ok.
 
     let config = GroupCommitConfig {
         recent_errors_capacity: 100,
@@ -172,9 +172,6 @@ fn havoc_repro_group_commit_false_failure() {
     // That assumption is WRONG for a sparse error list.
     // We should ONLY check `epoch < state.oldest_error_epoch`.
     //
-    // I need to fix `src/storage/wal/group_commit.rs` first.
-    // But for this test, I will temporarily comment out this assertion logic to fix the file in next step.
-    // Actually, I should just fix the file now.
 
     assert!(
         result.is_ok(),
