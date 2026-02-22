@@ -14,7 +14,7 @@ proptest! {
         let res = cosine_similarity(&a, &b);
         if let Ok(val) = res {
             if !val.is_nan() {
-                prop_assert!(val >= -1.0 && val <= 1.0, "Result {} out of range", val);
+                prop_assert!((-1.0..=1.0).contains(&val), "Result {} out of range", val);
             }
         }
     }
@@ -31,9 +31,9 @@ proptest! {
         let res = cosine_similarity(&a, &b);
         if let Ok(val) = res {
             // NaN is acceptable if inputs are garbage, but panic is not.
-            // The debug_assert in ops.rs panics if result > 1.0 + 1e-3.
+            // The debug_assert in ops.rs panics if result > 1.0 + 1e-2.
             if !val.is_nan() {
-                 prop_assert!(val >= -1.0 && val <= 1.0, "Result {} out of range", val);
+                 prop_assert!((-1.0..=1.0).contains(&val), "Result {} out of range", val);
             }
         }
     }
@@ -50,7 +50,7 @@ proptest! {
         let res = cosine_similarity(&a, &b);
         if let Ok(val) = res {
             if !val.is_nan() {
-                prop_assert!(val >= -1.0 && val <= 1.0, "Result {} out of range", val);
+                prop_assert!((-1.0..=1.0).contains(&val), "Result {} out of range", val);
             }
         }
     }
@@ -67,7 +67,7 @@ fn test_cosine_similarity_repro_regression() {
     // It should return 1.0 (clamped).
     let res = cosine_similarity(&a, &b).unwrap();
 
-    assert!(res >= -1.0 && res <= 1.0, "Result {} out of range", res);
+    assert!((-1.0..=1.0).contains(&res), "Result {} out of range", res);
 
     // Ideally it should be exactly 1.0 or very close
     assert!((res - 1.0).abs() < 1e-6, "Result {} should be ~1.0", res);

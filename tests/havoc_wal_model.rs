@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 #[cfg(loom)]
 mod loom_tests {
     //! # WAL Ring Buffer Model
