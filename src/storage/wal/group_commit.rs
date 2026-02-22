@@ -336,7 +336,9 @@ impl GroupCommitCoordinator {
         }
 
         // Mark this epoch as completed
-        if epoch > state.flushed_epoch { state.completed_epochs.insert(epoch); }
+        if epoch > state.flushed_epoch {
+            state.completed_epochs.insert(epoch);
+        }
 
         // Advance flushed_epoch contiguously to wake up waiters
         // We only advance if we have a contiguous sequence of completed epochs.
