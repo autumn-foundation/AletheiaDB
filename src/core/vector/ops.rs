@@ -573,7 +573,6 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 /// - Dimension limits are enforced at storage time (see [`crate::core::PropertyValue::vector`])
 /// - Additional checks would add overhead without safety benefit
 #[inline]
-#[allow(clippy::uninit_vec)] // Performance optimization: we explicitly fill the vector
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let sq_mag = squared_magnitude(v);
     // Use squared magnitude threshold to avoid denormal number issues.
@@ -590,19 +589,14 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
     // This provides ~15% speedup for large vectors by avoiding an extra write pass.
     let mut result = Vec::with_capacity(v.len());
 
-    // SAFETY: We immediately fill the entire vector using scale_and_copy.
-    // scale_and_copy internally asserts that src.len() == dst.len(), guaranteeing
-    // that all elements are written before the vector is exposed.
-    //
-    // The `result` vector is allocated with capacity `v.len()`, so `set_len` is
-    // within capacity bounds. `scale_and_copy` is a trusted function (verified by tests)
-    // that writes to every element of `result`. Even if `scale_and_copy` were to panic,
-    // the `result` vector would be dropped, which is safe for `Vec<f32>` (no Drop impl for f32).
-    // The only risk is if `scale_and_copy` returned early without initializing, but
-    // its implementation guarantees full coverage via exact chunking and remainder handling.
+    // SAFETY: We initialize the vector using scale_and_copy which takes MaybeUninit
+    // We slice spare_capacity_mut() to v.len() to ensure length equality for scale_and_copy assertions.
+    let dst = &mut result.spare_capacity_mut()[..v.len()];
+    scale_and_copy(v, dst, inv_mag);
+
+    // SAFETY: scale_and_copy guarantees initialization of the slice via assertion src.len() == dst.len()
     unsafe { result.set_len(v.len()) };
 
-    scale_and_copy(v, &mut result, inv_mag);
     result
 }
 
