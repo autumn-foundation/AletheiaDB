@@ -33,6 +33,7 @@ pub struct Inspiration {
 
 /// The Muse Engine.
 pub struct Muse<'a> {
+    #[allow(dead_code)]
     db: &'a AletheiaDB,
 }
 
