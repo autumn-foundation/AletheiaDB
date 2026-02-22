@@ -519,6 +519,38 @@ fn test_sentry_normalize_large_vector() {
 }
 
 #[test]
+fn test_sentry_normalize_in_place_large_vector() {
+    // 🛡️ Sentry Test: Verify normalize_in_place also handles large vectors.
+    let mut v = vec![1e20, 0.0];
+    normalize_in_place(&mut v);
+
+    assert!(
+        (v[0] - 1.0).abs() < 1e-6,
+        "Large vector normalize_in_place failed: {:?}",
+        v
+    );
+}
+
+#[test]
+fn test_sentry_normalize_in_place_inf() {
+    // 🛡️ Sentry: Ensure normalize_in_place handles Infinity by zeroing the vector
+    // (consistent with normalize behavior [0, NaN, 0] or similar, but here we explicitly zero if max is inf?
+    // Wait, implementation for Inf scalar is: scale_in_place(v, 0.0).
+    // So it zeroes out the vector.
+    let mut v = vec![1.0, f32::INFINITY, 3.0];
+    normalize_in_place(&mut v);
+
+    // Should be all zeros?
+    // Implementation: if max_val.is_infinite() -> scale_in_place(v, 0.0).
+    // 1.0 * 0.0 = 0.0
+    // Inf * 0.0 = NaN
+    // 3.0 * 0.0 = 0.0
+    assert_eq!(v[0], 0.0);
+    assert!(v[1].is_nan());
+    assert_eq!(v[2], 0.0);
+}
+
+#[test]
 fn test_sentry_cosine_similarity_large_vector() {
     // 🛡️ Sentry Test: Verify cosine similarity works for large vectors that cause intermediate overflow.
     // 1e20 -> Inf dot product and magnitude. Previously returned NaN (Inf/Inf).
@@ -532,4 +564,20 @@ fn test_sentry_cosine_similarity_large_vector() {
         "Large vector cosine similarity failed: {}",
         result
     );
+}
+
+#[test]
+fn test_sentry_cosine_similarity_large_vs_zero() {
+    // 🛡️ Sentry: Verify robust cosine similarity handles large vs zero correctly.
+    // Logic: if max_a == 0 or max_b == 0 -> return 0.0.
+    // This hits the coverage point in cosine_similarity_robust.
+    let large = vec![1e20, 0.0];
+    let zero = vec![0.0, 0.0];
+
+    // mag_sq of large is Inf.
+    // Enters fallback.
+    // max_a = 1e20. max_b = 0.
+    // Checks max_b == 0. Returns 0.0.
+    let result = cosine_similarity(&large, &zero).unwrap();
+    assert_eq!(result, 0.0);
 }
