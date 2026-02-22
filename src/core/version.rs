@@ -12,7 +12,9 @@
 use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
 use crate::core::interning::{IdentityHasher, InternedString};
-use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
+use crate::core::property::{
+    MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue,
+};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
@@ -476,26 +478,24 @@ impl PropertyDelta {
             .saturating_sub(self.removed.len())
             .max(self.changed.len() + self.vector_deltas.len());
 
-        // Use standard HashMap for construction, PropertyMap::from_iter will handle internal structure
-        // PropertyMap uses IdentityHasher internally too
-        let mut result = FastHashMap::with_capacity_and_hasher(
-            estimated_capacity,
-            BuildHasherDefault::<IdentityHasher>::default(),
-        );
+        // Use PropertyMapBuilder to construct the map directly, avoiding intermediate HashMap allocation
+        // and double hashing (once for temp map, once for final PropertyMap construction).
+        let mut builder = PropertyMapBuilder::with_capacity(estimated_capacity);
 
         // Copy all base properties except removed ones (single lookup per property)
         // This is optimal when changes << base (typical case: ~1-10% change rate)
         for (key, value) in base.iter() {
             if !self.removed.contains(key) {
                 // Arc clone - O(1) refcount increment, shares underlying data
-                result.insert(*key, value.clone());
+                // Use insert_by_key to avoid re-interning overhead
+                builder = builder.insert_by_key(*key, value.clone());
             }
         }
 
         // Apply regular changes (overwrites existing entries for modified properties)
         for (key, value) in &self.changed {
             // Arc clone - O(1) refcount increment
-            result.insert(*key, value.clone());
+            builder = builder.insert_by_key(*key, value.clone());
         }
 
         // Apply vector deltas (overwrites existing entries)
@@ -503,7 +503,7 @@ impl PropertyDelta {
             match vec_delta {
                 // Full replacement does not depend on base type/presence.
                 VectorDelta::Full(vec) => {
-                    result.insert(*key, PropertyValue::Vector(vec.clone()));
+                    builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
                 }
                 // Sparse delta requires vector base value.
                 VectorDelta::Sparse { .. } => {
@@ -511,14 +511,13 @@ impl PropertyDelta {
                         && let Some(base_vec) = base_value.as_vector()
                     {
                         let new_vec = vec_delta.apply(base_vec);
-                        result.insert(*key, PropertyValue::vector(&new_vec));
+                        builder = builder.insert_by_key(*key, PropertyValue::vector(&new_vec));
                     }
                 }
             }
         }
 
-        // Convert HashMap to PropertyMap using FromIterator
-        result.into_iter().collect()
+        builder.build()
     }
 
     /// Returns true if this delta has no changes.
