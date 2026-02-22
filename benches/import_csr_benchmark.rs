@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
 use aletheiadb::index::current::CurrentIndexes;
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 fn bench_import_csr_clones(c: &mut Criterion) {
@@ -46,7 +46,7 @@ fn bench_import_csr_clones(c: &mut Criterion) {
                     black_box(in_o),
                     black_box(in_e),
                 );
-            }
+            },
         )
     });
 
