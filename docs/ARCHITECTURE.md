@@ -103,6 +103,7 @@ classDiagram
 
     MCPServer --> QueryEngine : Uses
     QueryEngine --> AletheiaDB : Uses
+    %% Crate Boundary: Core defines traits, Storage implements them
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
     %% Removed the circular dependency arrow
