@@ -819,6 +819,65 @@ mod tests {
             "Result should be strictly greater than local"
         );
     }
+
+    #[test]
+    fn test_evaluate_clock_skew_self_heal_backward() {
+        let current_wallclock = 1_000_000;
+        let frontier_wallclock = current_wallclock + MAX_BACKWARD_DRIFT_US + 1;
+
+        let result = evaluate_clock_skew(
+            current_wallclock,
+            frontier_wallclock,
+            None,
+            true, // self_heal = true
+        )
+        .expect("backward drift should be healed");
+
+        assert_eq!(result.effective_wallclock, frontier_wallclock);
+        assert_eq!(result.healed_direction, Some(ClockSkewDirection::Backward));
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_self_heal_forward() {
+        let current_wallclock = 1_000_000;
+        let max_jump = 10_000;
+        let frontier_wallclock = current_wallclock - max_jump - 1;
+        // drift = current - frontier = max_jump + 1 > max_jump
+
+        let result = evaluate_clock_skew(
+            current_wallclock,
+            frontier_wallclock,
+            Some(max_jump),
+            true, // self_heal = true
+        )
+        .expect("forward drift should be healed");
+
+        assert_eq!(result.effective_wallclock, frontier_wallclock);
+        assert_eq!(result.healed_direction, Some(ClockSkewDirection::Forward));
+    }
+
+    #[test]
+    fn test_send_with_overflow_self_heal_fallback_send_error() {
+        // Trigger FallbackSend error:
+        // 1. Initial send fails with LogicalCounterOverflow.
+        // 2. Fallback (wallclock + 1) fails with InvalidTimestamp (because wallclock + 1 > MAX_VALID_TIMESTAMP).
+
+        // Setup:
+        // wallclock = MAX_VALID_TIMESTAMP
+        // logical = u32::MAX
+        // send(MAX_VALID_TIMESTAMP) -> LogicalCounterOverflow
+        // fallback = MAX_VALID_TIMESTAMP + 1 -> send(MAX_VALID_TIMESTAMP + 1) -> InvalidTimestamp
+
+        let ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, u32::MAX);
+
+        let err = send_with_overflow_self_heal(&ts, MAX_VALID_TIMESTAMP, true, |error| error)
+            .expect_err("should return FallbackSend error");
+
+        assert!(matches!(
+            err,
+            SendWithSelfHealError::FallbackSend(TemporalError::InvalidTimestamp { .. })
+        ));
+    }
 }
 
 #[cfg(test)]
