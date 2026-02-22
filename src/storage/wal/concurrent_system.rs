@@ -531,8 +531,8 @@ impl ConcurrentWalSystem {
                 // Note: Since flush coordinator preserves LSN order, waiting for the last one
                 // technically implies all previous ones are done, but waiting for all is safer
                 // against future changes and handles errors correctly.
-                for handle in handles {
-                    handle.wait().map_err(|e| {
+                if let Some(last_handle) = handles.into_iter().last() {
+                    last_handle.wait().map_err(|e| {
                         Error::Storage(StorageError::WalError {
                             reason: format!("WAL flush failed: {}", e),
                         })
