@@ -90,8 +90,8 @@ fn test_normalize_initialization_safety() {
     let normalized = normalize(&v);
 
     // Check values are correct (and thus initialized)
-    let mag = (1.0*1.0 + 2.0*2.0 + 3.0*3.0f32).sqrt();
-    assert!((normalized[0] - 1.0/mag).abs() < 1e-6);
-    assert!((normalized[1] - 2.0/mag).abs() < 1e-6);
-    assert!((normalized[2] - 3.0/mag).abs() < 1e-6);
+    let mag = (1.0 * 1.0 + 2.0 * 2.0 + 3.0 * 3.0f32).sqrt();
+    assert!((normalized[0] - 1.0 / mag).abs() < 1e-6);
+    assert!((normalized[1] - 2.0 / mag).abs() < 1e-6);
+    assert!((normalized[2] - 3.0 / mag).abs() < 1e-6);
 }
