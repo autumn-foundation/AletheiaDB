@@ -30,6 +30,7 @@
 //! | [`dreamer`] | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
 //! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
 //! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
+//! | [`janus`] | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
 //! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
 //! | [`chronos`] | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
 //! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
@@ -115,6 +116,9 @@ pub mod graph_context;
 #[cfg(feature = "nova")]
 /// Hindsight: Counterfactual Graph Analysis Engine.
 pub mod hindsight;
+#[cfg(feature = "nova")]
+/// Janus: Semantic Bridge Detector.
+pub mod janus;
 #[cfg(feature = "nova")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
