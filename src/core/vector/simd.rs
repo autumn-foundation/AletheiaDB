@@ -21,11 +21,11 @@ use std::mem::MaybeUninit;
 /// where SIMD becomes beneficial is typically around 16-32 dimensions.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub(crate) mod x86_ops {
-    use std::mem::MaybeUninit;
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
+    use std::mem::MaybeUninit;
 
     /// Computes dot product, magnitude_a², and magnitude_b² using AVX2.
     ///
@@ -729,10 +729,7 @@ mod tests {
         // Helper to get mutable uninit slice from vec
         let as_uninit = |v: &mut Vec<f32>| -> &mut [MaybeUninit<f32>] {
             unsafe {
-                std::slice::from_raw_parts_mut(
-                    v.as_mut_ptr() as *mut MaybeUninit<f32>,
-                    v.len(),
-                )
+                std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut MaybeUninit<f32>, v.len())
             }
         };
 
