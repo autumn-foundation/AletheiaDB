@@ -234,6 +234,28 @@ pub trait WriteOps: ReadOps {
     /// - `transaction_time` always starts at the **commit time**.
     /// - This means by default, facts are considered valid from the moment the transaction began.
     /// - If `valid_from` is Some(ts), valid_time starts at `ts`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// // Create a node that was valid starting 1 hour ago
+    /// let now_millis = time::to_millis(time::now());
+    /// let one_hour_ago = now_millis - 3_600_000;
+    /// let valid_from = time::from_millis(one_hour_ago);
+    ///
+    /// let node_id = tx.create_node_with_valid_time(
+    ///     "Person",
+    ///     properties! { "name" => "Alice" },
+    ///     Some(valid_from)
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn create_node_with_valid_time(
         &mut self,
         label: &str,
@@ -264,6 +286,47 @@ pub trait WriteOps: ReadOps {
     }
 
     /// Create a new edge with optional backdated valid_from time.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Source node ID
+    /// * `target` - Target node ID
+    /// * `label` - Edge label
+    /// * `properties` - Edge properties
+    /// * `valid_from` - When the relationship became valid (None = transaction time)
+    ///
+    /// # Bi-Temporal Semantics
+    ///
+    /// - If `valid_from` is None, `valid_time` starts at the **transaction start time**.
+    /// - `transaction_time` always starts at the **commit time**.
+    /// - If `valid_from` is provided, it must not be before the creation time of either
+    ///   the source or target node (to maintain causal consistency).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let alice = NodeId::new(1)?;
+    /// # let bob = NodeId::new(2)?;
+    /// // Relationship established yesterday
+    /// let now_millis = time::to_millis(time::now());
+    /// let yesterday = now_millis - 86_400_000;
+    /// let valid_from = time::from_millis(yesterday);
+    ///
+    /// let edge_id = tx.create_edge_with_valid_time(
+    ///     alice,
+    ///     bob,
+    ///     "KNOWS",
+    ///     properties! { "since" => 2023 },
+    ///     Some(valid_from)
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn create_edge_with_valid_time(
         &mut self,
         source: NodeId,
@@ -309,6 +372,37 @@ pub trait WriteOps: ReadOps {
     ///
     /// This merges the new properties with existing ones (PATCH semantics).
     /// Existing properties not in the map are preserved.
+    ///
+    /// # Bi-Temporal Semantics
+    ///
+    /// - The new version of the node (with updated properties) becomes valid
+    ///   starting at `valid_from`.
+    /// - The previous version remains valid until `valid_from`.
+    /// - This allows correcting historical data or recording changes that happened
+    ///   in the past but are only being recorded now.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// // Alice changed her name 1 week ago
+    /// let now_millis = time::to_millis(time::now());
+    /// let last_week = now_millis - 7 * 86_400_000;
+    /// let valid_from = time::from_millis(last_week);
+    ///
+    /// tx.update_node_with_valid_time(
+    ///     node_id,
+    ///     properties! { "name" => "Alicia" },
+    ///     Some(valid_from)
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn update_node_with_valid_time(
         &mut self,
         node_id: NodeId,
@@ -345,6 +439,35 @@ pub trait WriteOps: ReadOps {
     /// Update an edge's properties with optional backdated valid_from time.
     ///
     /// This merges the new properties with existing ones (PATCH semantics).
+    ///
+    /// # Bi-Temporal Semantics
+    ///
+    /// - The new version of the edge becomes valid starting at `valid_from`.
+    /// - Useful for recording when a relationship attribute changed (e.g., strength of
+    ///   connection, role title).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, core::EdgeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// // Role changed yesterday
+    /// let now_millis = time::to_millis(time::now());
+    /// let yesterday = now_millis - 86_400_000;
+    /// let valid_from = time::from_millis(yesterday);
+    ///
+    /// tx.update_edge_with_valid_time(
+    ///     edge_id,
+    ///     properties! { "role" => "Manager" },
+    ///     Some(valid_from)
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn update_edge_with_valid_time(
         &mut self,
         edge_id: EdgeId,
@@ -385,8 +508,29 @@ pub trait WriteOps: ReadOps {
     /// [`delete_node_cascade`](Self::delete_node_cascade) which automatically
     /// removes all connected edges to maintain referential integrity.
     ///
-    /// Only use this method if you explicitly need to preserve edges for some
-    /// specialized use case.
+    /// # Bi-Temporal Semantics
+    ///
+    /// - The node ceases to exist in valid time starting from `valid_from`.
+    /// - It remains visible in queries with `AS OF` time < `valid_from`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// // Node was removed from reality 5 minutes ago
+    /// let now_millis = time::to_millis(time::now());
+    /// let five_mins_ago = now_millis - 300_000;
+    /// let valid_from = time::from_millis(five_mins_ago);
+    ///
+    /// tx.delete_node_with_valid_time(node_id, Some(valid_from))?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn delete_node_with_valid_time(
         &mut self,
         node_id: NodeId,
@@ -431,7 +575,31 @@ pub trait WriteOps: ReadOps {
     /// ```
     fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()>;
 
-    /// Delete an edge with optional backdated valid_from time
+    /// Delete an edge with optional backdated valid_from time.
+    ///
+    /// # Bi-Temporal Semantics
+    ///
+    /// - The edge ceases to exist in valid time starting from `valid_from`.
+    /// - Useful for recording when a relationship ended (e.g., employment termination).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::EdgeId, api::transaction::WriteOps};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// // Relationship ended yesterday
+    /// let now_millis = time::to_millis(time::now());
+    /// let yesterday = now_millis - 86_400_000;
+    /// let valid_from = time::from_millis(yesterday);
+    ///
+    /// tx.delete_edge_with_valid_time(edge_id, Some(valid_from))?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn delete_edge_with_valid_time(
         &mut self,
         edge_id: EdgeId,
