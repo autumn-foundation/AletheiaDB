@@ -104,6 +104,12 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
+    // Fallback for extreme magnitudes (Inf)
+    // If we have overflow, we need a more robust (but slower) calculation
+    if mag_a_sq.is_infinite() || mag_b_sq.is_infinite() {
+        return cosine_similarity_robust(a, b);
+    }
+
     let magnitude = (mag_a_sq * mag_b_sq).sqrt();
 
     // Handle zero vectors
@@ -576,6 +582,38 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 #[allow(clippy::uninit_vec)] // Performance optimization: we explicitly fill the vector
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let sq_mag = squared_magnitude(v);
+
+    // Handle overflow (Inf) by scaling down
+    if sq_mag.is_infinite() {
+        let max_val = v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        if max_val.is_infinite() {
+            // Vector contains actual Infinity. Return [0, NaN, 0] behavior via multiplication by 0.0.
+            let mut result = Vec::with_capacity(v.len());
+            unsafe { result.set_len(v.len()) };
+            scale_and_copy(v, &mut result, 0.0);
+            return result;
+        }
+        if max_val == 0.0 {
+            return vec![0.0; v.len()];
+        }
+
+        let scaled_sq_mag: f32 = v
+            .iter()
+            .map(|x| {
+                let s = x / max_val;
+                s * s
+            })
+            .sum();
+
+        let inv_mag = 1.0 / scaled_sq_mag.sqrt();
+        let final_scale = (1.0 / max_val) * inv_mag;
+
+        let mut result = Vec::with_capacity(v.len());
+        unsafe { result.set_len(v.len()) };
+        scale_and_copy(v, &mut result, final_scale);
+        return result;
+    }
+
     // Use squared magnitude threshold to avoid denormal number issues.
     // See SQUARED_MAGNITUDE_THRESHOLD for details.
     if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {
@@ -639,6 +677,32 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
 #[inline]
 pub fn normalize_in_place(v: &mut [f32]) {
     let sq_mag = squared_magnitude(v);
+
+    // Handle overflow (Inf) by scaling down
+    if sq_mag.is_infinite() {
+        let max_val = v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        if max_val.is_infinite() {
+            scale_in_place(v, 0.0);
+            return;
+        }
+        if max_val == 0.0 {
+            return;
+        }
+
+        let scaled_sq_mag: f32 = v
+            .iter()
+            .map(|x| {
+                let s = x / max_val;
+                s * s
+            })
+            .sum();
+
+        let inv_mag = 1.0 / scaled_sq_mag.sqrt();
+        let final_scale = (1.0 / max_val) * inv_mag;
+        scale_in_place(v, final_scale);
+        return;
+    }
+
     // Use squared magnitude threshold to avoid denormal number issues.
     // See SQUARED_MAGNITUDE_THRESHOLD for details.
     if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {
@@ -648,6 +712,44 @@ pub fn normalize_in_place(v: &mut [f32]) {
     // Compute 1/sqrt(sq_mag) directly to avoid intermediate variable
     let inv_mag = 1.0 / sq_mag.sqrt();
     scale_in_place(v, inv_mag);
+}
+
+/// Robust cosine similarity calculation for vectors with extreme magnitudes.
+///
+/// This is used as a fallback when `dot_and_magnitudes` encounters overflow (Inf).
+/// It scales down the vectors by their maximum absolute value to bring them
+/// into a safe range before computing the dot product and magnitudes.
+fn cosine_similarity_robust(a: &[f32], b: &[f32]) -> Result<f32> {
+    // Find maximum absolute value to use as scaling factor
+    let max_a = a.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    let max_b = b.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+
+    if max_a == 0.0 || max_b == 0.0 {
+        return Ok(0.0);
+    }
+
+    // Compute scaled dot product and magnitudes
+    // We can do this in one pass to be somewhat efficient
+    let mut dot = 0.0;
+    let mut mag_a_sq = 0.0;
+    let mut mag_b_sq = 0.0;
+
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        let val_a = ai / max_a;
+        let val_b = bi / max_b;
+        dot += val_a * val_b;
+        mag_a_sq += val_a * val_a;
+        mag_b_sq += val_b * val_b;
+    }
+
+    let magnitude = (mag_a_sq * mag_b_sq).sqrt();
+
+    if magnitude == 0.0 {
+        return Ok(0.0);
+    }
+
+    let result = dot / magnitude;
+    Ok(result.clamp(-1.0, 1.0))
 }
 
 /// Checks if a vector is normalized (has magnitude approximately 1.0).

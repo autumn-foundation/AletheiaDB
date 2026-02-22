@@ -481,3 +481,55 @@ fn test_scale_in_place_zero_scalar() {
     assert!(v[2].is_nan()); // Inf * 0 = NaN
     assert!(v[3].is_nan()); // NaN * 0 = NaN
 }
+
+// ============================================================================
+// Normalization Edge Case Tests (Small/Large Vectors)
+// ============================================================================
+
+#[test]
+fn test_sentry_normalize_small_vector() {
+    // 🛡️ Sentry Test: Verify normalization works for small but valid vectors.
+    // 1e-8 is safely within f32 range, but 1e-8^2 = 1e-16 was previously
+    // below the 1e-14 threshold, causing it to be zeroed out.
+    let v = vec![1e-8, 0.0];
+    let normalized = normalize(&v);
+
+    // Should be [1.0, 0.0]
+    assert!(
+        (normalized[0] - 1.0).abs() < 1e-6,
+        "Small vector normalization failed: {:?}",
+        normalized
+    );
+}
+
+#[test]
+fn test_sentry_normalize_large_vector() {
+    // 🛡️ Sentry Test: Verify normalization works for large vectors that cause intermediate overflow.
+    // 1e20^2 = 1e40 (Inf). Previously this caused 1/Inf = 0, returning zero vector.
+    // Now it should scale down and normalize correctly.
+    let v = vec![1e20, 0.0];
+    let normalized = normalize(&v);
+
+    // Should be [1.0, 0.0]
+    assert!(
+        (normalized[0] - 1.0).abs() < 1e-6,
+        "Large vector normalization failed: {:?}",
+        normalized
+    );
+}
+
+#[test]
+fn test_sentry_cosine_similarity_large_vector() {
+    // 🛡️ Sentry Test: Verify cosine similarity works for large vectors that cause intermediate overflow.
+    // 1e20 -> Inf dot product and magnitude. Previously returned NaN (Inf/Inf).
+    // Now falls back to robust calculation.
+    let v = vec![1e20, 0.0];
+    let result = cosine_similarity(&v, &v).unwrap();
+
+    // Should be 1.0
+    assert!(
+        (result - 1.0).abs() < 1e-6,
+        "Large vector cosine similarity failed: {}",
+        result
+    );
+}
