@@ -410,7 +410,7 @@ pub(crate) fn persist_temporal_index(
     let historical_guard = historical.read();
 
     // Convert all node versions
-    let mut node_versions = Vec::new();
+    let mut node_versions = Vec::with_capacity(historical_guard.get_node_versions().len());
     for version in historical_guard.get_node_versions().values() {
         let entry = convert_node_version(version).map_err(|e| {
             StorageError::PersistenceError(format!(
@@ -423,7 +423,7 @@ pub(crate) fn persist_temporal_index(
     }
 
     // Convert all edge versions
-    let mut edge_versions = Vec::new();
+    let mut edge_versions = Vec::with_capacity(historical_guard.get_edge_versions().len());
     for version in historical_guard.get_edge_versions().values() {
         let entry = convert_edge_version(version).map_err(|e| {
             StorageError::PersistenceError(format!(
