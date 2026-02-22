@@ -481,3 +481,65 @@ fn test_scale_in_place_zero_scalar() {
     assert!(v[2].is_nan()); // Inf * 0 = NaN
     assert!(v[3].is_nan()); // NaN * 0 = NaN
 }
+
+// ============================================================================
+// Normalization Boundary Tests
+// ============================================================================
+
+use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
+
+#[test]
+fn test_is_normalized_lower_boundary() {
+    // Test exact lower boundary for is_normalized
+    // lower = (1.0 - tolerance)^2
+    let tolerance = 0.1;
+    let lower_mag = 1.0 - tolerance;
+    let v = vec![lower_mag, 0.0];
+
+    // sq_mag = (1-0.1)^2 = 0.81
+    // lower bound = (1-0.1)^2 = 0.81
+    // sq_mag >= lower should be true
+    assert!(is_normalized(&v, tolerance), "Should accept magnitude exactly at lower bound");
+
+    // Slightly less should fail
+    let v_less = vec![lower_mag - 1e-6, 0.0];
+    assert!(!is_normalized(&v_less, tolerance), "Should reject magnitude slightly below lower bound");
+}
+
+#[test]
+fn test_is_normalized_upper_boundary() {
+    // Test exact upper boundary
+    let tolerance = 0.1;
+    let upper_mag = 1.0 + tolerance;
+    let v = vec![upper_mag, 0.0];
+
+    // sq_mag = 1.21
+    // upper bound = 1.21
+    // sq_mag <= upper should be true
+    assert!(is_normalized(&v, tolerance), "Should accept magnitude exactly at upper bound");
+
+    // Slightly more should fail
+    let v_more = vec![upper_mag + 1e-6, 0.0];
+    assert!(!is_normalized(&v_more, tolerance), "Should reject magnitude slightly above upper bound");
+}
+
+#[test]
+fn test_normalize_threshold_boundary() {
+    // Test vector with squared magnitude exactly at threshold
+    // SQUARED_MAGNITUDE_THRESHOLD is 1e-14
+    // magnitude = sqrt(1e-14) = 1e-7
+    let val = SQUARED_MAGNITUDE_THRESHOLD.sqrt();
+    let v = vec![val];
+
+    // sq_mag = 1e-14. 1e-14 < 1e-14 is false.
+    // So normalize should happen.
+    let normalized = normalize(&v);
+    assert!((normalized[0] - 1.0).abs() < 1e-6, "Should normalize at threshold");
+
+    // Slightly smaller magnitude
+    // Use a value that squares to something definitely smaller than SQUARED_MAGNITUDE_THRESHOLD
+    let val_small = val * 0.999;
+    let v_small = vec![val_small];
+    let normalized_small = normalize(&v_small);
+    assert_eq!(normalized_small[0], 0.0, "Should zero out below threshold");
+}
