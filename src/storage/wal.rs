@@ -106,6 +106,7 @@ pub mod durability;
 pub mod group_commit;
 
 // Concurrent WAL modules
+pub(crate) mod background_flusher;
 pub mod concurrent;
 pub mod concurrent_system;
 pub mod flush_coordinator;
