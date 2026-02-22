@@ -35,6 +35,7 @@
 //! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
 //! | [`echo`] | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
 //! | [`kaleidoscope`] | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
+//! | [`lens`] | **Lens** | Semantic Perspective Engine. "Wear glasses made of a concept." |
 //! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
 //! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
@@ -115,6 +116,9 @@ pub mod hindsight;
 #[cfg(feature = "nova")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
+#[cfg(feature = "nova")]
+/// Lens: Semantic Perspective Engine.
+pub mod lens;
 #[cfg(feature = "nova")]
 /// Prism: Semantic Spectroscopy for Vectors.
 pub mod prism;
