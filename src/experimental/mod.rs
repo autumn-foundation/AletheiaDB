@@ -164,3 +164,5 @@ pub mod gravity;
 #[cfg(feature = "nova")]
 /// Metaphor: Semantic Graph Alignment Engine.
 pub mod metaphor;
+/// Muse: The Semantic Ideator.
+pub mod muse;
