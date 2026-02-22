@@ -69,7 +69,7 @@ just test
 > aletheiadb = { version = "0.1", features = ["nova"] }
 > ```
 >
-> If you see a runtime panic saying "Experimental features like X require the 'nova' feature", this is why!
+> If you see a compiler error saying "unresolved import" or "item is gated behind the `nova` feature", this is why!
 
 ### Development Commands
 

@@ -75,7 +75,6 @@ pub struct Sherlock<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(feature = "nova")]
 impl<'a> Sherlock<'a> {
     /// Create a new Sherlock instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -190,27 +189,7 @@ impl<'a> Sherlock<'a> {
     }
 }
 
-#[cfg(not(feature = "nova"))]
-impl<'a> Sherlock<'a> {
-    /// Create a new Sherlock instance.
-    pub fn new(_db: &'a AletheiaDB) -> Self {
-        panic!(
-            "Experimental features like Sherlock require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n"
-        );
-    }
-
-    #[cfg(test)]
-    fn new_internal(db: &'a AletheiaDB) -> Self {
-        Self { db }
-    }
-
-    /// Investigate a specific node for the given Mystery.
-    pub fn investigate(&self, _node_id: NodeId, _mystery: &Mystery) -> Result<Vec<Deduction>> {
-        panic!("Experimental features like Sherlock require the 'nova' feature.");
-    }
-}
-
-#[cfg(all(test, feature = "nova"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -328,34 +307,5 @@ mod tests {
         assert_eq!(results_pass.len(), 1, "Should match within 500ms");
         assert_eq!(results_pass[0].node_id, node_id);
         assert_eq!(results_pass[0].event_times, vec![t0, t1]);
-    }
-}
-
-#[cfg(all(test, not(feature = "nova")))]
-mod tests_stub {
-    use super::*;
-    use crate::AletheiaDB;
-    use crate::core::id::NodeId;
-    use std::time::Duration;
-
-    #[test]
-    #[should_panic(
-        expected = "Experimental features like Sherlock require the 'nova' feature. Please enable it in your Cargo.toml"
-    )]
-    fn test_stub_new_panics() {
-        let db = AletheiaDB::new().unwrap();
-        let _ = Sherlock::new(&db);
-    }
-
-    #[test]
-    #[should_panic(expected = "Experimental features like Sherlock require the 'nova' feature.")]
-    fn test_stub_investigate_panics() {
-        let db = AletheiaDB::new().unwrap();
-        // Use internal constructor to bypass the panic in new()
-        let sherlock = Sherlock::new_internal(&db);
-        let _ = sherlock.investigate(
-            NodeId::new(0).unwrap(),
-            &Mystery::new(Duration::from_secs(1)),
-        );
     }
 }
