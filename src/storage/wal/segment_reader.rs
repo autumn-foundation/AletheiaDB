@@ -26,6 +26,28 @@ use crate::core::property::PropertyMap;
 
 use super::{LSN, WalEntry, WalOperation};
 
+/// Maximum number of WAL entries allowed to be loaded into memory during recovery.
+///
+/// This limit prevents OOM DoS attacks where a massive WAL (e.g. 100GB) is loaded
+/// entirely into memory by `read_entries_from_dir`.
+/// 10 Million entries * ~200 bytes/entry ≈ 2GB RAM.
+pub const MAX_RECOVERY_ENTRIES: usize = 10_000_000;
+
+#[cfg(test)]
+pub(crate) static TEST_MAX_RECOVERY_ENTRIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn get_max_recovery_entries() -> usize {
+    #[cfg(test)]
+    {
+        let test_limit = TEST_MAX_RECOVERY_ENTRIES.load(std::sync::atomic::Ordering::Relaxed);
+        if test_limit > 0 {
+            return test_limit;
+        }
+    }
+    MAX_RECOVERY_ENTRIES
+}
+
 /// Magic bytes identifying a AletheiaDB WAL segment file.
 const WAL_MAGIC: [u8; 4] = *b"GWAL";
 
@@ -71,7 +93,7 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 
     // Read entries from each segment
     for (_, path) in segments {
-        let segment_entries = read_segment(&path, start_lsn)?;
+        let segment_entries = read_segment_internal(&path, start_lsn, entries.len())?;
         entries.extend(segment_entries);
     }
 
@@ -103,6 +125,14 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 /// Uses `memmap2` for memory-mapped I/O. Peak memory usage is O(working set)
 /// rather than O(file size). See issue #216.
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
+    read_segment_internal(path, start_lsn, 0)
+}
+
+fn read_segment_internal(
+    path: &Path,
+    start_lsn: LSN,
+    initial_count: usize,
+) -> Result<Vec<WalEntry>> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
@@ -172,6 +202,15 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
 
     // Parse entries using the extracted helper function (issue #218)
     while offset < buffer.len() {
+        if initial_count + entries.len() >= get_max_recovery_entries() {
+            return Err(StorageError::CapacityExceeded {
+                resource: "WAL recovery entries".to_string(),
+                current: initial_count + entries.len() + 1,
+                limit: get_max_recovery_entries(),
+            }
+            .into());
+        }
+
         // Try to parse an entry at the current offset
         match parse_entry_at(buffer, offset, version) {
             Ok((entry, bytes_consumed)) => {
@@ -1843,6 +1882,79 @@ mod fuzz_tests {
         ) {
             // Should not panic
             let _ = parse_entry_at(&bytes, offset, version);
+        }
+    }
+}
+
+#[cfg(test)]
+mod warden_tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMap;
+    use crate::core::temporal::time;
+    use crate::storage::wal::serialization::serialize_entry_into;
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_wal_recovery_dos_protection() {
+        // 🛡️ Warden Test: Verify recovery fails gracefully when limit is exceeded
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write WAL header
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        // Write 20 entries
+        for i in 1..=20 {
+            let lsn = LSN(i);
+            let operation = WalOperation::CreateNode {
+                node_id: crate::core::NodeId::new(i).unwrap(),
+                label: GLOBAL_INTERNER.intern("TestNode").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+            };
+            let entry = WalEntry::new(lsn, operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file.write_all(&buffer).unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+
+        // 1. Verify baseline (success)
+        TEST_MAX_RECOVERY_ENTRIES.store(0, Ordering::Relaxed); // 0 = use default (10M)
+        let entries = read_entries_from_dir(dir.path(), LSN(1)).expect("Baseline read failed");
+        assert_eq!(entries.len(), 20);
+
+        // 2. Set limit to 10 (exceeded by 20 entries)
+        TEST_MAX_RECOVERY_ENTRIES.store(10, Ordering::Relaxed);
+
+        // Ensure we reset limit even if panic occurs (RAII style, though simple try/finally block here)
+        let result = std::panic::catch_unwind(|| read_entries_from_dir(dir.path(), LSN(1)));
+
+        // Reset limit
+        TEST_MAX_RECOVERY_ENTRIES.store(0, Ordering::Relaxed);
+
+        let result = result.unwrap(); // Propagate panic if any (shouldn't happen)
+
+        // Assert error
+        assert!(result.is_err(), "Should fail when limit exceeded");
+        match result {
+            Err(Error::Storage(StorageError::CapacityExceeded {
+                resource,
+                current,
+                limit,
+            })) => {
+                assert_eq!(resource, "WAL recovery entries");
+                assert!(current > 10);
+                assert_eq!(limit, 10);
+            }
+            _ => panic!("Expected CapacityExceeded error, got {:?}", result),
         }
     }
 }
