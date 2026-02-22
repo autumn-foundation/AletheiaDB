@@ -233,7 +233,7 @@ pub struct ApiResponse {
 
 impl ApiResponse {
     /// Create a success response.
-    fn success(data: serde_json::Value) -> Self {
+    pub fn success(data: serde_json::Value) -> Self {
         Self {
             success: true,
             data: Some(data),
@@ -242,7 +242,7 @@ impl ApiResponse {
     }
 
     /// Create an error response.
-    fn error(msg: impl Into<String>) -> Self {
+    pub fn error(msg: impl Into<String>) -> Self {
         Self {
             success: false,
             data: None,

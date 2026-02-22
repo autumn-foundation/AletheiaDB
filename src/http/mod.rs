@@ -27,6 +27,7 @@
 //! }
 //! ```
 
+mod auth;
 mod config;
 pub(crate) mod converters;
 pub mod handlers;

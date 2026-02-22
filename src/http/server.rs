@@ -4,11 +4,12 @@ use actix_cors::Cors;
 use actix_web::{
     App, HttpServer,
     dev::Server,
-    middleware::{DefaultHeaders, Logger},
+    middleware::{Condition, DefaultHeaders, Logger},
     web,
 };
 use tokio::sync::oneshot;
 
+use super::auth::ApiKeyMiddleware;
 use super::config::{CorsConfig, ServerConfig};
 use super::handlers::{configure_health_routes, handle_query};
 
@@ -105,6 +106,39 @@ fn build_cors(cors_config: &CorsConfig) -> Cors {
 
 /// Create a configured Actix-web application factory with all middleware.
 ///
+/// This function is used by [`create_server`] and [`run_server`] to ensure consistent configuration.
+///
+/// # Arguments
+///
+/// * `config` - Server configuration including port, host, CORS, and API key settings.
+pub fn create_app_with_config(
+    config: ServerConfig,
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
+> {
+    let cors_config = config.cors();
+    let api_key = config.get_api_key().map(|k| k.to_string());
+    let has_key = api_key.is_some();
+
+    App::new()
+        .wrap(Logger::default())
+        .wrap(build_security_headers())
+        .wrap(build_cors(cors_config))
+        .wrap(Condition::new(
+            has_key,
+            ApiKeyMiddleware::new(api_key.unwrap_or_default()),
+        ))
+        .configure(configure_app)
+}
+
+/// Create a configured Actix-web application factory with all middleware.
+///
 /// This creates an app with **permissive CORS** suitable for development/testing.
 /// For production use, prefer [`create_app_with_config`] with proper CORS settings.
 ///
@@ -115,8 +149,8 @@ fn build_cors(cors_config: &CorsConfig) -> Cors {
 ///
 /// # Security Warning
 ///
-/// This function uses permissive CORS settings. For production deployments,
-/// use [`create_app_with_config`] with a properly configured [`ServerConfig`].
+/// This function uses permissive CORS settings and NO authentication.
+/// For production deployments, use [`create_app_with_config`] with a properly configured [`ServerConfig`].
 pub fn create_app() -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -126,12 +160,12 @@ pub fn create_app() -> App<
         InitError = (),
     >,
 > {
-    let cors_config = CorsConfig::permissive();
-    App::new()
-        .wrap(Logger::default())
-        .wrap(build_security_headers())
-        .wrap(build_cors(&cors_config))
-        .configure(configure_app)
+    // Create a default config which has permissive CORS for backward compatibility
+    let config = ServerConfig::builder()
+        .cors(CorsConfig::permissive())
+        .build();
+
+    create_app_with_config(config)
 }
 
 /// Create an HTTP server with the given configuration.
@@ -168,18 +202,13 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
     let shutdown_handle = ShutdownHandle::new(shutdown_tx);
 
     let bind_address = config.bind_address();
-    let cors_config = config.cors().clone();
+    // We need to clone config for the factory closure
+    let config = std::sync::Arc::new(config);
 
-    let server = HttpServer::new(move || {
-        App::new()
-            .wrap(Logger::default())
-            .wrap(build_security_headers())
-            .wrap(build_cors(&cors_config))
-            .configure(configure_app)
-    })
-    .bind(&bind_address)?
-    .disable_signals() // We handle signals ourselves
-    .run();
+    let server = HttpServer::new(move || create_app_with_config((*config).clone()))
+        .bind(&bind_address)?
+        .disable_signals() // We handle signals ourselves
+        .run();
 
     // Spawn a task that waits for shutdown signal using actix runtime
     let server_handle = server.handle();
@@ -215,32 +244,30 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
 /// ```
 pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     let bind_address = config.bind_address();
-    let cors_config = config.cors().clone();
 
     eprintln!("Starting AletheiaDB HTTP server on {}", bind_address);
-    if cors_config.is_permissive() {
+    if config.cors().is_permissive() {
         eprintln!(
-            "WARNING: CORS is configured in permissive mode (any origin allowed). \
-             This is not recommended for production."
+            "WARNING: CORS is configured in permissive mode (any origin allowed).              This is not recommended for production."
         );
     }
+    if config.get_api_key().is_none() {
+        eprintln!("WARNING: No API key configured. The server is open to public access.");
+    }
 
-    HttpServer::new(move || {
-        App::new()
-            .wrap(Logger::default())
-            .wrap(build_security_headers())
-            .wrap(build_cors(&cors_config))
-            .configure(configure_app)
-    })
-    .bind(&bind_address)?
-    .run()
-    .await
+    // Clone config for factory
+    let config = std::sync::Arc::new(config);
+
+    HttpServer::new(move || create_app_with_config((*config).clone()))
+        .bind(&bind_address)?
+        .run()
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::test;
+    use actix_web::{ResponseError, test};
 
     #[actix_rt::test]
     async fn test_configure_app_has_health_endpoint() {
@@ -309,5 +336,66 @@ mod tests {
             headers.get("Content-Security-Policy").unwrap(),
             "default-src 'none'; frame-ancestors 'none'"
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_auth_middleware_blocks_request_without_key() {
+        let config = ServerConfig::builder().api_key("secret").build();
+        let app = test::init_service(create_app_with_config(config)).await;
+
+        let req = test::TestRequest::get().uri("/status").to_request();
+
+        // Use match instead of unwrap_err because Debug is missing
+        match test::try_call_service(&app, req).await {
+            Ok(_) => panic!("Should have failed with 401"),
+            Err(err) => {
+                let resp = err.error_response();
+                assert_eq!(resp.status().as_u16(), 401);
+            }
+        }
+    }
+
+    #[actix_rt::test]
+    async fn test_auth_middleware_blocks_request_with_wrong_key() {
+        let config = ServerConfig::builder().api_key("secret").build();
+        let app = test::init_service(create_app_with_config(config)).await;
+
+        let req = test::TestRequest::get()
+            .uri("/status")
+            .insert_header(("Authorization", "Bearer wrong"))
+            .to_request();
+
+        match test::try_call_service(&app, req).await {
+            Ok(_) => panic!("Should have failed with 401"),
+            Err(err) => {
+                let resp = err.error_response();
+                assert_eq!(resp.status().as_u16(), 401);
+            }
+        }
+    }
+
+    #[actix_rt::test]
+    async fn test_auth_middleware_allows_request_with_correct_key() {
+        let config = ServerConfig::builder().api_key("secret").build();
+        let app = test::init_service(create_app_with_config(config)).await;
+
+        let req = test::TestRequest::get()
+            .uri("/status")
+            .insert_header(("Authorization", "Bearer secret"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert!(resp.status().is_success());
+    }
+
+    #[actix_rt::test]
+    async fn test_no_auth_by_default() {
+        let config = ServerConfig::default();
+        let app = test::init_service(create_app_with_config(config)).await;
+
+        let req = test::TestRequest::get().uri("/status").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert!(resp.status().is_success());
     }
 }

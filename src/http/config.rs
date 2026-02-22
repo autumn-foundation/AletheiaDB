@@ -109,6 +109,7 @@ pub struct ServerConfig {
     port: u16,
     host: String,
     cors: CorsConfig,
+    api_key: Option<String>,
 }
 
 impl ServerConfig {
@@ -120,6 +121,7 @@ impl ServerConfig {
             port,
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
+            api_key: None,
         }
     }
 
@@ -136,6 +138,11 @@ impl ServerConfig {
     /// Get the CORS configuration.
     pub fn cors(&self) -> &CorsConfig {
         &self.cors
+    }
+
+    /// Get the API key if configured.
+    pub fn get_api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
     }
 
     /// Get the bind address as "host:port".
@@ -155,6 +162,7 @@ impl Default for ServerConfig {
             port: 8080,
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
+            api_key: None,
         }
     }
 }
@@ -165,6 +173,7 @@ pub struct ServerConfigBuilder {
     port: Option<u16>,
     host: Option<String>,
     cors: Option<CorsConfig>,
+    api_key: Option<String>,
 }
 
 impl ServerConfigBuilder {
@@ -205,12 +214,19 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set the API key for authentication.
+    pub fn api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
+    }
+
     /// Build the server configuration.
     pub fn build(self) -> ServerConfig {
         ServerConfig {
             port: self.port.unwrap_or(8080),
             host: self.host.unwrap_or_else(|| "0.0.0.0".to_string()),
             cors: self.cors.unwrap_or_default(),
+            api_key: self.api_key,
         }
     }
 }
@@ -225,6 +241,7 @@ mod tests {
         assert_eq!(config.port(), 8080);
         assert_eq!(config.host(), "0.0.0.0");
         assert!(!config.cors().is_permissive());
+        assert!(config.get_api_key().is_none());
     }
 
     #[test]
@@ -232,6 +249,7 @@ mod tests {
         let config = ServerConfig::new(3000);
         assert_eq!(config.port(), 3000);
         assert_eq!(config.host(), "0.0.0.0");
+        assert!(config.get_api_key().is_none());
     }
 
     #[test]
@@ -277,5 +295,11 @@ mod tests {
             .cors(CorsConfig::permissive())
             .build();
         assert!(config.cors().is_permissive());
+    }
+
+    #[test]
+    fn test_builder_with_api_key() {
+        let config = ServerConfig::builder().api_key("secret").build();
+        assert_eq!(config.get_api_key(), Some("secret"));
     }
 }
