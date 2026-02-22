@@ -47,3 +47,9 @@
 **Summary:** `Node::with_metadata` and `Edge::with_metadata` functions were untested; replacing the `metadata` argument with `VersionMetadata::default()` would survive.
 **Diagnosis:** **Missing Coverage**. No unit tests existed for these specific constructor variants.
 **Kill Shot:** Added `test_node_with_metadata` and `test_edge_with_metadata` to verify that the provided metadata is actually stored.
+
+**[Vector Normalization Boundaries]**
+**Module:** `src/core/vector/ops.rs`
+**Summary:** `is_normalized` checks strict bounds `sq_mag >= lower && sq_mag <= upper`. A mutant changing `>=` to `>` or `<=` to `<` would survive without strict boundary tests. Similarly, `normalize` threshold check `sq_mag < SQUARED_MAGNITUDE_THRESHOLD`.
+**Diagnosis:** **Missing Coverage**. Existing tests covered typical cases but not exact boundaries where off-by-one errors live.
+**Kill Shot:** Added `test_is_normalized_lower_boundary`, `test_is_normalized_upper_boundary`, and `test_normalize_threshold_boundary` in `src/core/vector/sentry_tests.rs`.
