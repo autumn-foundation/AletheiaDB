@@ -438,13 +438,27 @@ impl ConcurrentWalSystem {
     ///
     /// This flushes immediately and waits for fsync.
     pub fn append_sync(&self, operation: WalOperation) -> Result<LSN> {
-        let lsn = self.wal.append_async(operation)?;
+        // Use append_with_handle to get a completion handle
+        // This ensures we can verify our specific entry was durably flushed
+        let (lsn, handle) = self.wal.append_with_handle(operation)?;
 
         // Drain and flush immediately for sync mode
+        // We do this to drive progress, but we don't rely on it for correctness
+        // (another thread might flush our entry)
         let entries = self.wal.drain_all();
         if !entries.is_empty() {
-            self.coordinator.flush(entries, true)?;
+            // Best effort flush. If it fails, our handle will be notified by
+            // whichever thread attempted the flush (us or someone else).
+            // We ignore the error here because handle.wait() below is the source of truth.
+            let _ = self.coordinator.flush(entries, true);
         }
+
+        // Wait for durability verification
+        handle.wait().map_err(|e| {
+            Error::Storage(StorageError::WalError {
+                reason: format!("WAL flush failed: {}", e),
+            })
+        })?;
 
         Ok(lsn)
     }
@@ -507,18 +521,45 @@ impl ConcurrentWalSystem {
         // Use the underlying WAL's batch append for async modes
         match self.durability_mode {
             DurabilityMode::Synchronous => {
-                // For synchronous mode, append batch then flush all
-                let lsns = self.wal.append_batch(operations)?;
+                if operations.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                // Split off the last operation to get a handle for it.
+                // We only need to wait for the LAST operation because WAL flush is
+                // strictly ordered by LSN. If the last operation is durable, all
+                // prior operations (including the prefix batch) must also be durable.
+                let mut operations = operations;
+                let last_op = operations.pop().expect("checked not empty");
+
+                // Append the prefix efficiently (no handle overhead)
+                let mut lsns = if !operations.is_empty() {
+                    self.wal.append_batch(operations)?
+                } else {
+                    Vec::with_capacity(1)
+                };
+
+                // Append the last one with a handle to verify durability
+                let (last_lsn, handle) = self.wal.append_with_handle(last_op)?;
+                lsns.push(last_lsn);
 
                 // Drain and flush immediately for sync mode
+                // We do this to drive progress, but we don't rely on it for correctness
+                // (another thread might flush our entry)
                 let entries = self.wal.drain_all();
                 if !entries.is_empty() {
-                    self.coordinator.flush(entries, true).map_err(|e| {
-                        Error::Storage(StorageError::WalError {
-                            reason: format!("Failed to flush batch after drain: {}", e),
-                        })
-                    })?;
+                    // Best effort flush. If it fails, our handle will be notified by
+                    // whichever thread attempted the flush (us or someone else).
+                    // We ignore the error here because handle.wait() below is the source of truth.
+                    let _ = self.coordinator.flush(entries, true);
                 }
+
+                // Wait for durability verification
+                handle.wait().map_err(|e| {
+                    Error::Storage(StorageError::WalError {
+                        reason: format!("WAL flush failed: {}", e),
+                    })
+                })?;
 
                 Ok(lsns)
             }
