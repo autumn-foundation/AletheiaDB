@@ -481,3 +481,39 @@ fn test_scale_in_place_zero_scalar() {
     assert!(v[2].is_nan()); // Inf * 0 = NaN
     assert!(v[3].is_nan()); // NaN * 0 = NaN
 }
+
+#[test]
+fn test_sentry_normalization_threshold_boundary() {
+    use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
+
+    // 🛡️ Sentry Test: Verify normalize() respects the exact threshold for zero vectors.
+    // This targets mutants that might change `<` to `<=` or modify the threshold.
+
+    // 1. Below threshold: Should be zeroed
+    // Construct vector with sq_mag approx 0.9 * threshold
+    let val_below = (SQUARED_MAGNITUDE_THRESHOLD * 0.9).sqrt();
+    let v_below = vec![val_below];
+    let normalized_below = normalize(&v_below);
+    assert_eq!(normalized_below, vec![0.0], "Vector below threshold should be zeroed");
+
+    // 2. Above threshold: Should be normalized
+    // Construct vector with sq_mag approx 1.1 * threshold
+    let val_above = (SQUARED_MAGNITUDE_THRESHOLD * 1.1).sqrt();
+    let v_above = vec![val_above];
+    let normalized_above = normalize(&v_above);
+    // Should be unit length (1.0)
+    assert!((normalized_above[0] - 1.0).abs() < 1e-6, "Vector above threshold should be normalized");
+
+    // 3. Pin the threshold value range
+    // Ensure threshold is not too high (e.g. 1.0).
+    // A vector with magnitude 1e-5 (sq_mag 1e-10) should definitely normalize (1e-10 > 1e-14).
+    let v_small = vec![1e-5];
+    let n_small = normalize(&v_small);
+    assert!((magnitude(&n_small) - 1.0).abs() < 1e-6, "Threshold is too high! 1e-5 vector was zeroed.");
+
+    // Ensure threshold is not too low (e.g. 0.0).
+    // A vector with magnitude 1e-10 (sq_mag 1e-20) should definitely zero (1e-20 < 1e-14).
+    let v_tiny = vec![1e-10];
+    let n_tiny = normalize(&v_tiny);
+    assert_eq!(n_tiny, vec![0.0], "Threshold is too low! 1e-10 vector was normalized.");
+}
