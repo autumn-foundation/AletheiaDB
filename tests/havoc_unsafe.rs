@@ -1,8 +1,8 @@
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization};
-use aletheiadb::index::VectorIndex; // Import trait
 use aletheiadb::core::id::NodeId;
-use std::sync::atomic::{AtomicBool, Ordering};
+use aletheiadb::index::VectorIndex; // Import trait
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, Quantization};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[test]
 fn test_custom_metric_panic_resilience() {
@@ -17,7 +17,11 @@ fn test_custom_metric_panic_resilience() {
                 panic!("Havoc injected panic!");
             }
             // Standard Euclidean distance
-            a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f32>().sqrt()
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>()
+                .sqrt()
         })
         .build()
         .expect("Failed to build index");

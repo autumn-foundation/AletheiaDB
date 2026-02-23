@@ -1,6 +1,6 @@
 #![cfg(loom)]
 
-use loom::sync::{Mutex, RwLock, Arc};
+use loom::sync::{Arc, Mutex, RwLock};
 use loom::thread;
 
 // Mock HnswIndex structure for concurrency model verification
@@ -74,7 +74,7 @@ impl Model {
 
     // Mimics HnswIndex::remove
     fn remove(&self, id: usize) {
-         let lock_idx = id % self.entry_locks.len();
+        let lock_idx = id % self.entry_locks.len();
         // 1. Acquire entry lock
         let _key_guard = self.entry_locks[lock_idx].lock().unwrap();
 
