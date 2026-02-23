@@ -163,13 +163,19 @@ pub mod wormhole;
 #[cfg(feature = "nova")]
 /// Gestalt: Semantic Subgraph Matching Engine.
 pub mod gestalt;
+
 #[cfg(feature = "nova")]
 /// Gravity: Semantic Mass and Orbit Analysis.
 pub mod gravity;
+
+#[cfg(feature = "nova")]
 /// Metaphor: Semantic Graph Alignment Engine.
 pub mod metaphor;
+
 #[cfg(feature = "nova")]
 /// Mnemosyne: Semantic Memory Consolidation.
 pub mod mnemosyne;
+
+#[cfg(feature = "nova")]
 /// Muse: The Semantic Ideator.
 pub mod muse;

@@ -1746,6 +1746,52 @@ impl HnswIndex {
         Ok(())
     }
 
+    /// Verify that the binary index file matches the expected dimensions and quantization.
+    ///
+    /// This reads the first 8 bytes of the file to check the vector size field.
+    /// usearch stores `count` (bytes 0-3) and `vector_byte_size` (bytes 4-7).
+    /// We verify that `vector_byte_size == dimensions * scalar_size`.
+    fn verify_index_header(
+        path: &Path,
+        dimensions: usize,
+        quantization: Quantization,
+    ) -> Result<()> {
+        let mut file = File::open(path).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to open index file for verification: {}",
+                e
+            )))
+        })?;
+
+        let mut header = [0u8; 8];
+        file.read_exact(&mut header).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to read index header: {}",
+                e
+            )))
+        })?;
+
+        // Extract vector_byte_size from bytes 4-7 (little-endian u32)
+        let vector_byte_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+
+        let scalar_size = match quantization {
+            Quantization::F32 => 4,
+            Quantization::F16 => 2,
+            Quantization::I8 => 1,
+        };
+
+        let expected_size = dimensions * scalar_size;
+
+        if vector_byte_size != expected_size {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Index file header mismatch: expected {} bytes per vector ({} dims * {} bytes), found {}",
+                expected_size, dimensions, scalar_size, vector_byte_size
+            ))));
+        }
+
+        Ok(())
+    }
+
     /// Validate loaded index metadata against configuration.
     fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswConfig) -> Result<()> {
         if let Some(meta) = metadata {
@@ -2181,6 +2227,9 @@ impl HnswIndex {
             }));
         }
 
+        // Verify binary index file header (prevents quantization mismatch vulnerability)
+        Self::verify_index_header(path, config.dimensions, config.quantization)?;
+
         let options = IndexOptions {
             dimensions: config.dimensions,
             metric: to_usearch_metric(config.metric),
@@ -2321,6 +2370,9 @@ impl HnswIndex {
             // Legacy index: fallback to defaults
             (Quantization::default(), DistanceMetric::Cosine)
         };
+
+        // Verify binary index file header (prevents quantization mismatch vulnerability)
+        Self::verify_index_header(path, dimensions, quantization)?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),

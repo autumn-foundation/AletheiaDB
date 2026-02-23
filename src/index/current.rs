@@ -782,7 +782,9 @@ impl CurrentIndexes {
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
     ) {
+        use crate::core::hasher::IdentityHasher;
         use std::collections::{HashMap, HashSet};
+        use std::hash::BuildHasherDefault;
 
         // Safety check: tombstones cannot be reconstructed from CSR import.
         // If we have tombstones, importing would cause deleted edges to reappear.
@@ -798,7 +800,7 @@ impl CurrentIndexes {
         );
 
         // Build edges map for CSR reconstruction
-        let mut edges_map = HashMap::new();
+        let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         for entry in self.edges.iter() {
             let edge = entry.value();
             edges_map.insert(edge.id, (edge.target, edge.label));

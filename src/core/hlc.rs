@@ -147,7 +147,9 @@ pub fn evaluate_clock_skew(
     max_forward_jump_us: Option<i64>,
     self_heal_clock_skew: bool,
 ) -> Result<ClockSkewDecision, ClockSkewViolation> {
-    let drift = current_wallclock - frontier_wallclock;
+    // Use saturating subtraction to prevent overflow/wrapping on extreme jumps.
+    // e.g. i64::MAX - i64::MIN would wrap to -1 without this, bypassing checks.
+    let drift = current_wallclock.saturating_sub(frontier_wallclock);
     let mut effective_wallclock = current_wallclock;
     let mut healed_direction = None;
 
@@ -931,6 +933,26 @@ mod tests {
         assert!(
             result_backward.is_ok(),
             "Exact max backward drift should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_overflow_protection() {
+        // 🛡️ Security Test: Reproduce arithmetic overflow vulnerability.
+        // Ensure massive forward jumps (e.g. i64::MAX - i64::MIN) are rejected
+        // instead of wrapping around to small negative numbers.
+        let current = i64::MAX;
+        let frontier = i64::MIN;
+        let max_forward = Some(MAX_FORWARD_JUMP_US);
+
+        // This should be rejected as an extreme forward jump.
+        let result = evaluate_clock_skew(current, frontier, max_forward, false);
+
+        assert!(
+            result.is_err(),
+            "Should reject extreme clock jump that wraps around arithmetic limits. Got: {:?} with drift {}",
+            result,
+            result.as_ref().map(|d| d.drift_us).unwrap_or(0)
         );
     }
 }

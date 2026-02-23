@@ -5,12 +5,16 @@
 
 use super::config::{MAX_DELTA_CHAIN_DEPTH, MIN_CAPACITY_ESTIMATE};
 use crate::core::error::{Result, VectorError};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::index::vector::VectorIndex;
 use crate::index::vector::hnsw::HnswIndex;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
+
+type IdentityBuildHasher = BuildHasherDefault<IdentityHasher>;
 
 /// Type alias for vector snapshot: map of NodeId to vector data
 /// Represents vector data in a snapshot, supporting both full and delta formats.
@@ -20,16 +24,16 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub(crate) enum VectorSnapshot {
     /// Full snapshot containing all vectors
-    Full(Arc<HashMap<NodeId, Arc<[f32]>>>),
+    Full(Arc<HashMap<NodeId, Arc<[f32]>, IdentityBuildHasher>>),
 
     /// Delta snapshot storing only differences
     Delta {
         /// Timestamp of the base snapshot this delta is relative to
         base_time: Timestamp,
         /// Vectors added or updated since the base snapshot
-        added: Arc<HashMap<NodeId, Arc<[f32]>>>,
+        added: Arc<HashMap<NodeId, Arc<[f32]>, IdentityBuildHasher>>,
         /// NodeIds removed since the base snapshot
-        removed: Arc<HashSet<NodeId>>,
+        removed: Arc<HashSet<NodeId, IdentityBuildHasher>>,
     },
 }
 
@@ -109,14 +113,14 @@ impl VectorSnapshot {
     pub(crate) fn to_hashmap(
         &self,
         all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
-    ) -> Result<HashMap<NodeId, Arc<[f32]>>> {
+    ) -> Result<HashMap<NodeId, Arc<[f32]>, IdentityBuildHasher>> {
         // Collect layers
         let mut current = self;
         let mut delta_layers = Vec::new();
         let mut depth = 0;
 
         // Walk backwards through delta chain to find the Full snapshot base
-        let base_vectors: HashMap<NodeId, Arc<[f32]>> = loop {
+        let base_vectors: HashMap<NodeId, Arc<[f32]>, IdentityBuildHasher> = loop {
             if depth >= MAX_DELTA_CHAIN_DEPTH {
                 // Return error instead of partial results to prevent silent data loss
                 return Err(VectorError::IndexError(format!(
@@ -141,8 +145,8 @@ impl VectorSnapshot {
                 } => {
                     // Store delta layer to apply later (in reverse order)
                     struct DeltaLayer<'a> {
-                        added: &'a HashMap<NodeId, Arc<[f32]>>,
-                        removed: &'a HashSet<NodeId>,
+                        added: &'a HashMap<NodeId, Arc<[f32]>, IdentityBuildHasher>,
+                        removed: &'a HashSet<NodeId, IdentityBuildHasher>,
                     }
                     delta_layers.push(DeltaLayer {
                         added: added.as_ref(),
@@ -313,7 +317,7 @@ impl SnapshotIndex {
 pub(crate) struct DeltaIndex {
     pub(crate) base: Arc<SnapshotIndex>,
     pub(crate) added: Arc<HnswIndex>,
-    pub(crate) removed: Arc<HashSet<NodeId>>,
+    pub(crate) removed: Arc<HashSet<NodeId, IdentityBuildHasher>>,
 }
 
 impl std::fmt::Debug for DeltaIndex {
@@ -451,7 +455,7 @@ pub(crate) struct SnapshotMetadata {
     pub(crate) last_snapshot_time: Timestamp,
 
     /// Set of NodeIds changed since last snapshot (for ChangeThreshold)
-    pub(crate) vectors_changed_since_snapshot: HashSet<NodeId>,
+    pub(crate) vectors_changed_since_snapshot: HashSet<NodeId, IdentityBuildHasher>,
 
     /// Last FULL snapshot time (for delta calculation)
     pub(crate) last_full_snapshot_time: Timestamp,
@@ -461,7 +465,7 @@ pub(crate) struct SnapshotMetadata {
 
     /// Accumulator for ALL changes since last FULL snapshot
     /// Used to build the delta index.
-    pub(crate) changes_accumulated: HashSet<NodeId>,
+    pub(crate) changes_accumulated: HashSet<NodeId, IdentityBuildHasher>,
 }
 
 impl SnapshotMetadata {
@@ -470,10 +474,10 @@ impl SnapshotMetadata {
             total_snapshots: 0,
             transactions_since_snapshot: 0,
             last_snapshot_time: initial_time,
-            vectors_changed_since_snapshot: HashSet::new(),
+            vectors_changed_since_snapshot: HashSet::with_hasher(BuildHasherDefault::default()),
             last_full_snapshot_time: initial_time,
             snapshots_since_full: 0,
-            changes_accumulated: HashSet::new(),
+            changes_accumulated: HashSet::with_hasher(BuildHasherDefault::default()),
         }
     }
 
@@ -507,7 +511,7 @@ impl SnapshotMetadata {
 /// from 3 to 1 during hot-path operations like `add()`.
 pub(crate) struct VectorState {
     /// In-memory storage of current vectors
-    pub(crate) vectors: HashMap<NodeId, Arc<[f32]>>,
+    pub(crate) vectors: HashMap<NodeId, Arc<[f32]>, IdentityBuildHasher>,
 
     /// Metadata for snapshot tracking
     pub(crate) metadata: SnapshotMetadata,
@@ -516,7 +520,7 @@ pub(crate) struct VectorState {
 impl VectorState {
     pub(crate) fn new(initial_time: Timestamp) -> Self {
         Self {
-            vectors: HashMap::new(),
+            vectors: HashMap::with_hasher(BuildHasherDefault::default()),
             metadata: SnapshotMetadata::new(initial_time),
         }
     }

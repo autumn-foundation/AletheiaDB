@@ -2,6 +2,57 @@
 //!
 //! This module implements functionality to analyze the vector space of the graph,
 //! identify natural clusters, and reify them as explicit "Region" nodes.
+//!
+//! # Overview
+//!
+//! The Cartographer uses K-Means clustering to group nodes based on their vector embeddings.
+//! It can then "reify" these clusters by creating new "Region" nodes in the graph and
+//! connecting the original nodes to their assigned regions.
+//!
+//! This transforms implicit semantic relationships (similarity in vector space) into
+//! explicit structural relationships (edges in the graph), allowing for hybrid queries
+//! that combine semantic and structural reasoning.
+//!
+//! # Example
+//!
+//! ```rust
+//! # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+//! # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+//! # use aletheiadb::experimental::cartographer::Cartographer;
+//! #
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 1. Setup database and vectors
+//! let db = AletheiaDB::new()?;
+//! db.enable_vector_index("embedding", HnswConfig::new(2, DistanceMetric::Euclidean))?;
+//!
+//! // Create nodes (Cluster 1: near origin)
+//! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 0.0]).build())?;
+//! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[0.1, 0.1]).build())?;
+//!
+//! // Create nodes (Cluster 2: far away)
+//! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[10.0, 10.0]).build())?;
+//! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[10.1, 10.1]).build())?;
+//!
+//! // 2. Analyze
+//! let cartographer = Cartographer::new(&db);
+//! let clusters = cartographer.analyze("embedding", 2)?;
+//!
+//! // 3. Reify (Create "Region" nodes)
+//! let region_ids = cartographer.reify(&clusters)?;
+//! assert_eq!(region_ids.len(), 2);
+//!
+//! // 4. Check results
+//! // Use scan with label filter properly
+//! let regions = db.query()
+//!     .scan_label("Region")
+//!     .execute(&db)?;
+//!
+//! let count = regions.count();
+//! println!("Created {} regions", count);
+//! assert_eq!(count, 2);
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::core::NodeId;
 use crate::{AletheiaDB, PropertyMapBuilder, WriteOps};
@@ -17,6 +68,9 @@ pub struct ClusteringResult {
 }
 
 /// The Cartographer maps the semantic landscape of the graph.
+///
+/// It provides methods to perform K-Means clustering on node embeddings
+/// and to materialize those clusters as nodes in the graph.
 pub struct Cartographer<'a> {
     pub(crate) db: &'a AletheiaDB,
 }
@@ -28,6 +82,17 @@ impl<'a> Cartographer<'a> {
     }
 
     /// Analyzes the graph to find clusters based on the given vector property.
+    ///
+    /// This performs K-Means clustering on the vectors found in the specified property.
+    ///
+    /// # Arguments
+    ///
+    /// * `property` - The property name containing the vector embeddings (e.g., "embedding").
+    /// * `k` - The number of clusters to find.
+    ///
+    /// # Returns
+    ///
+    /// A `ClusteringResult` containing centroids and node assignments.
     pub fn analyze(
         &self,
         property: &str,
@@ -68,7 +133,14 @@ impl<'a> Cartographer<'a> {
     /// This method creates a "Region" node for each cluster and links all
     /// member nodes to it with a "LOCATED_IN" edge.
     ///
-    /// Returns the NodeIds of the created Region nodes.
+    /// # Structure Created
+    ///
+    /// - **Nodes**: `(:Region { name: "Region N", cluster_id: N, centroid: [...] })`
+    /// - **Edges**: `(:Node)-[:LOCATED_IN]->(:Region)`
+    ///
+    /// # Returns
+    ///
+    /// The NodeIds of the created Region nodes.
     pub fn reify(&self, clustering: &ClusteringResult) -> crate::core::error::Result<Vec<NodeId>> {
         self.db.write(|tx| {
             let mut region_ids = Vec::new();

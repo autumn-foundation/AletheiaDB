@@ -151,8 +151,17 @@ impl TimeRange {
     }
 
     /// Create a time range that starts at the given timestamp and is still current.
+    ///
+    /// # Panics
+    /// Panics if start > MAX_VALID_TIMESTAMP and start != TIMESTAMP_MAX.
     #[inline]
     pub fn from(start: Timestamp) -> Self {
+        if start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX {
+            panic!(
+                "Start timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                MAX_VALID_TIMESTAMP
+            );
+        }
         TimeRange {
             start,
             end: TIMESTAMP_MAX,
@@ -166,8 +175,17 @@ impl TimeRange {
     }
 
     /// Create a point-in-time range (instant with zero duration).
+    ///
+    /// # Panics
+    /// Panics if timestamp > MAX_VALID_TIMESTAMP and timestamp != TIMESTAMP_MAX.
     #[inline]
     pub fn at(timestamp: Timestamp) -> Self {
+        if timestamp.wallclock() > MAX_VALID_TIMESTAMP && timestamp != TIMESTAMP_MAX {
+            panic!(
+                "Timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                MAX_VALID_TIMESTAMP
+            );
+        }
         TimeRange {
             start: timestamp,
             end: timestamp,
@@ -248,6 +266,7 @@ impl TimeRange {
     ///
     /// # Errors
     /// Returns `TemporalError::InvalidTimeRange` if end < start.
+    /// Returns `TemporalError::InvalidTimestamp` if end > MAX_VALID_TIMESTAMP.
     #[inline]
     pub fn close_at(self, end: Timestamp) -> Result<Self, TemporalError> {
         if end < self.start {
@@ -256,6 +275,17 @@ impl TimeRange {
                 end,
             });
         }
+
+        if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: end,
+                reason: format!(
+                    "End timestamp exceeds MAX_VALID_TIMESTAMP ({})",
+                    MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+
         Ok(TimeRange {
             start: self.start,
             end,

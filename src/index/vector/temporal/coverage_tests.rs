@@ -5,7 +5,10 @@ use crate::core::observer::{StorageEvent, StorageObserver};
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
+
+use crate::core::hasher::IdentityHasher;
 
 #[test]
 fn test_config_coverage() {
@@ -71,7 +74,7 @@ fn test_snapshot_debug_coverage() -> Result<()> {
     let delta = SnapshotIndex::Delta(Arc::new(DeltaIndex {
         base: Arc::new(SnapshotIndex::Full(hnsw.clone())),
         added: hnsw.clone(),
-        removed: Arc::new(HashSet::new()),
+        removed: Arc::new(HashSet::with_hasher(BuildHasherDefault::default())),
     }));
     let debug_str = format!("{:?}", delta);
     assert!(debug_str.contains("SnapshotIndex::Delta"));
@@ -81,7 +84,7 @@ fn test_snapshot_debug_coverage() -> Result<()> {
     let delta_struct = DeltaIndex {
         base: Arc::new(SnapshotIndex::Full(hnsw.clone())),
         added: hnsw.clone(),
-        removed: Arc::new(HashSet::new()),
+        removed: Arc::new(HashSet::with_hasher(BuildHasherDefault::default())),
     };
     let debug_str_struct = format!("{:?}", delta_struct);
     assert!(debug_str_struct.contains("DeltaIndex"));
@@ -152,7 +155,9 @@ fn test_max_delta_chain_depth_error() {
     let root_time: i64 = 0;
     snapshots.insert(
         root_time.into(),
-        VectorSnapshot::Full(Arc::new(HashMap::new())),
+        VectorSnapshot::Full(Arc::new(
+            HashMap::with_hasher(BuildHasherDefault::default()),
+        )),
     );
 
     let mut last_time = root_time;
@@ -162,8 +167,8 @@ fn test_max_delta_chain_depth_error() {
             time.into(),
             VectorSnapshot::Delta {
                 base_time: last_time.into(),
-                added: Arc::new(HashMap::new()),
-                removed: Arc::new(HashSet::new()),
+                added: Arc::new(HashMap::with_hasher(BuildHasherDefault::default())),
+                removed: Arc::new(HashSet::with_hasher(BuildHasherDefault::default())),
             },
         );
         last_time = time;
@@ -195,15 +200,15 @@ fn test_vector_snapshot_delta_len_coverage() {
 
     let delta = VectorSnapshot::Delta {
         base_time: 0.into(),
-        added: Arc::new(HashMap::new()),
-        removed: Arc::new(HashSet::new()),
+        added: Arc::new(HashMap::with_hasher(BuildHasherDefault::default())),
+        removed: Arc::new(HashSet::with_hasher(BuildHasherDefault::default())),
     };
 
     // Should return MIN_CAPACITY_ESTIMATE since added is empty
     assert_eq!(delta.len(), MIN_CAPACITY_ESTIMATE);
 
     // Create one with more items than MIN
-    let mut added = HashMap::new();
+    let mut added = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
     for i in 0..MIN_CAPACITY_ESTIMATE + 10 {
         added.insert(NodeId::new(i as u64).unwrap(), Arc::from(vec![0.0f32]));
     }
@@ -211,7 +216,7 @@ fn test_vector_snapshot_delta_len_coverage() {
     let delta_large = VectorSnapshot::Delta {
         base_time: 0.into(),
         added: Arc::new(added.clone()),
-        removed: Arc::new(HashSet::new()),
+        removed: Arc::new(HashSet::with_hasher(BuildHasherDefault::default())),
     };
 
     assert_eq!(delta_large.len(), MIN_CAPACITY_ESTIMATE + 10);
@@ -222,12 +227,12 @@ fn test_delta_get_vector_removed_coverage() -> Result<()> {
     use super::snapshot::VectorSnapshot;
 
     let id = NodeId::new(1).unwrap();
-    let mut removed = HashSet::new();
+    let mut removed = HashSet::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
     removed.insert(id);
 
     let delta = VectorSnapshot::Delta {
         base_time: 0.into(),
-        added: Arc::new(HashMap::new()),
+        added: Arc::new(HashMap::with_hasher(BuildHasherDefault::default())),
         removed: Arc::new(removed),
     };
 

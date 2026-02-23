@@ -221,6 +221,9 @@ impl GroupCommitCoordinator {
             .max(Duration::from_millis(self.config.timeout_min_ms))
             .min(Duration::from_millis(self.config.timeout_max_ms));
 
+        // Use a deadline to prevent spurious wakeups from resetting the timeout clock
+        let deadline = std::time::Instant::now() + timeout;
+
         // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
         // and this wait (rare but possible on fast systems), this loop exits immediately since
         // flushed_epoch >= epoch, and we return Ok(()) without waiting.
@@ -228,9 +231,25 @@ impl GroupCommitCoordinator {
         // EPOCH SEMANTICS: flushed_epoch = N means "epoch N has been flushed".
         // Transaction at epoch E waits while flushed_epoch < E (i.e., E has not been flushed yet).
         while state.flushed_epoch < epoch {
+            let now = std::time::Instant::now();
+            let remaining = if now >= deadline {
+                Duration::from_secs(0)
+            } else {
+                deadline - now
+            };
+
+            if remaining.as_nanos() == 0 {
+                return Err(Error::Storage(StorageError::WalError {
+                    reason: format!(
+                        "Group commit timeout waiting for epoch {} (current flushed: {})",
+                        epoch, state.flushed_epoch
+                    ),
+                }));
+            }
+
             let (new_state, timeout_result) = self
                 .flush_complete
-                .wait_timeout(state, timeout)
+                .wait_timeout(state, remaining)
                 .map_err(|_| {
                     Error::Storage(StorageError::LockPoisoned {
                         resource: "group_commit_state".to_string(),
@@ -239,7 +258,10 @@ impl GroupCommitCoordinator {
 
             state = new_state;
 
-            if timeout_result.timed_out() && state.flushed_epoch < epoch {
+            // Check if we timed out (either by Condvar result OR by deadline)
+            if (timeout_result.timed_out() || std::time::Instant::now() >= deadline)
+                && state.flushed_epoch < epoch
+            {
                 return Err(Error::Storage(StorageError::WalError {
                     reason: format!(
                         "Group commit timeout waiting for epoch {} (current flushed: {})",
@@ -781,5 +803,53 @@ mod tests {
 
         // 8. Transaction B should be done
         assert!(coord.wait_for_flush(epoch_b).is_ok());
+    }
+
+    #[test]
+    fn test_wait_for_flush_deadline_enforcement() {
+        // Config: timeout ~100ms
+        let config = GroupCommitConfig {
+            max_delay_ms: 10,
+            max_batch_size: 100,
+            timeout_multiplier: 1, // 10ms
+            timeout_base_ms: 10,   // + 10ms = 20ms
+            timeout_min_ms: 50,    // clamp min -> 50ms
+            timeout_max_ms: 200,   // clamp max -> 200ms
+            recent_errors_capacity: 1024,
+        };
+
+        let coord = Arc::new(GroupCommitCoordinator::with_config(config));
+        let coord_clone = Arc::clone(&coord);
+
+        // Register a transaction for Epoch 1
+        let (epoch, _) = coord.register_transaction().unwrap();
+
+        // Spawn a thread that keeps triggering "spurious" wakeups every 10ms
+        thread::spawn(move || {
+            let start = std::time::Instant::now();
+            // Run for 500ms (10x the timeout)
+            while start.elapsed() < Duration::from_millis(500) {
+                thread::sleep(Duration::from_millis(10));
+                // Finish a future epoch (100) triggers notify_all but doesn't advance flushed_epoch
+                let _ = coord_clone.finish_flush(100, Ok(()));
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let result = coord.wait_for_flush(epoch);
+        let elapsed = start.elapsed();
+
+        // Should fail fast (~50ms) with timeout error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timeout"));
+
+        // If bug exists, it will wait ~500ms (or whatever the thread runs for)
+        // If fix works, it will timeout around 50ms.
+        // We set threshold at 150ms to be safe for CI.
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "Wait took {:?}, expected < 150ms",
+            elapsed
+        );
     }
 }
