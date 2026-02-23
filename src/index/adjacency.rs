@@ -712,9 +712,9 @@ mod tests {
     #[test]
     fn test_import_csr_valid() {
         // Valid CSR import to cover "success" paths of assertions
-        let node_ids = vec![1, 2];
-        let offsets = vec![0, 1, 2]; // 2 nodes, 1 edge each (total 2)
-        let edge_ids = vec![100, 200]; // 2 edges
+        let node_ids = [1, 2];
+        let offsets = [0, 1, 2]; // 2 nodes, 1 edge each (total 2)
+        let edge_ids = [100, 200]; // 2 edges
         let mut map = std::collections::HashMap::new();
         let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
