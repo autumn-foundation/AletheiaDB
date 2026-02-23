@@ -1847,4 +1847,34 @@ mod sentry_tests {
         let range = TimeRange::new(100.into(), 200.into()).unwrap();
         assert!(!range.is_empty(), "Range [100, 200) should not be empty");
     }
+
+    #[test]
+    fn test_sentry_timerange_at_timestamp_max() {
+        // 🛡️ Sentry Test: Verify TimeRange::at() accepts TIMESTAMP_MAX.
+        // This targets the mutant `if ... timestamp != TIMESTAMP_MAX` -> `if ... timestamp == TIMESTAMP_MAX`.
+        // If the check logic is inverted, this call will panic because TIMESTAMP_MAX > MAX_VALID_TIMESTAMP.
+        let range = TimeRange::at(TIMESTAMP_MAX);
+        assert_eq!(range.start(), TIMESTAMP_MAX);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+        assert!(range.is_empty());
+    }
+
+    #[test]
+    fn test_sentry_timerange_new_timestamp_max() {
+        // 🛡️ Sentry Test: Verify TimeRange::new() accepts TIMESTAMP_MAX for start/end.
+        // This targets the mutants in TimeRange::new() that invert the sentinel check logic.
+        let range = TimeRange::new(TIMESTAMP_MAX, TIMESTAMP_MAX).unwrap();
+        assert_eq!(range.start(), TIMESTAMP_MAX);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_sentry_timerange_close_at_timestamp_max() {
+        // 🛡️ Sentry Test: Verify TimeRange::close_at() accepts TIMESTAMP_MAX.
+        // This targets the mutant in TimeRange::close_at() that inverts the sentinel check logic.
+        let range = TimeRange::from(100.into());
+        let closed = range.close_at(TIMESTAMP_MAX).unwrap();
+        assert_eq!(closed.end(), TIMESTAMP_MAX);
+        assert!(closed.is_current());
+    }
 }
