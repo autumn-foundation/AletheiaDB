@@ -52,7 +52,7 @@ base64 = { version = "0.22", optional = true }
 actix-web = { version = "4.9", optional = true }
 actix-cors = { version = "0.7", optional = true }
 actix-rt = { version = "2.10", optional = true }
-actix-governor = { version = "0.6", optional = true }
+actix-governor = { version = "0.10", optional = true }
 
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
