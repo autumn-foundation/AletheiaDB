@@ -182,6 +182,11 @@ pub fn create_app() -> App<
 /// shutdown.shutdown().await;
 /// ```
 pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, ShutdownHandle)> {
+    // Validate configuration
+    if let Err(e) = config.validate() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e));
+    }
+
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let shutdown_handle = ShutdownHandle::new(shutdown_tx);
 
@@ -234,6 +239,11 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
 /// }
 /// ```
 pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
+    // Validate configuration
+    if let Err(e) = config.validate() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e));
+    }
+
     let bind_address = config.bind_address();
     let cors_config = config.cors().clone();
     let rate_limit_config = config.rate_limit().clone();
@@ -409,5 +419,21 @@ mod tests {
             resp2.status().is_success(),
             "Rate limit did not replenish in time"
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_create_server_validates_config() {
+        let rate_limit_config = RateLimitConfig::new(0, 1);
+        let config = ServerConfig::builder()
+            .port(0)
+            .rate_limit(rate_limit_config)
+            .build();
+
+        let result = create_server(config).await;
+        if let Err(e) = result {
+            assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        } else {
+            panic!("Expected error but got success");
+        }
     }
 }
