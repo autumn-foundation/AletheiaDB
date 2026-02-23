@@ -93,24 +93,8 @@ impl AdjacencyIndex {
             return Self::new();
         }
 
-        // Validate CSR invariants to prevent panics during queries
-        if offsets.len() != node_ids.len() + 1 {
-            panic!(
-                "CSR offsets length mismatch: expected {}, got {}",
-                node_ids.len() + 1,
-                offsets.len()
-            );
-        }
-
-        // Safe to unwrap because we checked offsets.is_empty() above
-        let last_offset = *offsets.last().unwrap();
-        if last_offset != edge_ids.len() as u64 {
-            panic!(
-                "CSR last offset mismatch: expected {}, got {}",
-                edge_ids.len(),
-                last_offset
-            );
-        }
+        // Validate CSR invariants
+        Self::validate_csr_invariants(&node_ids, &offsets, &edge_ids).unwrap();
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
@@ -285,6 +269,33 @@ impl AdjacencyIndex {
     #[inline]
     pub fn node_count(&self) -> usize {
         self.node_ids.len()
+    }
+
+    /// Validate CSR invariants.
+    fn validate_csr_invariants(
+        node_ids: &[u64],
+        offsets: &[u64],
+        edge_ids: &[u64],
+    ) -> Result<(), String> {
+        if offsets.len() != node_ids.len() + 1 {
+            return Err(format!(
+                "CSR offsets length mismatch: expected {}, got {}",
+                node_ids.len() + 1,
+                offsets.len()
+            ));
+        }
+
+        if let Some(&last_offset) = offsets.last() {
+            if last_offset != edge_ids.len() as u64 {
+                return Err(format!(
+                    "CSR last offset mismatch: expected {}, got {}",
+                    edge_ids.len(),
+                    last_offset
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -696,48 +707,33 @@ mod sentry_tests {
     use std::collections::HashMap;
 
     #[test]
-    fn test_import_csr_validates_offsets_length() {
+    fn test_validate_csr_invariants_logic() {
+        // 1. Valid case
         let node_ids = vec![10, 20];
-        // Invalid: offsets len should be node_ids.len() + 1 = 3
-        let offsets = vec![0, 1];
-        let edge_ids = vec![100];
-        let edges_map = HashMap::new();
+        let offsets = vec![0, 1, 2];
+        let edge_ids = vec![100, 101];
+        assert!(AdjacencyIndex::validate_csr_invariants(&node_ids, &offsets, &edge_ids).is_ok());
 
-        // Use catch_unwind to ensure test completes and coverage is captured
-        let result = std::panic::catch_unwind(|| {
-            AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
-        });
+        // 2. Invalid offsets length
+        let invalid_offsets_len = vec![0, 1]; // too short
+        let err_len = AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_len, &edge_ids).unwrap_err();
+        assert!(err_len.contains("CSR offsets length mismatch"));
 
-        assert!(result.is_err(), "Should have panicked");
-        let err = result.unwrap_err();
-        if let Some(msg) = err.downcast_ref::<&str>() {
-            assert!(msg.contains("CSR offsets length mismatch"));
-        } else if let Some(msg) = err.downcast_ref::<String>() {
-            assert!(msg.contains("CSR offsets length mismatch"));
-        }
+        // 3. Invalid last offset
+        let invalid_offsets_val = vec![0, 1, 5]; // last is 5, but edges len is 2
+        let err_val = AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_val, &edge_ids).unwrap_err();
+        assert!(err_val.contains("CSR last offset mismatch"));
     }
 
     #[test]
-    fn test_import_csr_validates_last_offset() {
-        let node_ids = vec![10, 20];
-        // Valid length (3 = 2 + 1), but invalid last offset
-        // Edge IDs len is 1, so last offset should be 1
-        let offsets = vec![0, 0, 5]; // 5 != 1
-        let edge_ids = vec![100];
+    #[should_panic(expected = "CSR offsets length mismatch")]
+    fn test_import_csr_panics_on_invalid() {
+        // Integration check: ensure import_csr actually calls validate and panics
+        let node_ids = vec![10];
+        let offsets = vec![0]; // invalid len (should be 2)
+        let edge_ids = vec![100]; // Non-empty to bypass early return
         let edges_map = HashMap::new();
-
-        // Use catch_unwind to ensure test completes and coverage is captured
-        let result = std::panic::catch_unwind(|| {
-            AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
-        });
-
-        assert!(result.is_err(), "Should have panicked");
-        let err = result.unwrap_err();
-        if let Some(msg) = err.downcast_ref::<&str>() {
-            assert!(msg.contains("CSR last offset mismatch"));
-        } else if let Some(msg) = err.downcast_ref::<String>() {
-            assert!(msg.contains("CSR last offset mismatch"));
-        }
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
 
     #[test]
