@@ -9,7 +9,11 @@ fn test_small_vector_consistency() {
 
     // normalize(small_vec) should return a zero vector because magnitude is too small.
     let small_norm = normalize(&small_vec);
-    assert_eq!(small_norm, vec![0.0f32], "normalize should return zero vector for small magnitude input");
+    assert_eq!(
+        small_norm,
+        vec![0.0f32],
+        "normalize should return zero vector for small magnitude input"
+    );
 
     // cosine_similarity(small_vec, normal_vec) currently returns ~1.0 (if collinear) or whatever.
     // After fix, it should return 0.0 because small_vec is effectively zero.
@@ -23,11 +27,22 @@ fn test_small_vector_consistency() {
     println!("sim_raw: {}, sim_norm: {}", sim_raw, sim_norm);
 
     // Assert consistency: raw similarity should match normalized similarity (both 0.0).
-    assert!((sim_raw - sim_norm).abs() < 1e-6, "Raw similarity {} does not match normalized similarity {}", sim_raw, sim_norm);
+    assert!(
+        (sim_raw - sim_norm).abs() < 1e-6,
+        "Raw similarity {} does not match normalized similarity {}",
+        sim_raw,
+        sim_norm
+    );
 
     // Specifically, both should be 0.0
-    assert_eq!(sim_raw, 0.0, "cosine_similarity should return 0.0 for small vectors");
-    assert_eq!(sim_norm, 0.0, "cosine_similarity_normalized should return 0.0 for zero vectors");
+    assert_eq!(
+        sim_raw, 0.0,
+        "cosine_similarity should return 0.0 for small vectors"
+    );
+    assert_eq!(
+        sim_norm, 0.0,
+        "cosine_similarity_normalized should return 0.0 for zero vectors"
+    );
 }
 
 #[test]
@@ -39,6 +54,12 @@ fn test_small_vector_pair_consistency() {
     let sim_raw = cosine_similarity(&a, &b).unwrap();
     let sim_norm = cosine_similarity_normalized(&normalize(&a), &normalize(&b)).unwrap();
 
-    assert_eq!(sim_raw, 0.0, "cosine_similarity should return 0.0 for small vector pair");
-    assert_eq!(sim_norm, 0.0, "cosine_similarity_normalized should return 0.0 for zero vector pair");
+    assert_eq!(
+        sim_raw, 0.0,
+        "cosine_similarity should return 0.0 for small vector pair"
+    );
+    assert_eq!(
+        sim_norm, 0.0,
+        "cosine_similarity_normalized should return 0.0 for zero vector pair"
+    );
 }
