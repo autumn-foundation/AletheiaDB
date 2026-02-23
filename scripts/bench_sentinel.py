@@ -828,6 +828,11 @@ def main():
         action="store_true",
         help="Parse and report but don't save history",
     )
+    parser.add_argument(
+        "--no-block",
+        action="store_true",
+        help="Do not exit with error code on regressions (useful for nightly runs)",
+    )
 
     args = parser.parse_args()
 
@@ -882,10 +887,10 @@ def main():
 
     if has_critical:
         print("\n[chronos] 🚨 CRITICAL REGRESSIONS — recommend blocking merge.")
-        sys.exit(2)
+        sys.exit(0 if args.no_block else 2)
     elif has_regression:
         print("\n[chronos] ⚠️  Regressions detected — review recommended.")
-        sys.exit(1)
+        sys.exit(0 if args.no_block else 1)
     else:
         print("\n[chronos] ✅ All clear.")
         sys.exit(0)
