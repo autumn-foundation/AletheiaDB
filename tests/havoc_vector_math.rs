@@ -65,11 +65,13 @@ fn test_cosine_similarity_repro_regression() {
     let b = vec![-125.53673f32];
 
     // This call should NOT panic, even in debug mode.
-    // It should return 1.0 (clamped).
+    // Previously it returned 1.0 (clamped).
+    // Now, since `a` has squared magnitude < 1e-14, it is treated as a zero vector.
+    // This ensures consistency with normalize().
     let res = cosine_similarity(&a, &b).unwrap();
 
     assert!((-1.0..=1.0).contains(&res), "Result {} out of range", res);
 
-    // Ideally it should be exactly 1.0 or very close
-    assert!((res - 1.0).abs() < 1e-6, "Result {} should be ~1.0", res);
+    // Should be 0.0 because `a` is effectively zero
+    assert_eq!(res, 0.0, "Result {} should be 0.0 (noise vector)", res);
 }
