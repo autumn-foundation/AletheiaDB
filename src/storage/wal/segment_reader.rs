@@ -125,6 +125,11 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         .metadata()
         .map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
 
+    // Handle empty files explicitly to prevent mmap failure on some platforms (e.g. Linux)
+    if metadata.len() == 0 {
+        return Ok(Vec::new());
+    }
+
     if metadata.len() > MAX_SEGMENT_SIZE {
         return Err(StorageError::CorruptedData(format!(
             "WAL segment too large: {} bytes (max: {} bytes)",

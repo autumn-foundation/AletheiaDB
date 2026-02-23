@@ -93,6 +93,24 @@ impl AdjacencyIndex {
             return Self::new();
         }
 
+        // CSR Invariant Validation:
+        // 1. offsets array must have length = node_ids.len() + 1
+        // 2. The last offset must equal the total number of edges
+        assert_eq!(
+            offsets.len(),
+            node_ids.len() + 1,
+            "CSR offsets length mismatch: expected {}, got {}",
+            node_ids.len() + 1,
+            offsets.len()
+        );
+        assert_eq!(
+            offsets.last(),
+            Some(&(edge_ids.len() as u64)),
+            "CSR last offset mismatch: expected {}, got {:?}",
+            edge_ids.len(),
+            offsets.last()
+        );
+
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
         let node_ids_typed: Vec<NodeId> = node_ids
