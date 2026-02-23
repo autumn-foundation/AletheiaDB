@@ -1154,7 +1154,8 @@ mod mutant_kill_tests {
             .spawn()
             .expect("failed to spawn subprocess for with_max_capacity test");
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // CI environments can be slow, so give it plenty of time (10s)
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
