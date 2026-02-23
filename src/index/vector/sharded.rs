@@ -504,7 +504,8 @@ impl ShardedVectorIndex {
             .collect();
 
         // Sort descending by score
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Use OrderedFloat logic to ensure NaNs are handled consistently (NaN is last/smallest)
+        results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
 
         results
     }
@@ -513,8 +514,18 @@ impl ShardedVectorIndex {
 /// Wrapper for f32 that implements Ord for use in BinaryHeap.
 ///
 /// NaN values are treated as less than all other values for consistent ordering.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 struct OrderedFloat(f32);
+
+impl PartialEq for OrderedFloat {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.is_nan() && other.0.is_nan() {
+            true
+        } else {
+            self.0 == other.0
+        }
+    }
+}
 
 impl Eq for OrderedFloat {}
 
@@ -742,6 +753,212 @@ impl VectorIndex for ShardedVectorIndex {
             shard.compact()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    // ============================================================
+    // OrderedFloat Property Tests
+    // ============================================================
+
+    #[test]
+    fn test_sentry_ordered_float_total_ordering_properties() {
+        // 🛡️ Sentry Test: Verify Total Ordering properties (Reflexivity, Antisymmetry, Transitivity)
+        let a = OrderedFloat(1.0);
+        let b = OrderedFloat(2.0);
+        let c = OrderedFloat(3.0);
+
+        // Reflexivity: a <= a
+        assert!(a <= a);
+
+        // Antisymmetry: if a <= b and b <= a then a == b
+        if a <= b && b <= a {
+            assert_eq!(a, b);
+        }
+
+        // Transitivity: if a <= b and b <= c then a <= c
+        if a <= b && b <= c {
+            assert!(a <= c);
+        }
+    }
+
+    #[test]
+    fn test_sentry_ordered_float_infinity() {
+        // 🛡️ Sentry Test: Infinity handling
+        let pos_inf = OrderedFloat(f32::INFINITY);
+        let neg_inf = OrderedFloat(f32::NEG_INFINITY);
+        let zero = OrderedFloat(0.0);
+
+        assert!(neg_inf < zero);
+        assert!(zero < pos_inf);
+        assert!(neg_inf < pos_inf);
+    }
+
+    #[test]
+    fn test_sentry_ordered_float_nan_strictly_less() {
+        // 🛡️ Sentry Test: NaN is strictly less than everything else (including -inf)
+        // This ensures consistent sorting where NaNs bubble to one end
+        let nan = OrderedFloat(f32::NAN);
+        let neg_inf = OrderedFloat(f32::NEG_INFINITY);
+        let zero = OrderedFloat(0.0);
+        let pos_inf = OrderedFloat(f32::INFINITY);
+
+        assert!(nan < neg_inf);
+        assert!(nan < zero);
+        assert!(nan < pos_inf);
+        assert!(nan == nan); // Verified by our manual PartialEq impl
+    }
+
+    // ============================================================
+    // merge_results Edge Cases
+    // ============================================================
+
+    #[test]
+    fn test_sentry_merge_results_k_larger_than_total() {
+        // 🛡️ Sentry Test: Requesting more results than available
+        let shard_results = vec![
+            vec![(NodeId::new(1).unwrap(), 0.9)],
+            vec![(NodeId::new(2).unwrap(), 0.8)],
+        ];
+        // Total items: 2, k: 5
+        let merged = ShardedVectorIndex::merge_results(shard_results, 5);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].0, NodeId::new(1).unwrap());
+        assert_eq!(merged[1].0, NodeId::new(2).unwrap());
+    }
+
+    #[test]
+    fn test_sentry_merge_results_empty_inner_vecs() {
+        // 🛡️ Sentry Test: Some shards return no results
+        let shard_results = vec![
+            vec![], // Empty shard
+            vec![(NodeId::new(1).unwrap(), 0.9)],
+            vec![], // Another empty shard
+        ];
+        let merged = ShardedVectorIndex::merge_results(shard_results, 5);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].0, NodeId::new(1).unwrap());
+    }
+
+    #[test]
+    fn test_sentry_merge_results_nan_scores() {
+        // 🛡️ Sentry Test: Handling NaN scores in results
+        // Since OrderedFloat treats NaN as lowest, they should be at the end of the sorted list
+        // BUT merge_results uses a min-heap to keep the TOP k.
+        // Top K means largest scores.
+        // If NaN < everything, it's the smallest.
+        // So NaN should essentially never be in the top K unless we have fewer than K valid results.
+
+        let shard_results = vec![vec![
+            (NodeId::new(1).unwrap(), f32::NAN),
+            (NodeId::new(2).unwrap(), 0.5),
+        ]];
+
+        // We want top 2.
+        // OrderedFloat: NaN < 0.5.
+        // Sorted descending: 0.5, NaN.
+        let merged = ShardedVectorIndex::merge_results(shard_results, 2);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].0, NodeId::new(2).unwrap()); // 0.5
+        assert_eq!(merged[1].0, NodeId::new(1).unwrap()); // NaN
+        assert!(merged[1].1.is_nan());
+    }
+
+    // ============================================================
+    // Sharding Strategy Consistency
+    // ============================================================
+
+    #[test]
+    fn test_sentry_shard_for_id_determinism() {
+        // 🛡️ Sentry Test: Ensure shard mapping is deterministic
+        // Must provide valid HNSW config with dimensions > 0
+        let config = ShardedVectorConfig::new(4)
+            .with_hnsw_config(HnswConfig::new(4, DistanceMetric::Cosine));
+        let index = ShardedVectorIndex::new(config).unwrap();
+
+        let id = NodeId::new(12345).unwrap();
+        let shard1 = index.shard_for_id(id);
+        let shard2 = index.shard_for_id(id);
+        assert_eq!(shard1, shard2);
+    }
+
+    #[test]
+    fn test_sentry_shard_for_id_range_based_boundaries() {
+        // 🛡️ Sentry Test: Boundary checks for RangeBased
+        let config = ShardedVectorConfig::new(4)
+            .with_strategy(ShardingStrategy::RangeBased)
+            .with_hnsw_config(HnswConfig::new(4, DistanceMetric::Cosine));
+        let index = ShardedVectorIndex::new(config).unwrap();
+
+        // 0 should map to shard 0
+        assert_eq!(index.shard_for_id(NodeId::new(0).unwrap()), 0);
+
+        // MAX_VALID_ID should map to shard 3 (last shard)
+        // Note: NodeId::new(u64::MAX) fails validation because of reserved range.
+        // Use MAX_VALID_ID instead (which is publicly available in core::id or similar,
+        // but here we can just use a known safe large value or expect an error from NodeId::new).
+        // Since we want to test sharding logic, we use a valid large ID.
+        // NodeId::new checks against MAX_VALID_ID (u64::MAX - 1000).
+        let max_valid = u64::MAX - 1000;
+        assert_eq!(index.shard_for_id(NodeId::new(max_valid).unwrap()), 3);
+    }
+
+    // ============================================================
+    // Rebalancing Logic
+    // ============================================================
+
+    #[test]
+    fn test_sentry_estimate_rebalance_cost_perfectly_balanced() {
+        // 🛡️ Sentry Test: Cost should be 0 if perfectly balanced
+        let _index = ShardedVectorIndex::with_defaults(4, DistanceMetric::Cosine, 2).unwrap();
+
+        // Add 10 to shard 0, 10 to shard 1 (simulated by mocking stats?)
+        // We can't mock internal stats easily, so we rely on adding real vectors.
+        // RangeBased is easier to control distribution.
+        let config = ShardedVectorConfig::new(2)
+            .with_strategy(ShardingStrategy::RangeBased)
+            .with_hnsw_config(HnswConfig::new(4, DistanceMetric::Cosine))
+            .with_rebalance_config(RebalanceConfig::new().with_imbalance_threshold(1.1));
+        let index = ShardedVectorIndex::new(config).unwrap();
+
+        // Add 10 vectors to shard 0 (low IDs)
+        for i in 0..10 {
+            index.add(NodeId::new(i).unwrap(), &[0.0; 4]).unwrap();
+        }
+        // Add 10 vectors to shard 1 (high IDs)
+        let max_valid = u64::MAX - 1000;
+        for i in 0..10 {
+            let id = max_valid - i;
+            index.add(NodeId::new(id).unwrap(), &[0.0; 4]).unwrap();
+        }
+
+        let cost = index.estimate_rebalance_cost().unwrap();
+        assert_eq!(cost, 0);
+    }
+
+    #[test]
+    fn test_sentry_estimate_rebalance_cost_imbalanced() {
+        // 🛡️ Sentry Test: Cost should be > 0 if imbalanced
+        let config = ShardedVectorConfig::new(2)
+            .with_strategy(ShardingStrategy::RangeBased)
+            .with_hnsw_config(HnswConfig::new(4, DistanceMetric::Cosine))
+            .with_rebalance_config(RebalanceConfig::new().with_imbalance_threshold(1.1));
+        let index = ShardedVectorIndex::new(config).unwrap();
+
+        // Add 20 vectors to shard 0 only
+        for i in 0..20 {
+            index.add(NodeId::new(i).unwrap(), &[0.0; 4]).unwrap();
+        }
+
+        // Stats: [20, 0]. Total 20. Target 10 per shard.
+        // Shard 0 has 20, target 10. Excess = 10.
+        // Cost should be 10.
+
+        let cost = index.estimate_rebalance_cost().unwrap();
+        assert_eq!(cost, 10);
     }
 }
 
