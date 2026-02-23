@@ -193,6 +193,9 @@ exclude = [
     "examples/**",
 ]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 # Examples with required features
 # Embedding examples require their respective feature flags
 [[example]]
