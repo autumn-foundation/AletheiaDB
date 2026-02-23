@@ -227,10 +227,27 @@ impl GroupCommitCoordinator {
         //
         // EPOCH SEMANTICS: flushed_epoch = N means "epoch N has been flushed".
         // Transaction at epoch E waits while flushed_epoch < E (i.e., E has not been flushed yet).
+
+        // Use absolute deadline to ensure we don't wait indefinitely due to spurious wakeups
+        let start = std::time::Instant::now();
+
         while state.flushed_epoch < epoch {
+            // Check if we've already exceeded the timeout (absolute check)
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::Storage(StorageError::WalError {
+                    reason: format!(
+                        "Group commit timeout waiting for epoch {} (current flushed: {})",
+                        epoch, state.flushed_epoch
+                    ),
+                }));
+            }
+
+            let remaining = timeout - elapsed;
+
             let (new_state, timeout_result) = self
                 .flush_complete
-                .wait_timeout(state, timeout)
+                .wait_timeout(state, remaining)
                 .map_err(|_| {
                     Error::Storage(StorageError::LockPoisoned {
                         resource: "group_commit_state".to_string(),

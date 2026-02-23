@@ -147,7 +147,10 @@ pub fn evaluate_clock_skew(
     max_forward_jump_us: Option<i64>,
     self_heal_clock_skew: bool,
 ) -> Result<ClockSkewDecision, ClockSkewViolation> {
-    let drift = current_wallclock - frontier_wallclock;
+    // Use saturating_sub to prevent integer overflow attacks.
+    // Without this, huge forward jumps (e.g. current=MAX, frontier=MIN) could wrap around
+    // to small negative values, bypassing drift checks.
+    let drift = current_wallclock.saturating_sub(frontier_wallclock);
     let mut effective_wallclock = current_wallclock;
     let mut healed_direction = None;
 
@@ -932,6 +935,34 @@ mod tests {
             result_backward.is_ok(),
             "Exact max backward drift should be allowed"
         );
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_integer_overflow_vulnerability() {
+        // 🛡️ Sentry Test: Verify evaluate_clock_skew is robust against integer overflow.
+        // Scenario: Frontier is MIN, Current is MAX. Real drift is +Infinity.
+        // Vulnerable calculation: MAX - MIN = -1 (due to overflow).
+        // If vulnerable, this appears as valid small backward drift.
+
+        let current = i64::MAX;
+        let frontier = i64::MIN;
+
+        let result = evaluate_clock_skew(current, frontier, Some(3_600_000_000), false);
+
+        // Should be rejected as forward jump (drift > max_forward).
+        // If vulnerable, it returns Ok because -1 < max_forward and > -max_backward.
+        match result {
+            Ok(_) => {
+                panic!("Vulnerability confirmed: Overflow masked huge forward jump as valid drift")
+            }
+            Err(ClockSkewViolation {
+                direction: ClockSkewDirection::Forward,
+                ..
+            }) => {
+                // Correct behavior
+            }
+            Err(e) => panic!("Unexpected error type: {:?}", e),
+        }
     }
 }
 

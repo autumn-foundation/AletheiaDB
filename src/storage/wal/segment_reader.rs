@@ -39,6 +39,14 @@ pub(crate) const WAL_HEADER_SIZE: usize = 5;
 /// Default segments are 64MB, so 1GB allows for 16x growth
 pub(crate) const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 
+/// Maximum number of WAL entries to read during recovery to prevent OOM.
+/// Production limit: 10,000,000
+/// Test limit: 2,000
+#[cfg(not(test))]
+pub(crate) const MAX_RECOVERY_ENTRIES: usize = 10_000_000;
+#[cfg(test)]
+pub(crate) const MAX_RECOVERY_ENTRIES: usize = 2_000;
+
 /// Read all WAL entries from a directory, starting from the specified LSN.
 ///
 /// This function scans the directory for segment files (*.log), reads them in order,
@@ -76,6 +84,16 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
     // Read entries from each segment
     for (_, path) in segments {
         let segment_entries = read_segment(&path, start_lsn)?;
+
+        if entries.len() + segment_entries.len() > MAX_RECOVERY_ENTRIES {
+            return Err(StorageError::CorruptedData(format!(
+                "Too many WAL entries during recovery: {} (limit: {})",
+                entries.len() + segment_entries.len(),
+                MAX_RECOVERY_ENTRIES
+            ))
+            .into());
+        }
+
         entries.extend(segment_entries);
     }
 
@@ -173,6 +191,15 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
 
     // Parse entries using the extracted helper function (issue #218)
     while offset < buffer.len() {
+        if entries.len() >= MAX_RECOVERY_ENTRIES {
+            return Err(StorageError::CorruptedData(format!(
+                "Too many WAL entries in segment: {} (limit: {})",
+                entries.len(),
+                MAX_RECOVERY_ENTRIES
+            ))
+            .into());
+        }
+
         // Try to parse an entry at the current offset
         match parse_entry_at(buffer, offset, version) {
             Ok((entry, bytes_consumed)) => {
@@ -1851,6 +1878,9 @@ mod fuzz_tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::temporal::time;
+    use crate::storage::wal::serialization::serialize_entry_into;
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
@@ -1949,5 +1979,40 @@ mod sentry_tests {
             "Should read op type and fail validation. Got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_read_segment_max_recovery_entries() {
+        // 🛡️ Sentry Test: Verify MAX_RECOVERY_ENTRIES is enforced.
+        // Test limit is 2,000. We write 2,001 entries.
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("too_many.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        for i in 0..MAX_RECOVERY_ENTRIES + 1 {
+            let operation = WalOperation::CreateNode {
+                node_id: NodeId::new(i as u64 + 1).unwrap(),
+                label: GLOBAL_INTERNER.intern("Node").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+            };
+            let entry = WalEntry::new(LSN(i as u64 + 1), operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file.write_all(&buffer).unwrap();
+        }
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        let result = read_segment(&segment_path, LSN(1));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Too many WAL entries"));
     }
 }

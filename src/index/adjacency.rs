@@ -78,6 +78,11 @@ impl AdjacencyIndex {
 
     /// Import CSR data from persistence, reconstructing adjacency entries from edges.
     ///
+    /// # Panics
+    /// Panics if the input arrays do not satisfy CSR invariants:
+    /// - `offsets.len() == node_ids.len() + 1`
+    /// - `offsets.last() == Some(edge_ids.len())`
+    ///
     /// # Arguments
     /// * `node_ids` - Sorted array of node IDs that have outgoing edges
     /// * `offsets` - CSR offset array
@@ -92,6 +97,18 @@ impl AdjacencyIndex {
         if offsets.is_empty() || edge_ids.is_empty() {
             return Self::new();
         }
+
+        // Validate invariants to prevent late panics or corruption
+        assert_eq!(
+            offsets.len(),
+            node_ids.len() + 1,
+            "CSR invariant violated: offsets length must be node_ids length + 1"
+        );
+        assert_eq!(
+            offsets.last().copied(),
+            Some(edge_ids.len() as u64),
+            "CSR invariant violated: last offset must equal total edge count"
+        );
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
@@ -668,5 +685,27 @@ mod tests {
             1000,
             "max_node_id should consider target nodes"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "CSR invariant violated")]
+    fn test_import_csr_invalid_offsets_len() {
+        let node_ids = vec![1, 2];
+        let offsets = vec![0, 1]; // Should be len 3
+        let edge_ids = vec![100];
+        let map = std::collections::HashMap::new();
+
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &map);
+    }
+
+    #[test]
+    #[should_panic(expected = "CSR invariant violated: last offset must equal total edge count")]
+    fn test_import_csr_invalid_last_offset() {
+        let node_ids = vec![1];
+        let offsets = vec![0, 2]; // Last offset 2 implies 2 edges
+        let edge_ids = vec![100]; // But only 1 edge provided
+        let map = std::collections::HashMap::new();
+
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &map);
     }
 }
