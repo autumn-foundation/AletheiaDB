@@ -46,6 +46,7 @@ fn test_group_commit_high_concurrency_consistency() {
 
                     // 2. Commit (Wait for Group Commit)
                     // If append is async (GroupCommit mode), we must commit to ensure durability
+                    #[allow(clippy::collapsible_if)]
                     if let Some(epoch) = wal.commit().expect("Commit failed") {
                         if let Some(gc) = wal.group_commit_coordinator() {
                             gc.wait_for_flush(epoch).expect("Wait for flush failed");

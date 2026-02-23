@@ -261,13 +261,10 @@ impl BackgroundFlusher {
 
                 if let Some((epoch, gc)) = epoch.zip(self.group_commit.as_ref()) {
                     // Create a new error from the string representation
-                    gc.finish_flush(
-                        epoch,
-                        Err(crate::core::error::Error::other(e.to_string())),
-                    )
-                    .expect(
-                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                    );
+                    gc.finish_flush(epoch, Err(crate::core::error::Error::other(e.to_string())))
+                        .expect(
+                            "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
+                        );
                 }
             }
         }

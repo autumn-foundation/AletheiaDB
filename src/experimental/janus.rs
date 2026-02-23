@@ -80,6 +80,7 @@ impl<'a> JanusDetector<'a> {
             let neighbor_id = self.db.get_edge_target(edge_id)?;
             // Get neighbor node
             let neighbor = self.db.get_node(neighbor_id)?;
+            #[allow(clippy::collapsible_if)]
             if let Some(prop) = neighbor.get_property(property) {
                 if let Some(vec) = prop.as_vector() {
                     vectors.push(vec.to_vec());
@@ -165,6 +166,7 @@ impl<'a> JanusDetector<'a> {
             // 10 iterations usually enough for local 2-means
             let mut changes = 0;
             let mut sums = vec![vec![0.0; dim]; 2];
+            #[allow(clippy::useless_vec)]
             let mut counts = vec![0; 2];
 
             // Assign
