@@ -129,6 +129,9 @@ pub mod prism;
 /// Prophet Link Prediction Engine.
 pub mod prophet;
 #[cfg(feature = "nova")]
+/// Ripple: Semantic Causality Detector.
+pub mod ripple;
+#[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
 #[cfg(feature = "nova")]
