@@ -1,8 +1,9 @@
-
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization, VectorIndex, HnswConfig, HnswIndex};
 use aletheiadb::core::id::NodeId;
-use std::sync::{Arc, Mutex};
+use aletheiadb::index::vector::{
+    DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, Quantization, VectorIndex,
+};
 use std::fs;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn test_regress_buffer_overread() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,7 +71,9 @@ fn test_regress_buffer_overread() -> Result<(), Box<dyn std::error::Error>> {
         Ok(_) => {
             // If load succeeded, check if we actually have the vulnerability
             // (Only if we proceed to search, but here we just check load)
-            panic!("Index loaded successfully! Vulnerability not prevented. Expected header mismatch error.");
+            panic!(
+                "Index loaded successfully! Vulnerability not prevented. Expected header mismatch error."
+            );
         }
         Err(e) => {
             let msg = e.to_string();
