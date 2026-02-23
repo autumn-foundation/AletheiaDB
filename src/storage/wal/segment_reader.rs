@@ -1851,9 +1851,9 @@ mod fuzz_tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use tempfile::TempDir;
-    use std::io::Write;
     use std::fs::File;
+    use std::io::Write;
+    use tempfile::TempDir;
 
     #[test]
     fn test_read_segment_exactly_max_size_allowed() {
@@ -1879,10 +1879,14 @@ mod sentry_tests {
         match result {
             Ok(_) => {
                 // Success is fine (e.g. if sparse zeros are skipped or interpreted as empty)
-            },
+            }
             Err(e) => {
                 let msg = e.to_string();
-                assert!(!msg.contains("too large"), "Should not reject max size file. Error was: {}", msg);
+                assert!(
+                    !msg.contains("too large"),
+                    "Should not reject max size file. Error was: {}",
+                    msg
+                );
             }
         }
     }
@@ -1919,7 +1923,11 @@ mod sentry_tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         // We expect it to pass the first check (24 !> 24) and fail the op-type check.
-        assert!(msg.contains("operation type"), "Should fail at op type check, not header check. Got: {}", msg);
+        assert!(
+            msg.contains("operation type"),
+            "Should fail at op type check, not header check. Got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -1936,6 +1944,10 @@ mod sentry_tests {
 
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Unknown WAL operation type"), "Should read op type and fail validation. Got: {}", msg);
+        assert!(
+            msg.contains("Unknown WAL operation type"),
+            "Should read op type and fail validation. Got: {}",
+            msg
+        );
     }
 }
