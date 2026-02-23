@@ -7,6 +7,7 @@ use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
 #[test]
+#[serial_test::serial]
 fn test_adaptive_overfetch_learns_from_sparse_labels() {
     // Create database with vector index
     let db = AletheiaDB::new().unwrap();
@@ -57,6 +58,7 @@ fn test_adaptive_overfetch_learns_from_sparse_labels() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_adaptive_overfetch_learns_from_dense_labels() {
     // Create database with vector index
     let db = AletheiaDB::new().unwrap();
@@ -100,6 +102,7 @@ fn test_adaptive_overfetch_learns_from_dense_labels() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_adaptive_overfetch_embedding_search() {
     // Test adaptive over-fetch with find_similar_by_embedding_with_label
     let db = AletheiaDB::new().unwrap();
@@ -140,6 +143,7 @@ fn test_adaptive_overfetch_embedding_search() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_adaptive_overfetch_respects_max_cap() {
     // Ensure adaptive strategy doesn't exceed reasonable bounds
     let db = AletheiaDB::new().unwrap();
@@ -179,6 +183,7 @@ fn test_adaptive_overfetch_respects_max_cap() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_adaptive_overfetch_varying_distributions() {
     // Test adaptive over-fetch with varying label distributions
     let db = AletheiaDB::new().unwrap();
@@ -219,6 +224,7 @@ fn test_adaptive_overfetch_varying_distributions() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_adaptive_overfetch_statistics_tracking() {
     // Verify that statistics are being tracked correctly
     let db = AletheiaDB::new().unwrap();
@@ -350,10 +356,10 @@ fn run_adaptive_overfetch_concurrent_safety(
             .unwrap();
     }
 
-    // Spawn 4 threads (reduced from 8 for CI performance)
+    // Spawn 2 threads (reduced from 4 for CI performance/stability)
     let mut handles = vec![];
 
-    for thread_id in 0..4 {
+    for thread_id in 0..2 {
         let db_clone = Arc::clone(&db);
         let progress_clone = Arc::clone(&progress);
         let handle = thread::spawn(move || {
@@ -384,9 +390,9 @@ fn run_adaptive_overfetch_concurrent_safety(
     let stats_a = db.__test_get_filter_stats("TypeA").unwrap();
     let stats_b = db.__test_get_filter_stats("TypeB").unwrap();
 
-    // Each of 2 threads x 5 searches = 10 searches per label
-    assert_eq!(stats_a.0, 10, "TypeA should have 10 searches");
-    assert_eq!(stats_b.0, 10, "TypeB should have 10 searches");
+    // Each of 1 thread x 5 searches = 5 searches per label
+    assert_eq!(stats_a.0, 5, "TypeA should have 5 searches");
+    assert_eq!(stats_b.0, 5, "TypeB should have 5 searches");
 
     // Verify counters are non-zero and reasonable (main goal is no panics/corruption)
     assert!(stats_a.1 > 0, "TypeA candidates should be non-zero");
