@@ -266,3 +266,10 @@
 **Finding:** `MAX_VALID_TIMESTAMP` was used in logic but its value was not pinned by tests, allowing potential drift of the sentinel space.
 **Evidence:** Mutation analysis showed changing the constant value didn't fail existing tests.
 **Resolution:** Added sentry test explicitly asserting `MAX_VALID_TIMESTAMP == i64::MAX - 1000`.
+
+## [Vector Normalization Inconsistency]
+**Module:** `src/core/vector/ops.rs`
+**Verdict:** 🟡 Suspect
+**Finding:** `normalize` zeroes out vectors with small squared magnitudes (< `SQUARED_MAGNITUDE_THRESHOLD`), but `normalize_in_place` leaves them unchanged. This creates inconsistent behavior depending on which API is used.
+**Evidence:** Reproduction test `tests/repro_normalize_inconsistency.rs` failed, showing that `normalize_in_place` did not modify a tiny vector.
+**Resolution:** Updated `normalize_in_place` to explicitly zero out the vector if its magnitude is below the threshold. Added regression test `test_normalize_in_place_tiny_vector` in `src/core/vector/tests.rs`.

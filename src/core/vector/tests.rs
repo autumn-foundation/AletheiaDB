@@ -1232,6 +1232,16 @@ fn test_normalize_in_place_zero_vector() {
 }
 
 #[test]
+fn test_normalize_in_place_tiny_vector() {
+    // Vector with squared magnitude < SQUARED_MAGNITUDE_THRESHOLD (1e-14)
+    // 1e-8 * 1e-8 = 1e-16 < 1e-14
+    let mut v = vec![1e-8_f32];
+    normalize_in_place(&mut v);
+    // Should be zeroed out
+    assert_eq!(v, vec![0.0]);
+}
+
+#[test]
 fn test_normalize_in_place_empty_vector() {
     let mut v: Vec<f32> = vec![];
     normalize_in_place(&mut v);
