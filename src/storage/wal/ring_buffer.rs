@@ -1457,4 +1457,54 @@ mod sentry_tests {
             "Error should mention dropped entry"
         );
     }
+
+    #[test]
+    fn test_sentry_backpressure_hang_protection() {
+        // 🛡️ Sentry: Verify that if a previous writer stalls (claims slot but doesn't write),
+        // a subsequent writer (lapping) returns Err instead of hanging forever.
+        // This targets the mutation: `distance_behind <= self.capacity` -> `distance_behind < self.capacity`
+
+        let config = BackpressureConfig {
+            initial_spins: 1,
+            max_spins: 1, // Fail fast
+            base_sleep_us: 0,
+            max_sleep_us: 0,
+        };
+        let buf = WalRingBuffer::with_config(2, config); // Capacity 2
+
+        // Simulate Writer A claiming slot 0 but stalling (not writing data/updating sequence)
+        // We do this by manually advancing write_pos
+        buf.write_pos.fetch_add(1, Ordering::Relaxed);
+
+        // At this point:
+        // write_pos = 1
+        // slot[0].sequence = 0 (Initial)
+        // expected_seq for writer at 0 was 0. It claimed it.
+        // But it didn't update sequence to 1.
+
+        // Writer B claims slot 1.
+        let entry_b = PendingEntry::new_async(LSN(1), vec![]);
+        buf.try_append(entry_b)
+            .expect("Writer B should succeed at slot 1");
+        // write_pos = 2.
+        // slot[1].sequence = 2 (Updated by try_append)
+
+        // Writer C tries to claim slot 0 (wrapping).
+        // expected_seq = 2.
+        // current_seq = 0 (Writer A stalled).
+        // distance_behind = 2 - 0 = 2.
+        // capacity = 2.
+        // distance_behind == capacity.
+
+        // If the code is correct (<= capacity), it should detect "Buffer Full" and return Err after spinning.
+        // If the mutant is present (< capacity), it will think "Another producer claimed it" and continue/loop forever.
+
+        let entry_c = PendingEntry::new_async(LSN(2), vec![]);
+        let result = buf.try_append(entry_c);
+
+        assert!(
+            result.is_err(),
+            "Should return Err (backpressure) when slot is stalled by previous writer"
+        );
+    }
 }
