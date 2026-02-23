@@ -93,6 +93,18 @@ impl AdjacencyIndex {
             return Self::new();
         }
 
+        assert_eq!(
+            offsets.len(),
+            node_ids.len() + 1,
+            "CSR invariant: offsets.len() == node_ids.len() + 1"
+        );
+        let last_offset = *offsets.last().unwrap();
+        assert_eq!(
+            last_offset,
+            edge_ids.len() as u64,
+            "CSR invariant: last offset matches edge count"
+        );
+
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
         let node_ids_typed: Vec<NodeId> = node_ids
