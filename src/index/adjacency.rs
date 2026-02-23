@@ -712,6 +712,7 @@ mod tests {
 mod sentry_tests {
     use super::*;
     use std::collections::HashMap;
+    use std::hash::BuildHasherDefault;
 
     #[test]
     fn test_validate_csr_invariants_logic() {
@@ -743,7 +744,7 @@ mod sentry_tests {
         let node_ids = vec![10];
         let offsets = vec![0]; // invalid len (should be 2)
         let edge_ids = vec![100]; // Non-empty to bypass early return
-        let edges_map = HashMap::new();
+        let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
 
@@ -755,7 +756,7 @@ mod sentry_tests {
         let offsets: Vec<u64> = vec![0, 1, 2];
         let edge_ids: Vec<u64> = vec![100, 101];
 
-        let mut edges_map = HashMap::new();
+        let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         let target = NodeId::new(99).unwrap();
         let label = crate::core::interning::InternedString::from_raw(1);
 
