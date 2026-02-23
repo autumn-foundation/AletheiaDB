@@ -196,6 +196,7 @@ impl<'a> RippleDetector<'a> {
                 .map(|v| v.to_vec());
 
             // If timestamp is within window
+            #[allow(clippy::collapsible_if)]
             if ts >= start_time && ts < end_time {
                 if let (Some(curr), Some(prev)) = (&current_vec, &prev_vec) {
                     let dist = euclidean_distance(curr, prev)?;
@@ -404,11 +405,7 @@ mod tests {
 
         let detector = RippleDetector::new(&db);
         let config = RippleConfig {
-            window: TimeRange::new(
-                (t_base).into(),
-                (t_base + 10 * bin).into(),
-            )
-            .unwrap(),
+            window: TimeRange::new((t_base).into(), (t_base + 10 * bin).into()).unwrap(),
             bin_size_us: bin,
             max_lag_bins: 5,
             min_correlation: 0.8,
