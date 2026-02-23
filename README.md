@@ -348,7 +348,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 ### Basic Graph Operations
 
 ```rust
-use aletheiadb::{AletheiaDB, properties};
+use aletheiadb::prelude::*;
 
 // Create a new database
 let db = AletheiaDB::new().unwrap();
@@ -533,10 +533,10 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps};
-// ⚠️ REQUIRES FEATURE 'NOVA' IN CARGO.TOML
 // [dependencies]
 // aletheiadb = { version = "0.1", features = ["nova"] }
+
+use aletheiadb::prelude::*;
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
 // 1. Setup database and node (for self-contained example)
@@ -722,10 +722,10 @@ See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)
 
 For complex operations involving multiple updates, use explicit transactions.
 
-**Note**: The `WriteOps` trait must be imported to use methods on the transaction object.
+**Note**: The `prelude` module exports `WriteOps` and `ReadOps`, which are required to use methods on the transaction object.
 
 ```rust
-use aletheiadb::{PropertyMap, WriteOps};
+use aletheiadb::prelude::*;
 
 // Explicit read transaction
 let result = db.read(|tx| {
