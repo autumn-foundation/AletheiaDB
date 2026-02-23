@@ -164,18 +164,12 @@ impl AdjacencyIndex {
         // We include edge_id for canonical deterministic ordering.
         edges.par_sort_unstable_by_key(|(src, target, edge_id, _)| (*src, *target, *edge_id));
 
-        // Max node id is the maximum of all source and target IDs
-        let max_node_id = edges
-            .iter()
-            .flat_map(|(src, target, _, _)| [src.as_u64(), target.as_u64()])
-            .max()
-            .unwrap_or(0);
-
         // Pre-allocate assuming some average degree > 1 to avoid resizing
         let estimated_nodes = (edge_count / 4).max(16);
         let mut node_ids = Vec::with_capacity(estimated_nodes);
         let mut offsets = Vec::with_capacity(estimated_nodes + 1);
         let mut flat_edges = Vec::with_capacity(edge_count);
+        let mut max_node_id = 0;
 
         offsets.push(0);
 
@@ -184,6 +178,15 @@ impl AdjacencyIndex {
             node_ids.push(current_source);
 
             for (source, target, edge_id, label) in edges {
+                let src_val = source.as_u64();
+                let tgt_val = target.as_u64();
+                if src_val > max_node_id {
+                    max_node_id = src_val;
+                }
+                if tgt_val > max_node_id {
+                    max_node_id = tgt_val;
+                }
+
                 if source != current_source {
                     offsets.push(flat_edges.len());
                     current_source = source;
@@ -193,6 +196,10 @@ impl AdjacencyIndex {
             }
             offsets.push(flat_edges.len());
         }
+
+        // Optimize memory usage by releasing unused capacity
+        node_ids.shrink_to_fit();
+        offsets.shrink_to_fit();
 
         AdjacencyIndex {
             node_ids,
@@ -743,7 +750,7 @@ mod sentry_tests {
         let node_ids = vec![10];
         let offsets = vec![0]; // invalid len (should be 2)
         let edge_ids = vec![100]; // Non-empty to bypass early return
-        let edges_map = HashMap::new();
+        let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
 
@@ -755,7 +762,7 @@ mod sentry_tests {
         let offsets: Vec<u64> = vec![0, 1, 2];
         let edge_ids: Vec<u64> = vec![100, 101];
 
-        let mut edges_map = HashMap::new();
+        let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         let target = NodeId::new(99).unwrap();
         let label = crate::core::interning::InternedString::from_raw(1);
 
