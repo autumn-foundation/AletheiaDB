@@ -3,12 +3,51 @@
 //! "There can be only one."
 //!
 //! This module provides tools to identify and merge duplicate nodes in the graph.
-//! It uses vector similarity to find candidates and graph transactions to merge them.
+//! It combines vector similarity search (for candidate detection) with graph
+//! transactions (for structural merging) to provide a complete entity resolution workflow.
+//!
+//! # Concepts
+//!
+//! - **Survivor**: The node that will remain after the merge.
+//! - **Victim**: The duplicate node that will be merged into the survivor and then deleted.
+//! - **Semantic Similarity**: Using vector embeddings to find nodes that represent the same entity despite label/property differences.
 //!
 //! # Use Cases
-//! - **Entity Resolution**: "J. Smith" vs "John Smith".
-//! - **Deduplication**: Cleaning up data ingestion errors.
-//! - **Knowledge Fusion**: Merging two knowledge graphs.
+//!
+//! - **Entity Resolution**: Resolving "J. Smith" and "John Smith" into a single person node.
+//! - **Deduplication**: Cleaning up data ingestion errors where the same entity was created twice.
+//! - **Knowledge Fusion**: Merging two knowledge graphs where entities overlap.
+//!
+//! # Workflow
+//!
+//! 1. **Detect**: Use [`HighlanderDetector`] to find potential duplicates based on vector similarity.
+//! 2. **Review**: (Optional) Human or logic verifies the candidates.
+//! 3. **Merge**: Use [`EntityMerger`] to merge the victim into the survivor.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::experimental::highlander::{HighlanderDetector, EntityMerger};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//!
+//! // 1. Detect duplicates for a target node
+//! let detector = HighlanderDetector::new(&db);
+//! let target_node = aletheiadb::core::id::NodeId::new(1)?;
+//! let candidates = detector.find_duplicates(target_node, 0.9, 5)?;
+//!
+//! // 2. Merge the first candidate if found
+//! if let Some((victim_node, score)) = candidates.first() {
+//!     println!("Merging node {} (score {}) into {}", victim_node, score, target_node);
+//!
+//!     let merger = EntityMerger::new(&db);
+//!     merger.merge(target_node, *victim_node)?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::AletheiaDB;
 use crate::api::transaction::{ReadOps, WriteOps};
@@ -17,23 +56,27 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMapBuilder;
 use crate::{Error, Result, StorageError};
 
-/// Detector for finding potential duplicate nodes.
+/// Detector for finding potential duplicate nodes using vector similarity.
+///
+/// This struct provides methods to search the graph for nodes that are semantically
+/// similar to a target node, which often indicates duplication.
 ///
 /// # Example
 ///
 /// ```rust,no_run
-/// use aletheiadb::AletheiaDB;
-/// use aletheiadb::experimental::highlander::HighlanderDetector;
-///
+/// # use aletheiadb::AletheiaDB;
+/// # use aletheiadb::experimental::highlander::HighlanderDetector;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let db = AletheiaDB::new()?;
+/// # let db = AletheiaDB::new()?;
 /// let detector = HighlanderDetector::new(&db);
 ///
-/// // Find candidates similar to node_id
+/// // Find up to 5 nodes that are at least 90% similar to `node_id`
 /// // let candidates = detector.find_duplicates(node_id, 0.9, 5)?;
 /// # Ok(())
 /// # }
 /// ```
+#[doc(alias = "deduplication")]
+#[doc(alias = "resolution")]
 pub struct HighlanderDetector<'a> {
     db: &'a AletheiaDB,
 }
@@ -44,12 +87,23 @@ impl<'a> HighlanderDetector<'a> {
         Self { db }
     }
 
-    /// Find potential duplicates for a given node.
+    /// Find potential duplicates for a given node based on vector similarity.
+    ///
+    /// This method uses the database's vector index to find nodes with similar embeddings.
     ///
     /// # Arguments
-    /// * `target` - The node to check.
-    /// * `threshold` - Minimum similarity score (0.0 to 1.0).
-    /// * `limit` - Maximum number of candidates.
+    ///
+    /// * `target` - The node to check for duplicates.
+    /// * `threshold` - Minimum similarity score (0.0 to 1.0) to consider a node a duplicate.
+    /// * `limit` - Maximum number of candidates to return.
+    ///
+    /// # Returns
+    ///
+    /// A list of `(NodeId, similarity_score)` tuples, sorted by similarity descending.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the target node does not have a vector property indexed.
     pub fn find_duplicates(
         &self,
         target: NodeId,
@@ -66,6 +120,18 @@ impl<'a> HighlanderDetector<'a> {
 }
 
 /// Merger for combining two nodes into one.
+///
+/// This struct handles the structural operations required to merge two nodes:
+/// redirecting edges, merging properties, and deleting the duplicate.
+///
+/// # Strategy
+///
+/// The merge process follows a **"Survivor Wins"** strategy:
+/// 1. **Edges**: All edges connected to the `victim` are moved to the `survivor`.
+/// 2. **Properties**: Properties from the `victim` are copied to the `survivor` **only if** the survivor does not already have that property. Existing properties on the survivor are preserved (survivor priority).
+/// 3. **Deletion**: The `victim` node is deleted.
+#[doc(alias = "merge")]
+#[doc(alias = "combine")]
 pub struct EntityMerger<'a> {
     db: &'a AletheiaDB,
 }
@@ -76,17 +142,34 @@ impl<'a> EntityMerger<'a> {
         Self { db }
     }
 
-    /// Merge a victim node into a survivor node.
+    /// Merge a `victim` node into a `survivor` node.
     ///
-    /// This moves all edges from the victim to the survivor, merges properties,
-    /// and deletes the victim.
+    /// This operation is transactional and atomic. If any part fails, the graph remains unchanged.
+    ///
+    /// # Operations Performed
+    ///
+    /// 1. **Edge Relocation**:
+    ///    - Incoming edges to `victim` are redirected to `survivor`.
+    ///    - Outgoing edges from `victim` are redirected to start from `survivor`.
+    ///    - Self-loops on `victim` become self-loops on `survivor`.
+    ///    - Edges between `survivor` and `victim` become self-loops on `survivor`.
+    ///
+    /// 2. **Property Merge**:
+    ///    - `survivor.properties` = `survivor.properties` ∪ (`victim.properties` - `survivor.keys`).
+    ///    - Conflicting keys preserve the `survivor`'s value.
+    ///
+    /// 3. **Victim Deletion**:
+    ///    - The `victim` node is permanently deleted from the current graph state.
     ///
     /// # Arguments
+    ///
     /// * `survivor` - The node that will remain.
     /// * `victim` - The node that will be merged and deleted.
     ///
     /// # Errors
-    /// Returns `Error::Other` if `survivor` and `victim` are the same node.
+    ///
+    /// - Returns `Error::Other` if `survivor` and `victim` are the same node.
+    /// - Returns `Error::Storage` if nodes are not found or transaction fails.
     pub fn merge(&self, survivor: NodeId, victim: NodeId) -> Result<()> {
         if survivor == victim {
             return Err(Error::other(

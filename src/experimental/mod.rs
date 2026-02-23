@@ -30,6 +30,7 @@
 //! | [`dreamer`] | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
 //! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
 //! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
+//! | [`highlander`] | **Highlander** | Semantic Entity Resolution. "There can be only one." |
 //! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
 //! | [`chronos`] | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
 //! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
