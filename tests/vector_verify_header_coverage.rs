@@ -45,7 +45,7 @@ fn test_verify_header_quantization_coverage() {
             .quantization(Quantization::F16)
             .build()
             .unwrap();
-        index.add(NodeId::new(1).unwrap(), &vec![1.0; 16]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0; 16]).unwrap();
         index.save(&path).unwrap();
 
         let config =
@@ -61,7 +61,7 @@ fn test_verify_header_quantization_coverage() {
             .quantization(Quantization::I8)
             .build()
             .unwrap();
-        index.add(NodeId::new(1).unwrap(), &vec![1.0; 16]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0; 16]).unwrap();
         index.save(&path).unwrap();
 
         let config =
