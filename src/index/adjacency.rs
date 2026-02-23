@@ -93,6 +93,25 @@ impl AdjacencyIndex {
             return Self::new();
         }
 
+        // Validate CSR invariants to prevent panics during queries
+        assert_eq!(
+            offsets.len(),
+            node_ids.len() + 1,
+            "CSR offsets length mismatch: expected {}, got {}",
+            node_ids.len() + 1,
+            offsets.len()
+        );
+
+        if let Some(&last_offset) = offsets.last() {
+            assert_eq!(
+                last_offset,
+                edge_ids.len() as u64,
+                "CSR last offset mismatch: expected {}, got {}",
+                edge_ids.len(),
+                last_offset
+            );
+        }
+
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
         let node_ids_typed: Vec<NodeId> = node_ids
@@ -668,5 +687,24 @@ mod tests {
             1000,
             "max_node_id should consider target nodes"
         );
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    #[should_panic(expected = "CSR offsets length mismatch")]
+    fn test_import_csr_validates_offsets_length() {
+        let node_ids = vec![10, 20];
+        // Invalid: offsets len should be node_ids.len() + 1 = 3
+        let offsets = vec![0, 1];
+        let edge_ids = vec![100];
+        let edges_map = HashMap::new();
+
+        // This should panic with a clear message
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
 }
