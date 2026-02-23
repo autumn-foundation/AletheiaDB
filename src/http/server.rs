@@ -153,7 +153,10 @@ pub fn create_app() -> App<
         .wrap(Logger::default())
         .wrap(build_security_headers())
         .wrap(build_cors(&cors_config))
-        .wrap(build_rate_limit(&rate_limit_config).expect("Default rate limit config should be valid"))
+        .wrap(
+            build_rate_limit(&rate_limit_config)
+                .expect("Default rate limit config should be valid"),
+        )
         .configure(configure_app)
 }
 
