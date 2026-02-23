@@ -4321,7 +4321,6 @@ mod coverage_misc_tests {
     }
 }
 
-
 #[cfg(test)]
 mod coverage_additions {
     use super::*;
