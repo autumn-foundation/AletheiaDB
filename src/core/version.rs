@@ -12,9 +12,7 @@
 use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
 use crate::core::interning::{IdentityHasher, InternedString};
-use crate::core::property::{
-    MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue,
-};
+use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
@@ -471,41 +469,27 @@ impl PropertyDelta {
     /// or partial data recovery). It prevents the entire view from failing due to a single
     /// corrupted property history.
     pub fn apply(&self, base: &PropertyMap) -> PropertyMap {
-        // Calculate capacity for the new map to avoid reallocation
-        // Properties from base (minus removed) plus potentially new properties from changes
-        let estimated_capacity = base
-            .len()
-            .saturating_sub(self.removed.len())
-            .max(self.changed.len() + self.vector_deltas.len());
+        // Start from the base map using the copy-on-write builder.
+        // This is more efficient than manual iteration as it leverages optimized HashMap cloning
+        // and avoids redundant interner lookups for all unchanged properties.
+        let mut builder = base.clone().builder();
 
-        // Use PropertyMapBuilder to construct the map directly, avoiding intermediate HashMap allocation
-        // and double hashing (once for temp map, once for final PropertyMap construction).
-        let mut builder = PropertyMapBuilder::with_capacity(estimated_capacity);
-
-        // Copy all base properties except removed ones (single lookup per property)
-        // This is optimal when changes << base (typical case: ~1-10% change rate)
-        for (key, value) in base.iter() {
-            if !self.removed.contains(key) {
-                // Arc clone - O(1) refcount increment, shares underlying data
-                // Use insert_by_key to avoid re-interning overhead
-                builder = builder.insert_by_key(*key, value.clone());
-            }
+        // Remove properties
+        for key in &self.removed {
+            builder = builder.remove_by_key(key);
         }
 
-        // Apply regular changes (overwrites existing entries for modified properties)
+        // Apply regular changes (overwrites existing entries)
         for (key, value) in &self.changed {
-            // Arc clone - O(1) refcount increment
             builder = builder.insert_by_key(*key, value.clone());
         }
 
         // Apply vector deltas (overwrites existing entries)
         for (key, vec_delta) in &self.vector_deltas {
             match vec_delta {
-                // Full replacement does not depend on base type/presence.
                 VectorDelta::Full(vec) => {
                     builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
                 }
-                // Sparse delta requires vector base value.
                 VectorDelta::Sparse { .. } => {
                     if let Some(base_value) = base.get_by_interned_key(key)
                         && let Some(base_vec) = base_value.as_vector()
