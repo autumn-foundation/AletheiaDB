@@ -192,48 +192,68 @@ impl BackgroundFlusher {
     }
 
     fn perform_flush_cycle(&self) {
-        let entries = self.wal.drain_all();
-
-        // Always try to advance the epoch when there are entries OR when
-        // group commit has pending transactions.
+        // FIX: Start flush (advance epoch) BEFORE draining to prevent race condition.
+        // If we drain first, a concurrent transaction could append AND register (get epoch E)
+        // after drain but before we advance to E+1. This would result in E being marked
+        // flushed without the data being included.
         //
-        // LOCK POISONING: If current_batch_size() fails, the coordinator lock is
-        // poisoned and the system is in an unrecoverable state. Panicking is correct
-        // here - continuing would leave waiting transactions hanging indefinitely.
-        let should_mark_flushed = !entries.is_empty()
-            || self.group_commit.as_ref().is_some_and(|gc| {
-                gc.current_batch_size()
-                    .expect("GroupCommitCoordinator lock poisoned - flush thread cannot continue")
-                    > 0
-            });
+        // By advancing first, any new registration gets E+1, which will wait for the NEXT flush.
+        // Any existing registration (E) must have completed append before registration,
+        // so its data is already in the buffer and will be picked up by drain_all().
+        let flush_epoch = if let Some(ref gc) = self.group_commit {
+            Some(
+                gc.start_flush()
+                    .expect("GroupCommitCoordinator lock poisoned - flush thread cannot continue"),
+            )
+        } else {
+            None
+        };
+
+        let entries = self.wal.drain_all();
 
         if !entries.is_empty() {
             // Flush to coordinator
             let result = self.coordinator.flush(entries, self.sync_on_flush);
-            self.handle_flush_result(result.map(|_| ()));
-        } else if should_mark_flushed {
-            // No entries but there are pending transactions - advance epoch anyway
-            self.handle_flush_result(Ok(()));
+            self.handle_flush_result(result.map(|_| ()), flush_epoch);
+        } else if let Some(epoch) = flush_epoch {
+            // No entries but epoch was advanced. We must finish the flush for that epoch
+            // to wake up any waiters.
+            self.handle_flush_result(Ok(()), Some(epoch));
         }
     }
 
     fn perform_final_flush(&self) {
+        // Even on final flush, we should advance epoch to ensure any last-minute
+        // waiters are properly notified (or failed).
+        let flush_epoch = if let Some(ref gc) = self.group_commit {
+            Some(
+                gc.start_flush()
+                    .expect("GroupCommitCoordinator lock poisoned - flush thread cannot continue"),
+            )
+        } else {
+            None
+        };
+
         let entries = self.wal.drain_all();
         if !entries.is_empty() {
             let result = self.coordinator.flush(entries, true);
-            self.handle_flush_result(result.map(|_| ()));
+            self.handle_flush_result(result.map(|_| ()), flush_epoch);
+        } else if let Some(epoch) = flush_epoch {
+            self.handle_flush_result(Ok(()), Some(epoch));
         }
     }
 
-    fn handle_flush_result(&self, result: Result<()>) {
+    fn handle_flush_result(&self, result: Result<()>, epoch: Option<u64>) {
         match result {
             Ok(_) => {
                 // Reset error counter on success
                 self.error_counter.store(0, Ordering::Relaxed);
-                if let Some(ref gc) = self.group_commit {
-                    gc.mark_flushed(Ok(())).expect(
-                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                    );
+                if let Some(epoch) = epoch {
+                    if let Some(ref gc) = self.group_commit {
+                        gc.finish_flush(epoch, Ok(())).expect(
+                            "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -249,12 +269,17 @@ impl BackgroundFlusher {
                     eprintln!("WAL flush error: {}", e);
                 }
 
-                if let Some(ref gc) = self.group_commit {
-                    // Create a new error from the string representation
-                    gc.mark_flushed(Err(crate::core::error::Error::other(e.to_string())))
+                if let Some(epoch) = epoch {
+                    if let Some(ref gc) = self.group_commit {
+                        // Create a new error from the string representation
+                        gc.finish_flush(
+                            epoch,
+                            Err(crate::core::error::Error::other(e.to_string())),
+                        )
                         .expect(
                             "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
                         );
+                    }
                 }
             }
         }
