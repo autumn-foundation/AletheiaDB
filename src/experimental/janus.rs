@@ -29,6 +29,8 @@
 //! # }
 //! ```
 
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
@@ -165,7 +167,7 @@ impl<'a> JanusDetector<'a> {
             // 10 iterations usually enough for local 2-means
             let mut changes = 0;
             let mut sums = vec![vec![0.0; dim]; 2];
-            let mut counts = vec![0; 2];
+            let mut counts = [0; 2];
 
             // Assign
             for (i, v) in data.iter().enumerate() {
