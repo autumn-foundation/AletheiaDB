@@ -716,12 +716,16 @@ mod sentry_tests {
 
         // 2. Invalid offsets length
         let invalid_offsets_len = vec![0, 1]; // too short
-        let err_len = AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_len, &edge_ids).unwrap_err();
+        let err_len =
+            AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_len, &edge_ids)
+                .unwrap_err();
         assert!(err_len.contains("CSR offsets length mismatch"));
 
         // 3. Invalid last offset
         let invalid_offsets_val = vec![0, 1, 5]; // last is 5, but edges len is 2
-        let err_val = AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_val, &edge_ids).unwrap_err();
+        let err_val =
+            AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_val, &edge_ids)
+                .unwrap_err();
         assert!(err_val.contains("CSR last offset mismatch"));
     }
 
