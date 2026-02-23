@@ -94,18 +94,18 @@ impl AdjacencyIndex {
         }
 
         // Validate CSR invariants to prevent panics during queries
-        assert_eq!(
-            offsets.len(),
-            node_ids.len() + 1,
-            "CSR offsets length mismatch: expected {}, got {}",
-            node_ids.len() + 1,
-            offsets.len()
-        );
+        if offsets.len() != node_ids.len() + 1 {
+            panic!(
+                "CSR offsets length mismatch: expected {}, got {}",
+                node_ids.len() + 1,
+                offsets.len()
+            );
+        }
 
-        if let Some(&last_offset) = offsets.last() {
-            assert_eq!(
-                last_offset,
-                edge_ids.len() as u64,
+        // Safe to unwrap because we checked offsets.is_empty() above
+        let last_offset = *offsets.last().unwrap();
+        if last_offset != edge_ids.len() as u64 {
+            panic!(
                 "CSR last offset mismatch: expected {}, got {}",
                 edge_ids.len(),
                 last_offset
