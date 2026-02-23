@@ -1227,14 +1227,16 @@ impl VectorIndex for HnswIndex {
         // Cap k to prevent DoS
         let k_capped = k.min(self.max_k);
 
-        // Perform search with retry logic for transient errors
-        let index = self.inner.read();
-
         // Retry with exponential backoff to handle thread pool exhaustion
         // Under heavy concurrent load, usearch may fail with "No available threads to lock"
         for attempt in 0..MAX_SEARCH_ATTEMPTS {
+            // Acquire lock inside the loop so we can drop it before sleeping on retry
+            let index = self.inner.read();
             match index.search(query, k_capped) {
                 Ok(matches) => {
+                    // Release lock immediately after search to minimize contention
+                    drop(index);
+
                     self.stats
                         .searches_performed
                         .fetch_add(1, Ordering::Relaxed);
@@ -1245,6 +1247,9 @@ impl VectorIndex for HnswIndex {
                 }
                 Err(e) => {
                     let error_msg = e.to_string();
+                    // Release lock before checking retry condition (which might sleep)
+                    drop(index);
+
                     // Check if this is a transient thread pool exhaustion error
                     if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
                         // Track retry for observability
@@ -1345,21 +1350,22 @@ impl VectorIndex for HnswIndex {
         // Evaluate user predicates outside the inner index lock to avoid callback/writer deadlocks.
         let mut candidate_k = k_capped.min(max_candidates);
         loop {
-            // Convert matches while holding the inner lock so any usearch-backed buffers
-            // are not observed after concurrent mutation.
             let candidates =
                 {
-                    let index = self.inner.read();
                     let mut maybe_matches = None;
 
                     for attempt in 0..MAX_SEARCH_ATTEMPTS {
+                        let index = self.inner.read();
                         match index.search(query, candidate_k) {
                             Ok(found) => {
+                                drop(index);
                                 maybe_matches = Some(found);
                                 break;
                             }
                             Err(e) => {
                                 let error_msg = e.to_string();
+                                drop(index);
+
                                 if is_retryable_usearch_error(&error_msg)
                                     && attempt + 1 < MAX_SEARCH_ATTEMPTS
                                 {
