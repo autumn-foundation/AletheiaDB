@@ -696,7 +696,6 @@ mod sentry_tests {
     use std::collections::HashMap;
 
     #[test]
-    #[should_panic(expected = "CSR offsets length mismatch")]
     fn test_import_csr_validates_offsets_length() {
         let node_ids = vec![10, 20];
         // Invalid: offsets len should be node_ids.len() + 1 = 3
@@ -704,12 +703,21 @@ mod sentry_tests {
         let edge_ids = vec![100];
         let edges_map = HashMap::new();
 
-        // This should panic with a clear message
-        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        // Use catch_unwind to ensure test completes and coverage is captured
+        let result = std::panic::catch_unwind(|| {
+            AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        });
+
+        assert!(result.is_err(), "Should have panicked");
+        let err = result.unwrap_err();
+        if let Some(msg) = err.downcast_ref::<&str>() {
+            assert!(msg.contains("CSR offsets length mismatch"));
+        } else if let Some(msg) = err.downcast_ref::<String>() {
+            assert!(msg.contains("CSR offsets length mismatch"));
+        }
     }
 
     #[test]
-    #[should_panic(expected = "CSR last offset mismatch")]
     fn test_import_csr_validates_last_offset() {
         let node_ids = vec![10, 20];
         // Valid length (3 = 2 + 1), but invalid last offset
@@ -718,27 +726,40 @@ mod sentry_tests {
         let edge_ids = vec![100];
         let edges_map = HashMap::new();
 
-        // This should panic with a clear message about last offset
-        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        // Use catch_unwind to ensure test completes and coverage is captured
+        let result = std::panic::catch_unwind(|| {
+            AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        });
+
+        assert!(result.is_err(), "Should have panicked");
+        let err = result.unwrap_err();
+        if let Some(msg) = err.downcast_ref::<&str>() {
+            assert!(msg.contains("CSR last offset mismatch"));
+        } else if let Some(msg) = err.downcast_ref::<String>() {
+            assert!(msg.contains("CSR last offset mismatch"));
+        }
     }
 
     #[test]
     fn test_import_csr_success() {
-        let node_ids = vec![10];
-        // Valid: offsets len (2) == node_ids.len() + 1
-        // Valid: last offset (1) == edge_ids.len()
-        let offsets = vec![0, 1];
-        let edge_ids = vec![100];
+        // Multi-node case to fully exercise loop and max_node_id logic
+        let node_ids: Vec<u64> = vec![10, 20];
+        // Offsets: node 10 has 1 edge (0..1), node 20 has 1 edge (1..2)
+        let offsets: Vec<u64> = vec![0, 1, 2];
+        let edge_ids: Vec<u64> = vec![100, 101];
 
         let mut edges_map = HashMap::new();
-        let target = NodeId::new(20).unwrap();
+        let target = NodeId::new(99).unwrap();
         let label = crate::core::interning::InternedString::from_raw(1);
+
         edges_map.insert(EdgeId::new(100).unwrap(), (target, label));
+        edges_map.insert(EdgeId::new(101).unwrap(), (target, label));
 
         // Should not panic
         let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
 
-        assert_eq!(index.edge_count(), 1);
-        assert_eq!(index.node_count(), 1);
+        assert_eq!(index.edge_count(), 2);
+        assert_eq!(index.node_count(), 2);
+        assert_eq!(index.max_node_id(), 20);
     }
 }
