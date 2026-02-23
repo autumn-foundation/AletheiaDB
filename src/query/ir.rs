@@ -8,6 +8,8 @@ use std::ops::Not;
 use std::sync::Arc;
 
 use crate::core::NodeId;
+use crate::core::graph::Node;
+use crate::core::property::PropertyValue;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::index::vector::DistanceMetric;
 
@@ -446,6 +448,147 @@ impl Predicate {
     #[must_use]
     pub fn negate(self) -> Self {
         !self
+    }
+
+    /// Evaluate this predicate against a node.
+    pub fn evaluate(&self, node: &Node) -> bool {
+        match self {
+            Predicate::True => true,
+            Predicate::False => false,
+
+            Predicate::Eq { key, value } => {
+                if let Some(prop) = node.properties.get(key) {
+                    Self::compare_eq(prop, value)
+                } else {
+                    false
+                }
+            }
+
+            Predicate::Ne { key, value } => {
+                if let Some(prop) = node.properties.get(key) {
+                    !Self::compare_eq(prop, value)
+                } else {
+                    true // Non-existent != anything
+                }
+            }
+
+            Predicate::Gt { key, value } => {
+                if let Some(prop) = node.properties.get(key) {
+                    Self::compare_gt(prop, value)
+                } else {
+                    false
+                }
+            }
+
+            Predicate::Lt { key, value } => {
+                if let Some(prop) = node.properties.get(key) {
+                    Self::compare_lt(prop, value)
+                } else {
+                    false
+                }
+            }
+
+            Predicate::Gte { key, value } => {
+                if let Some(prop) = node.properties.get(key) {
+                    Self::compare_gte(prop, value)
+                } else {
+                    false
+                }
+            }
+
+            Predicate::Lte { key, value } => {
+                if let Some(prop) = node.properties.get(key) {
+                    Self::compare_lte(prop, value)
+                } else {
+                    false
+                }
+            }
+
+            Predicate::Exists(key) => node.properties.get(key).is_some(),
+
+            Predicate::NotExists(key) => node.properties.get(key).is_none(),
+
+            Predicate::Contains { key, substring } => {
+                if let Some(PropertyValue::String(s)) = node.properties.get(key) {
+                    s.contains(substring.as_str())
+                } else {
+                    false
+                }
+            }
+
+            Predicate::StartsWith { key, prefix } => {
+                if let Some(PropertyValue::String(s)) = node.properties.get(key) {
+                    s.starts_with(prefix.as_str())
+                } else {
+                    false
+                }
+            }
+
+            Predicate::EndsWith { key, suffix } => {
+                if let Some(PropertyValue::String(s)) = node.properties.get(key) {
+                    s.ends_with(suffix.as_str())
+                } else {
+                    false
+                }
+            }
+
+            Predicate::In { key, values } => {
+                if let Some(prop) = node.properties.get(key) {
+                    values.iter().any(|v| Self::compare_eq(prop, v))
+                } else {
+                    false
+                }
+            }
+
+            Predicate::And(preds) => preds.iter().all(|p| p.evaluate(node)),
+
+            Predicate::Or(preds) => preds.iter().any(|p| p.evaluate(node)),
+
+            Predicate::Not(pred) => !pred.evaluate(node),
+        }
+    }
+
+    fn compare_eq(prop: &PropertyValue, value: &PredicateValue) -> bool {
+        match (prop, value) {
+            (PropertyValue::Bool(a), PredicateValue::Bool(b)) => a == b,
+            (PropertyValue::Int(a), PredicateValue::Int(b)) => a == b,
+            (PropertyValue::Float(a), PredicateValue::Float(b)) => (a - b).abs() < f64::EPSILON,
+            (PropertyValue::String(a), PredicateValue::String(b)) => a.as_ref() == b.as_str(),
+            (PropertyValue::Null, PredicateValue::Null) => true,
+            _ => false,
+        }
+    }
+
+    fn compare_gt(prop: &PropertyValue, value: &PredicateValue) -> bool {
+        match (prop, value) {
+            (PropertyValue::Int(a), PredicateValue::Int(b)) => a > b,
+            (PropertyValue::Float(a), PredicateValue::Float(b)) => a > b,
+            _ => false,
+        }
+    }
+
+    fn compare_lt(prop: &PropertyValue, value: &PredicateValue) -> bool {
+        match (prop, value) {
+            (PropertyValue::Int(a), PredicateValue::Int(b)) => a < b,
+            (PropertyValue::Float(a), PredicateValue::Float(b)) => a < b,
+            _ => false,
+        }
+    }
+
+    fn compare_gte(prop: &PropertyValue, value: &PredicateValue) -> bool {
+        match (prop, value) {
+            (PropertyValue::Int(a), PredicateValue::Int(b)) => a >= b,
+            (PropertyValue::Float(a), PredicateValue::Float(b)) => a >= b,
+            _ => false,
+        }
+    }
+
+    fn compare_lte(prop: &PropertyValue, value: &PredicateValue) -> bool {
+        match (prop, value) {
+            (PropertyValue::Int(a), PredicateValue::Int(b)) => a <= b,
+            (PropertyValue::Float(a), PredicateValue::Float(b)) => a <= b,
+            _ => false,
+        }
     }
 }
 

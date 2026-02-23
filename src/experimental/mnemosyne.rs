@@ -234,7 +234,6 @@ mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::time;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     #[test]
