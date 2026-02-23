@@ -16,6 +16,51 @@ fn create_test_index() -> HnswIndex {
 }
 
 #[test]
+fn test_config_with_custom_metric() {
+    let metric_fn = |_: &[f32], _: &[f32]| 0.0;
+    let config = HnswConfig::new(4, DistanceMetric::Cosine)
+        .with_custom_metric("test_metric", metric_fn);
+
+    assert!(config.custom_metric.is_some());
+    assert_eq!(config.custom_metric.unwrap().name, "test_metric");
+}
+
+#[test]
+fn test_config_write_error() {
+    let config = HnswConfig::default();
+    let mut writer = MockFailWriter::new(0); // Fail immediately
+    assert!(config.serialize_into(&mut writer).is_err());
+}
+
+#[test]
+fn test_config_read_error() {
+    let mut reader = MockFailReader::new(vec![], 0);
+    assert!(HnswConfig::deserialize_from(&mut reader).is_err());
+}
+
+#[test]
+fn test_add_batch() {
+    let index = create_test_index();
+    let items = vec![
+        (NodeId::new(1).unwrap(), vec![1.0, 0.0, 0.0, 0.0]),
+        (NodeId::new(2).unwrap(), vec![0.0, 1.0, 0.0, 0.0]),
+    ];
+    index.add_batch(&items).unwrap();
+    assert_eq!(index.len(), 2);
+}
+
+#[test]
+fn test_remove_batch() {
+    let index = create_test_index();
+    index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+
+    let ids = vec![NodeId::new(1).unwrap()];
+    index.remove_batch(&ids).unwrap();
+    assert_eq!(index.len(), 1);
+}
+
+#[test]
 fn test_metric_wrapper_safe_on_unaligned() {
     let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
     let wrapper = create_metric_wrapper(4, distance_fn);
@@ -490,12 +535,10 @@ fn test_load_mappings_bad_magic() -> Result<()> {
     let path = dir.path().join("test_index.usearch");
     let mappings_path = path.with_extension("usearch.mappings");
 
-    // Create valid index
     let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
     index.save(&path)?;
 
-    // Corrupt magic bytes
     let mut data = std::fs::read(&mappings_path).unwrap();
     data[0] = b'X';
     std::fs::write(&mappings_path, &data).unwrap();
@@ -516,9 +559,8 @@ fn test_load_mappings_bad_version() -> Result<()> {
     index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
     index.save(&path)?;
 
-    // Corrupt version
     let mut data = std::fs::read(&mappings_path).unwrap();
-    data[4] = 99; // Invalid version
+    data[4] = 99;
     std::fs::write(&mappings_path, &data).unwrap();
 
     let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
