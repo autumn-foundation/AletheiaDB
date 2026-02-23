@@ -1837,8 +1837,8 @@ mod sentry_tests {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::time;
     use crate::storage::wal::serialization::serialize_entry_into;
-    use tempfile::TempDir;
     use std::io::Write;
+    use tempfile::TempDir;
 
     #[test]
     fn test_read_entries_exceeds_max_recovery_entries() {
@@ -1871,10 +1871,17 @@ mod sentry_tests {
 
         // This should fail with an error about exceeding the limit
         let result = read_entries_from_dir(dir.path(), LSN(0));
-        assert!(result.is_err(), "Should return error when exceeding MAX_RECOVERY_ENTRIES");
+        assert!(
+            result.is_err(),
+            "Should return error when exceeding MAX_RECOVERY_ENTRIES"
+        );
         match result {
             Err(Error::Storage(StorageError::CorruptedData(msg))) => {
-                assert!(msg.contains("recovery limit"), "Error should mention recovery limit, got: {}", msg);
+                assert!(
+                    msg.contains("recovery limit"),
+                    "Error should mention recovery limit, got: {}",
+                    msg
+                );
             }
             _ => panic!("Expected StorageError::CorruptedData"),
         }
