@@ -27,13 +27,23 @@ use crate::core::property::PropertyMap;
 use super::{LSN, WalEntry, WalOperation};
 
 /// Magic bytes identifying a AletheiaDB WAL segment file.
-const WAL_MAGIC: [u8; 4] = *b"GWAL";
+pub(crate) const WAL_MAGIC: [u8; 4] = *b"GWAL";
 
 /// Current WAL format version.
-const WAL_VERSION: u8 = 1;
+pub(crate) const WAL_VERSION: u8 = 1;
 
 /// Size of the WAL segment header (magic + version).
-const WAL_HEADER_SIZE: usize = 5;
+pub(crate) const WAL_HEADER_SIZE: usize = 5;
+
+/// Maximum number of entries to read during recovery to prevent OOM.
+///
+/// This limit prevents unbounded memory growth if the WAL contains an
+/// unexpectedly large number of entries (e.g. due to missing checkpoints).
+/// 10 million entries is approximately 1-5GB of RAM depending on entry size.
+#[cfg(not(test))]
+const MAX_RECOVERY_ENTRIES: usize = 10_000_000;
+#[cfg(test)]
+const MAX_RECOVERY_ENTRIES: usize = 2000;
 
 /// Read all WAL entries from a directory, starting from the specified LSN.
 ///
@@ -71,7 +81,16 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 
     // Read entries from each segment
     for (_, path) in segments {
-        let segment_entries = read_segment(&path, start_lsn)?;
+        let remaining = MAX_RECOVERY_ENTRIES.saturating_sub(entries.len());
+        if remaining == 0 {
+            return Err(StorageError::CorruptedData(format!(
+                "WAL recovery limit exceeded (max: {} entries)",
+                MAX_RECOVERY_ENTRIES
+            ))
+            .into());
+        }
+
+        let segment_entries = read_segment_internal(&path, start_lsn, remaining)?;
         entries.extend(segment_entries);
     }
 
@@ -103,6 +122,15 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 /// Uses `memmap2` for memory-mapped I/O. Peak memory usage is O(working set)
 /// rather than O(file size). See issue #216.
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
+    read_segment_internal(path, start_lsn, MAX_RECOVERY_ENTRIES)
+}
+
+/// Internal helper to read segment with a limit.
+fn read_segment_internal(
+    path: &Path,
+    start_lsn: LSN,
+    initial_count: usize,
+) -> Result<Vec<WalEntry>> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
@@ -123,7 +151,7 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
 
     // Maximum reasonable segment size (configurable, but 1GB is a safe upper bound)
     // Default segments are 64MB, so 1GB allows for 16x growth
-    const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+    pub(crate) const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
     if metadata.len() > MAX_SEGMENT_SIZE {
         return Err(StorageError::CorruptedData(format!(
             "WAL segment too large: {} bytes (max: {} bytes)",
@@ -172,6 +200,15 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
 
     // Parse entries using the extracted helper function (issue #218)
     while offset < buffer.len() {
+        // Enforce global entry limit to prevent OOM
+        if entries.len() >= initial_count {
+            return Err(StorageError::CorruptedData(format!(
+                "WAL recovery limit exceeded (max: {} entries)",
+                MAX_RECOVERY_ENTRIES
+            ))
+            .into());
+        }
+
         // Try to parse an entry at the current offset
         match parse_entry_at(buffer, offset, version) {
             Ok((entry, bytes_consumed)) => {
@@ -1791,6 +1828,56 @@ mod tests {
         // So `test_update_edge_insufficient_buffer_for_label` should cover lines 518-520 (the condition) and 524 (the error return).
         //
         // The overflow branch (inside `ok_or_else`) might remain uncovered, but that's fine if the main path is covered.
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::temporal::time;
+    use crate::storage::wal::serialization::serialize_entry_into;
+    use tempfile::TempDir;
+    use std::io::Write;
+
+    #[test]
+    fn test_read_entries_exceeds_max_recovery_entries() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0000000000000001.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write WAL header
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        // Write MAX_RECOVERY_ENTRIES + 1 entries
+        // Note: We rely on the test-specific MAX_RECOVERY_ENTRIES being small (e.g. 100)
+        let limit = MAX_RECOVERY_ENTRIES;
+        for i in 0..=limit {
+            let lsn = LSN(i as u64 + 1);
+            let operation = WalOperation::CreateNode {
+                node_id: NodeId::new(i as u64 + 1).unwrap(),
+                label: GLOBAL_INTERNER.intern("Node").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+            };
+            let entry = WalEntry::new(lsn, operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file.write_all(&buffer).unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+
+        // This should fail with an error about exceeding the limit
+        let result = read_entries_from_dir(dir.path(), LSN(0));
+        assert!(result.is_err(), "Should return error when exceeding MAX_RECOVERY_ENTRIES");
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(msg.contains("recovery limit"), "Error should mention recovery limit, got: {}", msg);
+            }
+            _ => panic!("Expected StorageError::CorruptedData"),
+        }
     }
 }
 
