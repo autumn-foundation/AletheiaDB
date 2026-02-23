@@ -281,7 +281,7 @@ pub async fn handle_query(
     state: web::Data<AppState>,
     req: web::Json<QueryRequest>,
 ) -> HttpResponse {
-    let db = state.db();
+    let db = state.db_arc();
 
     match req.into_inner() {
         QueryRequest::CreateNode { label, properties } => {
