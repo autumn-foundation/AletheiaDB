@@ -707,4 +707,18 @@ mod sentry_tests {
         // This should panic with a clear message
         AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
+
+    #[test]
+    #[should_panic(expected = "CSR last offset mismatch")]
+    fn test_import_csr_validates_last_offset() {
+        let node_ids = vec![10, 20];
+        // Valid length (3 = 2 + 1), but invalid last offset
+        // Edge IDs len is 1, so last offset should be 1
+        let offsets = vec![0, 0, 5]; // 5 != 1
+        let edge_ids = vec![100];
+        let edges_map = HashMap::new();
+
+        // This should panic with a clear message about last offset
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+    }
 }
