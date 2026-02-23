@@ -91,6 +91,9 @@ pub mod ariadne;
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
 #[cfg(feature = "nova")]
+/// Chameleon: Context-Aware Faceted Search.
+pub mod chameleon;
+#[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
 #[cfg(feature = "nova")]
