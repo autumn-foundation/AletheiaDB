@@ -52,10 +52,7 @@ pub(crate) fn save_index(
     path: &Path,
 ) -> Result<()> {
     // Collect mappings while holding the locks (caller ensures consistency via locks).
-    let mappings: Vec<(NodeId, u64)> = id_mapping
-        .iter()
-        .map(|e| (*e.key(), *e.value()))
-        .collect();
+    let mappings: Vec<(NodeId, u64)> = id_mapping.iter().map(|e| (*e.key(), *e.value())).collect();
     let count = mappings.len();
 
     index
@@ -101,11 +98,7 @@ where
     let mut hasher = Hasher::new();
     let count_u64 = count as u64;
 
-    fn write_and_hash<W: Write>(
-        writer: &mut W,
-        hasher: &mut Hasher,
-        data: &[u8],
-    ) -> Result<()> {
+    fn write_and_hash<W: Write>(writer: &mut W, hasher: &mut Hasher, data: &[u8]) -> Result<()> {
         writer.write_all(data).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to write mappings: {}",
@@ -406,10 +399,7 @@ pub(crate) fn validate_metadata(
 }
 
 /// Loads an index from disk.
-pub(crate) fn load_index(
-    path: &Path,
-    config: HnswConfig,
-) -> Result<IndexComponents> {
+pub(crate) fn load_index(path: &Path, config: HnswConfig) -> Result<IndexComponents> {
     if config.dimensions > MAX_VECTOR_DIMENSIONS {
         return Err(Error::Vector(VectorError::InvalidVector {
             reason: format!(
@@ -483,11 +473,14 @@ pub(crate) fn load_index(
         load_mappings_with_integrity(&mappings_path)?;
 
     // Validate metadata
-    validate_metadata(metadata.as_ref().map(|m| IndexMetadata {
-        dimensions: m.dimensions,
-        quantization: m.quantization,
-        metric: m.metric,
-    }), &config)?;
+    validate_metadata(
+        metadata.as_ref().map(|m| IndexMetadata {
+            dimensions: m.dimensions,
+            quantization: m.quantization,
+            metric: m.metric,
+        }),
+        &config,
+    )?;
 
     Ok(IndexComponents {
         index,
@@ -499,9 +492,7 @@ pub(crate) fn load_index(
 }
 
 /// Opens a memory-mapped index from disk in read-only mode.
-pub(crate) fn open_mmap_index(
-    path: &Path,
-) -> Result<MmapIndexComponents> {
+pub(crate) fn open_mmap_index(path: &Path) -> Result<MmapIndexComponents> {
     let index = Index::new(&IndexOptions::default()).map_err(|e| {
         Error::Vector(VectorError::IndexError(format!(
             "Failed to create index: {}",

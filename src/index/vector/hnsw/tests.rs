@@ -1,13 +1,16 @@
+use super::utils::{
+    FilterCallbackGuard, TEST_RACE_HOOK, TEST_SKIP_CAPACITY_CHECK, create_metric_wrapper,
+    is_retryable_usearch_error,
+};
 use super::*;
-use crate::index::vector::{DistanceMetric, Quantization, VectorIndex, StorageMode};
-use crate::core::id::NodeId;
 use crate::core::error::Result;
-use std::sync::Arc;
-use std::path::Path;
-use super::utils::{TEST_RACE_HOOK, TEST_SKIP_CAPACITY_CHECK, FilterCallbackGuard, create_metric_wrapper, is_retryable_usearch_error};
-use std::sync::atomic::Ordering;
+use crate::core::id::NodeId;
+use crate::index::vector::{DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crc32fast::Hasher;
 use std::io::Read;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 fn create_test_index() -> HnswIndex {
     HnswIndexBuilder::new(4, DistanceMetric::Cosine)
@@ -18,8 +21,8 @@ fn create_test_index() -> HnswIndex {
 #[test]
 fn test_config_with_custom_metric() {
     let metric_fn = |_: &[f32], _: &[f32]| 0.0;
-    let config = HnswConfig::new(4, DistanceMetric::Cosine)
-        .with_custom_metric("test_metric", metric_fn);
+    let config =
+        HnswConfig::new(4, DistanceMetric::Cosine).with_custom_metric("test_metric", metric_fn);
 
     assert!(config.custom_metric.is_some());
     assert_eq!(config.custom_metric.unwrap().name, "test_metric");
@@ -52,8 +55,12 @@ fn test_add_batch() {
 #[test]
 fn test_remove_batch() {
     let index = create_test_index();
-    index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-    index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+    index
+        .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    index
+        .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+        .unwrap();
 
     let ids = vec![NodeId::new(1).unwrap()];
     index.remove_batch(&ids).unwrap();
@@ -161,15 +168,24 @@ fn test_hnsw_config_deserialize_invalid_quantization() {
     let mut cursor = std::io::Cursor::new(buffer);
     let result = HnswConfig::deserialize_from(&mut cursor);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Invalid quantization"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid quantization")
+    );
 }
 
 #[test]
 fn test_builder_validation_limits() {
-    let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine).m(100).build();
+    let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine)
+        .m(100)
+        .build();
     assert!(res.is_err());
 
-    let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine).m(0).build();
+    let res = HnswIndexBuilder::new(10, DistanceMetric::Cosine)
+        .m(0)
+        .build();
     assert!(res.is_err());
 
     let res = HnswIndexBuilder::new(0, DistanceMetric::Cosine).build();
@@ -184,7 +200,12 @@ fn test_custom_metric_safety_check() {
         .build();
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("only supported with F32"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("only supported with F32")
+    );
 }
 
 #[test]
@@ -295,10 +316,30 @@ fn test_hnsw_config_custom_metric() {
 
 #[test]
 fn test_validate_ef_parameters() {
-    assert!(HnswIndexBuilder::new(4, DistanceMetric::Cosine).ef_construction(5).build().is_err());
-    assert!(HnswIndexBuilder::new(4, DistanceMetric::Cosine).ef_construction(5000).build().is_err());
-    assert!(HnswIndexBuilder::new(4, DistanceMetric::Cosine).ef_search(0).build().is_err());
-    assert!(HnswIndexBuilder::new(4, DistanceMetric::Cosine).ef_search(5000).build().is_err());
+    assert!(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_construction(5)
+            .build()
+            .is_err()
+    );
+    assert!(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_construction(5000)
+            .build()
+            .is_err()
+    );
+    assert!(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_search(0)
+            .build()
+            .is_err()
+    );
+    assert!(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_search(5000)
+            .build()
+            .is_err()
+    );
 }
 
 #[test]
@@ -470,7 +511,9 @@ fn test_concurrent_mixed_operations() -> Result<()> {
 fn test_max_key_overflow_protection() -> Result<()> {
     let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     const MAX_VALID_KEY: u64 = u64::MAX - 1000;
-    index.next_key.store(MAX_VALID_KEY, std::sync::atomic::Ordering::SeqCst);
+    index
+        .next_key
+        .store(MAX_VALID_KEY, std::sync::atomic::Ordering::SeqCst);
 
     let node1 = NodeId::new(1).unwrap();
     assert!(index.add(node1, &[1.0, 0.0, 0.0, 0.0]).is_ok());
@@ -565,7 +608,12 @@ fn test_load_mappings_bad_version() -> Result<()> {
 
     let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Unsupported mapping file version"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported mapping file version")
+    );
     Ok(())
 }
 
@@ -691,7 +739,12 @@ fn test_load_mappings_count_limit() -> Result<()> {
 
     let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("exceeds maximum allowed"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum allowed")
+    );
     Ok(())
 }
 
@@ -720,7 +773,11 @@ struct MockFailWriter {
 
 impl MockFailWriter {
     fn new(fail_after: usize) -> Self {
-        Self { fail_after, written: 0, buffer: Vec::new() }
+        Self {
+            fail_after,
+            written: 0,
+            buffer: Vec::new(),
+        }
     }
 }
 
@@ -733,29 +790,62 @@ impl std::io::Write for MockFailWriter {
         self.buffer.extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
 fn test_save_mappings_write_errors() {
     use super::persistence::write_mappings_to_writer;
-    let mappings = [(NodeId::new(1).unwrap(), 100), (NodeId::new(2).unwrap(), 200)];
+    let mappings = [
+        (NodeId::new(1).unwrap(), 100),
+        (NodeId::new(2).unwrap(), 200),
+    ];
     let config = HnswConfig::default();
 
     let mut writer = MockFailWriter::new(3);
-    assert!(write_mappings_to_writer(&mut writer, mappings.iter().copied(), mappings.len(), &config).is_err());
+    assert!(
+        write_mappings_to_writer(
+            &mut writer,
+            mappings.iter().copied(),
+            mappings.len(),
+            &config
+        )
+        .is_err()
+    );
 
     let mut writer = MockFailWriter::new(23 + 16 + 1);
-    assert!(write_mappings_to_writer(&mut writer, mappings.iter().copied(), mappings.len(), &config).is_err());
+    assert!(
+        write_mappings_to_writer(
+            &mut writer,
+            mappings.iter().copied(),
+            mappings.len(),
+            &config
+        )
+        .is_err()
+    );
 
     let mut writer = MockFailWriter::new(55 + 1);
-    assert!(write_mappings_to_writer(&mut writer, mappings.iter().copied(), mappings.len(), &config).is_err());
+    assert!(
+        write_mappings_to_writer(
+            &mut writer,
+            mappings.iter().copied(),
+            mappings.len(),
+            &config
+        )
+        .is_err()
+    );
 }
 
 struct MockFlushFailWriter;
 impl std::io::Write for MockFlushFailWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { Ok(buf.len()) }
-    fn flush(&mut self) -> std::io::Result<()> { Err(std::io::Error::other("Mock flush error")) }
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("Mock flush error"))
+    }
 }
 
 #[test]
@@ -764,35 +854,54 @@ fn test_save_mappings_flush_error() {
     let mappings: [(NodeId, u64); 0] = [];
     let config = HnswConfig::default();
     let mut writer = MockFlushFailWriter;
-    assert!(write_mappings_to_writer(&mut writer, mappings.iter().copied(), mappings.len(), &config).is_err());
+    assert!(
+        write_mappings_to_writer(
+            &mut writer,
+            mappings.iter().copied(),
+            mappings.len(),
+            &config
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn test_save_mappings_file_create_error() {
     let dir = tempfile::tempdir().unwrap();
-    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
     let index_path = dir.path().join("test.index");
     let mappings_path = index_path.with_extension("usearch.mappings");
     std::fs::create_dir(&mappings_path).unwrap();
 
     let result = index.save(&index_path);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Failed to create mappings file"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to create mappings file")
+    );
 }
 
 #[test]
 fn test_custom_metric_execution_coverage() {
-    let metric_fn = |a: &[f32], b: &[f32]| -> f32 {
-        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
-    };
+    let metric_fn =
+        |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum() };
     let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
         .quantization(Quantization::F32)
         .with_custom_metric("manhattan", metric_fn)
-        .build().unwrap();
+        .build()
+        .unwrap();
 
     for i in 0..10 {
         let id = NodeId::new(i + 1).unwrap();
-        let vec = if i % 2 == 0 { [1.0, 0.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0, 0.0] };
+        let vec = if i % 2 == 0 {
+            [1.0, 0.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0, 0.0]
+        };
         index.add(id, &vec).unwrap();
     }
     assert_eq!(index.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap().len(), 5);
@@ -800,7 +909,9 @@ fn test_custom_metric_execution_coverage() {
 
 #[test]
 fn test_add_race_retry_value_change_coverage() {
-    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
     let node = NodeId::new(1).unwrap();
     index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
@@ -819,7 +930,9 @@ fn test_add_race_retry_value_change_coverage() {
 
 #[test]
 fn test_add_race_retry_removal_coverage() {
-    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
     let node = NodeId::new(2).unwrap();
     index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
@@ -837,7 +950,9 @@ fn test_add_race_retry_removal_coverage() {
 
 #[test]
 fn test_add_race_vacant_coverage() {
-    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
     let node = NodeId::new(3).unwrap();
 
     TEST_RACE_HOOK.with(|h| {
@@ -849,7 +964,12 @@ fn test_add_race_vacant_coverage() {
     let result = index.add(node, &[0.5, 0.5, 0.5, 0.5]);
     TEST_RACE_HOOK.with(|h| h.set(None));
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Concurrent add detected"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Concurrent add detected")
+    );
     assert_eq!(index.len(), 0);
 }
 
@@ -881,7 +1001,11 @@ struct MockFailReader {
 
 impl MockFailReader {
     fn new(data: Vec<u8>, fail_at: usize) -> Self {
-        Self { data, fail_at, cursor: 0 }
+        Self {
+            data,
+            fail_at,
+            cursor: 0,
+        }
     }
 }
 
@@ -893,7 +1017,9 @@ impl Read for MockFailReader {
         let remaining = self.fail_at - self.cursor;
         let available = self.data.len() - self.cursor;
         let to_read = buf.len().min(remaining).min(available);
-        if to_read == 0 { return Ok(0); }
+        if to_read == 0 {
+            return Ok(0);
+        }
         buf[..to_read].copy_from_slice(&self.data[self.cursor..self.cursor + to_read]);
         self.cursor += to_read;
         Ok(to_read)
@@ -933,8 +1059,7 @@ fn test_load_mappings_file_open_error() {
 }
 
 #[test]
-fn test_load_mappings_read_failures() {
-}
+fn test_load_mappings_read_failures() {}
 
 #[test]
 fn test_add_reentrancy_check() {
@@ -944,7 +1069,12 @@ fn test_add_reentrancy_check() {
     let _guard = FilterCallbackGuard::new();
     let result = index.add(node_id, &vec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Cannot modify index from within a search_with_filter callback"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot modify index from within a search_with_filter callback")
+    );
 }
 
 #[test]
@@ -954,7 +1084,12 @@ fn test_remove_reentrancy_check() {
     let _guard = FilterCallbackGuard::new();
     let result = index.remove(node_id);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Cannot modify index from within a search_with_filter callback"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot modify index from within a search_with_filter callback")
+    );
 }
 
 #[test]
@@ -964,7 +1099,12 @@ fn test_save_reentrancy_check() {
     let _guard = FilterCallbackGuard::new();
     let result = index.save(path);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Cannot save index from within a search_with_filter callback"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot save index from within a search_with_filter callback")
+    );
 }
 
 #[test]
@@ -974,7 +1114,12 @@ fn test_search_reentrancy_check() {
     let _guard = FilterCallbackGuard::new();
     let result = index.search(&query, 10);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Cannot perform search from within a search_with_filter callback"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot perform search from within a search_with_filter callback")
+    );
 }
 
 #[test]
@@ -984,12 +1129,18 @@ fn test_search_with_filter_reentrancy_check() {
     let _guard = FilterCallbackGuard::new();
     let result = index.search_with_filter(&query, 10, |_| true);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Cannot perform search_with_filter from within a search_with_filter callback"));
+    assert!(
+        result.unwrap_err().to_string().contains(
+            "Cannot perform search_with_filter from within a search_with_filter callback"
+        )
+    );
 }
 
 #[test]
 fn test_metric_wrapper_panic_resilience() {
-    let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 { panic!("Test panic"); });
+    let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+        panic!("Test panic");
+    });
     let wrapper = create_metric_wrapper(4, distance_fn);
     let data = [0.0f32; 4];
     let result = wrapper(data.as_ptr(), data.as_ptr());
@@ -1010,7 +1161,10 @@ fn test_metric_wrapper_success_direct() {
 
 #[test]
 fn test_capacity_check_and_expand() {
-    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).initial_capacity(10).build().unwrap();
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .initial_capacity(10)
+        .build()
+        .unwrap();
     assert_eq!(index.len(), 0);
     index.check_and_expand_capacity(1).unwrap();
     for i in 0..10 {
@@ -1025,10 +1179,16 @@ fn test_capacity_check_and_expand() {
 fn test_vacant_path_race_recovery() -> Result<()> {
     TEST_SKIP_CAPACITY_CHECK.store(true, Ordering::SeqCst);
     struct ResetGuard;
-    impl Drop for ResetGuard { fn drop(&mut self) { TEST_SKIP_CAPACITY_CHECK.store(false, Ordering::SeqCst); } }
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            TEST_SKIP_CAPACITY_CHECK.store(false, Ordering::SeqCst);
+        }
+    }
     let _reset = ResetGuard;
 
-    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).initial_capacity(10).build()?;
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .initial_capacity(10)
+        .build()?;
     for i in 0..10 {
         index.add(NodeId::new(i + 1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
     }
@@ -1042,10 +1202,16 @@ fn test_vacant_path_race_recovery() -> Result<()> {
 fn test_occupied_path_inconsistency_race_recovery() -> Result<()> {
     TEST_SKIP_CAPACITY_CHECK.store(true, Ordering::SeqCst);
     struct ResetGuard;
-    impl Drop for ResetGuard { fn drop(&mut self) { TEST_SKIP_CAPACITY_CHECK.store(false, Ordering::SeqCst); } }
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            TEST_SKIP_CAPACITY_CHECK.store(false, Ordering::SeqCst);
+        }
+    }
     let _reset = ResetGuard;
 
-    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).initial_capacity(10).build()?;
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .initial_capacity(10)
+        .build()?;
     for i in 0..10 {
         index.add(NodeId::new(i + 1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
     }
@@ -1064,4 +1230,174 @@ fn test_occupied_path_inconsistency_race_recovery() -> Result<()> {
     assert_eq!(index.len(), 11);
     assert!(index.inner.read().capacity() > 10);
     Ok(())
+}
+
+#[test]
+fn test_deserialize_config_dimensions_overflow() {
+    let mut buffer = Vec::new();
+    let too_large = crate::core::property::MAX_VECTOR_DIMENSIONS as u64 + 1;
+    buffer.extend_from_slice(&too_large.to_le_bytes());
+    buffer.resize(100, 0); // Fill rest with dummy data
+
+    let mut cursor = std::io::Cursor::new(buffer);
+    let result = HnswConfig::deserialize_from(&mut cursor);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("dimensions"));
+    assert!(err_msg.contains("exceeds maximum"));
+}
+
+#[test]
+fn test_builder_dimensions_overflow() {
+    let too_large = crate::core::property::MAX_VECTOR_DIMENSIONS + 1;
+    let result = HnswIndexBuilder::new(too_large, DistanceMetric::Cosine).build();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("exceeds maximum"));
+}
+
+#[test]
+fn test_builder_with_custom_metric() {
+    let metric_fn = |_: &[f32], _: &[f32]| 0.0;
+    let builder = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .with_custom_metric("test_metric_builder", metric_fn);
+
+    // Check config inside builder
+    assert!(builder.config.custom_metric.is_some());
+    assert_eq!(
+        builder.config.custom_metric.unwrap().name,
+        "test_metric_builder"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_index_save_invalid_path() {
+    use std::os::unix::ffi::OsStringExt;
+    let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xff, 0xff]);
+    let path = std::path::Path::new(&invalid_utf8);
+
+    let index = create_test_index();
+    let result = index.save(path);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("invalid UTF-8"));
+}
+
+#[test]
+fn test_load_mappings_empty_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_empty.usearch");
+    let mappings_path = path.with_extension("usearch.mappings");
+
+    // Create a valid index file first so load_index can proceed to mappings
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
+    index
+        .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    index.save(&path).unwrap();
+
+    // Now overwrite mappings with empty file
+    std::fs::File::create(&mappings_path).unwrap();
+
+    let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+    // Should fail with "too small"
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("too small") || err_msg.contains("corrupted"));
+}
+
+#[test]
+fn test_load_mappings_metadata_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_mismatch.usearch");
+    let _mappings_path = path.with_extension("usearch.mappings");
+
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
+    index
+        .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    index.save(&path).unwrap();
+
+    // Load with different config
+    let config_diff_dim = HnswConfig::new(5, DistanceMetric::Cosine); // 5 != 4
+    let result = HnswIndex::load(&path, config_diff_dim);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("dimension mismatch")
+    );
+
+    let config_diff_metric = HnswConfig::new(4, DistanceMetric::Euclidean); // Euclidean != Cosine
+    let result = HnswIndex::load(&path, config_diff_metric);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("metric mismatch"));
+
+    let config_diff_quant =
+        HnswConfig::new(4, DistanceMetric::Cosine).with_quantization(Quantization::F16); // F16 != F32 (default)
+    let result = HnswIndex::load(&path, config_diff_quant);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("quantization mismatch")
+    );
+}
+
+#[test]
+fn test_load_legacy_index_custom_metric_error() {
+    // Simulate legacy index (V1) by manually writing V1 header
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_legacy.usearch");
+    let mappings_path = path.with_extension("usearch.mappings");
+
+    let mut writer = std::fs::File::create(&mappings_path).unwrap();
+    use std::io::Write;
+    let mut hasher = Hasher::new();
+
+    // Magic + V1
+    let magic = super::persistence::MAPPING_MAGIC;
+    writer.write_all(magic).unwrap();
+    hasher.update(magic);
+
+    writer.write_all(&[1]).unwrap(); // Version 1
+    hasher.update(&[1]);
+
+    let count = 0u64;
+    writer.write_all(&count.to_le_bytes()).unwrap();
+    hasher.update(&count.to_le_bytes());
+
+    let crc = hasher.finalize();
+    writer.write_all(&crc.to_le_bytes()).unwrap();
+
+    // Try to load with custom metric
+    let config = HnswConfig::new(4, DistanceMetric::Cosine).with_custom_metric("test", |_, _| 0.0);
+
+    // Also create dummy index file so load_index proceeds to mappings
+    let index_opts = usearch::IndexOptions {
+        dimensions: 4,
+        metric: usearch::MetricKind::Cos,
+        quantization: usearch::ScalarKind::F32,
+        connectivity: 16,
+        expansion_add: 100,
+        expansion_search: 100,
+        multi: false,
+    };
+    let index = usearch::Index::new(&index_opts).unwrap();
+    index.save(path.to_str().unwrap()).unwrap();
+
+    let result = HnswIndex::load(&path, config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot use custom metric with legacy index")
+    );
 }

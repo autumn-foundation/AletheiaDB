@@ -6,8 +6,8 @@ use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMo
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::io::{Read, Write};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use usearch::{Index, IndexOptions};
 
 /// Configuration for HNSW (Hierarchical Navigable Small World) index.
@@ -206,7 +206,7 @@ impl HnswConfig {
 
 /// Builder for configuring and creating an `HnswIndex`.
 pub struct HnswIndexBuilder {
-    config: HnswConfig,
+    pub(crate) config: HnswConfig,
 }
 
 impl HnswIndexBuilder {
@@ -423,7 +423,9 @@ impl HnswIndexBuilder {
             max_k: super::MAX_K,
             is_mmap: false,
             save_lock: Arc::new(RwLock::new(())),
-            entry_locks: (0..super::NUM_ENTRY_LOCKS).map(|_| Mutex::new(())).collect(),
+            entry_locks: (0..super::NUM_ENTRY_LOCKS)
+                .map(|_| Mutex::new(()))
+                .collect(),
         })
     }
 }
