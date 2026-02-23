@@ -60,7 +60,6 @@ use std::collections::HashMap;
 
 /// The result of a clustering operation.
 #[derive(Debug, Clone)]
-#[cfg_attr(docsrs, doc(cfg(feature = "nova")))]
 pub struct ClusteringResult {
     /// The centroids of the clusters.
     pub centroids: Vec<Vec<f32>>,
@@ -72,7 +71,6 @@ pub struct ClusteringResult {
 ///
 /// It provides methods to perform K-Means clustering on node embeddings
 /// and to materialize those clusters as nodes in the graph.
-#[cfg_attr(docsrs, doc(cfg(feature = "nova")))]
 pub struct Cartographer<'a> {
     pub(crate) db: &'a AletheiaDB,
 }
