@@ -107,16 +107,21 @@ fn build_cors(cors_config: &CorsConfig) -> Cors {
 /// Build rate limiting middleware from configuration.
 fn build_rate_limit(
     rate_limit_config: &RateLimitConfig,
-) -> Governor<
-    actix_governor::PeerIpKeyExtractor,
-    actix_governor::governor::middleware::NoOpMiddleware,
+) -> Result<
+    Governor<
+        actix_governor::PeerIpKeyExtractor,
+        actix_governor::governor::middleware::NoOpMiddleware,
+    >,
+    String,
 > {
+    rate_limit_config.validate()?;
+
     let governor_conf = GovernorConfigBuilder::default()
         .requests_per_second(u64::from(rate_limit_config.requests_per_second()))
         .burst_size(rate_limit_config.burst_size())
         .finish()
-        .expect("Failed to build rate limit configuration");
-    Governor::new(&governor_conf)
+        .ok_or_else(|| "Failed to build rate limit configuration".to_string())?;
+    Ok(Governor::new(&governor_conf))
 }
 
 /// Create a configured Actix-web application factory with all middleware.
@@ -148,7 +153,7 @@ pub fn create_app() -> App<
         .wrap(Logger::default())
         .wrap(build_security_headers())
         .wrap(build_cors(&cors_config))
-        .wrap(build_rate_limit(&rate_limit_config))
+        .wrap(build_rate_limit(&rate_limit_config).expect("Default rate limit config should be valid"))
         .configure(configure_app)
 }
 
@@ -189,12 +194,26 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
     let cors_config = config.cors().clone();
     let rate_limit_config = config.rate_limit().clone();
 
+    // Validate rate limit config early
+    if let Err(e) = rate_limit_config.validate() {
+        return Err(std::io::Error::other(e));
+    }
+
     let server = HttpServer::new(move || {
+        // We can unwrap here because we validated above, but to be 100% safe
+        // against race conditions (though config is cloned), we handle it.
+        // Actually, inside the closure, we can't easily return errors to the caller of `new`.
+        // But since we validated `rate_limit_config` before creating the server,
+        // `build_rate_limit` should succeed unless `GovernorConfigBuilder` fails for other reasons.
+        // If it fails, we panic, which is acceptable inside the factory closure if invariants are violated.
+        let rate_limit = build_rate_limit(&rate_limit_config)
+            .expect("Rate limit configuration should be valid after pre-validation");
+
         App::new()
             .wrap(Logger::default())
             .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
-            .wrap(build_rate_limit(&rate_limit_config))
+            .wrap(rate_limit)
             .configure(configure_app)
     })
     .bind(&bind_address)?
@@ -246,12 +265,20 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
         );
     }
 
+    // Validate rate limit config early
+    if let Err(e) = rate_limit_config.validate() {
+        return Err(std::io::Error::other(e));
+    }
+
     HttpServer::new(move || {
+        let rate_limit = build_rate_limit(&rate_limit_config)
+            .expect("Rate limit configuration should be valid after pre-validation");
+
         App::new()
             .wrap(Logger::default())
             .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
-            .wrap(build_rate_limit(&rate_limit_config))
+            .wrap(rate_limit)
             .configure(configure_app)
     })
     .bind(&bind_address)?
@@ -350,7 +377,7 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .wrap(build_rate_limit(&rate_limit_config))
+                .wrap(build_rate_limit(&rate_limit_config).unwrap())
                 .configure(configure_app),
         )
         .await;
@@ -381,7 +408,7 @@ mod tests {
 
         let app = test::init_service(
             App::new()
-                .wrap(build_rate_limit(&rate_limit_config))
+                .wrap(build_rate_limit(&rate_limit_config).unwrap())
                 .configure(configure_app),
         )
         .await;

@@ -130,6 +130,17 @@ impl RateLimitConfig {
     pub fn burst_size(&self) -> u32 {
         self.burst_size
     }
+
+    /// Validate the configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.requests_per_second == 0 {
+            return Err("requests_per_second must be > 0".to_string());
+        }
+        if self.burst_size == 0 {
+            return Err("burst_size must be > 0".to_string());
+        }
+        Ok(())
+    }
 }
 
 impl Default for RateLimitConfig {
@@ -347,5 +358,17 @@ mod tests {
         let config = ServerConfig::builder().rate_limit(rate_limit).build();
         assert_eq!(config.rate_limit().requests_per_second(), 100);
         assert_eq!(config.rate_limit().burst_size(), 200);
+    }
+
+    #[test]
+    fn test_rate_limit_validation() {
+        let valid = RateLimitConfig::new(10, 20);
+        assert!(valid.validate().is_ok());
+
+        let invalid_rps = RateLimitConfig::new(0, 20);
+        assert!(invalid_rps.validate().is_err());
+
+        let invalid_burst = RateLimitConfig::new(10, 0);
+        assert!(invalid_burst.validate().is_err());
     }
 }
