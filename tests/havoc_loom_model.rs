@@ -1,4 +1,5 @@
 #![cfg(loom)]
+#![allow(unexpected_cfgs)]
 
 use loom::sync::{Arc, Mutex, RwLock};
 use loom::thread;
