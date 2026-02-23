@@ -725,7 +725,7 @@ mod tests {
             node_ids.iter().map(|&x| x as u64).collect(),
             offsets.iter().map(|&x| x as u64).collect(),
             edge_ids.iter().map(|&x| x as u64).collect(),
-            &map
+            &map,
         );
 
         assert_eq!(index.node_count(), 2);
