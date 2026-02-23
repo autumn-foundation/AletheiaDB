@@ -18,6 +18,7 @@
 
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::core::error::{Error, Result, StorageError};
 use crate::core::hlc::HybridTimestamp;
@@ -34,6 +35,16 @@ const WAL_VERSION: u8 = 1;
 
 /// Size of the WAL segment header (magic + version).
 const WAL_HEADER_SIZE: usize = 5;
+
+/// Maximum number of entries to read during recovery to prevent OOM.
+/// This is a safety limit against huge WALs causing memory exhaustion.
+#[cfg(not(test))]
+const MAX_RECOVERY_ENTRIES: usize = 10_000_000;
+#[cfg(test)]
+const MAX_RECOVERY_ENTRIES: usize = 2000;
+
+/// Warning flag to prevent log spam when limit is exceeded.
+static OOM_WARNING_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Read all WAL entries from a directory, starting from the specified LSN.
 ///
@@ -70,8 +81,10 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
     segments.sort_by_key(|(id, _)| *id);
 
     // Read entries from each segment
+    let mut total_count = 0;
     for (_, path) in segments {
-        let segment_entries = read_segment(&path, start_lsn)?;
+        let segment_entries = read_segment_internal(&path, start_lsn, total_count)?;
+        total_count += segment_entries.len();
         entries.extend(segment_entries);
     }
 
@@ -103,6 +116,15 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 /// Uses `memmap2` for memory-mapped I/O. Peak memory usage is O(working set)
 /// rather than O(file size). See issue #216.
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
+    read_segment_internal(path, start_lsn, 0)
+}
+
+/// Internal implementation of read_segment with entry count limit.
+fn read_segment_internal(
+    path: &Path,
+    start_lsn: LSN,
+    initial_count: usize,
+) -> Result<Vec<WalEntry>> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
@@ -177,6 +199,22 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
             Ok((entry, bytes_consumed)) => {
                 // Only include entries >= start_lsn
                 if entry.lsn >= start_lsn {
+                    // Check capacity limit to prevent OOM
+                    if initial_count + entries.len() >= MAX_RECOVERY_ENTRIES
+                        && !OOM_WARNING_LOGGED.swap(true, Ordering::Relaxed)
+                    {
+                        #[cfg(feature = "observability")]
+                        tracing::warn!(
+                            "WAL recovery entries exceeded limit ({}). Continuing, but OOM is possible. \
+                             Consider compacting WAL or increasing memory.",
+                            MAX_RECOVERY_ENTRIES
+                        );
+                        #[cfg(not(feature = "observability"))]
+                        eprintln!(
+                            "WARN: WAL recovery entries exceeded limit ({}). Continuing, but OOM is possible.",
+                            MAX_RECOVERY_ENTRIES
+                        );
+                    }
                     entries.push(entry);
                 }
                 offset += bytes_consumed;
@@ -1844,5 +1882,53 @@ mod fuzz_tests {
             // Should not panic
             let _ = parse_entry_at(&bytes, offset, version);
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use crate::storage::wal::serialization::serialize_entry_into;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_read_entries_limit_enforcement() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("limit_test.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write WAL header
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        // Write MAX_RECOVERY_ENTRIES + 1 entries
+        for i in 0..=MAX_RECOVERY_ENTRIES {
+            let lsn = LSN(i as u64 + 1);
+            let operation = WalOperation::CreateNode {
+                node_id: NodeId::new(i as u64 + 1).unwrap(),
+                label: crate::core::interning::GLOBAL_INTERNER
+                    .intern("Node")
+                    .unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: crate::core::temporal::time::now(),
+            };
+            let entry = WalEntry::new(lsn, operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file.write_all(&buffer).unwrap();
+        }
+        file.sync_all().unwrap();
+
+        // Reading should NOT fail (soft limit), but should log a warning
+        let result = read_segment(&segment_path, LSN(1));
+        assert!(
+            result.is_ok(),
+            "Should not fail when exceeding limit (soft limit)"
+        );
+
+        let entries = result.unwrap();
+        // Should have read all entries (MAX_RECOVERY_ENTRIES + 1)
+        assert_eq!(entries.len(), MAX_RECOVERY_ENTRIES + 1);
     }
 }
