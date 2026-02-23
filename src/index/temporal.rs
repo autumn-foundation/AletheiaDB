@@ -179,7 +179,11 @@ struct EntityTimeline {
     versions: Vec<TimelineEntry>,
     /// Fast lookup: metadata_idx -> position in versions vec.
     /// Enables O(1) updates instead of O(n) linear search.
-    metadata_to_position: std::collections::HashMap<VersionMetadataIndex, usize>,
+    metadata_to_position: std::collections::HashMap<
+        VersionMetadataIndex,
+        usize,
+        std::hash::BuildHasherDefault<crate::core::hasher::IdentityHasher>,
+    >,
 }
 
 impl EntityTimeline {

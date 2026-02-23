@@ -13,9 +13,11 @@
 //! This layout is cache-friendly because traversing from a node requires
 //! sequential access to a contiguous region of memory.
 
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use rayon::prelude::*;
+use std::hash::BuildHasherDefault;
 
 /// A single entry in the adjacency list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +89,11 @@ impl AdjacencyIndex {
         node_ids: Vec<u64>,
         offsets: Vec<u64>,
         edge_ids: Vec<u64>,
-        edges_map: &std::collections::HashMap<EdgeId, (NodeId, InternedString)>,
+        edges_map: &std::collections::HashMap<
+            EdgeId,
+            (NodeId, InternedString),
+            BuildHasherDefault<IdentityHasher>,
+        >,
     ) -> Self {
         if offsets.is_empty() || edge_ids.is_empty() {
             return Self::new();

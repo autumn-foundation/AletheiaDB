@@ -728,7 +728,11 @@ impl CheckpointManager {
                         builder = builder.insert_by_key(*key, value.clone());
                     }
                     let changed_props = builder.build();
-                    let removed_keys: Vec<u32> = delta.removed.iter().map(|k| k.as_u32()).collect();
+                    let removed_keys: Vec<u32> = delta
+                        .removed
+                        .iter()
+                        .map(|k: &crate::core::interning::InternedString| k.as_u32())
+                        .collect();
 
                     (
                         PersistedVersionType::Delta {
@@ -796,7 +800,11 @@ impl CheckpointManager {
                         builder = builder.insert_by_key(*key, value.clone());
                     }
                     let changed_props = builder.build();
-                    let removed_keys: Vec<u32> = delta.removed.iter().map(|k| k.as_u32()).collect();
+                    let removed_keys: Vec<u32> = delta
+                        .removed
+                        .iter()
+                        .map(|k: &crate::core::interning::InternedString| k.as_u32())
+                        .collect();
 
                     (
                         PersistedVersionType::Delta {
