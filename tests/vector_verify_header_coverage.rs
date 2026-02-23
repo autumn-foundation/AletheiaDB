@@ -1,6 +1,7 @@
-
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization, VectorIndex, HnswConfig, HnswIndex};
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{
+    DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, Quantization, VectorIndex,
+};
 use std::fs::File;
 use std::io::Write;
 
@@ -47,8 +48,8 @@ fn test_verify_header_quantization_coverage() {
         index.add(NodeId::new(1).unwrap(), &vec![1.0; 16]).unwrap();
         index.save(&path).unwrap();
 
-        let config = HnswConfig::new(16, DistanceMetric::Cosine)
-            .with_quantization(Quantization::F16);
+        let config =
+            HnswConfig::new(16, DistanceMetric::Cosine).with_quantization(Quantization::F16);
         let loaded = HnswIndex::load(&path, config);
         assert!(loaded.is_ok());
     }
@@ -63,8 +64,8 @@ fn test_verify_header_quantization_coverage() {
         index.add(NodeId::new(1).unwrap(), &vec![1.0; 16]).unwrap();
         index.save(&path).unwrap();
 
-        let config = HnswConfig::new(16, DistanceMetric::Cosine)
-            .with_quantization(Quantization::I8);
+        let config =
+            HnswConfig::new(16, DistanceMetric::Cosine).with_quantization(Quantization::I8);
         let loaded = HnswIndex::load(&path, config);
         assert!(loaded.is_ok());
     }
