@@ -19,6 +19,7 @@ fn regression_group_commit_data_loss_prevention() {
     // 5. T1 checks status.
     //
     // EXPECTED: T1 should receive an error (not Ok).
+    // VERIFIED: Fix confirmed by regression test.
 
     let coord = Arc::new(GroupCommitCoordinator::new(100, 100));
     let barrier = Arc::new(Barrier::new(2));
