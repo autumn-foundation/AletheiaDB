@@ -147,7 +147,7 @@ pub fn evaluate_clock_skew(
     max_forward_jump_us: Option<i64>,
     self_heal_clock_skew: bool,
 ) -> Result<ClockSkewDecision, ClockSkewViolation> {
-    let drift = current_wallclock - frontier_wallclock;
+    let drift = current_wallclock.saturating_sub(frontier_wallclock);
     let mut effective_wallclock = current_wallclock;
     let mut healed_direction = None;
 
@@ -931,6 +931,37 @@ mod tests {
         assert!(
             result_backward.is_ok(),
             "Exact max backward drift should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_overflow_reproduction() {
+        // Scenario: Frontier is at i64::MIN (very old), Current is at 0 (1970).
+        // Drift should be 0 - i64::MIN = i64::MIN.abs() which is > i64::MAX.
+        // In i64 arithmetic, 0 - i64::MIN overflows.
+        // If it wraps, it becomes i64::MIN.
+        // Then drift (i64::MIN) < -MAX_BACKWARD_DRIFT_US.
+        // This is interpreted as Backward Drift (Violation), even though current is way ahead of frontier.
+
+        let current = 0;
+        let frontier = i64::MIN;
+
+        // This should be valid forward drift (huge), but if it overflows, it might look like backward drift.
+        // If max_forward_jump_us is None, it should be accepted.
+
+        // With current implementation (let drift = current - frontier), this will panic in debug mode.
+        // In release mode (wrapping), drift = i64::MIN.
+        // i64::MIN < -MAX_BACKWARD_DRIFT_US.
+        // So it returns Err(Backward).
+
+        let result = evaluate_clock_skew(current, frontier, None, false);
+
+        // We expect this to be Ok (accepted) because it's forward drift and we didn't set a forward limit.
+        // If it fails with Backward violation, we have reproduced the bug.
+
+        assert!(
+            result.is_ok(),
+            "Should accept forward drift even if calculating it overflows"
         );
     }
 }
