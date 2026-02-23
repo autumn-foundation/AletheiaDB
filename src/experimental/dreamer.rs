@@ -19,118 +19,105 @@ use crate::core::id::NodeId;
 use crate::core::temporal::TimeRange;
 use std::time::Duration;
 
-/// The Dreamer engine for predictive semantic analysis.
-pub struct Dreamer<'a> {
-    db: &'a AletheiaDB,
-}
+/// Predict the future semantic neighbors of a node.
+///
+/// # Arguments
+/// * `db` - The database instance.
+/// * `node_id` - The node to analyze.
+/// * `property` - The vector property name (must be indexed).
+/// * `history_window` - The time range to analyze for trajectory calculation.
+/// * `future_horizon` - How far into the future to project from the last known point.
+/// * `k` - Number of neighbors to find.
+///
+/// # Returns
+/// A list of `(NodeId, score)` pairs representing the nodes closest to the predicted future state.
+///
+/// This uses [`AletheiaDB::search_vectors_in`] internally to find the nearest neighbors
+/// to the extrapolated vector.
+pub fn predict_future(
+    db: &AletheiaDB,
+    node_id: NodeId,
+    property: &str,
+    history_window: TimeRange,
+    future_horizon: Duration,
+    k: usize,
+) -> Result<Vec<(NodeId, f32)>> {
+    // 1. Fetch History
+    let history = db.get_node_history(node_id)?;
 
-impl<'a> Dreamer<'a> {
-    /// Create a new Dreamer instance.
-    pub fn new(db: &'a AletheiaDB) -> Self {
-        Self { db }
-    }
+    // Extract vector snapshots: (timestamp_micros, vector)
+    let mut snapshots: Vec<(i64, Vec<f32>)> = Vec::new();
 
-    /// Predict the future semantic neighbors of a node.
-    ///
-    /// # Arguments
-    /// * `node_id` - The node to analyze.
-    /// * `property` - The vector property name (must be indexed).
-    /// * `history_window` - The time range to analyze for trajectory calculation.
-    /// * `future_horizon` - How far into the future to project from the last known point.
-    /// * `k` - Number of neighbors to find.
-    ///
-    /// # Returns
-    /// A list of `(NodeId, score)` pairs representing the nodes closest to the predicted future state.
-    ///
-    /// This uses [`AletheiaDB::search_vectors_in`] internally to find the nearest neighbors
-    /// to the extrapolated vector.
-    pub fn predict_future(
-        &self,
-        node_id: NodeId,
-        property: &str,
-        history_window: TimeRange,
-        future_horizon: Duration,
-        k: usize,
-    ) -> Result<Vec<(NodeId, f32)>> {
-        // 1. Fetch History
-        let history = self.db.get_node_history(node_id)?;
+    for version in &history.versions {
+        let valid_time = version.temporal.valid_time();
 
-        // Extract vector snapshots: (timestamp_micros, vector)
-        let mut snapshots: Vec<(i64, Vec<f32>)> = Vec::new();
-
-        for version in &history.versions {
-            let valid_time = version.temporal.valid_time();
-
-            // Check if version is relevant to the window
-            // We include versions that start within the window or overlap it significantly.
-            // Simplest is to check if valid_start is inside the window.
-            if valid_time.start() < history_window.end()
-                && valid_time.end() > history_window.start()
+        // Check if version is relevant to the window
+        // We include versions that start within the window or overlap it significantly.
+        // Simplest is to check if valid_start is inside the window.
+        if valid_time.start() < history_window.end() && valid_time.end() > history_window.start() {
+            // Get the property value from this version
+            if let Some(prop_val) = version.properties.get(property)
+                && let Some(vec) = prop_val.as_vector()
             {
-                // Get the property value from this version
-                if let Some(prop_val) = version.properties.get(property)
-                    && let Some(vec) = prop_val.as_vector()
-                {
-                    // Use the max of (valid_start, window_start) as the effective timestamp
-                    // ensuring we don't look back before the window started.
-                    let effective_time = valid_time
-                        .start()
-                        .wallclock()
-                        .max(history_window.start().wallclock());
+                // Use the max of (valid_start, window_start) as the effective timestamp
+                // ensuring we don't look back before the window started.
+                let effective_time = valid_time
+                    .start()
+                    .wallclock()
+                    .max(history_window.start().wallclock());
 
-                    // Avoid duplicates if multiple versions map to same effective time?
-                    // Just take them all, sort later.
-                    snapshots.push((effective_time, vec.to_vec()));
-                }
+                // Avoid duplicates if multiple versions map to same effective time?
+                // Just take them all, sort later.
+                snapshots.push((effective_time, vec.to_vec()));
             }
         }
+    }
 
-        // Sort by time to ensure chronological order
-        snapshots.sort_by_key(|(t, _)| *t);
+    // Sort by time to ensure chronological order
+    snapshots.sort_by_key(|(t, _)| *t);
 
-        // Deduplicate timestamps (keep latest per timestamp if any)
-        snapshots.dedup_by_key(|(t, _)| *t);
+    // Deduplicate timestamps (keep latest per timestamp if any)
+    snapshots.dedup_by_key(|(t, _)| *t);
 
-        if snapshots.is_empty() {
-            return Err(Error::Vector(VectorError::IndexError(format!(
-                "No vector history found for node {} in property '{}' within the specified window",
-                node_id, property
-            ))));
-        }
+    if snapshots.is_empty() {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "No vector history found for node {} in property '{}' within the specified window",
+            node_id, property
+        ))));
+    }
 
-        // 2. Calculate Trajectory (Velocity)
-        let (last_time, last_vec) = snapshots.last().unwrap();
+    // 2. Calculate Trajectory (Velocity)
+    let (last_time, last_vec) = snapshots.last().unwrap();
 
-        let projected_vec = if snapshots.len() < 2 {
-            // Not enough history to determine trajectory. Assume static.
+    let projected_vec = if snapshots.len() < 2 {
+        // Not enough history to determine trajectory. Assume static.
+        last_vec.clone()
+    } else {
+        let (first_time, first_vec) = snapshots.first().unwrap();
+
+        let duration_micros = last_time - first_time;
+
+        if duration_micros <= 0 {
             last_vec.clone()
         } else {
-            let (first_time, first_vec) = snapshots.first().unwrap();
+            let duration_secs = duration_micros as f32 / 1_000_000.0;
+            let horizon_secs = future_horizon.as_secs_f32();
 
-            let duration_micros = last_time - first_time;
+            // Linear projection: Future = Last + (Velocity * Horizon)
+            // Velocity = (Last - First) / Duration
+            let mut proj = Vec::with_capacity(last_vec.len());
 
-            if duration_micros <= 0 {
-                last_vec.clone()
-            } else {
-                let duration_secs = duration_micros as f32 / 1_000_000.0;
-                let horizon_secs = future_horizon.as_secs_f32();
-
-                // Linear projection: Future = Last + (Velocity * Horizon)
-                // Velocity = (Last - First) / Duration
-                let mut proj = Vec::with_capacity(last_vec.len());
-
-                for (start, end) in first_vec.iter().zip(last_vec.iter()) {
-                    let velocity = (end - start) / duration_secs;
-                    let future_val = end + (velocity * horizon_secs);
-                    proj.push(future_val);
-                }
-                proj
+            for (start, end) in first_vec.iter().zip(last_vec.iter()) {
+                let velocity = (end - start) / duration_secs;
+                let future_val = end + (velocity * horizon_secs);
+                proj.push(future_val);
             }
-        };
+            proj
+        }
+    };
 
-        // 3. Search
-        self.db.search_vectors_in(property, &projected_vec, k)
-    }
+    // 3. Search
+    db.search_vectors_in(property, &projected_vec, k)
 }
 
 #[cfg(test)]
@@ -209,7 +196,7 @@ mod tests {
         assert!(history.version_count() >= 2);
 
         // Run Dreamer
-        let dreamer = Dreamer::new(&db);
+        // let dreamer = Dreamer::new(&db); // Deleted
 
         // Window covers start to end
         let window = TimeRange::new(t_start, t_end).unwrap();
@@ -230,9 +217,7 @@ mod tests {
         // Let's use a generic future horizon
         let horizon = Duration::from_millis(50);
 
-        let predictions = dreamer
-            .predict_future(learner, "embedding", window, horizon, 3)
-            .unwrap();
+        let predictions = predict_future(&db, learner, "embedding", window, horizon, 3).unwrap();
 
         assert!(!predictions.is_empty());
 
@@ -258,13 +243,11 @@ mod tests {
         let t1 = time::now();
 
         // No updates.
-        let dreamer = Dreamer::new(&db);
+        // let dreamer = Dreamer::new(&db); // Deleted
         let window = TimeRange::new(t0, t1).unwrap();
 
         // Should return same position
-        let res = dreamer
-            .predict_future(node, "vec", window, Duration::from_secs(10), 1)
-            .unwrap();
+        let res = predict_future(&db, node, "vec", window, Duration::from_secs(10), 1).unwrap();
 
         // Should match itself (as it's the closest to [1.0, 1.0])
         assert_eq!(res[0].0, node);

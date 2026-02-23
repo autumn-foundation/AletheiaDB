@@ -12,6 +12,8 @@
 //!   High score = High novelty (no existing concepts nearby).
 //! - **Inspiration**: The proposed new concept.
 
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
@@ -37,7 +39,6 @@ pub struct Muse<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(feature = "nova")]
 impl<'a> Muse<'a> {
     /// Create a new Muse instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -140,35 +141,7 @@ impl<'a> Muse<'a> {
     }
 }
 
-#[cfg(not(feature = "nova"))]
-impl<'a> Muse<'a> {
-    /// Create a new Muse instance.
-    pub fn new(_db: &'a AletheiaDB) -> Self {
-        panic!(
-            "Experimental feature 'Muse' requires the 'nova' feature. Please enable it in Cargo.toml."
-        );
-    }
-
-    /// Internal constructor for testing panic behavior.
-    #[cfg(test)]
-    fn new_internal(db: &'a AletheiaDB) -> Self {
-        Self { db }
-    }
-
-    /// Inspire a new concept based on the input nodes.
-    pub fn inspire(
-        &self,
-        _nodes: &[NodeId],
-        _property: Option<&str>,
-        _limit: usize,
-    ) -> Result<Option<Inspiration>> {
-        panic!(
-            "Experimental feature 'Muse' requires the 'nova' feature. Please enable it in Cargo.toml."
-        );
-    }
-}
-
-#[cfg(all(test, feature = "nova"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
@@ -247,27 +220,5 @@ mod tests {
         // Nearest neighbor is C (sim = 1.0)
         // Novelty should be 0.0
         assert!(inspiration.novelty_score < 0.01);
-    }
-}
-
-#[cfg(all(test, not(feature = "nova")))]
-mod stub_tests {
-    use super::*;
-    use crate::AletheiaDB;
-
-    #[test]
-    #[should_panic(expected = "Experimental feature 'Muse' requires the 'nova' feature")]
-    fn test_stub_new_panics() {
-        let db = AletheiaDB::new().unwrap();
-        let _ = Muse::new(&db);
-    }
-
-    #[test]
-    #[should_panic(expected = "Experimental feature 'Muse' requires the 'nova' feature")]
-    fn test_stub_inspire_panics() {
-        let db = AletheiaDB::new().unwrap();
-        // Use internal constructor to bypass new's panic
-        let muse = Muse::new_internal(&db);
-        let _ = muse.inspire(&[], None, 0);
     }
 }

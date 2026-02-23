@@ -17,175 +17,152 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMapBuilder;
 use crate::{Error, Result, StorageError};
 
-/// Detector for finding potential duplicate nodes.
+/// Find potential duplicates for a given node.
+///
+/// # Arguments
+/// * `db` - The database instance.
+/// * `target` - The node to check.
+/// * `threshold` - Minimum similarity score (0.0 to 1.0).
+/// * `limit` - Maximum number of candidates.
 ///
 /// # Example
 ///
 /// ```rust,no_run
 /// use aletheiadb::AletheiaDB;
-/// use aletheiadb::experimental::highlander::HighlanderDetector;
+/// use aletheiadb::experimental::highlander::detect_duplicates;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let db = AletheiaDB::new()?;
-/// let detector = HighlanderDetector::new(&db);
 ///
 /// // Find candidates similar to node_id
-/// // let candidates = detector.find_duplicates(node_id, 0.9, 5)?;
+/// // let candidates = detect_duplicates(&db, node_id, 0.9, 5)?;
 /// # Ok(())
 /// # }
 /// ```
-pub struct HighlanderDetector<'a> {
-    db: &'a AletheiaDB,
+pub fn detect_duplicates(
+    db: &AletheiaDB,
+    target: NodeId,
+    threshold: f32,
+    limit: usize,
+) -> Result<Vec<(NodeId, f32)>> {
+    db.find_similar(target, limit).map(|candidates| {
+        candidates
+            .into_iter()
+            .filter(|&(_, score)| score >= threshold)
+            .collect()
+    })
 }
 
-impl<'a> HighlanderDetector<'a> {
-    /// Create a new HighlanderDetector.
-    pub fn new(db: &'a AletheiaDB) -> Self {
-        Self { db }
+/// Merge a victim node into a survivor node.
+///
+/// This moves all edges from the victim to the survivor, merges properties,
+/// and deletes the victim.
+///
+/// # Arguments
+/// * `db` - The database instance.
+/// * `survivor` - The node that will remain.
+/// * `victim` - The node that will be merged and deleted.
+///
+/// # Errors
+/// Returns `Error::Other` if `survivor` and `victim` are the same node.
+pub fn merge_entities(db: &AletheiaDB, survivor: NodeId, victim: NodeId) -> Result<()> {
+    if survivor == victim {
+        return Err(Error::other(
+            "Cannot merge a node into itself (survivor == victim)",
+        ));
     }
 
-    /// Find potential duplicates for a given node.
-    ///
-    /// # Arguments
-    /// * `target` - The node to check.
-    /// * `threshold` - Minimum similarity score (0.0 to 1.0).
-    /// * `limit` - Maximum number of candidates.
-    pub fn find_duplicates(
-        &self,
-        target: NodeId,
-        threshold: f32,
-        limit: usize,
-    ) -> Result<Vec<(NodeId, f32)>> {
-        self.db.find_similar(target, limit).map(|candidates| {
-            candidates
-                .into_iter()
-                .filter(|&(_, score)| score >= threshold)
-                .collect()
-        })
-    }
-}
+    db.write(|tx| {
+        // 1. Move Edges
+        // We collect all edges connected to the victim.
+        // Note: Self-loops appear in both outgoing and incoming lists.
+        // We handle them by deduplicating or checking ID.
+        let mut edges_processed = std::collections::HashSet::new();
 
-/// Merger for combining two nodes into one.
-pub struct EntityMerger<'a> {
-    db: &'a AletheiaDB,
-}
+        // Outgoing: Victim -> Target
+        let outgoing = tx.get_outgoing_edges(victim);
+        for edge_id in outgoing {
+            if edges_processed.insert(edge_id) {
+                let edge = tx.get_edge(edge_id)?;
+                let new_target = if edge.target == victim {
+                    survivor // Handle self-loop: Victim->Victim becomes Survivor->Survivor
+                } else {
+                    edge.target
+                };
+                // Resolve label
+                let label = GLOBAL_INTERNER
+                    .resolve_with(edge.label, |s| s.to_string())
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::InconsistentState {
+                            reason: format!(
+                                "Edge label with ID {} not found in interner",
+                                edge.label.as_u32()
+                            ),
+                        })
+                    })?;
 
-impl<'a> EntityMerger<'a> {
-    /// Create a new EntityMerger.
-    pub fn new(db: &'a AletheiaDB) -> Self {
-        Self { db }
-    }
-
-    /// Merge a victim node into a survivor node.
-    ///
-    /// This moves all edges from the victim to the survivor, merges properties,
-    /// and deletes the victim.
-    ///
-    /// # Arguments
-    /// * `survivor` - The node that will remain.
-    /// * `victim` - The node that will be merged and deleted.
-    ///
-    /// # Errors
-    /// Returns `Error::Other` if `survivor` and `victim` are the same node.
-    pub fn merge(&self, survivor: NodeId, victim: NodeId) -> Result<()> {
-        if survivor == victim {
-            return Err(Error::other(
-                "Cannot merge a node into itself (survivor == victim)",
-            ));
+                // Create edge from Survivor -> New Target
+                tx.create_edge(survivor, new_target, &label, edge.properties)?;
+                // Delete old edge
+                tx.delete_edge(edge_id)?;
+            }
         }
 
-        self.db.write(|tx| {
-            // 1. Move Edges
-            // We collect all edges connected to the victim.
-            // Note: Self-loops appear in both outgoing and incoming lists.
-            // We handle them by deduplicating or checking ID.
-            let mut edges_processed = std::collections::HashSet::new();
+        // Incoming: Source -> Victim
+        let incoming = tx.get_incoming_edges(victim);
+        for edge_id in incoming {
+            if edges_processed.insert(edge_id) {
+                let edge = tx.get_edge(edge_id)?;
+                let new_source = if edge.source == victim {
+                    survivor // Handle self-loop (should be caught above, but for safety)
+                } else {
+                    edge.source
+                };
+                // Resolve label
+                let label = GLOBAL_INTERNER
+                    .resolve_with(edge.label, |s| s.to_string())
+                    .ok_or_else(|| {
+                        Error::Storage(StorageError::InconsistentState {
+                            reason: format!(
+                                "Edge label with ID {} not found in interner",
+                                edge.label.as_u32()
+                            ),
+                        })
+                    })?;
 
-            // Outgoing: Victim -> Target
-            let outgoing = tx.get_outgoing_edges(victim);
-            for edge_id in outgoing {
-                if edges_processed.insert(edge_id) {
-                    let edge = tx.get_edge(edge_id)?;
-                    let new_target = if edge.target == victim {
-                        survivor // Handle self-loop: Victim->Victim becomes Survivor->Survivor
-                    } else {
-                        edge.target
-                    };
-                    // Resolve label
-                    let label = GLOBAL_INTERNER
-                        .resolve_with(edge.label, |s| s.to_string())
-                        .ok_or_else(|| {
-                            Error::Storage(StorageError::InconsistentState {
-                                reason: format!(
-                                    "Edge label with ID {} not found in interner",
-                                    edge.label.as_u32()
-                                ),
-                            })
-                        })?;
-
-                    // Create edge from Survivor -> New Target
-                    tx.create_edge(survivor, new_target, &label, edge.properties)?;
-                    // Delete old edge
-                    tx.delete_edge(edge_id)?;
-                }
+                // Create edge from New Source -> Survivor
+                tx.create_edge(new_source, survivor, &label, edge.properties)?;
+                // Delete old edge
+                tx.delete_edge(edge_id)?;
             }
+        }
 
-            // Incoming: Source -> Victim
-            let incoming = tx.get_incoming_edges(victim);
-            for edge_id in incoming {
-                if edges_processed.insert(edge_id) {
-                    let edge = tx.get_edge(edge_id)?;
-                    let new_source = if edge.source == victim {
-                        survivor // Handle self-loop (should be caught above, but for safety)
-                    } else {
-                        edge.source
-                    };
-                    // Resolve label
-                    let label = GLOBAL_INTERNER
-                        .resolve_with(edge.label, |s| s.to_string())
-                        .ok_or_else(|| {
-                            Error::Storage(StorageError::InconsistentState {
-                                reason: format!(
-                                    "Edge label with ID {} not found in interner",
-                                    edge.label.as_u32()
-                                ),
-                            })
-                        })?;
+        // 2. Merge Properties
+        // Strategy: Survivor Wins. We only add properties from Victim that Survivor lacks.
+        let victim_node = tx.get_node(victim)?;
+        let survivor_node = tx.get_node(survivor)?;
 
-                    // Create edge from New Source -> Survivor
-                    tx.create_edge(new_source, survivor, &label, edge.properties)?;
-                    // Delete old edge
-                    tx.delete_edge(edge_id)?;
-                }
+        let mut props_to_add = PropertyMapBuilder::new();
+        let mut has_changes = false;
+
+        for (key, val) in victim_node.properties.iter() {
+            // Optimized check using interned keys
+            if !survivor_node.properties.contains_interned_key(key) {
+                props_to_add = props_to_add.try_insert_by_key(*key, val.clone())?;
+                has_changes = true;
             }
+        }
 
-            // 2. Merge Properties
-            // Strategy: Survivor Wins. We only add properties from Victim that Survivor lacks.
-            let victim_node = tx.get_node(victim)?;
-            let survivor_node = tx.get_node(survivor)?;
+        if has_changes {
+            tx.update_node(survivor, props_to_add.build())?;
+        }
 
-            let mut props_to_add = PropertyMapBuilder::new();
-            let mut has_changes = false;
+        // 3. Delete Victim
+        // We have manually deleted all edges, so use delete_node to avoid cascade issues with self-loops
+        tx.delete_node(victim)?;
 
-            for (key, val) in victim_node.properties.iter() {
-                // Optimized check using interned keys
-                if !survivor_node.properties.contains_interned_key(key) {
-                    props_to_add = props_to_add.try_insert_by_key(*key, val.clone())?;
-                    has_changes = true;
-                }
-            }
-
-            if has_changes {
-                tx.update_node(survivor, props_to_add.build())?;
-            }
-
-            // 3. Delete Victim
-            // We have manually deleted all edges, so use delete_node to avoid cascade issues with self-loops
-            tx.delete_node(victim)?;
-
-            Ok(())
-        })
-    }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -220,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_duplicates() {
+    fn test_detect_duplicates_fn() {
         let (db, _dir) = create_test_db();
 
         // Enable vector index
@@ -248,8 +225,7 @@ mod tests {
             .build();
         let distinct = db.create_node("Person", props3).unwrap();
 
-        let detector = HighlanderDetector::new(&db);
-        let duplicates = detector.find_duplicates(target, 0.9, 5).unwrap();
+        let duplicates = detect_duplicates(&db, target, 0.9, 5).unwrap();
 
         // Should find "J. Smith"
         assert!(!duplicates.is_empty(), "Should find at least one duplicate");
@@ -264,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_entities() {
+    fn test_merge_entities_fn() {
         let (db, _dir) = create_test_db();
 
         // 1. Create Survivor: "Survivor"
@@ -300,8 +276,7 @@ mod tests {
         db.create_edge(victim, place, "LIVES_IN", PropertyMapBuilder::new().build())
             .unwrap();
 
-        let merger = EntityMerger::new(&db);
-        merger.merge(survivor, victim).unwrap();
+        merge_entities(&db, survivor, victim).unwrap();
 
         // Verify Victim is deleted
         assert!(
@@ -348,19 +323,18 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_self_error() {
+    fn test_merge_self_error_fn() {
         let (db, _dir) = create_test_db();
         let node = db
             .create_node("Person", PropertyMapBuilder::new().build())
             .unwrap();
-        let merger = EntityMerger::new(&db);
-        let result = merger.merge(node, node);
+        let result = merge_entities(&db, node, node);
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("Cannot merge a node into itself"));
     }
 
     #[test]
-    fn test_merge_self_loops() {
+    fn test_merge_self_loops_fn() {
         let (db, _dir) = create_test_db();
         let survivor = db
             .create_node("Survivor", PropertyMapBuilder::new().build())
@@ -374,8 +348,7 @@ mod tests {
             .create_edge(victim, victim, "SELF", PropertyMapBuilder::new().build())
             .unwrap();
 
-        let merger = EntityMerger::new(&db);
-        merger.merge(survivor, victim).unwrap();
+        merge_entities(&db, survivor, victim).unwrap();
 
         // Should become Survivor -> Survivor
         let outgoing = db.get_outgoing_edges_with_label(survivor, "SELF");
@@ -386,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_connected_nodes() {
+    fn test_merge_connected_nodes_fn() {
         let (db, _dir) = create_test_db();
         let survivor = db
             .create_node("Survivor", PropertyMapBuilder::new().build())
@@ -403,8 +376,7 @@ mod tests {
         db.create_edge(victim, survivor, "BACK", PropertyMapBuilder::new().build())
             .unwrap();
 
-        let merger = EntityMerger::new(&db);
-        merger.merge(survivor, victim).unwrap();
+        merge_entities(&db, survivor, victim).unwrap();
 
         // Survivor -> Victim should become Survivor -> Survivor (Self loop)
         let outgoing_link = db.get_outgoing_edges_with_label(survivor, "LINK");

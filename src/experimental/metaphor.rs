@@ -20,9 +20,7 @@
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
-#[cfg(feature = "nova")]
 use crate::core::vector::cosine_similarity;
-#[cfg(feature = "nova")]
 use std::collections::{HashMap, HashSet};
 
 /// A single mapping in the alignment.
@@ -51,7 +49,6 @@ pub struct Metaphor<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(feature = "nova")]
 impl<'a> Metaphor<'a> {
     /// Create a new Metaphor engine.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -252,39 +249,11 @@ impl<'a> Metaphor<'a> {
     }
 }
 
-#[cfg(not(feature = "nova"))]
-impl<'a> Metaphor<'a> {
-    /// Create a new Metaphor engine.
-    pub fn new(_db: &'a AletheiaDB) -> Self {
-        panic!(
-            "Experimental features like Metaphor require the 'nova' feature. Please enable it in your Cargo.toml:\n\n[dependencies]\naletheiadb = {{ version = \"...\", features = [\"nova\"] }}\n"
-        );
-    }
-
-    #[cfg(test)]
-    fn new_internal(db: &'a AletheiaDB) -> Self {
-        Self { db }
-    }
-
-    /// Align a source subgraph to a target subgraph.
-    pub fn align(
-        &self,
-        _source_nodes: &[NodeId],
-        _target_nodes: &[NodeId],
-        _vector_property: &str,
-        _structural_weight: f32,
-    ) -> Result<Alignment> {
-        panic!("Experimental features like Metaphor require the 'nova' feature.");
-    }
-}
-
-#[cfg(feature = "nova")]
 struct NodeData {
     vector: Option<Vec<f32>>,
     neighbors: Vec<NodeId>,
 }
 
-#[cfg(feature = "nova")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,27 +393,5 @@ mod tests {
         // Check B -> Y (Leftover)
         let map_b = alignment.mappings.iter().find(|m| m.source == b).unwrap();
         assert_eq!(map_b.target, y);
-    }
-}
-
-#[cfg(not(feature = "nova"))]
-#[cfg(test)]
-mod stub_tests {
-    use super::*;
-    use crate::AletheiaDB;
-
-    #[test]
-    #[should_panic(expected = "Experimental features like Metaphor require the 'nova' feature")]
-    fn test_stub_new_panics() {
-        let db = AletheiaDB::new().unwrap();
-        let _ = Metaphor::new(&db);
-    }
-
-    #[test]
-    #[should_panic(expected = "Experimental features like Metaphor require the 'nova' feature")]
-    fn test_stub_align_panics() {
-        let db = AletheiaDB::new().unwrap();
-        let metaphor = Metaphor::new_internal(&db);
-        let _ = metaphor.align(&[], &[], "vec", 0.0);
     }
 }
