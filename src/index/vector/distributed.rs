@@ -58,6 +58,7 @@
 //! ```
 
 use crate::core::error::{Error, Result, VectorError};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{DistanceMetric, Quantization, VectorIndex};
@@ -66,7 +67,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -1110,7 +1111,8 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 pub struct MockVectorNodeClient {
     node_id: u16,
     healthy: AtomicBool,
-    vectors: RwLock<std::collections::HashMap<NodeId, Vec<f32>>>,
+    vectors:
+        RwLock<std::collections::HashMap<NodeId, Vec<f32>, BuildHasherDefault<IdentityHasher>>>,
     dimensions: usize,
     metric: DistanceMetric,
     fail_next: RwLock<Option<String>>,
@@ -1122,7 +1124,9 @@ impl MockVectorNodeClient {
         Self {
             node_id,
             healthy: AtomicBool::new(true),
-            vectors: RwLock::new(std::collections::HashMap::new()),
+            vectors: RwLock::new(std::collections::HashMap::with_hasher(
+                BuildHasherDefault::default(),
+            )),
             dimensions,
             metric,
             fail_next: RwLock::new(None),

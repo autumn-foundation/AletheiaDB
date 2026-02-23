@@ -10,8 +10,9 @@
 //! - `VersionData`: Payload (Anchor or Delta).
 
 use crate::core::error::Result;
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
-use crate::core::interning::{IdentityHasher, InternedString};
+use crate::core::interning::InternedString;
 use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
@@ -478,10 +479,11 @@ impl PropertyDelta {
 
         // Use standard HashMap for construction, PropertyMap::from_iter will handle internal structure
         // PropertyMap uses IdentityHasher internally too
-        let mut result = FastHashMap::with_capacity_and_hasher(
-            estimated_capacity,
-            BuildHasherDefault::<IdentityHasher>::default(),
-        );
+        let mut result: FastHashMap<PropertyKey, PropertyValue> =
+            FastHashMap::with_capacity_and_hasher(
+                estimated_capacity,
+                BuildHasherDefault::<IdentityHasher>::default(),
+            );
 
         // Copy all base properties except removed ones (single lookup per property)
         // This is optimal when changes << base (typical case: ~1-10% change rate)

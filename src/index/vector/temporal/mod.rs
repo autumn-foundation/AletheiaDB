@@ -73,11 +73,15 @@
 //! - `docs/VECTOR_SEARCH_DESIGN.md` - Overall vector search architecture
 
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::core::hasher::IdentityHasher;
 use parking_lot::RwLock;
 use rayon::prelude::*;
+
+type IdentityBuildHasher = BuildHasherDefault<IdentityHasher>;
 
 use crate::core::error::{Error, Result, TemporalError, VectorError};
 use crate::core::id::NodeId;
@@ -378,7 +382,10 @@ impl TemporalVectorIndex {
 
         // Read current state to get vectors
         let state = self.current_state.read();
-        let mut vector_snapshot = HashMap::with_capacity(state.vectors.len());
+        let mut vector_snapshot = HashMap::with_capacity_and_hasher(
+            state.vectors.len(),
+            BuildHasherDefault::<IdentityHasher>::default(),
+        );
 
         for (node_id, vector) in state.vectors.iter() {
             snapshot.add(*node_id, vector.as_ref())?;
@@ -406,7 +413,7 @@ impl TemporalVectorIndex {
         base: Arc<SnapshotIndex>,
         base_vectors: &VectorSnapshot,
         base_time: Timestamp,
-        changes: &HashSet<NodeId>,
+        changes: &HashSet<NodeId, IdentityBuildHasher>,
     ) -> Result<(SnapshotIndex, VectorSnapshot)> {
         // SAFETY VALIDATION: Ensure base is a Full snapshot, not a Delta
         // This prevents delta-of-delta chains which would violate our performance guarantees
@@ -429,12 +436,15 @@ impl TemporalVectorIndex {
         let added = HnswIndex::new(added_config)?;
 
         // Build delta vector snapshot - only store changed vectors
-        let mut added_vectors = HashMap::new();
-        let mut removed_vectors = HashSet::new();
+        let mut added_vectors =
+            HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        let mut removed_vectors =
+            HashSet::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
 
         // For DeltaIndex.removed: only nodes that WERE in base and are now invalid
         // This is crucial for correct len() calculation
-        let mut invalidated_in_base = HashSet::new();
+        let mut invalidated_in_base =
+            HashSet::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
 
         // We need access to all snapshots to check containment in base
         // Since we're inside write lock, we can't easily access snapshot_data
@@ -3364,13 +3374,18 @@ mod tests {
         use std::collections::BTreeMap;
 
         // Create a delta snapshot that references a missing base
+        let mut added = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        added.insert(
+            NodeId::new(1).unwrap(),
+            Arc::from(vec![1.0f32, 0.0f32, 0.0f32, 0.0f32]) as Arc<[f32]>,
+        );
+
         let delta_snapshot = VectorSnapshot::Delta {
             base_time: 1000.into(), // This base won't exist
-            added: Arc::new(HashMap::from([(
-                NodeId::new(1).unwrap(),
-                Arc::from(vec![1.0f32, 0.0f32, 0.0f32, 0.0f32]) as Arc<[f32]>,
-            )])),
-            removed: Arc::new(HashSet::new()),
+            added: Arc::new(added),
+            removed: Arc::new(HashSet::with_hasher(
+                BuildHasherDefault::<IdentityHasher>::default(),
+            )),
         };
 
         let snapshots: BTreeMap<Timestamp, VectorSnapshot> = BTreeMap::new(); // Empty - no base
