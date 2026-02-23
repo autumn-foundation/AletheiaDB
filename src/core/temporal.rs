@@ -1847,4 +1847,29 @@ mod sentry_tests {
         let range = TimeRange::new(100.into(), 200.into()).unwrap();
         assert!(!range.is_empty(), "Range [100, 200) should not be empty");
     }
+
+    #[test]
+    fn test_sentry_timerange_deserialize_checks_invariants() {
+        // 🛡️ Sentry Test: Verify deserialize rejects start > end.
+        // This targets mutants that might remove the invariant check in deserialize.
+
+        let start = HybridTimestamp::new_unchecked(200, 0);
+        let end = HybridTimestamp::new_unchecked(100, 0);
+
+        let mut bytes = Vec::new();
+        start.serialize_into(&mut bytes);
+        end.serialize_into(&mut bytes);
+
+        let result = TimeRange::deserialize(&bytes);
+        assert!(result.is_err(), "Should reject start > end in deserialize");
+        match result.unwrap_err() {
+            StorageError::CorruptedData(msg) => {
+                assert!(
+                    msg.contains("start") && msg.contains("end"),
+                    "Error message should mention start and end"
+                );
+            }
+            _ => panic!("Expected CorruptedData error"),
+        }
+    }
 }
