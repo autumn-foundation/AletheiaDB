@@ -721,4 +721,24 @@ mod sentry_tests {
         // This should panic with a clear message about last offset
         AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
+
+    #[test]
+    fn test_import_csr_success() {
+        let node_ids = vec![10];
+        // Valid: offsets len (2) == node_ids.len() + 1
+        // Valid: last offset (1) == edge_ids.len()
+        let offsets = vec![0, 1];
+        let edge_ids = vec![100];
+
+        let mut edges_map = HashMap::new();
+        let target = NodeId::new(20).unwrap();
+        let label = crate::core::interning::InternedString::from_raw(1);
+        edges_map.insert(EdgeId::new(100).unwrap(), (target, label));
+
+        // Should not panic
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+
+        assert_eq!(index.edge_count(), 1);
+        assert_eq!(index.node_count(), 1);
+    }
 }
