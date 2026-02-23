@@ -708,4 +708,27 @@ mod tests {
 
         AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &map);
     }
+
+    #[test]
+    fn test_import_csr_valid() {
+        // Valid CSR import to cover "success" paths of assertions
+        let node_ids = vec![1, 2];
+        let offsets = vec![0, 1, 2]; // 2 nodes, 1 edge each (total 2)
+        let edge_ids = vec![100, 200]; // 2 edges
+        let mut map = std::collections::HashMap::new();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        map.insert(EdgeId::new(100).unwrap(), (NodeId::new(10).unwrap(), label));
+        map.insert(EdgeId::new(200).unwrap(), (NodeId::new(20).unwrap(), label));
+
+        let index = AdjacencyIndex::import_csr(
+            node_ids.iter().map(|&x| x as u64).collect(),
+            offsets.iter().map(|&x| x as u64).collect(),
+            edge_ids.iter().map(|&x| x as u64).collect(),
+            &map
+        );
+
+        assert_eq!(index.node_count(), 2);
+        assert_eq!(index.edge_count(), 2);
+    }
 }

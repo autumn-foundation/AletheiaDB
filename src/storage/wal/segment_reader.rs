@@ -2015,4 +2015,59 @@ mod sentry_tests {
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Too many WAL entries"));
     }
+
+    #[test]
+    fn test_read_entries_from_dir_max_recovery_entries() {
+        // 🛡️ Sentry Test: Verify MAX_RECOVERY_ENTRIES is enforced in read_entries_from_dir.
+        // Create 2 segments.
+        // Seg 1: 1500 entries.
+        // Seg 2: 1000 entries.
+        // Total: 2500 > 2000 (test limit).
+
+        let dir = TempDir::new().unwrap();
+
+        // Segment 1
+        let path1 = dir.path().join("1.log");
+        let mut file1 = File::create(&path1).unwrap();
+        file1.write_all(&WAL_MAGIC).unwrap();
+        file1.write_all(&[WAL_VERSION]).unwrap();
+        for i in 0..1500 {
+            let operation = WalOperation::CreateNode {
+                node_id: NodeId::new(i as u64 + 1).unwrap(),
+                label: GLOBAL_INTERNER.intern("Node").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+            };
+            let entry = WalEntry::new(LSN(i as u64 + 1), operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file1.write_all(&buffer).unwrap();
+        }
+        file1.sync_all().unwrap();
+
+        // Segment 2
+        let path2 = dir.path().join("2.log");
+        let mut file2 = File::create(&path2).unwrap();
+        file2.write_all(&WAL_MAGIC).unwrap();
+        file2.write_all(&[WAL_VERSION]).unwrap();
+        for i in 0..1000 {
+            let operation = WalOperation::CreateNode {
+                node_id: NodeId::new(i as u64 + 10000).unwrap(),
+                label: GLOBAL_INTERNER.intern("Node").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+            };
+            let entry = WalEntry::new(LSN(i as u64 + 10000), operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file2.write_all(&buffer).unwrap();
+        }
+        file2.sync_all().unwrap();
+
+        // Read all
+        let result = read_entries_from_dir(dir.path(), LSN(1));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Too many WAL entries"));
+    }
 }

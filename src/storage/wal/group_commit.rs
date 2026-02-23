@@ -799,4 +799,61 @@ mod tests {
         // 8. Transaction B should be done
         assert!(coord.wait_for_flush(epoch_b).is_ok());
     }
+
+    #[test]
+    fn test_wait_for_flush_timeout_spurious() {
+        // Attempt to trigger the absolute timeout check inside the loop.
+        // We set a very short timeout and simulate spurious wakeups by notifying without advancing flushed_epoch.
+        let config = GroupCommitConfig {
+            max_delay_ms: 0,
+            max_batch_size: 100,
+            timeout_multiplier: 0,
+            timeout_base_ms: 1, // 1ms timeout
+            timeout_min_ms: 1,
+            timeout_max_ms: 1000,
+            recent_errors_capacity: 1024,
+        };
+        let coord = Arc::new(GroupCommitCoordinator::with_config(config));
+
+        let (epoch, _) = coord.register_transaction().unwrap();
+
+        // Spawn a thread that keeps waking up waiters but doesn't advance the epoch enough
+        let coord_clone = Arc::clone(&coord);
+        let handle = thread::spawn(move || {
+            // Wait a bit to ensure the main thread enters wait_for_flush
+            thread::sleep(Duration::from_millis(2));
+            // Trigger spurious wakeups by notifying (finish_flush calls notify_all)
+            // We flush epoch 0 (which is already flushed or irrelevant) just to trigger notify
+            // But finish_flush expects epoch > flushed_epoch to insert into completed.
+            // If we pass an error, it notifies? Yes.
+            // Or if we finish a future epoch but not the one waited for (gap)?
+            // Let's just use the condvar directly if we could, but we can't.
+            // finish_flush calls notify_all unconditionally.
+            // So we can "finish" a fake epoch (e.g. current epoch + 100) or just same epoch with error?
+            // If we finish with error, wait_for_flush returns error immediately.
+            // We want it to loop.
+            // Loop condition: flushed_epoch < epoch.
+            // So flushed_epoch must NOT advance to epoch.
+            // We can finish flush for a *smaller* epoch?
+            // flushed_epoch starts at 0. Target epoch is 1.
+            // If we finish flush for epoch 0? It's already flushed.
+            // Does finish_flush notify if epoch <= flushed_epoch? Yes, it notifies unconditionally.
+            for _ in 0..10 {
+                // Finish epoch 0 (no-op on logic, but triggers notify)
+                let _ = coord_clone.finish_flush(0, Ok(()));
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let result = coord.wait_for_flush(epoch);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timeout"));
+        // Ensure it didn't hang
+        assert!(elapsed < Duration::from_millis(500));
+
+        handle.join().unwrap();
+    }
 }

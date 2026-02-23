@@ -951,18 +951,17 @@ mod tests {
 
         // Should be rejected as forward jump (drift > max_forward).
         // If vulnerable, it returns Ok because -1 < max_forward and > -max_backward.
-        match result {
-            Ok(_) => {
-                panic!("Vulnerability confirmed: Overflow masked huge forward jump as valid drift")
-            }
-            Err(ClockSkewViolation {
-                direction: ClockSkewDirection::Forward,
-                ..
-            }) => {
-                // Correct behavior
-            }
-            Err(e) => panic!("Unexpected error type: {:?}", e),
-        }
+        assert!(
+            matches!(
+                result,
+                Err(ClockSkewViolation {
+                    direction: ClockSkewDirection::Forward,
+                    ..
+                })
+            ),
+            "Expected ClockSkewViolation::Forward, got {:?}",
+            result
+        );
     }
 }
 
