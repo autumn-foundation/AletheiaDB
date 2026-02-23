@@ -134,6 +134,12 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         .into());
     }
 
+    // Handle empty files explicitly to avoid mmap failure on some platforms (e.g. macOS/Windows)
+    // A zero-byte file can occur if a crash happens immediately after segment creation.
+    if metadata.len() == 0 {
+        return Ok(Vec::new());
+    }
+
     // Memory-map the file for efficient reading without loading entire file into memory.
     // SAFETY: We only read from the memory map, never write. The file is opened read-only.
     // The mapping is valid for the lifetime of this function and is automatically unmapped

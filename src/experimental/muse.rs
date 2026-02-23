@@ -12,6 +12,8 @@
 //!   High score = High novelty (no existing concepts nearby).
 //! - **Inspiration**: The proposed new concept.
 
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
