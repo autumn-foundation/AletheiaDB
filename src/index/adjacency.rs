@@ -285,6 +285,7 @@ impl AdjacencyIndex {
             ));
         }
 
+        #[allow(clippy::collapsible_if)]
         if let Some(&last_offset) = offsets.last() {
             if last_offset != edge_ids.len() as u64 {
                 return Err(format!(
