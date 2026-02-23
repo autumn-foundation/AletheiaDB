@@ -39,3 +39,7 @@
 ## 2024-05-28 - Broken Links in Feature-Gated Modules
 **Confusion:** Running `cargo doc` without features enabled resulted in broken intra-doc links to experimental modules (like `sherlock` or `hindsight`), causing warnings and confusion about missing items.
 **Clarification:** Documentation generation for experimental features requires enabling the `nova` feature flag (e.g., `cargo doc --features nova`).
+
+## 2024-05-29 - Experimental Feature Leaks
+**Confusion:** The `experimental` module documentation claimed that all features were gated behind `feature = "nova"`. However, `metaphor` and `muse` were publicly exposed even without the feature enabled, leading to inconsistent API availability and potential runtime panics (as `metaphor` used internal runtime checks instead of compile-time gating).
+**Clarification:** Updated `src/experimental/mod.rs` to explicitly gate `metaphor` and `muse` with `#[cfg(feature = "nova")]`, aligning the code with the documentation and ensuring a consistent compile-time experience.
