@@ -106,7 +106,11 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
             }
 
             // Collect removed property keys (as interned string indices)
-            let removed_keys: Vec<u32> = delta.removed.iter().map(|k| k.as_u32()).collect();
+            let removed_keys: Vec<u32> = delta
+                .removed
+                .iter()
+                .map(|k: &crate::core::interning::InternedString| k.as_u32())
+                .collect();
 
             let props = builder.build();
             (

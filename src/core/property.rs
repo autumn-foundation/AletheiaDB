@@ -12,7 +12,8 @@ use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
 use crate::core::error::{Result, StorageError};
-use crate::core::interning::{GLOBAL_INTERNER, IdentityHasher, InternedString};
+use crate::core::hasher::IdentityHasher;
+use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::vector::SparseVec;
 
 // ============================================================================

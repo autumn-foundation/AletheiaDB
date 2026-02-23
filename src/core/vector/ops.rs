@@ -104,6 +104,12 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Use SIMD-accelerated computation when available
     let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
+    // Handle effectively zero vectors early to avoid numerical instability
+    // and match behavior of normalize()
+    if mag_a_sq < SQUARED_MAGNITUDE_THRESHOLD || mag_b_sq < SQUARED_MAGNITUDE_THRESHOLD {
+        return Ok(0.0);
+    }
+
     // Compute magnitude as product of individual square roots to avoid intermediate overflow.
     // If we did (mag_a_sq * mag_b_sq).sqrt(), the product could overflow f32::MAX
     // even if individual squared magnitudes are within range.
@@ -215,14 +221,18 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
         let mag_a_sq: f32 = a.iter().map(|x| x * x).sum();
         let mag_b_sq: f32 = b.iter().map(|x| x * x).sum();
 
+        // Allow unit vectors (mag ≈ 1.0) OR zero vectors (mag ≈ 0.0) produced by normalize()
+        let a_valid = (mag_a_sq - 1.0).abs() < 1e-4 || mag_a_sq < SQUARED_MAGNITUDE_THRESHOLD;
         debug_assert!(
-            (mag_a_sq - 1.0).abs() < 1e-4,
+            a_valid,
             "First vector is not unit length: ||a||² = {} (expected 1.0). \
              Use cosine_similarity() for non-normalized vectors.",
             mag_a_sq
         );
+
+        let b_valid = (mag_b_sq - 1.0).abs() < 1e-4 || mag_b_sq < SQUARED_MAGNITUDE_THRESHOLD;
         debug_assert!(
-            (mag_b_sq - 1.0).abs() < 1e-4,
+            b_valid,
             "Second vector is not unit length: ||b||² = {} (expected 1.0). \
              Use cosine_similarity() for non-normalized vectors.",
             mag_b_sq

@@ -776,6 +776,102 @@ sequenceDiagram
     Metaphor-->>User: Alignment
 ```
 
+**Semantic Entity Resolution (Highlander)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class HighlanderDetector {
+            +find_duplicates(target, threshold)
+        }
+        class EntityMerger {
+            +merge(survivor, victim)
+        }
+    }
+    class AletheiaDB
+    HighlanderDetector --> AletheiaDB : Uses
+    EntityMerger --> AletheiaDB : Mutates
+```
+
+**Sequence: Entity Merge**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Merger as EntityMerger
+    participant DB as AletheiaDB
+
+    User->>Merger: merge(survivor, victim)
+    Merger->>DB: get_edges(victim)
+    loop Move Edges
+        Merger->>DB: create_edge(survivor, target)
+        Merger->>DB: delete_edge(victim, target)
+    end
+    Merger->>DB: get_props(victim)
+    loop Merge Props
+        Merger->>DB: update_node(survivor, missing_prop)
+    end
+    Merger->>DB: delete_node(victim)
+    Merger-->>User: Success
+```
+
+**Semantic Bridge Detection (Janus)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class JanusDetector {
+            +analyze_node(node_id, property)
+        }
+        class BridgeScore {
+            +total_score: f32
+            +inter_cluster_distance: f32
+            +intra_cluster_spread: f32
+            +is_bridge() bool
+        }
+    }
+    class AletheiaDB
+    JanusDetector --> AletheiaDB : Uses
+    JanusDetector ..> BridgeScore : Produces
+```
+
+**Semantic Ideation (Muse)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Muse {
+            +inspire(seeds)
+        }
+        class Inspiration {
+            +centroid: Vec<f32>
+            +novelty_score: f32
+            +coherence_score: f32
+        }
+    }
+    class AletheiaDB
+    Muse --> AletheiaDB : Uses
+    Muse ..> Inspiration : Produces
+```
+
+**Sequence: Semantic Ideation**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Muse
+    participant DB as AletheiaDB
+
+    User->>Muse: inspire(seeds)
+    Muse->>DB: get_vectors(seeds)
+    Muse->>Muse: compute_centroid()
+    Muse->>DB: search_vectors(centroid)
+    DB-->>Muse: nearest_neighbors
+    Muse->>Muse: novelty = 1.0 - max_sim
+    Muse->>Muse: coherence = avg_sim_to_seeds
+    Muse-->>User: Inspiration
+```
+
 ### Temporal Query Processing
 
 **Query Types:**

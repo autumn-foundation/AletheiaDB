@@ -41,6 +41,7 @@
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
 //! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
 //! | [`gestalt`] | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
+//! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -86,63 +87,87 @@
 #[cfg(feature = "nova")]
 /// Ariadne: Semantic Thread Weaver.
 pub mod ariadne;
+
 #[cfg(feature = "nova")]
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
+
 #[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
+
 #[cfg(feature = "nova")]
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
+
 #[cfg(feature = "nova")]
 /// Dissonance: Semantic Stress Detector.
 pub mod dissonance;
+
 #[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
+
 #[cfg(feature = "nova")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
+
 #[cfg(feature = "nova")]
 /// Associative retrieval ("Fishing") module.
 pub mod fishing;
+
 #[cfg(feature = "nova")]
 /// Graph context exporter for LLM integration.
 pub mod graph_context;
+
 #[cfg(feature = "nova")]
 /// Highlander: Semantic Entity Resolution.
 pub mod highlander;
+
 #[cfg(feature = "nova")]
 /// Hindsight: Counterfactual Graph Analysis Engine.
 pub mod hindsight;
+
 #[cfg(feature = "nova")]
 /// Janus: Semantic Bridge Detector.
 pub mod janus;
+
 #[cfg(feature = "nova")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
+
 #[cfg(feature = "nova")]
 /// Prism: Semantic Spectroscopy for Vectors.
 pub mod prism;
+
 #[cfg(feature = "nova")]
 /// Prophet Link Prediction Engine.
 pub mod prophet;
+
+#[cfg(feature = "nova")]
+/// Ripple: Semantic Causality Detector.
+pub mod ripple;
+
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
+
 #[cfg(feature = "nova")]
 /// Sherlock: Temporal Pattern Matching Engine.
 pub mod sherlock;
+
 #[cfg(feature = "nova")]
 /// Sybil: Memetic Propagation Engine.
 pub mod sybil;
+
 #[cfg(feature = "nova")]
 /// Telepathy: Semantic Spreading Activation Engine.
 pub mod telepathy;
+
 #[cfg(feature = "nova")]
 /// Temporal Diff Engine for computing snapshot differences.
 pub mod temporal_diff;
+
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
@@ -162,12 +187,19 @@ pub mod wormhole;
 #[cfg(feature = "nova")]
 /// Gestalt: Semantic Subgraph Matching Engine.
 pub mod gestalt;
+
 #[cfg(feature = "nova")]
 /// Gravity: Semantic Mass and Orbit Analysis.
 pub mod gravity;
+
 #[cfg(feature = "nova")]
 /// Metaphor: Semantic Graph Alignment Engine.
 pub mod metaphor;
+
+#[cfg(feature = "nova")]
+/// Mnemosyne: Semantic Memory Consolidation.
+pub mod mnemosyne;
+
 #[cfg(feature = "nova")]
 /// Muse: The Semantic Ideator.
 pub mod muse;

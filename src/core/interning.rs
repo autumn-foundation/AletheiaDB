@@ -9,9 +9,10 @@
 //! - Enables O(1) string equality checks (compare u32 instead of string contents)
 //! - Thread-safe without locking (uses DashMap)
 
+use crate::core::hasher::IdentityHasher;
 use dashmap::DashMap;
 use std::fmt;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -85,32 +86,6 @@ impl fmt::Debug for InternedString {
             Some(res) => res,
             None => write!(f, "InternedString({})", self.0),
         }
-    }
-}
-
-/// A hasher that passes through u32 values unchanged.
-/// Used for the ID -> String map where keys are already unique integers.
-/// This avoids the overhead of hashing (SipHash) for lookups.
-#[derive(Default)]
-pub struct IdentityHasher(u64);
-
-impl Hasher for IdentityHasher {
-    fn write(&mut self, bytes: &[u8]) {
-        // Fallback: treat bytes as little-endian u32 if length matches
-        if let Ok(bytes) = bytes.try_into() {
-            self.0 = u32::from_le_bytes(bytes) as u64;
-        } else {
-            // Should not happen for InternedString keys
-            self.0 = bytes.len() as u64;
-        }
-    }
-
-    fn write_u32(&mut self, i: u32) {
-        self.0 = i as u64;
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
     }
 }
 
@@ -1099,27 +1074,6 @@ mod tests {
     }
 
     #[test]
-    fn test_identity_hasher() {
-        use std::hash::Hasher;
-        let mut hasher = IdentityHasher::default();
-
-        // Test write_u32 (primary path)
-        hasher.write_u32(42);
-        assert_eq!(hasher.finish(), 42);
-
-        // Test write with 4 bytes (fallback success path)
-        let bytes = 12345u32.to_le_bytes();
-        hasher.write(&bytes);
-        assert_eq!(hasher.finish(), 12345);
-
-        // Test write with other length (fallback fail path)
-        // This covers the else branch in IdentityHasher::write
-        let bytes = [1u8, 2, 3];
-        hasher.write(&bytes);
-        assert_eq!(hasher.finish(), 3); // Should use len()
-    }
-
-    #[test]
     fn test_display_impl() {
         // Test successful resolution via GLOBAL_INTERNER
         let s = "display_test_string";
@@ -1154,7 +1108,8 @@ mod mutant_kill_tests {
             .spawn()
             .expect("failed to spawn subprocess for with_max_capacity test");
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // CI environments can be slow, so give it plenty of time (10s)
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {

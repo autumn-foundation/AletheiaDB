@@ -13,9 +13,11 @@
 //! This layout is cache-friendly because traversing from a node requires
 //! sequential access to a contiguous region of memory.
 
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use rayon::prelude::*;
+use std::hash::BuildHasherDefault;
 
 /// A single entry in the adjacency list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +89,18 @@ impl AdjacencyIndex {
         node_ids: Vec<u64>,
         offsets: Vec<u64>,
         edge_ids: Vec<u64>,
-        edges_map: &std::collections::HashMap<EdgeId, (NodeId, InternedString)>,
+        edges_map: &std::collections::HashMap<
+            EdgeId,
+            (NodeId, InternedString),
+            BuildHasherDefault<IdentityHasher>,
+        >,
     ) -> Self {
         if offsets.is_empty() || edge_ids.is_empty() {
             return Self::new();
         }
+
+        // Validate CSR invariants
+        Self::validate_csr_invariants(&node_ids, &offsets, &edge_ids).unwrap();
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
@@ -266,6 +275,34 @@ impl AdjacencyIndex {
     #[inline]
     pub fn node_count(&self) -> usize {
         self.node_ids.len()
+    }
+
+    /// Validate CSR invariants.
+    fn validate_csr_invariants(
+        node_ids: &[u64],
+        offsets: &[u64],
+        edge_ids: &[u64],
+    ) -> Result<(), String> {
+        if offsets.len() != node_ids.len() + 1 {
+            return Err(format!(
+                "CSR offsets length mismatch: expected {}, got {}",
+                node_ids.len() + 1,
+                offsets.len()
+            ));
+        }
+
+        #[allow(clippy::collapsible_if)]
+        if let Some(&last_offset) = offsets.last() {
+            if last_offset != edge_ids.len() as u64 {
+                return Err(format!(
+                    "CSR last offset mismatch: expected {}, got {}",
+                    edge_ids.len(),
+                    last_offset
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -668,5 +705,68 @@ mod tests {
             1000,
             "max_node_id should consider target nodes"
         );
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_validate_csr_invariants_logic() {
+        // 1. Valid case
+        let node_ids = vec![10, 20];
+        let offsets = vec![0, 1, 2];
+        let edge_ids = vec![100, 101];
+        assert!(AdjacencyIndex::validate_csr_invariants(&node_ids, &offsets, &edge_ids).is_ok());
+
+        // 2. Invalid offsets length
+        let invalid_offsets_len = vec![0, 1]; // too short
+        let err_len =
+            AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_len, &edge_ids)
+                .unwrap_err();
+        assert!(err_len.contains("CSR offsets length mismatch"));
+
+        // 3. Invalid last offset
+        let invalid_offsets_val = vec![0, 1, 5]; // last is 5, but edges len is 2
+        let err_val =
+            AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_val, &edge_ids)
+                .unwrap_err();
+        assert!(err_val.contains("CSR last offset mismatch"));
+    }
+
+    #[test]
+    #[should_panic(expected = "CSR offsets length mismatch")]
+    fn test_import_csr_panics_on_invalid() {
+        // Integration check: ensure import_csr actually calls validate and panics
+        let node_ids = vec![10];
+        let offsets = vec![0]; // invalid len (should be 2)
+        let edge_ids = vec![100]; // Non-empty to bypass early return
+        let edges_map = HashMap::new();
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+    }
+
+    #[test]
+    fn test_import_csr_success() {
+        // Multi-node case to fully exercise loop and max_node_id logic
+        let node_ids: Vec<u64> = vec![10, 20];
+        // Offsets: node 10 has 1 edge (0..1), node 20 has 1 edge (1..2)
+        let offsets: Vec<u64> = vec![0, 1, 2];
+        let edge_ids: Vec<u64> = vec![100, 101];
+
+        let mut edges_map = HashMap::new();
+        let target = NodeId::new(99).unwrap();
+        let label = crate::core::interning::InternedString::from_raw(1);
+
+        edges_map.insert(EdgeId::new(100).unwrap(), (target, label));
+        edges_map.insert(EdgeId::new(101).unwrap(), (target, label));
+
+        // Should not panic
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+
+        assert_eq!(index.edge_count(), 2);
+        assert_eq!(index.node_count(), 2);
+        assert_eq!(index.max_node_id(), 20);
     }
 }

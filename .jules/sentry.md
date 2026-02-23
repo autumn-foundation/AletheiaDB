@@ -33,3 +33,7 @@
 ## [Query Converter Optimization & Usability Gaps]
 **Learning:** `AstConverter` missed the `StartNode` optimization (O(1) lookup) when the node ID was provided via a parameter (``), falling back to a full table scan. Also, `WHERE value = n.prop` failed because the converter enforced `property = value` ordering.
 **Action:** Updated `convert_node_pattern` to resolve ID parameters for optimization. Updated `convert_comparison` to support symmetric equality by swapping operands. Added regression tests in `src/query/converter.rs`.
+
+## 2024-03-03 - Timeout Reset on Spurious Wakeups
+**Learning:** `Condvar::wait_timeout` usage in `GroupCommitCoordinator` was flawed because it reused the original `timeout` value in a loop. Spurious wakeups (or notifications for intermediate epochs) would reset the timeout clock, potentially allowing the wait to extend indefinitely beyond the configured limit.
+**Action:** Refactored `wait_for_flush` to calculate an absolute `deadline` (Instant) upfront and use `deadline - now` for the remaining timeout in each iteration. This enforces a strict upper bound on wait time regardless of wakeups. Added `test_wait_for_flush_deadline_enforcement` to prevent regression.

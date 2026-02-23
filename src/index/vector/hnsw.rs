@@ -1227,14 +1227,16 @@ impl VectorIndex for HnswIndex {
         // Cap k to prevent DoS
         let k_capped = k.min(self.max_k);
 
-        // Perform search with retry logic for transient errors
-        let index = self.inner.read();
-
         // Retry with exponential backoff to handle thread pool exhaustion
         // Under heavy concurrent load, usearch may fail with "No available threads to lock"
         for attempt in 0..MAX_SEARCH_ATTEMPTS {
+            // Acquire lock inside the loop so we can drop it before sleeping on retry
+            let index = self.inner.read();
             match index.search(query, k_capped) {
                 Ok(matches) => {
+                    // Release lock immediately after search to minimize contention
+                    drop(index);
+
                     self.stats
                         .searches_performed
                         .fetch_add(1, Ordering::Relaxed);
@@ -1245,6 +1247,9 @@ impl VectorIndex for HnswIndex {
                 }
                 Err(e) => {
                     let error_msg = e.to_string();
+                    // Release lock before checking retry condition (which might sleep)
+                    drop(index);
+
                     // Check if this is a transient thread pool exhaustion error
                     if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
                         // Track retry for observability
@@ -1345,21 +1350,22 @@ impl VectorIndex for HnswIndex {
         // Evaluate user predicates outside the inner index lock to avoid callback/writer deadlocks.
         let mut candidate_k = k_capped.min(max_candidates);
         loop {
-            // Convert matches while holding the inner lock so any usearch-backed buffers
-            // are not observed after concurrent mutation.
             let candidates =
                 {
-                    let index = self.inner.read();
                     let mut maybe_matches = None;
 
                     for attempt in 0..MAX_SEARCH_ATTEMPTS {
+                        let index = self.inner.read();
                         match index.search(query, candidate_k) {
                             Ok(found) => {
+                                drop(index);
                                 maybe_matches = Some(found);
                                 break;
                             }
                             Err(e) => {
                                 let error_msg = e.to_string();
+                                drop(index);
+
                                 if is_retryable_usearch_error(&error_msg)
                                     && attempt + 1 < MAX_SEARCH_ATTEMPTS
                                 {
@@ -1742,6 +1748,52 @@ impl HnswIndex {
                 e
             )))
         })?;
+
+        Ok(())
+    }
+
+    /// Verify that the binary index file matches the expected dimensions and quantization.
+    ///
+    /// This reads the first 8 bytes of the file to check the vector size field.
+    /// usearch stores `count` (bytes 0-3) and `vector_byte_size` (bytes 4-7).
+    /// We verify that `vector_byte_size == dimensions * scalar_size`.
+    fn verify_index_header(
+        path: &Path,
+        dimensions: usize,
+        quantization: Quantization,
+    ) -> Result<()> {
+        let mut file = File::open(path).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to open index file for verification: {}",
+                e
+            )))
+        })?;
+
+        let mut header = [0u8; 8];
+        file.read_exact(&mut header).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to read index header: {}",
+                e
+            )))
+        })?;
+
+        // Extract vector_byte_size from bytes 4-7 (little-endian u32)
+        let vector_byte_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+
+        let scalar_size = match quantization {
+            Quantization::F32 => 4,
+            Quantization::F16 => 2,
+            Quantization::I8 => 1,
+        };
+
+        let expected_size = dimensions * scalar_size;
+
+        if vector_byte_size != expected_size {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Index file header mismatch: expected {} bytes per vector ({} dims * {} bytes), found {}",
+                expected_size, dimensions, scalar_size, vector_byte_size
+            ))));
+        }
 
         Ok(())
     }
@@ -2181,6 +2233,9 @@ impl HnswIndex {
             }));
         }
 
+        // Verify binary index file header (prevents quantization mismatch vulnerability)
+        Self::verify_index_header(path, config.dimensions, config.quantization)?;
+
         let options = IndexOptions {
             dimensions: config.dimensions,
             metric: to_usearch_metric(config.metric),
@@ -2321,6 +2376,9 @@ impl HnswIndex {
             // Legacy index: fallback to defaults
             (Quantization::default(), DistanceMetric::Cosine)
         };
+
+        // Verify binary index file header (prevents quantization mismatch vulnerability)
+        Self::verify_index_header(path, dimensions, quantization)?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
@@ -4327,5 +4385,39 @@ mod coverage_additions {
 
         assert!(path.exists());
         assert!(path.with_extension("usearch.mappings").exists());
+    }
+
+    #[test]
+    fn test_warden_coverage_search_happy_path() {
+        // This test explicitly exercises the search function to ensure code coverage
+        // hits the "Happy Path" lines inside the retry loop.
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        let node_id = NodeId::new(1).unwrap();
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Call search - should hit L1233, L1237, L1239
+        let results = index.search(&[1.0, 0.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node_id);
+    }
+
+    #[test]
+    fn test_warden_coverage_search_with_filter_happy_path() {
+        // This test exercises search_with_filter to ensure coverage
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        let node_id = NodeId::new(1).unwrap();
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Call search_with_filter
+        let results = index
+            .search_with_filter(&[1.0, 0.0, 0.0, 0.0], 10, |_| true)
+            .unwrap();
+        assert_eq!(results.len(), 1);
     }
 }

@@ -15,6 +15,7 @@
 
 pub mod error;
 pub mod graph;
+pub mod hasher;
 pub mod history;
 pub mod hlc;
 pub mod id;

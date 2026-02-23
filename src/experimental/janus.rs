@@ -30,6 +30,8 @@
 //! # }
 //! ```
 
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
@@ -81,6 +83,7 @@ impl<'a> JanusDetector<'a> {
             let neighbor_id = self.db.get_edge_target(edge_id)?;
             // Get neighbor node
             let neighbor = self.db.get_node(neighbor_id)?;
+            #[allow(clippy::collapsible_if)]
             if let Some(prop) = neighbor.get_property(property) {
                 if let Some(vec) = prop.as_vector() {
                     vectors.push(vec.to_vec());
