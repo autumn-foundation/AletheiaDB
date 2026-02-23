@@ -1,9 +1,9 @@
-use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
-use aletheiadb::storage::wal::{DurabilityMode, WalOperation, LSN};
+use aletheiadb::GLOBAL_INTERNER;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMap;
 use aletheiadb::core::temporal::time;
-use aletheiadb::GLOBAL_INTERNER;
+use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use aletheiadb::storage::wal::{DurabilityMode, LSN, WalOperation};
 use std::sync::Arc;
 use std::thread;
 use tempfile::tempdir;
@@ -58,7 +58,11 @@ fn test_group_commit_high_concurrency_consistency() {
                     // We check that the entry with this LSN actually exists on disk.
                     // Note: This is an expensive check (I/O per op), but necessary for strict verification.
                     let recovered = wal.read_from(lsn).expect("Read failed");
-                    assert!(!recovered.is_empty(), "Data loss detected: LSN {:?} not found on disk immediately after commit", lsn);
+                    assert!(
+                        !recovered.is_empty(),
+                        "Data loss detected: LSN {:?} not found on disk immediately after commit",
+                        lsn
+                    );
                     assert_eq!(recovered[0].lsn, lsn, "Read incorrect LSN");
                 }
             })
@@ -74,7 +78,11 @@ fn test_group_commit_high_concurrency_consistency() {
 
     // Ensure all data is accounted for
     let total_expected = (num_threads * ops_per_thread) as u64;
-    assert_eq!(wal.total_appends(), total_expected, "Total appends mismatch");
+    assert_eq!(
+        wal.total_appends(),
+        total_expected,
+        "Total appends mismatch"
+    );
 
     // Force flush ensures background thread is done
     wal.flush().unwrap();
@@ -82,7 +90,11 @@ fn test_group_commit_high_concurrency_consistency() {
     // Verify readable data count
     // read_from reads from disk. If data was lost (not flushed), count will be less.
     let recovered = wal.read_from(LSN(0)).unwrap();
-    assert_eq!(recovered.len() as u64, total_expected, "Recovered entries count mismatch - DATA LOSS DETECTED");
+    assert_eq!(
+        recovered.len() as u64,
+        total_expected,
+        "Recovered entries count mismatch - DATA LOSS DETECTED"
+    );
 
     // Check strict LSN sequence
     let mut lsns: Vec<u64> = recovered.iter().map(|e| e.lsn.0).collect();
@@ -91,6 +103,12 @@ fn test_group_commit_high_concurrency_consistency() {
     // LSNs are allocated sequentially from 1
     // If any are missing, there's a gap.
     for (i, lsn) in lsns.iter().enumerate() {
-        assert_eq!(*lsn, (i + 1) as u64, "Missing LSN in sequence: expected {}, got {}", i + 1, lsn);
+        assert_eq!(
+            *lsn,
+            (i + 1) as u64,
+            "Missing LSN in sequence: expected {}, got {}",
+            i + 1,
+            lsn
+        );
     }
 }
