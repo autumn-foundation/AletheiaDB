@@ -67,3 +67,13 @@
 1. Updated `storage/index_persistence/operations.rs` to import `TxId` from `core::id` instead of `api`.
 2. Moved `VectorIndexBuilder` from `api` to `db`, as it is a concrete helper for `AletheiaDB`.
 3. Moved `utils/error.rs` to `core/error.rs` and deleted `utils` module, consolidating core domain types.
+
+## 2026-05-24 - Breaking up the HNSW Blob
+**Tangle:** `src/index/vector/hnsw.rs` (4300+ lines) was a "Blob" mixing core indexing logic, configuration, statistics, persistence I/O, and utilities. It violated Single Responsibility Principle.
+**Blueprint:** Refactored into `src/index/vector/hnsw/` directory.
+1. `mod.rs`: Facade and core `VectorIndex` implementation.
+2. `config.rs`: Configuration and Builder.
+3. `persistence.rs`: I/O logic, file formats, and integrity checks.
+4. `stats.rs`: Telemetry and counters.
+5. `utils.rs`: Shared helpers and wrappers.
+6. `tests.rs`: Isolated test suite.

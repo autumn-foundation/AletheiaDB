@@ -76,6 +76,7 @@ impl<'a> Muse<'a> {
         let mut vectors = Vec::with_capacity(nodes.len());
         for &node_id in nodes {
             let node = self.db.get_node(node_id)?;
+            #[allow(clippy::collapsible_if)]
             if let Some(val) = node.properties.get(&prop_name) {
                 if let Some(vec) = val.as_vector() {
                     vectors.push(vec.to_vec());
