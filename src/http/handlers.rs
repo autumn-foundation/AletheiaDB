@@ -293,30 +293,37 @@ pub async fn handle_query(
                 None => crate::core::PropertyMap::new(),
             };
 
-            match db.create_node(&label, props) {
-                Ok(node_id) => {
-                    match db.get_node(node_id) {
-                        Ok(node) => {
-                            let props_json = match property_map_to_json(&node.properties) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    return HttpResponse::InternalServerError()
-                                        .json(ApiResponse::error(e));
-                                }
-                            };
-                            let node_json = json!({
-                                "id": node.id.as_u64(),
-                                "label": interned_to_string(node.label),
-                                "properties": props_json
-                            });
-                            // Issue 5: Return single object, not array
-                            HttpResponse::Ok().json(ApiResponse::success(node_json))
+            let db = db.clone();
+            let label = label.clone();
+
+            let result = web::block(move || {
+                match db.create_node(&label, props) {
+                    Ok(node_id) => {
+                        match db.get_node(node_id) {
+                            Ok(node) => {
+                                let props_json = property_map_to_json(&node.properties)
+                                    .map_err(|e| e.to_string())?;
+                                let node_json = json!({
+                                    "id": node.id.as_u64(),
+                                    "label": interned_to_string(node.label),
+                                    "properties": props_json
+                                });
+                                Ok(node_json)
+                            }
+                            Err(e) => Err(e.to_string()),
                         }
-                        Err(e) => HttpResponse::InternalServerError()
-                            .json(ApiResponse::error(e.to_string())),
                     }
+                    Err(e) => Err(e.to_string()),
                 }
-                Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
+            })
+            .await;
+
+            match result {
+                Ok(Ok(node_json)) => HttpResponse::Ok().json(ApiResponse::success(node_json)),
+                Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse::error(e)),
+                Err(e) => {
+                    HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
+                }
             }
         }
         QueryRequest::GetNode { node_id } => {
@@ -350,20 +357,6 @@ pub async fn handle_query(
             limit,
             offset,
         } => {
-            let mut builder = if let Some(lbl) = label {
-                QueryBuilder::new().scan_label(&lbl)
-            } else {
-                QueryBuilder::new().scan(None)
-            };
-
-            if let Some(props) = properties {
-                for (key, value) in props {
-                    if let Some(pred_value) = json_to_predicate_value(&value) {
-                        builder = builder.filter(Predicate::eq(key, pred_value));
-                    }
-                }
-            }
-
             // Issue 4: Pagination
             let limit_val = limit.unwrap_or(100);
             let offset_val = offset.unwrap_or(0);
@@ -378,31 +371,51 @@ pub async fn handle_query(
                 )));
             }
 
-            if let Some(skip) = offset {
-                builder = builder.skip(skip);
-            }
+            let db = db.clone();
 
-            match builder.limit(limit_val).execute(db) {
-                Ok(results) => {
-                    let mut nodes = Vec::new();
-                    for row in results.flatten() {
-                        if let crate::query::executor::EntityResult::Node(node) = row.entity {
-                            let props_json = match property_map_to_json(&node.properties) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    return HttpResponse::InternalServerError()
-                                        .json(ApiResponse::error(e));
-                                }
-                            };
-                            nodes.push(json!({
-                                "id": node.id.as_u64(),
-                                "label": interned_to_string(node.label),
-                                "properties": props_json
-                            }));
+            let result = web::block(move || {
+                let mut builder = if let Some(lbl) = label {
+                    QueryBuilder::new().scan_label(&lbl)
+                } else {
+                    QueryBuilder::new().scan(None)
+                };
+
+                if let Some(props) = properties {
+                    for (key, value) in props {
+                        if let Some(pred_value) = json_to_predicate_value(&value) {
+                            builder = builder.filter(Predicate::eq(key, pred_value));
                         }
                     }
-                    HttpResponse::Ok().json(ApiResponse::success(json!(nodes)))
                 }
+
+                if let Some(skip) = offset {
+                    builder = builder.skip(skip);
+                }
+
+                match builder.limit(limit_val).execute(&db) {
+                    Ok(results) => {
+                        let mut nodes = Vec::new();
+                        for row in results.flatten() {
+                            if let crate::query::executor::EntityResult::Node(node) = row.entity {
+                                let props_json = property_map_to_json(&node.properties)
+                                    .map_err(|e| e.to_string())?;
+                                nodes.push(json!({
+                                    "id": node.id.as_u64(),
+                                    "label": interned_to_string(node.label),
+                                    "properties": props_json
+                                }));
+                            }
+                        }
+                        Ok(nodes)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            })
+            .await;
+
+            match result {
+                Ok(Ok(nodes)) => HttpResponse::Ok().json(ApiResponse::success(json!(nodes))),
+                Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse::error(e)),
                 Err(e) => {
                     HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
                 }
@@ -413,122 +426,139 @@ pub async fn handle_query(
             limit,
             offset,
         } => {
-            match NodeId::new(node_id) {
-                Ok(nid) => {
-                    // Safety limits to prevent DoS
-                    let max_limit = 1000;
-                    let max_deep_pagination = 10_000;
-
-                    let limit_val = limit.unwrap_or(100).min(max_limit);
-                    let offset_val = offset.unwrap_or(0);
-
-                    // Prevent deep-pagination and overflow bypasses.
-                    if offset_val.saturating_add(limit_val) > max_deep_pagination {
-                        return HttpResponse::BadRequest().json(ApiResponse::error(format!(
-                            "Pagination limit exceeded: offset + limit must be <= {}",
-                            max_deep_pagination
-                        )));
-                    }
-
-                    // Deduplication
-                    let mut seen_ids = HashSet::new();
-                    let mut neighbors = Vec::with_capacity(limit_val);
-
-                    // Use zero-allocation iterators
-                    // Outgoing: edge -> target node
-                    let outgoing_iter = db
-                        .get_outgoing_edges_iter(nid)
-                        .map(|edge_id| db.get_edge_target(edge_id).ok());
-
-                    // Incoming: edge -> source node
-                    let incoming_iter = db
-                        .get_incoming_edges_iter(nid)
-                        .map(|edge_id| db.get_edge_source(edge_id).ok());
-
-                    // Chain iterators -> filter valid -> filter duplicates -> skip -> take
-                    let combined_iter = outgoing_iter
-                        .chain(incoming_iter)
-                        .flatten() // remove None (failed lookups)
-                        .filter(|&neighbor_id| seen_ids.insert(neighbor_id)) // deduplicate
-                        .skip(offset_val)
-                        .take(limit_val);
-
-                    for neighbor_id in combined_iter {
-                        match db.get_node(neighbor_id) {
-                            Ok(node) => {
-                                let props_json = match property_map_to_json(&node.properties) {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        return HttpResponse::InternalServerError()
-                                            .json(ApiResponse::error(e));
-                                    }
-                                };
-                                neighbors.push(json!({
-                                    "id": node.id.as_u64(),
-                                    "label": interned_to_string(node.label),
-                                    "properties": props_json
-                                }));
-                            }
-                            Err(e) => {
-                                // Node ID found in edge but not in node index? Should be impossible unless corrupted
-                                return HttpResponse::InternalServerError()
-                                    .json(ApiResponse::error(e.to_string()));
-                            }
-                        }
-                    }
-
-                    HttpResponse::Ok().json(ApiResponse::success(json!(neighbors)))
-                }
-                Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
-            }
-        }
-        QueryRequest::ExecuteQuery { query, parameters } => {
-            // 1. Parse the query (with parameters if provided)
-            let parsed_query = if let Some(params_json) = parameters {
-                match json_to_parameter_map(&params_json) {
-                    Ok(params) => match parse_query_with_params(&query, params) {
-                        Ok(q) => q,
-                        Err(e) => {
-                            return HttpResponse::BadRequest()
-                                .json(ApiResponse::error(e.to_string()));
-                        }
-                    },
-                    Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e)),
-                }
-            } else {
-                match parse_query(&query) {
-                    Ok(q) => q,
-                    Err(e) => {
-                        return HttpResponse::BadRequest().json(ApiResponse::error(e.to_string()));
-                    }
-                }
+            // Validation first
+            let nid = match NodeId::new(node_id) {
+                Ok(nid) => nid,
+                Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
             };
 
-            // 2. Execute the query
-            match db.execute_query(parsed_query) {
-                Ok(results) => {
-                    // 3. Serialize results
-                    let mut json_results = Vec::new();
-                    for row_result in results {
-                        match row_result {
-                            Ok(row) => match query_row_to_json(row) {
-                                Ok(json) => json_results.push(json),
-                                Err(e) => {
-                                    return HttpResponse::InternalServerError()
-                                        .json(ApiResponse::error(e));
-                                }
-                            },
-                            Err(e) => {
-                                return HttpResponse::InternalServerError()
-                                    .json(ApiResponse::error(e.to_string()));
-                            }
+            // Safety limits to prevent DoS
+            let max_limit = 1000;
+            let max_deep_pagination = 10_000;
+
+            let limit_val = limit.unwrap_or(100).min(max_limit);
+            let offset_val = offset.unwrap_or(0);
+
+            // Prevent deep-pagination and overflow bypasses.
+            if offset_val.saturating_add(limit_val) > max_deep_pagination {
+                return HttpResponse::BadRequest().json(ApiResponse::error(format!(
+                    "Pagination limit exceeded: offset + limit must be <= {}",
+                    max_deep_pagination
+                )));
+            }
+
+            let db = db.clone();
+
+            let result = web::block(move || {
+                // Deduplication
+                let mut seen_ids = HashSet::new();
+                let mut neighbors = Vec::with_capacity(limit_val);
+
+                // Use zero-allocation iterators
+                // Outgoing: edge -> target node
+                let outgoing_iter = db
+                    .get_outgoing_edges_iter(nid)
+                    .map(|edge_id| db.get_edge_target(edge_id).ok());
+
+                // Incoming: edge -> source node
+                let incoming_iter = db
+                    .get_incoming_edges_iter(nid)
+                    .map(|edge_id| db.get_edge_source(edge_id).ok());
+
+                // Chain iterators -> filter valid -> filter duplicates -> skip -> take
+                let combined_iter = outgoing_iter
+                    .chain(incoming_iter)
+                    .flatten() // remove None (failed lookups)
+                    .filter(|&neighbor_id| seen_ids.insert(neighbor_id)) // deduplicate
+                    .skip(offset_val)
+                    .take(limit_val);
+
+                for neighbor_id in combined_iter {
+                    match db.get_node(neighbor_id) {
+                        Ok(node) => {
+                            let props_json = property_map_to_json(&node.properties)
+                                .map_err(|e| e.to_string())?;
+                            neighbors.push(json!({
+                                "id": node.id.as_u64(),
+                                "label": interned_to_string(node.label),
+                                "properties": props_json
+                            }));
+                        }
+                        Err(e) => {
+                            // Node ID found in edge but not in node index? Should be impossible unless corrupted
+                            return Err(e.to_string());
                         }
                     }
-                    HttpResponse::Ok().json(ApiResponse::success(json!(json_results)))
                 }
+                Ok(neighbors)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(neighbors)) => HttpResponse::Ok().json(ApiResponse::success(json!(neighbors))),
+                Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse::error(e)),
                 Err(e) => {
                     HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
                 }
+            }
+        }
+        QueryRequest::ExecuteQuery { query, parameters } => {
+            let db = db.clone();
+
+            // Move parsing + execution to blocking thread
+            // Parsing is CPU bound, execution involves DB IO/scans
+            let result = web::block(move || {
+                // 1. Parse the query
+                let parsed_query = if let Some(params_json) = parameters {
+                    match json_to_parameter_map(&params_json) {
+                        Ok(params) => match parse_query_with_params(&query, params) {
+                            Ok(q) => q,
+                            Err(e) => return Err(e.to_string()),
+                        },
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    match parse_query(&query) {
+                        Ok(q) => q,
+                        Err(e) => return Err(e.to_string()),
+                    }
+                };
+
+                // 2. Execute the query
+                match db.execute_query(parsed_query) {
+                    Ok(results) => {
+                        // 3. Serialize results
+                        let mut json_results = Vec::new();
+                        for row_result in results {
+                            match row_result {
+                                Ok(row) => match query_row_to_json(row) {
+                                    Ok(json) => json_results.push(json),
+                                    Err(e) => return Err(e),
+                                },
+                                Err(e) => return Err(e.to_string()),
+                            }
+                        }
+                        Ok(json_results)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }).await;
+
+            match result {
+                Ok(Ok(json_results)) => HttpResponse::Ok().json(ApiResponse::success(json!(json_results))),
+                Ok(Err(e)) => {
+                    // Simple heuristic: parse errors (often starting with "Syntax error") are Bad Request,
+                    // others (StorageError) are Internal Server Error.
+                    // For now, mapping everything to Internal Error to be safe/consistent with previous behavior
+                    // (though previous behavior had explicit BadRequest for parse errors).
+                    // Let's improve this:
+                    if e.to_lowercase().contains("syntax") || e.to_lowercase().contains("parse") {
+                         HttpResponse::BadRequest().json(ApiResponse::error(e))
+                    } else {
+                         HttpResponse::InternalServerError().json(ApiResponse::error(e))
+                    }
+                }
+                Err(e) => HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string())),
             }
         }
     }
