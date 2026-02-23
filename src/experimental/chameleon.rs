@@ -156,7 +156,11 @@ impl<'a> Chameleon<'a> {
         }
 
         // Sort aspects by weight (descending)
-        aspects.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal));
+        aspects.sort_by(|a, b| {
+            b.weight
+                .partial_cmp(&a.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(aspects)
     }
@@ -331,14 +335,43 @@ mod tests {
         // Cluster A: [0, 0], [0.1, 0.1]
         // Cluster B: [10, 10], [10.1, 10.1]
 
-        let n1 = db.create_node("A", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 0.0]).build()).unwrap();
-        let n2 = db.create_node("A", PropertyMapBuilder::new().insert_vector("vec", &[0.1, 0.1]).build()).unwrap();
-        let n3 = db.create_node("B", PropertyMapBuilder::new().insert_vector("vec", &[10.0, 10.0]).build()).unwrap();
-        let n4 = db.create_node("B", PropertyMapBuilder::new().insert_vector("vec", &[10.1, 10.1]).build()).unwrap();
+        let n1 = db
+            .create_node(
+                "A",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let n2 = db
+            .create_node(
+                "A",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.1, 0.1])
+                    .build(),
+            )
+            .unwrap();
+        let n3 = db
+            .create_node(
+                "B",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[10.0, 10.0])
+                    .build(),
+            )
+            .unwrap();
+        let n4 = db
+            .create_node(
+                "B",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[10.1, 10.1])
+                    .build(),
+            )
+            .unwrap();
 
         // Connect
         for n in [n1, n2, n3, n4] {
-            db.create_edge(center, n, "LINK", PropertyMapBuilder::new().build()).unwrap();
+            db.create_edge(center, n, "LINK", PropertyMapBuilder::new().build())
+                .unwrap();
         }
 
         let chameleon = Chameleon::new(&db);
@@ -358,15 +391,44 @@ mod tests {
             .unwrap();
 
         // Cluster A: Around X-axis [1, 0]
-        let n1 = db.create_node("A", PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0]).build()).unwrap();
-        let n2 = db.create_node("A", PropertyMapBuilder::new().insert_vector("vec", &[0.9, 0.1]).build()).unwrap();
+        let n1 = db
+            .create_node(
+                "A",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let n2 = db
+            .create_node(
+                "A",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.9, 0.1])
+                    .build(),
+            )
+            .unwrap();
 
         // Cluster B: Around Y-axis [0, 1]
-        let n3 = db.create_node("B", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 1.0]).build()).unwrap();
-        let n4 = db.create_node("B", PropertyMapBuilder::new().insert_vector("vec", &[0.1, 0.9]).build()).unwrap();
+        let n3 = db
+            .create_node(
+                "B",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 1.0])
+                    .build(),
+            )
+            .unwrap();
+        let n4 = db
+            .create_node(
+                "B",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.1, 0.9])
+                    .build(),
+            )
+            .unwrap();
 
         for n in [n1, n2, n3, n4] {
-            db.create_edge(center, n, "LINK", PropertyMapBuilder::new().build()).unwrap();
+            db.create_edge(center, n, "LINK", PropertyMapBuilder::new().build())
+                .unwrap();
         }
 
         let chameleon = Chameleon::new(&db);
@@ -384,6 +446,10 @@ mod tests {
         let is_x = (c0[0] - 1.0).abs() < 0.2;
         let is_y = (c0[1] - 1.0).abs() < 0.2;
 
-        assert!(is_x || is_y, "Centroid 0 {:?} should be near X or Y axis", c0);
+        assert!(
+            is_x || is_y,
+            "Centroid 0 {:?} should be near X or Y axis",
+            c0
+        );
     }
 }
