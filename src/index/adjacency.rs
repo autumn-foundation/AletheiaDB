@@ -745,8 +745,11 @@ mod sentry_tests {
         let node_ids = vec![10];
         let offsets = vec![0]; // invalid len (should be 2)
         let edge_ids = vec![100]; // Non-empty to bypass early return
-        let edges_map: HashMap<EdgeId, (NodeId, InternedString), BuildHasherDefault<IdentityHasher>> =
-            HashMap::with_hasher(BuildHasherDefault::default());
+        let edges_map: HashMap<
+            EdgeId,
+            (NodeId, InternedString),
+            BuildHasherDefault<IdentityHasher>,
+        > = HashMap::with_hasher(BuildHasherDefault::default());
         AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
 
