@@ -11,7 +11,7 @@
 //!     ACID-compliant transactions.
 //! 2.  **Hybrid Querying** ([`crate::query`]): A unified engine for Graph, Vector, and
 //!     Temporal queries.
-//! 3.  **Vector Search** ([`vector_builder`]): Fluent configuration for embedding-based
+//! 3.  **Vector Search** ([`crate::db::vector_builder`]): Fluent configuration for embedding-based
 //!     similarity search.
 //!
 //! # Quick Start
@@ -85,7 +85,7 @@
 //! # Module Map
 //!
 //! - **[`transaction`]**: Core ACID transaction types ([`ReadTransaction`], [`WriteTransaction`]).
-//! - **[`vector_builder`]**: Fluent builder for configuring vector indexes.
+//! - **[`crate::db::vector_builder`]**: Fluent builder for configuring vector indexes.
 //! - **[`crate::db`]**: The main [`AletheiaDB`](crate::AletheiaDB) struct and entry point.
 //! - **[`crate::query`]**: The fluent query builder API.
 

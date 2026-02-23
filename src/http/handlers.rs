@@ -296,25 +296,21 @@ pub async fn handle_query(
             let db = db.clone();
             let label = label.clone();
 
-            let result = web::block(move || {
-                match db.create_node(&label, props) {
-                    Ok(node_id) => {
-                        match db.get_node(node_id) {
-                            Ok(node) => {
-                                let props_json = property_map_to_json(&node.properties)
-                                    .map_err(|e| e.to_string())?;
-                                let node_json = json!({
-                                    "id": node.id.as_u64(),
-                                    "label": interned_to_string(node.label),
-                                    "properties": props_json
-                                });
-                                Ok(node_json)
-                            }
-                            Err(e) => Err(e.to_string()),
-                        }
+            let result = web::block(move || match db.create_node(&label, props) {
+                Ok(node_id) => match db.get_node(node_id) {
+                    Ok(node) => {
+                        let props_json =
+                            property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
+                        let node_json = json!({
+                            "id": node.id.as_u64(),
+                            "label": interned_to_string(node.label),
+                            "properties": props_json
+                        });
+                        Ok(node_json)
                     }
                     Err(e) => Err(e.to_string()),
-                }
+                },
+                Err(e) => Err(e.to_string()),
             })
             .await;
 
@@ -429,7 +425,9 @@ pub async fn handle_query(
             // Validation first
             let nid = match NodeId::new(node_id) {
                 Ok(nid) => nid,
-                Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
+                Err(e) => {
+                    return HttpResponse::BadRequest().json(ApiResponse::error(e.to_string()));
+                }
             };
 
             // Safety limits to prevent DoS
@@ -495,7 +493,9 @@ pub async fn handle_query(
             .await;
 
             match result {
-                Ok(Ok(neighbors)) => HttpResponse::Ok().json(ApiResponse::success(json!(neighbors))),
+                Ok(Ok(neighbors)) => {
+                    HttpResponse::Ok().json(ApiResponse::success(json!(neighbors)))
+                }
                 Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse::error(e)),
                 Err(e) => {
                     HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
@@ -542,10 +542,13 @@ pub async fn handle_query(
                     }
                     Err(e) => Err(e.to_string()),
                 }
-            }).await;
+            })
+            .await;
 
             match result {
-                Ok(Ok(json_results)) => HttpResponse::Ok().json(ApiResponse::success(json!(json_results))),
+                Ok(Ok(json_results)) => {
+                    HttpResponse::Ok().json(ApiResponse::success(json!(json_results)))
+                }
                 Ok(Err(e)) => {
                     // Simple heuristic: parse errors (often starting with "Syntax error") are Bad Request,
                     // others (StorageError) are Internal Server Error.
@@ -553,12 +556,14 @@ pub async fn handle_query(
                     // (though previous behavior had explicit BadRequest for parse errors).
                     // Let's improve this:
                     if e.to_lowercase().contains("syntax") || e.to_lowercase().contains("parse") {
-                         HttpResponse::BadRequest().json(ApiResponse::error(e))
+                        HttpResponse::BadRequest().json(ApiResponse::error(e))
                     } else {
-                         HttpResponse::InternalServerError().json(ApiResponse::error(e))
+                        HttpResponse::InternalServerError().json(ApiResponse::error(e))
                     }
                 }
-                Err(e) => HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string())),
+                Err(e) => {
+                    HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
+                }
             }
         }
     }

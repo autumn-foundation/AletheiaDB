@@ -1,7 +1,6 @@
-use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_hnsw_search_in_async_context() {
@@ -11,7 +10,7 @@ async fn test_hnsw_search_in_async_context() {
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .build()
-            .unwrap()
+            .unwrap(),
     );
 
     let node_id = NodeId::new(1).unwrap();
@@ -37,7 +36,9 @@ async fn test_hnsw_search_in_async_context() {
         // If HnswIndex uses block_in_place, this thread becomes a blocking thread temporarily,
         // and a new worker is spawned/woken up to replace it.
         index_clone2.search(&[1.0, 0.0, 0.0, 0.0], 10).unwrap()
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     assert_eq!(result_direct.len(), 1);
     assert_eq!(result_direct[0].0, node_id);
@@ -48,7 +49,7 @@ async fn test_hnsw_add_in_async_context() {
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .build()
-            .unwrap()
+            .unwrap(),
     );
 
     let node_id = NodeId::new(1).unwrap();
@@ -57,7 +58,9 @@ async fn test_hnsw_add_in_async_context() {
     let index_clone = Arc::clone(&index);
     tokio::task::spawn(async move {
         index_clone.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     assert_eq!(index.len(), 1);
 }

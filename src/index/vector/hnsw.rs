@@ -968,10 +968,9 @@ impl VectorIndex for HnswIndex {
                     // This is safe because add() with a non-existent key will succeed
 
                     // Add the new vector while still holding the lock
-                    if let Err(e) = self.retry_usearch(
-                        || index.add(existing_key, vector),
-                        "Failed to add vector",
-                    ) {
+                    if let Err(e) = self
+                        .retry_usearch(|| index.add(existing_key, vector), "Failed to add vector")
+                    {
                         // Check for "Duplicate keys" error which indicates inconsistency between contains() and add()
                         if e.to_string().contains("Duplicate keys") {
                             // Force remove and retry add
@@ -1381,9 +1380,7 @@ impl VectorIndex for HnswIndex {
                                 {
                                     self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
                                     let delay_ms = 1u64 << attempt;
-                                    std::thread::sleep(std::time::Duration::from_millis(
-                                        delay_ms,
-                                    ));
+                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                                     continue;
                                 }
 
