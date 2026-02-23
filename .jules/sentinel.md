@@ -53,3 +53,9 @@
 **Summary:** `is_normalized` checks strict bounds `sq_mag >= lower && sq_mag <= upper`. A mutant changing `>=` to `>` or `<=` to `<` would survive without strict boundary tests. Similarly, `normalize` threshold check `sq_mag < SQUARED_MAGNITUDE_THRESHOLD`.
 **Diagnosis:** **Missing Coverage**. Existing tests covered typical cases but not exact boundaries where off-by-one errors live.
 **Kill Shot:** Added `test_is_normalized_lower_boundary`, `test_is_normalized_upper_boundary`, and `test_normalize_threshold_boundary` in `src/core/vector/sentry_tests.rs`.
+
+**[CSR Invariant Validation]**
+**Module:** `src/index/adjacency.rs`
+**Summary:** `AdjacencyIndex::import_csr` lacked validation for CSR invariants, allowing construction of invalid indices if persistence data was corrupted.
+**Diagnosis:** **Suspected Code Bug**. The memory suggested assertions existed, but they were missing. A mutant removing them would have survived (if they existed), or rather, the absence of them allowed invalid data.
+**Kill Shot:** Added assertions to `import_csr` to enforce `offsets.len() == node_ids.len() + 1` and `offsets.last() == edge_ids.len()`. Added `sentry_tests` to verify panic on violation.

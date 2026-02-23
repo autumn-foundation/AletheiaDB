@@ -93,6 +93,21 @@ impl AdjacencyIndex {
             return Self::new();
         }
 
+        assert_eq!(
+            offsets.len(),
+            node_ids.len() + 1,
+            "CSR offsets length mismatch: expected {}, got {}",
+            node_ids.len() + 1,
+            offsets.len()
+        );
+        assert_eq!(
+            *offsets.last().unwrap() as usize,
+            edge_ids.len(),
+            "CSR offsets last value mismatch: expected {}, got {}",
+            edge_ids.len(),
+            offsets.last().unwrap()
+        );
+
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
         let node_ids_typed: Vec<NodeId> = node_ids
@@ -668,5 +683,58 @@ mod tests {
             1000,
             "max_node_id should consider target nodes"
         );
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::interning::InternedString;
+
+    #[test]
+    #[should_panic(expected = "CSR offsets length mismatch")]
+    fn test_import_csr_invalid_offsets_length() {
+        let node_ids = vec![1];
+        let offsets = vec![0]; // Should be length 2
+        let edge_ids = vec![100]; // Non-empty
+        let map = std::collections::HashMap::new();
+
+        let _ = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &map);
+    }
+
+    #[test]
+    #[should_panic(expected = "CSR offsets last value mismatch")]
+    fn test_import_csr_invalid_offsets_last_value() {
+        let node_ids = vec![1];
+        let offsets = vec![0, 5];
+        let edge_ids = vec![0, 1, 2, 3]; // Length 4, should be 5
+        let map = std::collections::HashMap::new();
+
+        let _ = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &map);
+    }
+
+    #[test]
+    fn test_binary_search_behavior() {
+        let node_ids = vec![10, 20];
+        let offsets = vec![0, 1, 2];
+        let edge_ids = vec![100, 200];
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            EdgeId::new(100).unwrap(),
+            (NodeId::new(11).unwrap(), InternedString::from_raw(0)),
+        );
+        map.insert(
+            EdgeId::new(200).unwrap(),
+            (NodeId::new(21).unwrap(), InternedString::from_raw(0)),
+        );
+
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &map);
+
+        // Verify existing
+        assert_eq!(index.degree(NodeId::new(10).unwrap()), 1);
+
+        // Verify missing (but within range)
+        assert_eq!(index.degree(NodeId::new(15).unwrap()), 0);
+        assert!(index.get_adjacency(NodeId::new(15).unwrap()).is_empty());
     }
 }
