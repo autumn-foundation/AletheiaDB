@@ -818,6 +818,8 @@ mod tests {
         let closed_both = interval.close_both(1500.into(), 2500.into()).unwrap();
         assert!(!closed_both.is_currently_valid());
         assert!(!closed_both.is_currently_recorded());
+        assert_eq!(closed_both.valid_time().end(), 1500.into());
+        assert_eq!(closed_both.transaction_time().end(), 2500.into());
     }
 
     #[test]
@@ -1876,5 +1878,30 @@ mod sentry_tests {
         let closed = range.close_at(TIMESTAMP_MAX).unwrap();
         assert_eq!(closed.end(), TIMESTAMP_MAX);
         assert!(closed.is_current());
+    }
+
+    #[test]
+    fn test_sentry_deserialize_rejects_inverted_range() {
+        // 🛡️ Sentry Test: Verify TimeRange::deserialize rejects inverted ranges (start > end).
+        // This targets mutants that remove or weaken the validation check in deserialize.
+        // HybridTimestamp is 12 bytes: 8 bytes wallclock (i64 le), 4 bytes logical (u32 le).
+
+        let mut bytes = Vec::new();
+
+        // Start: 200
+        bytes.extend_from_slice(&200i64.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        // End: 100
+        bytes.extend_from_slice(&100i64.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let result = TimeRange::deserialize(&bytes);
+
+        assert!(result.is_err(), "Should reject range where start > end");
+
+        // Check error message
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
