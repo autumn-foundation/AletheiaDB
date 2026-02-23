@@ -41,6 +41,7 @@
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
 //! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
 //! | [`gestalt`] | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
+//! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -167,5 +168,8 @@ pub mod gestalt;
 pub mod gravity;
 /// Metaphor: Semantic Graph Alignment Engine.
 pub mod metaphor;
+#[cfg(feature = "nova")]
+/// Mnemosyne: Semantic Memory Consolidation.
+pub mod mnemosyne;
 /// Muse: The Semantic Ideator.
 pub mod muse;
