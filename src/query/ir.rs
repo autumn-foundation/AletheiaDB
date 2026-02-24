@@ -7,10 +7,10 @@
 use std::ops::Not;
 use std::sync::Arc;
 
+use crate::core::NodeId;
 use crate::core::error::{QueryError, Result};
 use crate::core::graph::Node;
 use crate::core::property::PropertyValue;
-use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::index::vector::DistanceMetric;
 
@@ -465,12 +465,14 @@ impl Predicate {
 
     fn evaluate_recursive(&self, node: &Node, depth: usize) -> Result<bool> {
         if depth > MAX_PREDICATE_DEPTH {
-            return Err(crate::core::error::Error::Query(QueryError::ExecutionError {
-                message: format!(
-                    "Predicate recursion depth limit exceeded (max {})",
-                    MAX_PREDICATE_DEPTH
-                ),
-            }));
+            return Err(crate::core::error::Error::Query(
+                QueryError::ExecutionError {
+                    message: format!(
+                        "Predicate recursion depth limit exceeded (max {})",
+                        MAX_PREDICATE_DEPTH
+                    ),
+                },
+            ));
         }
 
         match self {
@@ -808,14 +810,13 @@ mod tests {
     }
 }
 #[cfg(test)]
-#[cfg(test)]
 mod recursion_tests {
-    use crate::query::ir::{Predicate, MAX_PREDICATE_DEPTH};
     use crate::core::graph::Node;
-    use crate::core::property::PropertyMapBuilder;
     use crate::core::id::NodeId;
     use crate::core::id::VersionId;
     use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::query::ir::{MAX_PREDICATE_DEPTH, Predicate};
 
     fn make_test_node() -> Node {
         let props = PropertyMapBuilder::new().insert("val", 1).build();
@@ -840,7 +841,12 @@ mod recursion_tests {
 
         let result = pred.evaluate(&node);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("recursion depth limit exceeded"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("recursion depth limit exceeded")
+        );
     }
 
     #[test]
@@ -860,12 +866,12 @@ mod recursion_tests {
 
 #[cfg(test)]
 mod float_tests {
-    use crate::query::ir::Predicate;
     use crate::core::graph::Node;
-    use crate::core::property::PropertyMapBuilder;
     use crate::core::id::NodeId;
     use crate::core::id::VersionId;
     use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::query::ir::Predicate;
 
     fn make_float_node(val: f64) -> Node {
         let props = PropertyMapBuilder::new().insert("val", val).build();
