@@ -90,17 +90,37 @@ impl<'a> Chameleon<'a> {
         property: &str,
         k: usize,
     ) -> Result<Vec<Aspect>> {
+        const MAX_CONTEXT_NEIGHBORS: usize = 100;
+
         // 1. Gather Neighbors
         let neighbor_ids = self.get_neighbors(node_id)?;
         if neighbor_ids.is_empty() {
             return Ok(Vec::new());
         }
 
+        // Limit to prevent DoS
+        let neighbor_iter = neighbor_ids.iter().take(MAX_CONTEXT_NEIGHBORS);
+
         // 2. Extract Vectors
-        let mut data = Vec::with_capacity(neighbor_ids.len());
-        for &nid in &neighbor_ids {
+        let mut data = Vec::with_capacity(neighbor_ids.len().min(MAX_CONTEXT_NEIGHBORS));
+        let mut expected_dim = None;
+
+        for &nid in neighbor_iter {
             if let Ok(vec) = self.get_node_vector(nid, property) {
-                data.push((nid, vec));
+                match expected_dim {
+                    None => {
+                        // First valid vector establishes the dimension
+                        expected_dim = Some(vec.len());
+                        data.push((nid, vec));
+                    }
+                    Some(dim) => {
+                        // Subsequent vectors must match
+                        if vec.len() == dim {
+                            data.push((nid, vec));
+                        }
+                        // Else: ignore mismatching vectors to prevent panic/garbage
+                    }
+                }
             }
         }
 
