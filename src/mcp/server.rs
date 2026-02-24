@@ -287,7 +287,7 @@ impl AletheiaMcpServer {
     /// # Example Request
     ///
     /// ```rust
-    /// use aletheiadb::mcp::tools::CreateNodeRequest;
+    /// use aletheiadb::mcp::CreateNodeRequest;
     /// use std::collections::HashMap;
     /// use serde_json::json;
     ///
