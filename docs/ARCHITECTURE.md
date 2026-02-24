@@ -73,6 +73,16 @@ C4Context
 
 ## Design Patterns
 
+### Module Dependencies
+
+```mermaid
+classDiagram
+    class Core
+    class Storage
+    Core --> Storage : Uses (Trait Bound)
+    %% Removed the circular dependency arrow
+```
+
 ### Hybrid Storage Architecture
 
 ```mermaid
