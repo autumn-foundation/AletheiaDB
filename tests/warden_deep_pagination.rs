@@ -1,19 +1,20 @@
-use actix_web::{test, App, web};
-use serde_json::json;
-use std::sync::Arc;
+#![cfg(feature = "http-server")]
+
+use actix_web::{App, test, web};
 use aletheiadb::AletheiaDB;
 use aletheiadb::http::AppState;
+use serde_json::json;
+use std::sync::Arc;
 
 #[actix_rt::test]
 async fn test_warden_execute_query_deep_pagination_dos() {
     let db = Arc::new(AletheiaDB::new().unwrap());
     let state = web::Data::new(AppState::new(db));
 
-    let app = test::init_service(
-        App::new()
-            .app_data(state)
-            .route("/query", web::post().to(aletheiadb::http::handlers::handle_query)),
-    )
+    let app = test::init_service(App::new().app_data(state).route(
+        "/query",
+        web::post().to(aletheiadb::http::handlers::handle_query),
+    ))
     .await;
 
     // A query with a massive SKIP that would cause the server to loop for a long time
@@ -38,13 +39,17 @@ async fn test_warden_execute_query_deep_pagination_dos() {
         // We want this test to fail currently to demonstrate the issue
         panic!("VULNERABILITY CONFIRMED: Server accepted deep pagination query");
     } else {
-        assert!(resp.status().is_client_error(), "Should reject deep pagination");
+        assert!(
+            resp.status().is_client_error(),
+            "Should reject deep pagination"
+        );
         let body = test::read_body(resp).await;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let error = json["error"].as_str().unwrap();
         // Check for either the handler-level error or the planner-level error
-        let passed = error.contains("Pagination limit exceeded") ||
-                     (error.contains("Invalid query parameter") && error.contains("exceeds maximum allowed"));
+        let passed = error.contains("Pagination limit exceeded")
+            || (error.contains("Invalid query parameter")
+                && error.contains("exceeds maximum allowed"));
         assert!(passed, "Unexpected error message: {}", error);
     }
 }
