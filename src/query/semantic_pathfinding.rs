@@ -409,8 +409,6 @@ mod tests {
     #[test]
     fn test_semantic_pathfinding_time_travel() {
         use crate::core::temporal::time;
-        use std::thread;
-        use std::time::Duration;
 
         let db = create_test_db();
         let _now = time::now();
@@ -452,15 +450,18 @@ mod tests {
             .unwrap();
         assert!(path_t0.is_some(), "Path should exist at t0 before deletion");
 
-        // Wait a bit to ensure distinct timestamp
-        thread::sleep(Duration::from_millis(10));
-
         // Delete "Middle" node at t1 (which should break the path)
         // Use delete_node_cascade to ensure edges are also deleted from current storage
         let (_, t_delete) = db
             .write_with_timestamp(|tx| tx.delete_node_cascade(middle))
             .unwrap();
         let _t1 = t_delete;
+
+        // Verify time monotonicity (HLC guarantees distinct timestamps)
+        assert!(
+            t_delete > t0,
+            "Time must advance monotonically for subsequent transactions"
+        );
 
         // Query at t0 AFTER deletion: With temporal adjacency index (enabled by default),
         // the path SHOULD be found even though edges are deleted from current storage
@@ -517,5 +518,137 @@ mod tests {
         );
         // Verify it's the original middle node, not new_middle
         assert_eq!(path_t0_check.as_ref().unwrap()[1], middle);
+    }
+
+    mod sentry_tests {
+        use super::*;
+
+        #[test]
+        fn test_pathfinding_zero_max_depth() {
+            let db = create_test_db();
+            // Create a minimal graph A -> B
+            let a = db
+                .create_node("A", PropertyMapBuilder::new().build())
+                .unwrap();
+            let b = db
+                .create_node("B", PropertyMapBuilder::new().build())
+                .unwrap();
+            db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            let query = vec![0.0; 3];
+            let pathfinder = SemanticPathfinder::new(&db, "embedding");
+
+            // Max depth 0 should fail to find path if A != B
+            let path = pathfinder.find_path(a, b, &query, 0, false).unwrap();
+            assert!(path.is_none(), "Depth 0 should not allow traversal");
+        }
+
+        #[test]
+        fn test_pathfinding_start_equals_end() {
+            let db = create_test_db();
+            let a = db
+                .create_node("A", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            let query = vec![0.0; 3];
+            let pathfinder = SemanticPathfinder::new(&db, "embedding");
+
+            // Should find path [A] immediately
+            let path = pathfinder.find_path(a, a, &query, 10, false).unwrap();
+            assert!(path.is_some());
+            assert_eq!(path.unwrap(), vec![a]);
+        }
+
+        #[test]
+        fn test_pathfinding_disconnected() {
+            let db = create_test_db();
+            let a = db
+                .create_node("A", PropertyMapBuilder::new().build())
+                .unwrap();
+            let b = db
+                .create_node("B", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            // No edges
+
+            let query = vec![0.0; 3];
+            let pathfinder = SemanticPathfinder::new(&db, "embedding");
+
+            let path = pathfinder.find_path(a, b, &query, 10, false).unwrap();
+            assert!(path.is_none());
+        }
+
+        #[test]
+        fn test_pathfinding_cycle() {
+            let db = create_test_db();
+            let a = db
+                .create_node("A", PropertyMapBuilder::new().build())
+                .unwrap();
+            let b = db
+                .create_node("B", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            // Cycle: A -> B -> A
+            db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+            db.create_edge(b, a, "BACK", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            let query = vec![0.0; 3];
+            let pathfinder = SemanticPathfinder::new(&db, "embedding");
+
+            // Search for unreachable C
+            let c = db
+                .create_node("C", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            // Should terminate and return None, not hang
+            let path = pathfinder.find_path(a, c, &query, 10, false).unwrap();
+            assert!(path.is_none());
+        }
+
+        #[test]
+        fn test_calculate_semantic_cost_dimension_mismatch() {
+            let db = create_test_db();
+            // Node with 3D vector
+            let a = db
+                .create_node(
+                    "A",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[1.0, 0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            let b = db
+                .create_node(
+                    "B",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.0, 1.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+
+            db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            // Query with 4D vector -> Mismatch!
+            let query = vec![0.0; 4];
+            let pathfinder = SemanticPathfinder::new(&db, "embedding");
+
+            // Should propagate error from cosine_similarity
+            let result = pathfinder.find_path(a, b, &query, 10, false);
+            assert!(result.is_err());
+
+            let err_msg = result.unwrap_err().to_string();
+            // Error message depends on implementation of cosine_similarity
+            // Likely "Dimension mismatch" or similar
+            assert!(
+                err_msg.to_lowercase().contains("dimension")
+                    || err_msg.to_lowercase().contains("mismatch"),
+                "Error should be dimension mismatch, got: {}",
+                err_msg
+            );
+        }
     }
 }
