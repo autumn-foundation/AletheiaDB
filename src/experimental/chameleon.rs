@@ -96,10 +96,27 @@ impl<'a> Chameleon<'a> {
             return Ok(Vec::new());
         }
 
-        // 2. Extract Vectors
-        let mut data = Vec::with_capacity(neighbor_ids.len());
-        for &nid in &neighbor_ids {
+        // 2. Extract Vectors (with dimension consistency check)
+        // We limit analysis to a subset of neighbors to keep it interactive and prevent DoS
+        const MAX_CONTEXT_NEIGHBORS: usize = 100;
+        let limit = neighbor_ids.len().min(MAX_CONTEXT_NEIGHBORS);
+
+        let mut data = Vec::with_capacity(limit);
+        let mut expected_dim: Option<usize> = None;
+
+        for &nid in neighbor_ids.iter().take(limit) {
             if let Ok(vec) = self.get_node_vector(nid, property) {
+                // Initialize expected dimension from first valid vector
+                let dim = vec.len();
+                if let Some(expected) = expected_dim {
+                    if dim != expected {
+                        // Skip vectors with mismatched dimensions to prevent clustering panic
+                        continue;
+                    }
+                } else {
+                    expected_dim = Some(dim);
+                }
+
                 data.push((nid, vec));
             }
         }
