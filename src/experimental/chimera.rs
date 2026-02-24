@@ -190,12 +190,7 @@ impl<'a> ChimeraEngine<'a> {
                     let label_str = GLOBAL_INTERNER
                         .resolve_with(edge.label, |s| s.to_string())
                         .unwrap_or_default();
-                    tx.create_edge(
-                        edge.source,
-                        new_node,
-                        &label_str,
-                        edge.properties.clone(),
-                    )?;
+                    tx.create_edge(edge.source, new_node, &label_str, edge.properties.clone())?;
                 }
             }
 
@@ -283,7 +278,12 @@ impl<'a> ChimeraEngine<'a> {
         }
     }
 
-    fn merge_comparable<F>(&self, a: &PropertyValue, b: &PropertyValue, op: F) -> Option<PropertyValue>
+    fn merge_comparable<F>(
+        &self,
+        a: &PropertyValue,
+        b: &PropertyValue,
+        op: F,
+    ) -> Option<PropertyValue>
     where
         F: Fn(f64, f64) -> f64,
     {
@@ -414,22 +414,13 @@ mod tests {
         let node = db.get_node(chimera).unwrap();
 
         assert!(node.has_label_str("Hybrid"));
-        assert_eq!(
-            node.get_property("age").unwrap().as_float(),
-            Some(30.0)
-        );
+        assert_eq!(node.get_property("age").unwrap().as_float(), Some(30.0));
         assert_eq!(
             node.get_property("name").unwrap().as_str(),
             Some("Alice&Bob")
         );
-        assert_eq!(
-            node.get_property("skill").unwrap().as_str(),
-            Some("Rust")
-        );
-        assert_eq!(
-            node.get_property("city").unwrap().as_str(),
-            Some("London")
-        );
+        assert_eq!(node.get_property("skill").unwrap().as_str(), Some("Rust"));
+        assert_eq!(node.get_property("city").unwrap().as_str(), Some("London"));
     }
 
     #[test]
@@ -445,8 +436,7 @@ mod tests {
         db.create_edge(a, target, "OUT", Default::default())
             .unwrap();
         // Source -> B
-        db.create_edge(source, b, "IN", Default::default())
-            .unwrap();
+        db.create_edge(source, b, "IN", Default::default()).unwrap();
 
         let engine = ChimeraEngine::new(&db);
         let chimera = engine.synthesize(a, b, Default::default()).unwrap();
