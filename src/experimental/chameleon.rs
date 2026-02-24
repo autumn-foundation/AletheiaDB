@@ -98,9 +98,29 @@ impl<'a> Chameleon<'a> {
 
         // 2. Extract Vectors
         let mut data = Vec::with_capacity(neighbor_ids.len());
+        // Establish expected dimension from the first valid vector found
+        let mut expected_dim: Option<usize> = None;
+
         for &nid in &neighbor_ids {
             if let Ok(vec) = self.get_node_vector(nid, property) {
-                data.push((nid, vec));
+                match expected_dim {
+                    Some(dim) => {
+                        if vec.len() == dim {
+                            data.push((nid, vec));
+                        } else {
+                            // Ignore vectors with mismatched dimensions to prevent panics in MiniKMeans
+                            // Note: Using eprintln! because 'log' crate is not a direct dependency of 'nova' feature
+                            eprintln!(
+                                "WARN [Chameleon]: Skipping vector for neighbor {} due to dimension mismatch (expected {}, got {})",
+                                nid, dim, vec.len()
+                            );
+                        }
+                    }
+                    None => {
+                        expected_dim = Some(vec.len());
+                        data.push((nid, vec));
+                    }
+                }
             }
         }
 
