@@ -918,72 +918,72 @@ impl VectorIndex for HnswIndex {
                     }
                 }
 
-                // Use execute_with_retry_mut to perform the update.
-                // This helper handles locking, retrying on transient errors, and crucially
-                // DROPS the lock during backoff sleep to prevent DoS.
-                self.execute_with_retry_mut(
-                    |index| {
-                        // Re-verify mapping under Inner lock
-                        // We need to lock the map again to check if the ID still maps to existing_key.
-                        // This is safe because we hold Inner, so we are following Inner->Map order.
-                        if let Some(current_entry) = self.id_mapping.get(&id) {
-                            if *current_entry != existing_key {
-                                // Mapping changed (concurrent update).
-                                // Since we don't hold the correct key anymore, we return a transient error.
-                                return Err(Box::new(Error::Vector(VectorError::IndexError(
-                                    "Concurrent modification detected during update (mapping changed)"
-                                        .to_string(),
-                                ))));
-                            }
-                            // Mapping is consistent. Proceed with update.
-                        } else {
-                            // Mapping removed.
-                            // If the node was deleted, we shouldn't add a vector for it.
-                            return Err(Box::new(Error::Vector(VectorError::IndexError(
-                                "Concurrent modification detected during update (node removed)"
-                                    .to_string(),
-                            ))));
-                        }
+                // Acquire inner write lock to serialize structural mutations in usearch.
+                let index = self.inner.write();
 
-                        // Check if key exists before removing to avoid wasteful FFI call
-                        if index.contains(existing_key) {
-                            // Key exists in usearch - remove it before re-adding
-                            // (usearch requires explicit remove before add with same key)
-                            index
-                                .remove(existing_key)
-                                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-                        } else {
-                            // Key doesn't exist, so this is a net addition.
-                            // We must ensure capacity exists, as the optimistic check in
-                            // check_and_expand_capacity might have been raced.
-                            if index.size() >= index.capacity() {
-                                let new_capacity = (index.capacity() * 2).max(1024);
-                                index.reserve(new_capacity).map_err(|e| {
-                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                                })?;
-                            }
-                        }
+                // Re-verify mapping under Inner lock
+                // We need to lock the map again to check if the ID still maps to existing_key.
+                // This is safe because we hold Inner, so we are following Inner->Map order.
+                if let Some(current_entry) = self.id_mapping.get(&id) {
+                    if *current_entry != existing_key {
+                        // Mapping changed (concurrent update).
+                        // Since we don't hold the correct key anymore, we return a transient error.
+                        return Err(Error::Vector(VectorError::IndexError(
+                            "Concurrent modification detected during update (mapping changed)"
+                                .to_string(),
+                        )));
+                    }
+                    // Mapping is consistent. Proceed with update.
+                } else {
+                    // Mapping removed.
+                    // If the node was deleted, we shouldn't add a vector for it.
+                    return Err(Error::Vector(VectorError::IndexError(
+                        "Concurrent modification detected during update (node removed)".to_string(),
+                    )));
+                }
 
-                        // Add the new vector while still holding the lock
-                        if let Err(e) = index.add(existing_key, vector) {
-                            // Check for "Duplicate keys" error which indicates inconsistency between contains() and add()
-                            if e.to_string().contains("Duplicate keys") {
-                                // Force remove and retry add
-                                index.remove(existing_key).map_err(|e| {
-                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                                })?;
-                                index.add(existing_key, vector).map_err(|e| {
-                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                                })?;
-                            } else {
-                                return Err(Box::new(e));
-                            }
-                        }
+                // Check if key exists before removing to avoid wasteful FFI call
+                if index.contains(existing_key) {
+                    // Key exists in usearch - remove it before re-adding
+                    // (usearch requires explicit remove before add with same key)
+                    self.retry_usearch(
+                        || index.remove(existing_key),
+                        "Failed to remove existing vector",
+                    )?;
+                } else {
+                    // Key doesn't exist, so this is a net addition.
+                    // We must ensure capacity exists, as the optimistic check in
+                    // check_and_expand_capacity might have been raced.
+                    if index.size() >= index.capacity() {
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        self.retry_usearch(
+                            || index.reserve(new_capacity),
+                            "Failed to expand capacity (race recovery)",
+                        )?;
+                    }
+                }
+                // Note: If key doesn't exist, we skip remove() and proceed directly to add()
+                // This is safe because add() with a non-existent key will succeed
 
-                        Ok(())
-                    },
-                    "Failed to update vector",
-                )?;
+                // Add the new vector while still holding the lock
+                if let Err(e) =
+                    self.retry_usearch(|| index.add(existing_key, vector), "Failed to add vector")
+                {
+                    // Check for "Duplicate keys" error which indicates inconsistency between contains() and add()
+                    if e.to_string().contains("Duplicate keys") {
+                        // Force remove and retry add
+                        self.retry_usearch(
+                            || index.remove(existing_key),
+                            "Failed to force remove existing vector",
+                        )?;
+                        self.retry_usearch(
+                            || index.add(existing_key, vector),
+                            "Failed to add vector after force remove",
+                        )?;
+                    } else {
+                        return Err(e);
+                    }
+                }
 
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -1020,75 +1020,74 @@ impl VectorIndex for HnswIndex {
 
                 // Note: save_lock is already held at start of function.
 
-                // Use execute_with_retry_mut to perform the addition.
-                self.execute_with_retry_mut(
-                    |index| {
-                        // Ensure capacity exists. The optimistic check in check_and_expand_capacity
-                        // might have been raced by other threads. Since we hold the write lock now,
-                        // we are the source of truth.
-                        if index.size() >= index.capacity() {
-                            let new_capacity = (index.capacity() * 2).max(1024);
-                            index.reserve(new_capacity).map_err(|e| {
-                                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                            })?;
-                        }
+                // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant).
+                // Vacant path updates the index before claiming the map entry (Inner -> Map).
+                let index = self.inner.write();
 
-                        // Step 3: Add to inner usearch index while holding write lock
-                        index
-                            .add(key, vector)
-                            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+                // Ensure capacity exists. The optimistic check in check_and_expand_capacity
+                // might have been raced by other threads. Since we hold the write lock now,
+                // we are the source of truth.
+                if index.size() >= index.capacity() {
+                    let new_capacity = (index.capacity() * 2).max(1024);
+                    self.retry_usearch(
+                        || index.reserve(new_capacity),
+                        "Failed to expand capacity (race recovery)",
+                    )?;
+                }
 
-                        #[cfg(test)]
-                        {
-                            // Hook to simulate race condition: simulate another thread adding mapping
-                            // after we checked it was vacant but before we inserted our mapping.
-                            if let Some(hook) = TEST_RACE_HOOK.with(|h| h.get()) {
-                                hook(self, id);
-                            }
-                        }
+                // Step 3: Add to inner usearch index while holding write lock
+                self.retry_usearch(|| index.add(key, vector), "Failed to add vector")?;
 
-                        // Step 4: Insert to mappings (dashmap) WHILE HOLDING INNER LOCK
-                        // We keep the inner lock held to ensure atomicity with respect to save_internal().
-                        // If we dropped the lock here, save_internal() could run, see the new vector in inner,
-                        // but miss the mapping in id_mapping (Zombie Vector bug).
-                        //
-                        // Lock order check: Inner -> Map (via entry()). This is consistent with other operations.
-                        let race_detected = match self.id_mapping.entry(id) {
-                            dashmap::mapref::entry::Entry::Occupied(_) => true,
-                            dashmap::mapref::entry::Entry::Vacant(e) => {
-                                // Success: we claimed the ID
-                                e.insert(key);
-                                // Drop the entry lock implicitly here when e is consumed/scope ends
-                                false
-                            }
-                        };
+                #[cfg(test)]
+                {
+                    // Hook to simulate race condition: simulate another thread adding mapping
+                    // after we checked it was vacant but before we inserted our mapping.
+                    if let Some(hook) = TEST_RACE_HOOK.with(|h| h.get()) {
+                        hook(self, id);
+                    }
+                }
 
-                        if race_detected {
-                            // Race detected: Another thread added this NodeId concurrently
-                            // Our vector is in inner with key=key, but someone else claimed the ID.
-                            // We must rollback our addition to avoid phantom vectors.
+                // Step 4: Insert to mappings (dashmap) WHILE HOLDING INNER LOCK
+                // We keep the inner lock held to ensure atomicity with respect to save_internal().
+                // If we dropped the lock here, save_internal() could run, see the new vector in inner,
+                // but miss the mapping in id_mapping (Zombie Vector bug).
+                //
+                // Lock order check: Inner -> Map (via entry()). This is consistent with other operations.
+                let race_detected = match self.id_mapping.entry(id) {
+                    dashmap::mapref::entry::Entry::Occupied(_) => true,
+                    dashmap::mapref::entry::Entry::Vacant(e) => {
+                        // Success: we claimed the ID
+                        e.insert(key);
+                        // Drop the entry lock implicitly here when e is consumed/scope ends
+                        false
+                    }
+                };
 
-                            // We already hold the inner write lock, so we can remove directly.
-                            index.remove(key).map_err(|e| {
-                                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                            })?;
+                if race_detected {
+                    // Race detected: Another thread added this NodeId concurrently
+                    // Our vector is in inner with key=key, but someone else claimed the ID.
+                    // We must rollback our addition to avoid phantom vectors.
 
-                            // The existing mapping wins; return error to indicate retry needed
-                            return Err(Box::new(Error::Vector(VectorError::IndexError(
-                                "Concurrent add detected for same NodeId, vector already exists"
-                                    .to_string(),
-                            ))));
-                        }
+                    // We already hold the inner write lock, so we can remove directly.
+                    self.retry_usearch(
+                        || index.remove(key),
+                        "Failed to rollback vector after concurrent add",
+                    )?;
 
-                        Ok(())
-                    },
-                    "Failed to add vector",
-                )?;
+                    // The existing mapping wins; return error to indicate retry needed
+                    return Err(Error::Vector(VectorError::IndexError(
+                        "Concurrent add detected for same NodeId, vector already exists"
+                            .to_string(),
+                    )));
+                }
 
                 // If no race, we successfully inserted into id_mapping.
                 // Now insert reverse mapping.
                 self.reverse_mapping.insert(key, id);
                 self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+
+                // Explicitly drop index lock (though it would drop at end of scope)
+                drop(index);
 
                 Ok(())
             }
@@ -1152,15 +1151,8 @@ impl VectorIndex for HnswIndex {
             self.reverse_mapping.remove(&key);
 
             // Native delete in usearch (serialize with other structural mutations)
-            // Use execute_with_retry_mut to handle locking and retries correctly
-            self.execute_with_retry_mut(
-                |index| {
-                    index
-                        .remove(key)
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-                },
-                "Failed to remove vector",
-            )?;
+            let index = self.inner.write();
+            self.retry_usearch(|| index.remove(key), "Failed to remove vector")?;
 
             self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
         }
@@ -1265,7 +1257,20 @@ impl VectorIndex for HnswIndex {
 
                         // Exponential backoff: 1ms, 2ms, 4ms
                         let delay_ms = 1u64 << attempt;
-                        self.sleep_for_retry(std::time::Duration::from_millis(delay_ms));
+
+                        #[cfg(any(feature = "tokio", feature = "embeddings"))]
+                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                            #[allow(clippy::collapsible_if)]
+                            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+                            {
+                                tokio::task::block_in_place(|| {
+                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms))
+                                });
+                                continue;
+                            }
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                         continue;
                     }
                     // Non-retryable error or exhausted retries
@@ -1358,50 +1363,65 @@ impl VectorIndex for HnswIndex {
         // Evaluate user predicates outside the inner index lock to avoid callback/writer deadlocks.
         let mut candidate_k = k_capped.min(max_candidates);
         loop {
-            let candidates = {
-                let mut maybe_matches = None;
+            let candidates =
+                {
+                    let mut maybe_matches = None;
 
-                for attempt in 0..MAX_SEARCH_ATTEMPTS {
-                    let index = self.inner.read();
-                    match index.search(query, candidate_k) {
-                        Ok(found) => {
-                            drop(index);
-                            maybe_matches = Some(found);
-                            break;
-                        }
-                        Err(e) => {
-                            let error_msg = e.to_string();
-                            drop(index);
-
-                            if is_retryable_usearch_error(&error_msg)
-                                && attempt + 1 < MAX_SEARCH_ATTEMPTS
-                            {
-                                self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
-                                let delay_ms = 1u64 << attempt;
-                                self.sleep_for_retry(std::time::Duration::from_millis(delay_ms));
-                                continue;
+                    for attempt in 0..MAX_SEARCH_ATTEMPTS {
+                        let index = self.inner.read();
+                        match index.search(query, candidate_k) {
+                            Ok(found) => {
+                                drop(index);
+                                maybe_matches = Some(found);
+                                break;
                             }
+                            Err(e) => {
+                                let error_msg = e.to_string();
+                                drop(index);
 
-                            if attempt > 0 {
-                                self.stats
-                                    .search_retry_failures
-                                    .fetch_add(1, Ordering::Relaxed);
+                                if is_retryable_usearch_error(&error_msg)
+                                    && attempt + 1 < MAX_SEARCH_ATTEMPTS
+                                {
+                                    self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
+                                    let delay_ms = 1u64 << attempt;
+
+                                    #[cfg(any(feature = "tokio", feature = "embeddings"))]
+                                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                        #[allow(clippy::collapsible_if)]
+                                        if handle.runtime_flavor()
+                                            == tokio::runtime::RuntimeFlavor::MultiThread
+                                        {
+                                            tokio::task::block_in_place(|| {
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_millis(delay_ms),
+                                                )
+                                            });
+                                            continue;
+                                        }
+                                    }
+
+                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                                    continue;
+                                }
+
+                                if attempt > 0 {
+                                    self.stats
+                                        .search_retry_failures
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                return Err(Error::Vector(VectorError::IndexError(format!(
+                                    "Filtered search failed: {}",
+                                    e
+                                ))));
                             }
-                            return Err(Error::Vector(VectorError::IndexError(format!(
-                                "Filtered search failed: {}",
-                                e
-                            ))));
                         }
                     }
-                }
 
-                // Convert matches (already sorted) so we can iterate by best similarity first
-                self.convert_matches(
-                    maybe_matches.expect(
+                    // Convert matches (already sorted) so we can iterate by best similarity first
+                    self.convert_matches(maybe_matches.expect(
                         "filtered search retry loop should have returned or produced matches",
-                    ),
-                )
-            };
+                    ))
+                };
 
             let mut filtered = Vec::with_capacity(k_capped.min(candidates.len()));
             for (node_id, similarity) in candidates {
@@ -1523,13 +1543,15 @@ impl VectorIndex for HnswIndex {
 
 // Private helper methods for HnswIndex
 impl HnswIndex {
+    /// Helper to retry usearch operations on transient errors (like thread pool exhaustion).
+
     /// Helper to sleep for a duration during retries.
     ///
     /// This method replaces blocking sleep calls to avoid stalling async runtimes if possible,
     /// or simply sleeps if running synchronously.
     ///
-    /// Note: We deliberately removed `tokio::task::block_in_place` usage because it can panic
-    /// if called from a `LocalSet` context, which is a crash risk. Dropping locks before sleeping
+    /// Note: We deliberately removed tokio::task::block_in_place usage because it can panic
+    /// if called from a LocalSet context, which is a crash risk. Dropping locks before sleeping
     /// is the preferred mitigation for DoS risks.
     fn sleep_for_retry(&self, duration: std::time::Duration) {
         std::thread::sleep(duration);
@@ -1549,7 +1571,7 @@ impl HnswIndex {
             let mut index_guard = self.inner.write();
 
             // Execute operation
-            match op(&mut index_guard) {
+            match op(&mut *index_guard) {
                 Ok(val) => return Ok(val),
                 Err(e) => {
                     let error_msg = e.to_string();
@@ -1568,14 +1590,11 @@ impl HnswIndex {
                     }
 
                     if attempt > 0 {
-                        self.stats
-                            .search_retry_failures
-                            .fetch_add(1, Ordering::Relaxed);
+                        self.stats.search_retry_failures.fetch_add(1, Ordering::Relaxed);
                     }
 
                     return Err(Error::Vector(VectorError::IndexError(format!(
-                        "{}: {}",
-                        context, e
+                        "{}: {}", context, e
                     ))));
                 }
             }
@@ -1583,14 +1602,7 @@ impl HnswIndex {
         unreachable!("Retry loop should always return")
     }
 
-    /// Helper to retry usearch operations on transient errors (like thread pool exhaustion).
-    ///
-    /// # Deprecated
-    /// This method holds the lock implicitly if the closure captures it.
-    /// Use `execute_with_retry_mut` instead for write operations to ensure locks are dropped.
-    /// For read operations, manage the lock scope manually with `sleep_for_retry`.
-    #[allow(dead_code)]
-    fn retry_usearch<F, T, E>(&self, mut op: F, context: &str) -> Result<T>
+    fn retry_usearch_DEPRECATED_REPLACED<F, T, E>(&self, mut op: F, context: &str) -> Result<T>
     where
         F: FnMut() -> std::result::Result<T, E>,
         E: std::fmt::Display,
@@ -1603,7 +1615,20 @@ impl HnswIndex {
                     if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
                         self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
                         let delay_ms = 1u64 << attempt;
-                        self.sleep_for_retry(std::time::Duration::from_millis(delay_ms));
+
+                        #[cfg(any(feature = "tokio", feature = "embeddings"))]
+                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                            #[allow(clippy::collapsible_if)]
+                            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+                            {
+                                tokio::task::block_in_place(|| {
+                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms))
+                                });
+                                continue;
+                            }
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                         continue;
                     }
                     if attempt > 0 {
@@ -1657,31 +1682,20 @@ impl HnswIndex {
         }
         drop(index);
 
-        // Acquire write lock to expand capacity via execute_with_retry_mut
-        // This handles the double-check pattern internally because the closure
-        // is re-executed on retry, re-acquiring the lock.
-        // Wait, execute_with_retry_mut re-runs the WHOLE closure.
-        // So we can put the double-check inside the closure.
-        self.execute_with_retry_mut(
-            |index| {
-                // Double check capacity under write lock (race condition check)
-                // This is safe because index here is &mut Index guard from execute_with_retry_mut
-                if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
-                    return Ok(());
-                }
+        // Acquire write lock to expand capacity
+        let index = self.inner.write();
 
-                // Expand capacity
-                // Double capacity, minimum 1024
-                let new_capacity = (index.capacity() * 2).max(1024);
+        // Double check capacity under write lock (race condition check)
+        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
+            return Ok(());
+        }
 
-                index
-                    .reserve(new_capacity)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        // Expand capacity
+        // Double capacity, minimum 1024
+        let new_capacity = (index.capacity() * 2).max(1024);
 
-                Ok(())
-            },
-            "Failed to expand capacity",
-        )?;
+        // Use retry logic for reserve as well, just in case
+        self.retry_usearch(|| index.reserve(new_capacity), "Failed to expand capacity")?;
 
         Ok(())
     }
