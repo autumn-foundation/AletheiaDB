@@ -20,6 +20,9 @@ use super::planner::physical::{PhysicalOp, PhysicalPlan};
 pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
 pub use iterators::TemporalNodeScanIterator;
+pub use iterators::{
+    FilterIterator, LimitIterator, ProjectIterator, ProvenanceFilterIterator, VectorRerankIterator,
+};
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
@@ -54,7 +57,7 @@ impl Default for ExecutionConfig {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust
 /// use std::sync::Arc;
 /// use parking_lot::RwLock;
 /// use aletheiadb::storage::current::CurrentStorage;

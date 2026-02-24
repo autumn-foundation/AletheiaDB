@@ -851,12 +851,12 @@ impl ResultIterator for TraversalIterator {
 ///
 /// # Example
 ///
-/// ```rust,no_run
-/// use aletheiadb::query::executor::iterators::{FilterIterator, NodeScanIterator};
+/// ```rust
+/// use aletheiadb::query::executor::{FilterIterator, NodeScanIterator};
 /// use aletheiadb::query::ir::Predicate;
 /// use std::sync::Arc;
 ///
-/// # let current = Arc::new(aletheiadb::storage::CurrentStorage::new());
+/// let current = Arc::new(aletheiadb::storage::CurrentStorage::new());
 /// let input = Box::new(NodeScanIterator::new(Some("Person".to_string()), current));
 /// let predicate = Predicate::eq("name", "Alice");
 /// let filter_iter = FilterIterator::new(input, predicate);
@@ -870,6 +870,7 @@ pub struct FilterIterator {
 }
 
 impl FilterIterator {
+    /// Create a new FilterIterator that filters results based on the predicate.
     pub fn new(input: Box<dyn ResultIterator>, predicate: Predicate) -> Self {
         FilterIterator { input, predicate }
     }
@@ -1221,11 +1222,11 @@ impl ResultIterator for VectorRerankIterator {
 ///
 /// # Example
 ///
-/// ```rust,no_run
-/// use aletheiadb::query::executor::iterators::{LimitIterator, NodeScanIterator};
+/// ```rust
+/// use aletheiadb::query::executor::{LimitIterator, NodeScanIterator};
 /// use std::sync::Arc;
 ///
-/// # let current = Arc::new(aletheiadb::storage::CurrentStorage::new());
+/// let current = Arc::new(aletheiadb::storage::CurrentStorage::new());
 /// let input = Box::new(NodeScanIterator::new(Some("Person".to_string()), current));
 ///
 /// // Skip 5, take 10
@@ -1240,6 +1241,7 @@ pub struct LimitIterator {
 }
 
 impl LimitIterator {
+    /// Create a new LimitIterator that applies offset and limit to the input.
     pub fn new(input: Box<dyn ResultIterator>, offset: usize, count: usize) -> Self {
         LimitIterator {
             input,
@@ -1294,6 +1296,7 @@ pub struct ProvenanceFilterIterator {
 }
 
 impl ProvenanceFilterIterator {
+    /// Create a new ProvenanceFilterIterator that conditionally strips metadata.
     pub fn new(inner: Box<dyn ResultIterator>, include_provenance: bool) -> Self {
         ProvenanceFilterIterator {
             inner,
@@ -1328,6 +1331,7 @@ pub struct ProjectIterator {
 }
 
 impl ProjectIterator {
+    /// Create a new ProjectIterator that projects specific properties from the results.
     pub fn new(input: Box<dyn ResultIterator>, mut properties: Vec<String>) -> Self {
         // Deduplicate properties to prevent errors when projecting same property multiple times
         properties.sort();
