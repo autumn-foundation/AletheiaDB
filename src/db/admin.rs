@@ -269,8 +269,7 @@ impl AletheiaDB {
         let historical_stats = self.historical.read().stats();
         let total_versions =
             historical_stats.total_node_versions + historical_stats.total_edge_versions;
-        let total_anchors =
-            historical_stats.node_anchor_count + historical_stats.edge_anchor_count;
+        let total_anchors = historical_stats.node_anchor_count + historical_stats.edge_anchor_count;
 
         let avg_delta_chain = if total_anchors > 0 {
             let interval = total_versions as f64 / total_anchors as f64;
