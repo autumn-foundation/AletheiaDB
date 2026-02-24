@@ -3970,27 +3970,35 @@ mod tests {
         // We verify that the update succeeds and targets the correct version.
         indexes.update_node_valid_time_end(node_id, v3, 30.into());
 
-        // Verify v3 was updated (it should still be visible at 25)
-        let results = indexes.find_node_version_at_point(node_id, 25.into(), 0.into());
-        assert!(results.contains(&v3), "v3 should be visible at 25");
+        // Verify v3 was updated. At time 25, v1, v2, and v3 should be visible.
+        let mut results = indexes.find_node_version_at_point(node_id, 25.into(), 0.into());
+        results.sort();
+        assert_eq!(
+            results,
+            vec![v1, v2, v3],
+            "v1, v2, and v3 should be visible at 25"
+        );
 
-        // Verify v3 is NOT found after 30
-        let results = indexes.find_node_version_at_point(node_id, 35.into(), 0.into());
-        assert!(!results.contains(&v3), "v3 should be closed at 30");
-        // v1 and v2 should still be visible (they are open-ended)
-        assert!(results.contains(&v1));
-        assert!(results.contains(&v2));
+        // Verify v3 is NOT found after 30. At time 35, only v1 and v2 should be visible.
+        let mut results = indexes.find_node_version_at_point(node_id, 35.into(), 0.into());
+        results.sort();
+        assert_eq!(
+            results,
+            vec![v1, v2],
+            "Only v1 and v2 should be visible at 35"
+        );
 
         // 5. Update v2 (newly inserted at index 1)
-        // Verify v2 is intact (wasn't accidentally updated instead of v3)
-        let results = indexes.find_node_version_at_point(node_id, 15.into(), 0.into());
-        assert!(results.contains(&v2), "v2 should be visible at 15");
+        // Verify v2 is intact before update. At time 15, v1 and v2 should be visible.
+        let mut results = indexes.find_node_version_at_point(node_id, 15.into(), 0.into());
+        results.sort();
+        assert_eq!(results, vec![v1, v2], "v1 and v2 should be visible at 15");
 
         indexes.update_node_valid_time_end(node_id, v2, 18.into());
 
-        // Verify v2 was updated
+        // Verify v2 was updated. At time 19, only v1 should be visible.
         let results = indexes.find_node_version_at_point(node_id, 19.into(), 0.into());
-        assert!(!results.contains(&v2), "v2 should be closed at 18");
+        assert_eq!(results, vec![v1], "Only v1 should be visible at 19");
     }
 
     #[test]
