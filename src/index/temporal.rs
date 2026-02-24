@@ -2737,21 +2737,27 @@ mod tests {
         }
 
         // Strategy for generating unique version entries (to avoid duplicates)
-        fn unique_version_entries_strategy(size: impl Into<proptest::collection::SizeRange>) -> impl Strategy<Value = Vec<(VersionId, BiTemporalInterval)>> {
+        fn unique_version_entries_strategy(
+            size: impl Into<proptest::collection::SizeRange>,
+        ) -> impl Strategy<Value = Vec<(VersionId, BiTemporalInterval)>> {
             prop::collection::btree_map(
-                0u64..10_000u64, // Key generator (VersionId)
+                0u64..10_000u64,       // Key generator (VersionId)
                 time_range_strategy(), // Value generator (TimeRange)
-                size
-            ).prop_flat_map(|map| {
-                let vec: Vec<_> = map.into_iter().map(|(vid, (start, end))| {
-                    (
-                        VersionId::new(vid).unwrap(),
-                        BiTemporalInterval::new(
-                            TimeRange::new(start.into(), end.into()).unwrap(),
-                            TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                        ),
-                    )
-                }).collect();
+                size,
+            )
+            .prop_flat_map(|map| {
+                let vec: Vec<_> = map
+                    .into_iter()
+                    .map(|(vid, (start, end))| {
+                        (
+                            VersionId::new(vid).unwrap(),
+                            BiTemporalInterval::new(
+                                TimeRange::new(start.into(), end.into()).unwrap(),
+                                TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                            ),
+                        )
+                    })
+                    .collect();
                 // Shuffle the vector to ensure random insertion order
                 Just(vec).prop_shuffle()
             })
