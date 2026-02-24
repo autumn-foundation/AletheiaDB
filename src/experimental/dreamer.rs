@@ -107,6 +107,14 @@ impl<'a> Dreamer<'a> {
         } else {
             let (first_time, first_vec) = snapshots.first().unwrap();
 
+            // Validate dimensions to prevent silent truncation/extrapolation errors
+            if first_vec.len() != last_vec.len() {
+                return Err(Error::Vector(VectorError::DimensionMismatch {
+                    expected: first_vec.len(),
+                    actual: last_vec.len(),
+                }));
+            }
+
             let duration_micros = last_time - first_time;
 
             if duration_micros <= 0 {
