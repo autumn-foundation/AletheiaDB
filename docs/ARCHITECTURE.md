@@ -907,6 +907,7 @@ sequenceDiagram
         Mnemosyne->>Mnemosyne: dist = distance(prev_kept, curr)
         alt dist > threshold OR props_changed
             Mnemosyne->>Mnemosyne: keep(curr)
+            Mnemosyne->>Mnemosyne: prev_kept = curr
         else
             Mnemosyne->>Mnemosyne: discard(curr)
         end
