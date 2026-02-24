@@ -1824,6 +1824,12 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_no_return_clause() {
+        let query = Parser::parse("MATCH (n)").unwrap();
+        assert!(query.return_clause.is_none());
+    }
+
     // =====================================================
     // ORDER BY Tests
     // =====================================================
