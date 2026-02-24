@@ -620,6 +620,86 @@ sequenceDiagram
     Scribe-->>User: List<NarrativeEvent>
 ```
 
+**Semantic Memory Consolidation (Mnemosyne)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Mnemosyne {
+            +consolidate_memory(node_id, prop, threshold)
+        }
+        class MemoryFrame {
+            +timestamp: Timestamp
+            +version_id: VersionId
+            +reason: String
+            +properties: PropertyMap
+        }
+    }
+    class AletheiaDB
+
+    Mnemosyne --> AletheiaDB : Uses
+    Mnemosyne ..> MemoryFrame : Produces
+```
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Mnemosyne
+    participant DB as AletheiaDB
+
+    User->>Mnemosyne: consolidate_memory(node, thresh)
+    Mnemosyne->>DB: get_node_history(node)
+    DB-->>Mnemosyne: versions
+    loop Every Version
+        Mnemosyne->>Mnemosyne: dist = vector_distance(last_kept, current)
+        alt dist > thresh OR prop_changed
+            Mnemosyne->>Mnemosyne: keep_frame(current)
+            Mnemosyne->>Mnemosyne: update_last_kept(current)
+        end
+    end
+    Mnemosyne-->>User: List<MemoryFrame>
+```
+
+**Context-Aware Faceted Search (Chameleon)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Chameleon {
+            +analyze_context(node_id, prop, k)
+            +facet_search(node_id, aspect_idx, limit)
+        }
+        class Aspect {
+            +centroid: Vec<f32>
+            +weight: f32
+            +exemplars: Vec<NodeId>
+        }
+    }
+    class AletheiaDB
+
+    Chameleon --> AletheiaDB : Uses
+    Chameleon ..> Aspect : Produces
+```
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Chameleon
+    participant DB as AletheiaDB
+
+    User->>Chameleon: analyze_context(node, k)
+    Chameleon->>DB: get_neighbors(node)
+    DB-->>Chameleon: neighbors
+    Chameleon->>DB: get_vectors(neighbors)
+    Chameleon->>Chameleon: cluster(vectors, k) (MiniKMeans)
+    Chameleon-->>User: List<Aspect>
+
+    User->>Chameleon: facet_search(node, aspect_idx)
+    Chameleon->>DB: search_vectors(aspect.centroid)
+    DB-->>Chameleon: results
+    Chameleon-->>User: List<NodeId>
+```
+
 ### Semantic Physics & Pattern Matching
 
 **Semantic Stress (Dissonance)**
