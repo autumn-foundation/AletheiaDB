@@ -644,7 +644,8 @@ mod tests {
             // Error message depends on implementation of cosine_similarity
             // Likely "Dimension mismatch" or similar
             assert!(
-                err_msg.to_lowercase().contains("dimension") || err_msg.to_lowercase().contains("mismatch"),
+                err_msg.to_lowercase().contains("dimension")
+                    || err_msg.to_lowercase().contains("mismatch"),
                 "Error should be dimension mismatch, got: {}",
                 err_msg
             );
