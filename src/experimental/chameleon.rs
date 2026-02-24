@@ -33,7 +33,7 @@
 //!
 //! // 1. Analyze Context
 //! // Find 2 distinct aspects of Node 123
-//! let aspects = chameleon.analyze_context(123.into(), "embedding", 2)?;
+//! let aspects = chameleon.analyze_context(123u64.into(), "embedding", 2)?;
 //!
 //! for (i, aspect) in aspects.iter().enumerate() {
 //!     println!("Aspect {}: Weight {:.2}", i, aspect.weight);
@@ -42,7 +42,7 @@
 //!
 //! // 2. Faceted Search
 //! // Search for nodes similar to Aspect 0 (e.g., the 'Tech' aspect)
-//! let results = chameleon.facet_search(123.into(), "embedding", 0, 10)?;
+//! let results = chameleon.facet_search(123u64.into(), "embedding", 0, 10)?;
 //!
 //! for (node, score) in results {
 //!     println!("Found similar node: {} (score: {})", node, score);

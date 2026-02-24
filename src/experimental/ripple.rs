@@ -30,8 +30,10 @@
 //! let detector = RippleDetector::new(&db);
 //!
 //! // Look for causal ripples in the last hour, with 1-minute resolution
+//! let now = time::now();
+//! let start = (now.wallclock() - 3600 * 1_000_000).into();
 //! let config = RippleConfig {
-//!     window: TimeRange::new(time::now() - 3600 * 1_000_000, time::now())?,
+//!     window: TimeRange::new(start, now)?,
 //!     bin_size_us: 60 * 1_000_000, // 1 minute
 //!     max_lag_bins: 10,            // Check lag up to 10 minutes
 //!     min_correlation: 0.5,        // Minimum correlation to report

@@ -19,6 +19,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let janus = JanusDetector::new(&db);
+//! let node_id = 1u64.into();
 //!
 //! let score = janus.analyze_node(node_id, "embedding")?;
 //!
