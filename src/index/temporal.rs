@@ -838,6 +838,15 @@ impl TemporalIndexes {
             .into());
         }
 
+        // Check for duplicates before inserting (Issue #196)
+        if timelines.find_metadata_index(version_id).is_some() {
+            return Err(StorageError::DuplicateId {
+                id: format!("{}", version_id),
+                kind: "version".to_string(),
+            }
+            .into());
+        }
+
         // Store version metadata once in consolidated storage
         let metadata = VersionMetadata::new(version_id);
         let metadata_idx = timelines.add_version_metadata(metadata)?;
@@ -2727,16 +2736,24 @@ mod tests {
                 .prop_flat_map(|start| (Just(start), (start + 1)..=(start + 10_000)))
         }
 
-        // Strategy for generating version entries
-        fn version_entry_strategy() -> impl Strategy<Value = (VersionId, BiTemporalInterval)> {
-            (0u64..10_000u64, time_range_strategy()).prop_map(|(vid, (start, end))| {
-                (
-                    VersionId::new(vid).unwrap(),
-                    BiTemporalInterval::new(
-                        TimeRange::new(start.into(), end.into()).unwrap(),
-                        TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                    ),
-                )
+        // Strategy for generating unique version entries (to avoid duplicates)
+        fn unique_version_entries_strategy(size: impl Into<proptest::collection::SizeRange>) -> impl Strategy<Value = Vec<(VersionId, BiTemporalInterval)>> {
+            prop::collection::btree_map(
+                0u64..10_000u64, // Key generator (VersionId)
+                time_range_strategy(), // Value generator (TimeRange)
+                size
+            ).prop_flat_map(|map| {
+                let vec: Vec<_> = map.into_iter().map(|(vid, (start, end))| {
+                    (
+                        VersionId::new(vid).unwrap(),
+                        BiTemporalInterval::new(
+                            TimeRange::new(start.into(), end.into()).unwrap(),
+                            TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                        ),
+                    )
+                }).collect();
+                // Shuffle the vector to ensure random insertion order
+                Just(vec).prop_shuffle()
             })
         }
 
@@ -2744,7 +2761,7 @@ mod tests {
             /// Property: Inserting versions in any order should produce the same sorted timeline
             #[test]
             fn prop_insert_order_irrelevant(
-                versions in prop::collection::vec(version_entry_strategy(), 1..100)
+                versions in unique_version_entries_strategy(1..100)
             ) {
                 let indexes = TemporalIndexes::new();
                 let node_id = NodeId::new(1).unwrap();
@@ -2799,7 +2816,7 @@ mod tests {
             /// Property: Time range queries should return exactly the versions that overlap
             #[test]
             fn prop_range_query_correctness(
-                versions in prop::collection::vec(version_entry_strategy(), 1..50),
+                versions in unique_version_entries_strategy(1..50),
                 query_range in time_range_strategy()
             ) {
                 let indexes = TemporalIndexes::new();
@@ -2836,24 +2853,19 @@ mod tests {
             /// Property: Batch insert should be equivalent to individual inserts (when no duplicates)
             #[test]
             fn prop_batch_insert_equivalence(
-                versions in prop::collection::vec(version_entry_strategy(), 1..50)
+                versions in unique_version_entries_strategy(1..50)
             ) {
                 let node_id = NodeId::new(1).unwrap();
 
-                // Remove duplicates from input to ensure fair comparison
-                let mut unique_versions = versions.clone();
-                unique_versions.sort_by_key(|(vid, _)| *vid);
-                unique_versions.dedup_by_key(|(vid, _)| *vid);
-
                 // Individual inserts
                 let indexes1 = TemporalIndexes::new();
-                for (version_id, temporal) in &unique_versions {
+                for (version_id, temporal) in &versions {
                     indexes1.insert_node_version(node_id, *version_id, *temporal).unwrap();
                 }
 
                 // Batch insert
                 let indexes2 = TemporalIndexes::new();
-                indexes2.insert_node_versions_batch(node_id, unique_versions.clone()).unwrap();
+                indexes2.insert_node_versions_batch(node_id, versions.clone()).unwrap();
 
                 // Both should produce identical timelines
                 let entity_id = EntityId::Node(node_id);
@@ -2876,7 +2888,7 @@ mod tests {
             /// Property: Timeline should remain sorted after random retroactive inserts
             #[test]
             fn prop_retroactive_inserts_maintain_order(
-                versions in prop::collection::vec(version_entry_strategy(), 1..100)
+                versions in unique_version_entries_strategy(1..100)
             ) {
                 let indexes = TemporalIndexes::new();
                 let node_id = NodeId::new(1).unwrap();
@@ -2902,7 +2914,7 @@ mod tests {
             /// Property: Point queries should return subset of range queries
             #[test]
             fn prop_point_query_subset_of_range(
-                versions in prop::collection::vec(version_entry_strategy(), 1..50),
+                versions in unique_version_entries_strategy(1..50),
                 point in timestamp_strategy()
             ) {
                 let indexes = TemporalIndexes::new();
@@ -2938,7 +2950,7 @@ mod tests {
             /// Property: Timeline remains sorted after batch insert
             #[test]
             fn prop_batch_maintains_sort_order(
-                versions in prop::collection::vec(version_entry_strategy(), 1..50)
+                versions in unique_version_entries_strategy(1..50)
             ) {
                 let indexes = TemporalIndexes::new();
                 let node_id = NodeId::new(1).unwrap();
