@@ -1522,14 +1522,18 @@ mod sentry_tests {
         // Ready sequence = pos + 1 = 1 + 1 = 2.
         buf.slots[1].sequence.store(2, Ordering::Relaxed);
         let (entry1, _) = PendingEntry::new_sync(LSN(1), vec![1]);
-        unsafe { *buf.slots[1].entry.get() = Some(entry1); }
+        unsafe {
+            *buf.slots[1].entry.get() = Some(entry1);
+        }
 
         // Leave Slot 0 as NOT READY (simulating a slow writer or crash).
         // Current seq is 0 (from set_state). Expected is 1.
         // 0 != 1, so not ready.
         let (entry0, _) = PendingEntry::new_sync(LSN(0), vec![0]);
         // We put the entry in, but don't update sequence.
-        unsafe { *buf.slots[0].entry.get() = Some(entry0); }
+        unsafe {
+            *buf.slots[0].entry.get() = Some(entry0);
+        }
 
         // Attempt drain
         let drained = buf.drain();
@@ -1549,7 +1553,11 @@ mod sentry_tests {
         let drained_retry = buf.drain();
 
         // Should now get both entries in order
-        assert_eq!(drained_retry.len(), 2, "Should drain both entries after gap is filled");
+        assert_eq!(
+            drained_retry.len(),
+            2,
+            "Should drain both entries after gap is filled"
+        );
         assert_eq!(drained_retry[0].lsn, LSN(0));
         assert_eq!(drained_retry[1].lsn, LSN(1));
     }
