@@ -900,7 +900,7 @@ sequenceDiagram
     participant Mnemosyne
     participant DB as AletheiaDB
 
-    User->>Mnemosyne: consolidate_memory(node, threshold)
+    User->>Mnemosyne: consolidate_memory(node, vec_prop, threshold)
     Mnemosyne->>DB: get_node_history(node)
     DB-->>Mnemosyne: versions
     loop Every Version
