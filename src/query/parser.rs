@@ -2107,6 +2107,33 @@ mod tests {
         assert!(err.message.contains("Unexpected character"));
         // This implicitly tests From<LexerError> for ParseError
     }
+
+    #[test]
+    fn test_parse_error_unexpected_tokens() {
+        let result = Parser::parse("MATCH (n) RETURN n UNEXPECTED");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Unexpected tokens"));
+    }
+
+    #[test]
+    fn test_parse_match_multiple_patterns() {
+        let query = Parser::parse("MATCH (a), (b) RETURN a").unwrap();
+        if let SourceClause::Match(patterns) = &query.source {
+            assert_eq!(patterns.len(), 2);
+        } else {
+            panic!("Expected MATCH clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_error_invalid_start_token() {
+        // 'ORDER' is not a valid start token for the source clause
+        let result = Parser::parse("ORDER BY n");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected MATCH, SIMILAR, or FIND"));
+    }
 }
 
 #[cfg(test)]
