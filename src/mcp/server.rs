@@ -25,6 +25,78 @@
 //! | **Temporal** | `get_node_at_time`, `get_node_history` | Time-travel queries and history |
 //! | **Hybrid** | `hybrid_query` | Combined graph + vector + temporal queries |
 //!
+//! # Examples
+//!
+//! Below are examples of how to interact with the key tools using JSON-RPC requests (the underlying protocol of MCP).
+//!
+//! ## 1. Creating a Node
+//!
+//! **Request:** `create_node`
+//! ```json
+//! {
+//!   "label": "Person",
+//!   "properties": {
+//!     "name": "Alice",
+//!     "age": 30,
+//!     "interests": ["Rust", "Graphs"]
+//!   }
+//! }
+//! ```
+//!
+//! **Response:**
+//! ```json
+//! {
+//!   "id": 1,
+//!   "label": "Person",
+//!   "properties": {
+//!     "name": "Alice",
+//!     "age": 30,
+//!     "interests": ["Rust", "Graphs"]
+//!   }
+//! }
+//! ```
+//!
+//! ## 2. Vector Search
+//!
+//! **Request:** `find_similar`
+//! ```json
+//! {
+//!   "property_name": "embedding",
+//!   "embedding": [0.1, 0.2, 0.3, ...],
+//!   "k": 5
+//! }
+//! ```
+//!
+//! **Response:**
+//! ```json
+//! {
+//!   "results": [
+//!     {
+//!       "node": {
+//!         "id": 42,
+//!         "label": "Document",
+//!         "properties": { "title": "Rust Guide", ... }
+//!       },
+//!       "score": 0.98
+//!     },
+//!     ...
+//!   ],
+//!   "count": 5
+//! }
+//! ```
+//!
+//! ## 3. Hybrid Query (Graph + Vector + Time)
+//!
+//! **Request:** `hybrid_query`
+//! ```json
+//! {
+//!   "start_node_id": 1,
+//!   "traverse_edge": "KNOWS",
+//!   "query_embedding": [0.1, 0.2, ...],
+//!   "valid_time": "2024-01-01T00:00:00Z"
+//! }
+//! ```
+//!
 //! # Usage
 //!
 //! The server is typically run as a standalone binary communicating over stdio:
@@ -181,7 +253,26 @@ impl AletheiaMcpServer {
     /// Get a node by its ID.
     ///
     /// Returns the node's label and all properties in JSON format.
-    /// If the node is not found, returns an error JSON.
+    ///
+    /// # Output Format
+    ///
+    /// ```json
+    /// {
+    ///   "id": 123,
+    ///   "label": "Person",
+    ///   "properties": {
+    ///     "name": "Alice",
+    ///     "age": 30
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a JSON object with an "error" key if the node is not found.
+    /// ```json
+    /// { "error": "Node not found: 123" }
+    /// ```
     pub fn get_node(&self, req: GetNodeRequest) -> String {
         Self::extract_text(self.handle_get_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -191,7 +282,35 @@ impl AletheiaMcpServer {
     /// Create a new node.
     ///
     /// Creates a node with the specified label and optional properties.
-    /// Returns the created node's ID and details.
+    /// Returns the created node's ID and details in JSON format.
+    ///
+    /// # Example Request
+    ///
+    /// ```rust
+    /// use aletheiadb::mcp::CreateNodeRequest;
+    /// use std::collections::HashMap;
+    /// use serde_json::json;
+    ///
+    /// let mut props = HashMap::new();
+    /// props.insert("name".to_string(), json!("Alice"));
+    ///
+    /// let req = CreateNodeRequest {
+    ///     label: "Person".to_string(),
+    ///     properties: Some(props),
+    /// };
+    /// ```
+    ///
+    /// # Output Format
+    ///
+    /// Returns the complete node object including the newly assigned ID.
+    ///
+    /// ```json
+    /// {
+    ///   "id": 1,
+    ///   "label": "Person",
+    ///   "properties": { "name": "Alice" }
+    /// }
+    /// ```
     pub fn create_node(&self, req: CreateNodeRequest) -> String {
         Self::extract_text(self.handle_create_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -200,8 +319,14 @@ impl AletheiaMcpServer {
 
     /// Update a node's properties.
     ///
-    /// Merges the provided properties with existing ones. Set a property to `null` to delete it.
-    /// Returns the updated node.
+    /// Merges the provided properties with existing ones.
+    /// - New keys are added.
+    /// - Existing keys are updated.
+    /// - Keys set to `null` are removed (future feature, currently sets to Null).
+    ///
+    /// # Output Format
+    ///
+    /// Returns the updated node object.
     pub fn update_node(&self, req: UpdateNodeRequest) -> String {
         Self::extract_text(self.handle_update_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -332,7 +457,31 @@ impl AletheiaMcpServer {
     /// Find similar nodes.
     ///
     /// Performs a K-Nearest Neighbors (k-NN) search using vector embeddings.
-    /// Requires a vector index to be enabled on the target property.
+    ///
+    /// # Prerequisites
+    ///
+    /// A vector index must be enabled on the target property using `enable_vector_index`
+    /// before this method can be used.
+    ///
+    /// # Output Format
+    ///
+    /// Returns a list of matches with their similarity scores.
+    ///
+    /// ```json
+    /// {
+    ///   "results": [
+    ///     {
+    ///       "node": {
+    ///         "id": 123,
+    ///         "label": "Document",
+    ///         "properties": { "title": "..." }
+    ///       },
+    ///       "score": 0.95
+    ///     }
+    ///   ],
+    ///   "count": 1
+    /// }
+    /// ```
     pub fn find_similar(&self, req: FindSimilarRequest) -> String {
         Self::extract_text(self.handle_find_similar(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -343,6 +492,25 @@ impl AletheiaMcpServer {
     ///
     /// Configures and builds an HNSW index on a specific property, enabling semantic search.
     /// This is a prerequisite for `find_similar`.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name`: The property to index (e.g., "embedding").
+    /// * `dimensions`: The size of the vector (e.g., 1536 for OpenAI).
+    /// * `distance_metric`: "cosine" (default), "euclidean", or "dot".
+    ///
+    /// # Output Format
+    ///
+    /// Returns a success confirmation.
+    ///
+    /// ```json
+    /// {
+    ///   "success": true,
+    ///   "property_name": "embedding",
+    ///   "dimensions": 1536,
+    ///   "distance_metric": "cosine"
+    /// }
+    /// ```
     pub fn enable_vector_index(&self, req: EnableVectorIndexRequest) -> String {
         Self::extract_text(self.handle_enable_vector_index(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -352,6 +520,21 @@ impl AletheiaMcpServer {
     /// List vector indexes.
     ///
     /// Returns a list of all active vector indexes and their configuration (dimensions, metric).
+    ///
+    /// # Output Format
+    ///
+    /// ```json
+    /// {
+    ///   "indexes": [
+    ///     {
+    ///       "property_name": "embedding",
+    ///       "dimensions": 1536,
+    ///       "distance_metric": "Cosine"
+    ///     }
+    ///   ],
+    ///   "count": 1
+    /// }
+    /// ```
     pub fn list_vector_indexes(&self, req: ListVectorIndexesRequest) -> String {
         Self::extract_text(self.handle_list_vector_indexes(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -378,8 +561,44 @@ impl AletheiaMcpServer {
 
     /// Execute a hybrid query.
     ///
-    /// Combines graph traversal, vector similarity, and temporal filtering into a single query.
-    /// Example: "Find 10 documents similar to this embedding, linked to User X, as of last week."
+    /// Combines **graph traversal**, **vector similarity**, and **temporal filtering** into a single query.
+    /// This is the most powerful tool for "reasoning" about data.
+    ///
+    /// # Capabilities
+    ///
+    /// - **Start**: From a specific node (`start_node_id`) OR by vector search (`query_embedding`).
+    /// - **Traverse**: Follow edges (`traverse_edge`) up to `traverse_depth`.
+    /// - **Filter**: By time (`valid_time`) or label (`filter_label`).
+    /// - **Rank**: Re-rank results by vector similarity (`query_embedding`).
+    ///
+    /// # Example Scenarios
+    ///
+    /// 1. **"Find similar documents written by Alice"**
+    ///    - Start at Alice (`start_node_id`)
+    ///    - Traverse `WROTE` edges
+    ///    - Rank by similarity to `query_embedding`
+    ///
+    /// 2. **"Find papers about AI published last year"**
+    ///    - Vector search (`query_embedding`)
+    ///    - Filter by `valid_time`
+    ///
+    /// # Output Format
+    ///
+    /// Returns a list of hybrid results containing the node, optional score, path, and timestamp.
+    ///
+    /// ```json
+    /// {
+    ///   "results": [
+    ///     {
+    ///       "node": { "id": 10, "label": "Document", "properties": {...} },
+    ///       "similarity_score": 0.92,
+    ///       "traversal_path": [1, 5, 10],
+    ///       "timestamp": "2023-01-01T12:00:00Z"
+    ///     }
+    ///   ],
+    ///   "count": 1
+    /// }
+    /// ```
     pub fn hybrid_query(&self, req: HybridQueryRequest) -> String {
         Self::extract_text(self.handle_hybrid_query(
             serde_json::to_value(req).expect("request serialization should not fail"),
