@@ -493,6 +493,13 @@ impl CurrentStorage {
     /// - **No allocation**: Does not clone the Node
     /// - **No Arc increment**: Does not increment PropertyMap reference count (unless cloned in closure)
     /// - **Lock duration**: Holds DashMap read lock only during closure execution
+    ///
+    /// # Safety & Deadlocks
+    ///
+    /// **WARNING**: The closure is executed while holding a read lock on the node shard.
+    /// Do NOT attempt to modify the graph or perform operations that might acquire a
+    /// write lock on the same shard (e.g., `update_node`, `delete_node`) within the closure.
+    /// Doing so will cause a deadlock (lock re-entrancy hazard).
     #[inline]
     pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
     where
@@ -2118,18 +2125,26 @@ impl CurrentStorage {
     fn get_node_vector(&self, node_id: NodeId, prop_name: &str) -> Result<Arc<[f32]>> {
         self.indexes
             .with_node(node_id, |node| {
-                let val = node.properties.get(prop_name).ok_or_else(|| {
-                    crate::core::error::Error::Storage(StorageError::PropertyNotFound(
-                        prop_name.to_string(),
-                    ))
-                })?;
-                val.as_arc_vector().ok_or_else(|| {
-                    crate::core::error::Error::Vector(crate::core::error::VectorError::InvalidVector {
-                        reason: "Property is not a vector".to_string(),
+                node.properties
+                    .get(prop_name)
+                    .ok_or_else(|| {
+                        crate::core::error::Error::Storage(StorageError::PropertyNotFound(
+                            prop_name.to_string(),
+                        ))
+                    })?
+                    .as_arc_vector()
+                    .ok_or_else(|| {
+                        crate::core::error::Error::Vector(
+                            crate::core::error::VectorError::InvalidVector {
+                                reason: "Property is not a vector".to_string(),
+                            },
+                        )
                     })
-                })
             })
-            .ok_or_else(|| crate::core::error::Error::Storage(StorageError::NodeNotFound(node_id)))?
+            .transpose()?
+            .ok_or_else(|| {
+                crate::core::error::Error::Storage(StorageError::NodeNotFound(node_id))
+            })
     }
 
     fn get_vector_index_internal(

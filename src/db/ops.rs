@@ -80,6 +80,13 @@ impl AletheiaDB {
     /// - **No allocation**: Does not clone the Node
     /// - **No Arc increment**: Does not increment PropertyMap reference count (unless cloned in closure)
     /// - **Lock duration**: Holds DashMap read lock only during closure execution
+    ///
+    /// # Safety & Deadlocks
+    ///
+    /// **WARNING**: The closure is executed while holding a read lock on the node shard.
+    /// Do NOT attempt to modify the graph or perform operations that might acquire a
+    /// write lock on the same shard (e.g., `update_node`, `delete_node`) within the closure.
+    /// Doing so will cause a deadlock (lock re-entrancy hazard).
     #[inline]
     pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
     where
