@@ -555,7 +555,11 @@ pub async fn handle_query(
                     // For now, mapping everything to Internal Error to be safe/consistent with previous behavior
                     // (though previous behavior had explicit BadRequest for parse errors).
                     // Let's improve this:
-                    if e.to_lowercase().contains("syntax") || e.to_lowercase().contains("parse") {
+                    let error_lower = e.to_lowercase();
+                    if error_lower.contains("syntax")
+                        || error_lower.contains("parse")
+                        || error_lower.contains("invalid query parameter")
+                    {
                         HttpResponse::BadRequest().json(ApiResponse::error(e))
                     } else {
                         HttpResponse::InternalServerError().json(ApiResponse::error(e))
