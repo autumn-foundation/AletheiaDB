@@ -7,11 +7,16 @@
 use std::ops::Not;
 use std::sync::Arc;
 
-use crate::core::NodeId;
+use crate::core::error::{QueryError, Result};
 use crate::core::graph::Node;
 use crate::core::property::PropertyValue;
+use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::index::vector::DistanceMetric;
+
+/// Maximum recursion depth for predicate evaluation to prevent stack overflow.
+/// Matched with MAX_RECURSION_DEPTH in core/property.rs for consistency.
+const MAX_PREDICATE_DEPTH: usize = 100;
 
 /// A query operation that can be composed into a query pipeline.
 ///
@@ -451,100 +456,130 @@ impl Predicate {
     }
 
     /// Evaluate this predicate against a node.
-    pub fn evaluate(&self, node: &Node) -> bool {
+    ///
+    /// Returns `Ok(bool)` indicating if the predicate matches, or `Err` if evaluation fails
+    /// (e.g., due to recursion depth limits).
+    pub fn evaluate(&self, node: &Node) -> Result<bool> {
+        self.evaluate_recursive(node, 0)
+    }
+
+    fn evaluate_recursive(&self, node: &Node, depth: usize) -> Result<bool> {
+        if depth > MAX_PREDICATE_DEPTH {
+            return Err(crate::core::error::Error::Query(QueryError::ExecutionError {
+                message: format!(
+                    "Predicate recursion depth limit exceeded (max {})",
+                    MAX_PREDICATE_DEPTH
+                ),
+            }));
+        }
+
         match self {
-            Predicate::True => true,
-            Predicate::False => false,
+            Predicate::True => Ok(true),
+            Predicate::False => Ok(false),
 
             Predicate::Eq { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    Self::compare_eq(prop, value)
+                    Ok(Self::compare_eq(prop, value))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
             Predicate::Ne { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    !Self::compare_eq(prop, value)
+                    Ok(!Self::compare_eq(prop, value))
                 } else {
-                    true // Non-existent != anything
+                    Ok(true) // Non-existent != anything
                 }
             }
 
             Predicate::Gt { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    Self::compare_gt(prop, value)
+                    Ok(Self::compare_gt(prop, value))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
             Predicate::Lt { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    Self::compare_lt(prop, value)
+                    Ok(Self::compare_lt(prop, value))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
             Predicate::Gte { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    Self::compare_gte(prop, value)
+                    Ok(Self::compare_gte(prop, value))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
             Predicate::Lte { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    Self::compare_lte(prop, value)
+                    Ok(Self::compare_lte(prop, value))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
-            Predicate::Exists(key) => node.properties.get(key).is_some(),
+            Predicate::Exists(key) => Ok(node.properties.get(key).is_some()),
 
-            Predicate::NotExists(key) => node.properties.get(key).is_none(),
+            Predicate::NotExists(key) => Ok(node.properties.get(key).is_none()),
 
             Predicate::Contains { key, substring } => {
                 if let Some(PropertyValue::String(s)) = node.properties.get(key) {
-                    s.contains(substring.as_str())
+                    Ok(s.contains(substring.as_str()))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
             Predicate::StartsWith { key, prefix } => {
                 if let Some(PropertyValue::String(s)) = node.properties.get(key) {
-                    s.starts_with(prefix.as_str())
+                    Ok(s.starts_with(prefix.as_str()))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
             Predicate::EndsWith { key, suffix } => {
                 if let Some(PropertyValue::String(s)) = node.properties.get(key) {
-                    s.ends_with(suffix.as_str())
+                    Ok(s.ends_with(suffix.as_str()))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
             Predicate::In { key, values } => {
                 if let Some(prop) = node.properties.get(key) {
-                    values.iter().any(|v| Self::compare_eq(prop, v))
+                    Ok(values.iter().any(|v| Self::compare_eq(prop, v)))
                 } else {
-                    false
+                    Ok(false)
                 }
             }
 
-            Predicate::And(preds) => preds.iter().all(|p| p.evaluate(node)),
+            Predicate::And(preds) => {
+                for p in preds {
+                    if !p.evaluate_recursive(node, depth + 1)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
 
-            Predicate::Or(preds) => preds.iter().any(|p| p.evaluate(node)),
+            Predicate::Or(preds) => {
+                for p in preds {
+                    if p.evaluate_recursive(node, depth + 1)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
 
-            Predicate::Not(pred) => !pred.evaluate(node),
+            Predicate::Not(pred) => Ok(!pred.evaluate_recursive(node, depth + 1)?),
         }
     }
 
@@ -552,7 +587,16 @@ impl Predicate {
         match (prop, value) {
             (PropertyValue::Bool(a), PredicateValue::Bool(b)) => a == b,
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a == b,
-            (PropertyValue::Float(a), PredicateValue::Float(b)) => (a - b).abs() < f64::EPSILON,
+            // Use semantic equality logic for floats:
+            // 1. Handle NaN equality (NaN == NaN is true in our semantics)
+            // 2. Use strict equality for other values (handles Infinity correctly)
+            (PropertyValue::Float(a), PredicateValue::Float(b)) => {
+                if a.is_nan() {
+                    b.is_nan()
+                } else {
+                    a == b
+                }
+            }
             (PropertyValue::String(a), PredicateValue::String(b)) => a.as_ref() == b.as_str(),
             (PropertyValue::Null, PredicateValue::Null) => true,
             _ => false,
@@ -761,5 +805,111 @@ mod tests {
 
         let v: PredicateValue = "hello".into();
         assert_eq!(v, PredicateValue::String("hello".to_string()));
+    }
+}
+#[cfg(test)]
+#[cfg(test)]
+mod recursion_tests {
+    use crate::query::ir::{Predicate, MAX_PREDICATE_DEPTH};
+    use crate::core::graph::Node;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::id::NodeId;
+    use crate::core::id::VersionId;
+    use crate::core::interning::GLOBAL_INTERNER;
+
+    fn make_test_node() -> Node {
+        let props = PropertyMapBuilder::new().insert("val", 1).build();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+        Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_recursion_limit_exceeded() {
+        let node = make_test_node();
+        let mut pred = Predicate::eq("val", 1);
+
+        // Nest deeper than the limit
+        for _ in 0..MAX_PREDICATE_DEPTH + 1 {
+            pred = Predicate::Not(Box::new(pred));
+        }
+
+        let result = pred.evaluate(&node);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("recursion depth limit exceeded"));
+    }
+
+    #[test]
+    fn test_recursion_limit_ok() {
+        let node = make_test_node();
+        let mut pred = Predicate::eq("val", 1);
+
+        // Nest exactly at the limit
+        for _ in 0..MAX_PREDICATE_DEPTH - 1 {
+            pred = Predicate::Not(Box::new(pred));
+        }
+
+        let result = pred.evaluate(&node);
+        assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod float_tests {
+    use crate::query::ir::Predicate;
+    use crate::core::graph::Node;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::id::NodeId;
+    use crate::core::id::VersionId;
+    use crate::core::interning::GLOBAL_INTERNER;
+
+    fn make_float_node(val: f64) -> Node {
+        let props = PropertyMapBuilder::new().insert("val", val).build();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+        Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_float_infinity_equality() {
+        let node = make_float_node(f64::INFINITY);
+        let pred = Predicate::eq("val", f64::INFINITY);
+        assert!(pred.evaluate(&node).unwrap());
+    }
+
+    #[test]
+    fn test_float_neg_infinity_equality() {
+        let node = make_float_node(f64::NEG_INFINITY);
+        let pred = Predicate::eq("val", f64::NEG_INFINITY);
+        assert!(pred.evaluate(&node).unwrap());
+    }
+
+    #[test]
+    fn test_float_nan_equality() {
+        // Our semantics: NaN == NaN
+        let node = make_float_node(f64::NAN);
+        let pred = Predicate::eq("val", f64::NAN);
+        assert!(pred.evaluate(&node).unwrap());
+    }
+
+    #[test]
+    fn test_float_strict_equality_small_numbers() {
+        // Old logic: (a - b).abs() < EPSILON
+        // 0.0 vs 1e-20. Diff 1e-20 < 2e-16. Old logic: Equal.
+        // New logic (strict): 0.0 != 1e-20. New logic: Not Equal.
+
+        let node = make_float_node(0.0);
+        let pred = Predicate::eq("val", 1e-20);
+
+        // Should be false with strict equality
+        assert!(!pred.evaluate(&node).unwrap());
     }
 }

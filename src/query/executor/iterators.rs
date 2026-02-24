@@ -858,7 +858,7 @@ impl FilterIterator {
         FilterIterator { input, predicate }
     }
 
-    fn evaluate(&self, node: &Node) -> bool {
+    fn evaluate(&self, node: &Node) -> Result<bool> {
         self.predicate.evaluate(node)
     }
 }
@@ -869,10 +869,11 @@ impl ResultIterator for FilterIterator {
             match self.input.next() {
                 Some(Ok(row)) => {
                     if let Some(node) = row.entity.as_node() {
-                        if self.evaluate(node) {
-                            return Some(Ok(row));
+                        match self.evaluate(node) {
+                            Ok(true) => return Some(Ok(row)),
+                            Ok(false) => continue, // Filter didn't pass, continue to next
+                            Err(e) => return Some(Err(e)),
                         }
-                        // Filter didn't pass, continue to next
                     } else {
                         // Non-node entities pass through
                         return Some(Ok(row));
@@ -1369,7 +1370,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1378,7 +1379,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Bob");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1387,7 +1388,7 @@ mod tests {
         let predicate = Predicate::eq("missing", "value");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1396,7 +1397,7 @@ mod tests {
         let predicate = Predicate::ne("name", "Bob");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1405,7 +1406,7 @@ mod tests {
         let predicate = Predicate::ne("name", "Alice");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1415,7 +1416,7 @@ mod tests {
         let predicate = Predicate::ne("missing", "value");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1424,7 +1425,7 @@ mod tests {
         let predicate = Predicate::gt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1433,7 +1434,7 @@ mod tests {
         let predicate = Predicate::gt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1442,7 +1443,7 @@ mod tests {
         let predicate = Predicate::gt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1451,7 +1452,7 @@ mod tests {
         let predicate = Predicate::lt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1460,7 +1461,7 @@ mod tests {
         let predicate = Predicate::lt("age", 18i64);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1472,7 +1473,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1484,7 +1485,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1496,7 +1497,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1508,7 +1509,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1520,7 +1521,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1532,7 +1533,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1541,7 +1542,7 @@ mod tests {
         let predicate = Predicate::exists("name");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1550,7 +1551,7 @@ mod tests {
         let predicate = Predicate::exists("missing");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1559,7 +1560,7 @@ mod tests {
         let predicate = Predicate::NotExists("missing".to_string());
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1568,7 +1569,7 @@ mod tests {
         let predicate = Predicate::NotExists("name".to_string());
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1577,7 +1578,7 @@ mod tests {
         let predicate = Predicate::contains("name", "John");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1586,7 +1587,7 @@ mod tests {
         let predicate = Predicate::contains("name", "Bob");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1598,7 +1599,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1610,7 +1611,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1622,7 +1623,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1634,7 +1635,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1650,7 +1651,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1665,7 +1666,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1686,7 +1687,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").and(Predicate::gt("age", 18i64));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1695,7 +1696,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").and(Predicate::gt("age", 18i64));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1704,7 +1705,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1713,7 +1714,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1722,7 +1723,7 @@ mod tests {
         let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1731,7 +1732,7 @@ mod tests {
         let predicate = Predicate::Not(Box::new(Predicate::eq("name", "Bob")));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1740,7 +1741,7 @@ mod tests {
         let predicate = Predicate::Not(Box::new(Predicate::eq("name", "Alice")));
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1749,7 +1750,7 @@ mod tests {
         let predicate = Predicate::True;
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1758,7 +1759,7 @@ mod tests {
         let predicate = Predicate::False;
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1774,11 +1775,11 @@ mod tests {
 
         let predicate = Predicate::gt("score", 3.0f64);
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
 
         let predicate = Predicate::lt("score", 4.0f64);
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -1794,11 +1795,11 @@ mod tests {
 
         let predicate = Predicate::eq("active", true);
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
 
         let predicate = Predicate::eq("active", false);
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     // ==================== FilterIterator Integration Tests ====================
@@ -2156,7 +2157,7 @@ mod tests {
         let predicate = Predicate::gt("name", 10i64); // Comparing String to Int
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node)); // Type mismatch returns false
+        assert!(!filter.evaluate(&node).unwrap()); // Type mismatch returns false
     }
 
     #[test]
@@ -2165,7 +2166,7 @@ mod tests {
         let predicate = Predicate::contains("age", "30"); // age is Int, not String
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -2177,7 +2178,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -2189,7 +2190,7 @@ mod tests {
         };
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     // ==================== Null handling ====================
@@ -2214,7 +2215,7 @@ mod tests {
             value: PredicateValue::Null,
         };
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     // ==================== Complex nested predicates ====================
@@ -2233,7 +2234,7 @@ mod tests {
         ]);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -2243,7 +2244,7 @@ mod tests {
         let predicate = Predicate::And(vec![]);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(filter.evaluate(&node));
+        assert!(filter.evaluate(&node).unwrap());
     }
 
     #[test]
@@ -2253,7 +2254,7 @@ mod tests {
         let predicate = Predicate::Or(vec![]);
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
-        assert!(!filter.evaluate(&node));
+        assert!(!filter.evaluate(&node).unwrap());
     }
 
     // ==================== NodeLookupIterator Tests ====================
