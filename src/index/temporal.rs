@@ -3926,4 +3926,140 @@ mod tests {
         assert!(ids.contains(&EntityId::Node(node_id)));
         assert!(ids.contains(&EntityId::Edge(edge_id)));
     }
+
+    #[test]
+    fn test_update_after_retroactive_insert() {
+        // This test ensures that the metadata_to_position map is correctly updated
+        // when an insertion shifts existing entries (retroactive insertion).
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+        let v3 = VersionId::new(102).unwrap();
+
+        // 1. Insert v1 at start 0 (index 0)
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(TimeRange::from(0.into()), TimeRange::from(0.into())),
+            )
+            .unwrap();
+
+        // 2. Insert v3 at start 20 (index 1)
+        indexes
+            .insert_node_version(
+                node_id,
+                v3,
+                BiTemporalInterval::new(TimeRange::from(20.into()), TimeRange::from(0.into())),
+            )
+            .unwrap();
+
+        // 3. Insert v2 at start 10 (index 1, shifts v3 to index 2)
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(TimeRange::from(10.into()), TimeRange::from(0.into())),
+            )
+            .unwrap();
+
+        // 4. Update v3 (which moved from index 1 to index 2)
+        // If the map wasn't updated, this would try to update index 1 (which is now v2)
+        // or fail if it somehow kept old index but didn't find the entry.
+        // We verify that the update succeeds and targets the correct version.
+        indexes.update_node_valid_time_end(node_id, v3, 30.into());
+
+        // Verify v3 was updated. At time 25, v1, v2, and v3 should be visible.
+        let mut results = indexes.find_node_version_at_point(node_id, 25.into(), 0.into());
+        results.sort();
+        assert_eq!(
+            results,
+            vec![v1, v2, v3],
+            "v1, v2, and v3 should be visible at 25"
+        );
+
+        // Verify v3 is NOT found after 30. At time 35, only v1 and v2 should be visible.
+        let mut results = indexes.find_node_version_at_point(node_id, 35.into(), 0.into());
+        results.sort();
+        assert_eq!(
+            results,
+            vec![v1, v2],
+            "Only v1 and v2 should be visible at 35"
+        );
+
+        // 5. Update v2 (newly inserted at index 1)
+        // Verify v2 is intact before update. At time 15, v1 and v2 should be visible.
+        let mut results = indexes.find_node_version_at_point(node_id, 15.into(), 0.into());
+        results.sort();
+        assert_eq!(results, vec![v1, v2], "v1 and v2 should be visible at 15");
+
+        indexes.update_node_valid_time_end(node_id, v2, 18.into());
+
+        // Verify v2 was updated. At time 19, only v1 should be visible.
+        let results = indexes.find_node_version_at_point(node_id, 19.into(), 0.into());
+        assert_eq!(results, vec![v1], "Only v1 should be visible at 19");
+    }
+
+    #[test]
+    fn test_batch_insert_unsorted_query() {
+        // This test ensures that insert_batch sorts the entries, which is critical
+        // for binary search (partition_point) to work correctly.
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+
+        let v1 = VersionId::new(100).unwrap(); // start 0
+        let v2 = VersionId::new(101).unwrap(); // start 20
+        let v3 = VersionId::new(102).unwrap(); // start 10
+
+        // Create a batch with unsorted entries: [0, 20, 10]
+        let batch = vec![
+            (
+                v1,
+                BiTemporalInterval::new(TimeRange::from(0.into()), TimeRange::from(0.into())),
+            ),
+            (
+                v2,
+                BiTemporalInterval::new(TimeRange::from(20.into()), TimeRange::from(0.into())),
+            ),
+            (
+                v3,
+                BiTemporalInterval::new(TimeRange::from(10.into()), TimeRange::from(0.into())),
+            ),
+        ];
+
+        indexes.insert_node_versions_batch(node_id, batch).unwrap();
+
+        // Query a range that covers [0, 15).
+        // This should include v1 (start 0) and v3 (start 10).
+        // It should EXCLUDE v2 (start 20).
+        //
+        // If the array was unsorted [0, 20, 10]:
+        // partition_point(|e| e.start < 15):
+        // - Probe middle (20). 20 < 15 is False.
+        // - Go left.
+        // - Probe 0. 0 < 15 is True.
+        // - Returns index 1.
+        // - Slice is [0].
+        // - Result: only v1. MISSES v3!
+        //
+        // If sorted [0, 10, 20]:
+        // partition_point(|e| e.start < 15):
+        // - Probe middle (10). 10 < 15 is True.
+        // - Go right.
+        // - Probe 20. 20 < 15 is False.
+        // - Returns index 2.
+        // - Slice is [0, 10].
+        // - Result: v1 and v3. Correct.
+
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(0.into(), 15.into()).unwrap(),
+        );
+
+        assert_eq!(results.len(), 2, "Should find 2 versions (v1 and v3)");
+        assert!(results.contains(&v1));
+        assert!(results.contains(&v3));
+        assert!(!results.contains(&v2));
+    }
 }
