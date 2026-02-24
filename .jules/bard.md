@@ -43,3 +43,7 @@
 ## 2024-05-29 - Experimental Feature Leaks
 **Confusion:** The `experimental` module documentation claimed that all features were gated behind `feature = "nova"`. However, `metaphor` and `muse` were publicly exposed even without the feature enabled, leading to inconsistent API availability and potential runtime panics (as `metaphor` used internal runtime checks instead of compile-time gating).
 **Clarification:** Updated `src/experimental/mod.rs` to explicitly gate `metaphor` and `muse` with `#[cfg(feature = "nova")]`, aligning the code with the documentation and ensuring a consistent compile-time experience.
+
+## 2024-05-30 - The Case of the Fake Statistic
+**Confusion:** The `Statistics::avg_delta_chain` field (used for cost-based optimization of temporal queries) was documented as "collected statistics" but was actually hardcoded to `5.0` in `refresh_statistics`, with a TODO comment (Issue #366) hidden in the implementation. This could mislead users debugging query performance on deep historical graphs.
+**Clarification:** Refactored `AletheiaDB::refresh_statistics` to calculate the actual average chain length from `HistoricalStorage` metadata (`total_versions / total_anchors`). Updated `Statistics` documentation to explain its lifecycle and role in query planning.

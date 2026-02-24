@@ -1,7 +1,27 @@
 //! Statistics Collection for Query Optimization
 //!
 //! Provides cardinality and selectivity estimates for cost-based optimization.
-//! Statistics are collected lazily and cached until invalidated.
+//!
+//! # Role in Query Planning
+//!
+//! The query planner relies on accurate statistics to make informed decisions about:
+//! - **Join Order**: Which side of a join should be the build vs. probe side?
+//! - **Access Methods**: Should we use a full scan, an index lookup, or a vector search?
+//! - **Filter Ordering**: Which predicates should be applied first?
+//!
+//! # Lifecycle
+//!
+//! Statistics are **not** updated in real-time with every write operation to avoid
+//! lock contention on the shared `Statistics` structure. Instead, they follow a
+//! lazy/manual refresh model:
+//!
+//! 1. **Initialization**: Created with default/empty values.
+//! 2. **Lazy Refresh**: The database triggers a refresh on the first query execution.
+//! 3. **Manual Refresh**: Administrators can trigger a refresh via [`AletheiaDB::refresh_statistics`].
+//! 4. **Invalidation**: Schema changes (e.g., adding an index) invalidate the cache,
+//!    forcing a refresh on the next query.
+//!
+//! [`AletheiaDB::refresh_statistics`]: crate::db::AletheiaDB::refresh_statistics
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -46,30 +66,75 @@ impl Default for AtomicF64 {
 /// Statistics are collected lazily on first query and cached.
 /// They can be manually refreshed or automatically invalidated
 /// on schema changes.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::planner::Statistics;
+/// use aletheiadb::core::interning::InternedString;
+///
+/// let stats = Statistics::new();
+///
+/// // Statistics are initially empty
+/// assert_eq!(stats.node_count(), 0);
+/// assert!(!stats.is_initialized());
+///
+/// // Manually refreshing statistics
+/// // In a real app, AletheiaDB::refresh_statistics() calls this
+/// stats.refresh(
+///     1000, // node_count
+///     5000, // edge_count
+///     100,  // vector_count
+///     vec![], // label_counts
+///     5.0   // avg_delta_chain
+/// );
+///
+/// assert_eq!(stats.node_count(), 1000);
+/// assert!(stats.is_initialized());
+/// ```
 #[derive(Debug, Default)]
 pub struct Statistics {
-    /// Whether statistics have been collected
+    /// Whether statistics have been collected.
+    ///
+    /// If false, the query engine will trigger a refresh before planning.
     initialized: AtomicBool,
 
-    /// Total node count
+    /// Total node count in the current graph.
+    ///
+    /// Used to estimate scan costs and filter selectivity.
     node_count: AtomicUsize,
 
-    /// Total edge count
+    /// Total edge count in the current graph.
+    ///
+    /// Used to estimate traversal costs and average degree.
     edge_count: AtomicUsize,
 
-    /// Number of indexed vectors
+    /// Number of indexed vectors.
+    ///
+    /// Used to estimate the cost of vector search operations.
     vector_count: AtomicUsize,
 
-    /// Label cardinalities
+    /// Label cardinalities (count of nodes per label).
+    ///
+    /// Used to estimate the output size of `ScanNodes(label)`.
     label_counts: DashMap<InternedString, usize>,
 
-    /// Average out-degree (edges per node)
+    /// Average out-degree (edges per node).
+    ///
+    /// Critical for estimating the explosion factor of graph traversals.
+    /// A high degree increases the cost of multi-hop queries exponentially.
     avg_out_degree: AtomicF64,
 
-    /// Average delta chain length in historical storage
+    /// Average delta chain length in historical storage.
+    ///
+    /// Represents the average number of versions one must walk back to find an anchor.
+    /// Used to estimate the I/O cost of temporal lookups (`AS OF` queries).
+    ///
+    /// - **Low value (near 1.0)**: Most lookups hit anchors directly (fast).
+    /// - **High value**: Lookups require applying many deltas (slow).
     avg_delta_chain: AtomicF64,
 
-    /// Property statistics for selectivity estimation
+    /// Property statistics for selectivity estimation.
     property_stats: RwLock<PropertyStats>,
 }
 
@@ -121,7 +186,7 @@ impl Statistics {
     pub fn average_delta_chain_length(&self) -> f64 {
         let avg = self.avg_delta_chain.load(Ordering::Relaxed);
         if avg < f64::EPSILON {
-            // Default estimate (anchor every 10 versions)
+            // Default estimate (anchor every 10 versions -> avg depth ~5)
             5.0
         } else {
             avg
@@ -138,6 +203,24 @@ impl Statistics {
     ///
     /// Returns a value between 0.0 and 1.0 indicating what fraction
     /// of rows would pass an equality predicate.
+    ///
+    /// If distinct counts are available, uses `1.0 / distinct_count`.
+    /// Otherwise, assumes a default selectivity of 10% (0.1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    ///
+    /// // Default selectivity (unknown distribution)
+    /// assert_eq!(stats.estimate_selectivity("status", "active"), 0.1);
+    ///
+    /// // With known distinct counts (e.g. 2 statuses: active, inactive)
+    /// stats.update_property_stats("status", 2);
+    /// assert_eq!(stats.estimate_selectivity("status", "active"), 0.5);
+    /// ```
     #[must_use]
     pub fn estimate_selectivity(&self, property: &str, _value: &str) -> f64 {
         let stats = self.property_stats.read();
@@ -148,9 +231,10 @@ impl Statistics {
             .unwrap_or(0.1) // Default 10% selectivity
     }
 
-    /// Update statistics from storage
+    /// Update statistics from storage.
     ///
-    /// This is called lazily on first query or when explicitly requested.
+    /// This is called by [`AletheiaDB::refresh_statistics`](crate::db::AletheiaDB::refresh_statistics)
+    /// to populate the cache with fresh values from the storage engine.
     pub fn refresh(
         &self,
         node_count: usize,
@@ -181,12 +265,16 @@ impl Statistics {
         self.initialized.store(true, Ordering::Release);
     }
 
-    /// Invalidate cached statistics
+    /// Invalidate cached statistics.
+    ///
+    /// Forces the next query to trigger a refresh.
     pub fn invalidate(&self) {
         self.initialized.store(false, Ordering::Release);
     }
 
-    /// Update property statistics
+    /// Update property statistics.
+    ///
+    /// Used to feed distinct counts from background analysis jobs.
     pub fn update_property_stats(&self, property: &str, distinct_count: usize) {
         let mut stats = self.property_stats.write();
         stats
