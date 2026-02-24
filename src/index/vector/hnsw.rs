@@ -134,10 +134,6 @@ std::thread_local! {
     static TEST_RACE_HOOK: std::cell::Cell<Option<TestRaceHook>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
-pub(crate) static TEST_SKIP_CAPACITY_CHECK: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
 /// This ensures the flag is always reset, even if the callback panics.
 pub(crate) struct FilterCallbackGuard {
@@ -883,9 +879,6 @@ impl VectorIndex for HnswIndex {
         }
 
         self.maybe_block_in_place(|| {
-            // Ensure capacity before acquiring any locks that might cause contention
-            self.check_and_expand_capacity(1)?;
-
             // Acquire entry lock to serialize updates to same key
             // This prevents race conditions in usearch when multiple threads update the same key concurrently
             let lock_idx = (id.as_u64() as usize) % self.entry_locks.len();
@@ -954,8 +947,7 @@ impl VectorIndex for HnswIndex {
                         )?;
                     } else {
                         // Key doesn't exist, so this is a net addition.
-                        // We must ensure capacity exists, as the optimistic check in
-                        // check_and_expand_capacity might have been raced.
+                        // We must ensure capacity exists.
                         if index.size() >= index.capacity() {
                             let new_capacity = (index.capacity() * 2).max(1024);
                             self.retry_usearch(
@@ -1026,8 +1018,7 @@ impl VectorIndex for HnswIndex {
                     // Vacant path updates the index before claiming the map entry (Inner -> Map).
                     let index = self.inner.write();
 
-                    // Ensure capacity exists. The optimistic check in check_and_expand_capacity
-                    // might have been raced by other threads. Since we hold the write lock now,
+                    // Ensure capacity exists. Since we hold the write lock now,
                     // we are the source of truth.
                     if index.size() >= index.capacity() {
                         let new_capacity = (index.capacity() * 2).max(1024);
@@ -1512,60 +1503,6 @@ impl HnswIndex {
             }
         }
         unreachable!("Retry loop should always return")
-    }
-
-    /// Checks and expands index capacity if needed.
-    ///
-    /// This method ensures that the index has enough capacity to accommodate new vectors.
-    /// It uses a "lock upgrading" strategy (optimistic read -> exclusive write) to minimize contention.
-    ///
-    /// # Concurrency
-    ///
-    /// - **Fast Path**: Acquires `read` lock. If capacity is sufficient, returns immediately.
-    /// - **Slow Path**: Acquires `write` lock. Expands capacity by doubling it (min 1024).
-    ///
-    /// # Race Condition Protection
-    ///
-    /// Uses `CAPACITY_PADDING` to account for concurrent additions that might occur
-    /// between the capacity check and the actual addition.
-    ///
-    /// # Arguments
-    ///
-    /// * `vectors_to_add` - Number of vectors expected to be added (usually 1)
-    fn check_and_expand_capacity(&self, vectors_to_add: usize) -> Result<()> {
-        #[cfg(test)]
-        if TEST_SKIP_CAPACITY_CHECK.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        // Padding to account for concurrent additions between check and actual add.
-        // This prevents a race condition where multiple threads pass the capacity check
-        // but then collectively overflow the capacity, causing a crash in usearch.
-        const CAPACITY_PADDING: usize = 128;
-
-        // Optimistic check with read lock
-        let index = self.inner.read();
-        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
-            return Ok(());
-        }
-        drop(index);
-
-        // Acquire write lock to expand capacity
-        let index = self.inner.write();
-
-        // Double check capacity under write lock (race condition check)
-        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
-            return Ok(());
-        }
-
-        // Expand capacity
-        // Double capacity, minimum 1024
-        let new_capacity = (index.capacity() * 2).max(1024);
-
-        // Use retry logic for reserve as well, just in case
-        self.retry_usearch(|| index.reserve(new_capacity), "Failed to expand capacity")?;
-
-        Ok(())
     }
 
     /// Internal implementation of index saving.
@@ -3951,53 +3888,11 @@ mod coverage_tests {
 }
 
 #[cfg(test)]
-mod capacity_tests {
-    use super::*;
-
-    #[test]
-    fn test_capacity_check_and_expand() {
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-            .initial_capacity(10)
-            .build()
-            .unwrap();
-
-        // Initially size 0, capacity 10
-        assert_eq!(index.len(), 0);
-
-        // This should pass without expanding
-        index.check_and_expand_capacity(1).unwrap();
-
-        // Fill to capacity
-        for i in 0..10 {
-            let id = NodeId::new(i + 1).unwrap();
-            index.add(id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        }
-
-        assert_eq!(index.len(), 10);
-
-        // This should trigger expansion
-        // Note: we can't easily assert on capacity here without exposing internal usearch state
-        // but we can verify it doesn't error
-        index.check_and_expand_capacity(1).unwrap();
-    }
-}
-
-#[cfg(test)]
 mod race_recovery_tests {
     use super::*;
 
     #[test]
-    fn test_vacant_path_race_recovery() -> Result<()> {
-        // Setup: Ensure we skip the optimistic check
-        TEST_SKIP_CAPACITY_CHECK.store(true, Ordering::SeqCst);
-        struct ResetGuard;
-        impl Drop for ResetGuard {
-            fn drop(&mut self) {
-                TEST_SKIP_CAPACITY_CHECK.store(false, Ordering::SeqCst);
-            }
-        }
-        let _reset = ResetGuard;
-
+    fn test_vacant_path_capacity_expansion() -> Result<()> {
         // Create index with small capacity
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .initial_capacity(10)
@@ -4010,7 +3905,6 @@ mod race_recovery_tests {
         assert_eq!(index.len(), 10);
 
         // At this point, size=10, capacity=10.
-        // optimistic check is skipped.
         // add(11) will enter Vacant path.
         // It will acquire inner write lock.
         // It will check size >= capacity (10 >= 10). True.
@@ -4026,17 +3920,7 @@ mod race_recovery_tests {
     }
 
     #[test]
-    fn test_occupied_path_inconsistency_race_recovery() -> Result<()> {
-        // Setup: Ensure we skip the optimistic check
-        TEST_SKIP_CAPACITY_CHECK.store(true, Ordering::SeqCst);
-        struct ResetGuard;
-        impl Drop for ResetGuard {
-            fn drop(&mut self) {
-                TEST_SKIP_CAPACITY_CHECK.store(false, Ordering::SeqCst);
-            }
-        }
-        let _reset = ResetGuard;
-
+    fn test_occupied_path_capacity_expansion() -> Result<()> {
         // Create index
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
             .initial_capacity(10)
@@ -4048,7 +3932,7 @@ mod race_recovery_tests {
         }
         assert_eq!(index.len(), 10);
 
-        // We want to trigger the Occupied path logic:
+        // We want to trigger the Occupied path logic with expansion:
         // 1. Update an existing node (e.g., node 1).
         // 2. Use hook to make inner inconsistent (remove key 1 from inner).
         // 3. Ensure index is full (add dummy key to inner).
