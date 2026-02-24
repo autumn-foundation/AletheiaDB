@@ -108,6 +108,15 @@ impl<'a> Chameleon<'a> {
             return Ok(Vec::new());
         }
 
+        // Validate dimensions to prevent panic in MiniKMeans
+        let dim = data[0].1.len();
+        if dim == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Filter out vectors with inconsistent dimensions
+        data.retain(|(_, vec)| vec.len() == dim);
+
         // 3. Cluster (K-Means)
         // If k > data.len(), we clamp it.
         let effective_k = k.min(data.len());
