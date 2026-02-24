@@ -2142,7 +2142,9 @@ impl CurrentStorage {
                     })
             })
             .transpose()?
-            .ok_or_else(|| crate::core::error::Error::Storage(StorageError::NodeNotFound(node_id)))
+            .ok_or(crate::core::error::Error::Storage(StorageError::NodeNotFound(
+                node_id,
+            )))
     }
 
     fn get_vector_index_internal(
