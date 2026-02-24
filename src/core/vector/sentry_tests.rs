@@ -538,22 +538,24 @@ fn test_is_normalized_upper_boundary() {
 #[test]
 fn test_normalize_threshold_boundary() {
     // Test vector with squared magnitude exactly at threshold
-    // SQUARED_MAGNITUDE_THRESHOLD is 1e-14
-    // magnitude = sqrt(1e-14) = 1e-7
-    let val = SQUARED_MAGNITUDE_THRESHOLD.sqrt();
+    // SQUARED_MAGNITUDE_THRESHOLD is 1e-25 (updated from 1e-14)
+    // magnitude = sqrt(1e-25) ≈ 3e-13
+    // Use slightly above sqrt to avoid floating point precision issues causing underflow below threshold
+    let val = SQUARED_MAGNITUDE_THRESHOLD.sqrt() * 1.0001;
     let v = vec![val];
 
-    // sq_mag = 1e-14. 1e-14 < 1e-14 is false.
+    // sq_mag > threshold.
     // So normalize should happen.
     let normalized = normalize(&v);
     assert!(
         (normalized[0] - 1.0).abs() < 1e-6,
-        "Should normalize at threshold"
+        "Should normalize at/above threshold"
     );
 
     // Slightly smaller magnitude
     // Use a value that squares to something definitely smaller than SQUARED_MAGNITUDE_THRESHOLD
-    let val_small = val * 0.999;
+    // 0.999 * 1.0001 ≈ 0.999.
+    let val_small = SQUARED_MAGNITUDE_THRESHOLD.sqrt() * 0.999;
     let v_small = vec![val_small];
     let normalized_small = normalize(&v_small);
     assert_eq!(normalized_small[0], 0.0, "Should zero out below threshold");
