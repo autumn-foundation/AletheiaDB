@@ -3938,8 +3938,16 @@ mod tests {
         let e0 = timeline.versions[0];
         let e1 = timeline.versions[1];
 
-        assert_eq!(e0.end, 200.into(), "Expected FIFO order (first inserted first)");
-        assert_eq!(e1.end, 300.into(), "Expected FIFO order (second inserted second)");
+        assert_eq!(
+            e0.end,
+            200.into(),
+            "Expected FIFO order (first inserted first)"
+        );
+        assert_eq!(
+            e1.end,
+            300.into(),
+            "Expected FIFO order (second inserted second)"
+        );
     }
 
     #[test]
@@ -3961,7 +3969,15 @@ mod tests {
         let mid2 = timeline.versions[2];
 
         // Assert FIFO behavior
-        assert_eq!(mid1.end, 110.into(), "Middle insert should be FIFO (first inserted first)");
-        assert_eq!(mid2.end, 120.into(), "Middle insert should be FIFO (second inserted second)");
+        assert_eq!(
+            mid1.end,
+            110.into(),
+            "Middle insert should be FIFO (first inserted first)"
+        );
+        assert_eq!(
+            mid2.end,
+            120.into(),
+            "Middle insert should be FIFO (second inserted second)"
+        );
     }
 }
