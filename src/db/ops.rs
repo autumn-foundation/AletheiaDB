@@ -70,6 +70,31 @@ impl AletheiaDB {
         self.current.get_node(node_id)
     }
 
+    /// Access a node without cloning, executing a closure on the node data.
+    ///
+    /// This method provides zero-copy read access to node data for hot paths
+    /// where only specific fields are needed.
+    ///
+    /// # Performance
+    ///
+    /// - **No allocation**: Does not clone the Node
+    /// - **No Arc increment**: Does not increment PropertyMap reference count (unless cloned in closure)
+    /// - **Lock duration**: Holds DashMap read lock only during closure execution
+    ///
+    /// # Safety & Deadlocks
+    ///
+    /// **WARNING**: The closure is executed while holding a read lock on the node shard.
+    /// Do NOT attempt to modify the graph or perform operations that might acquire a
+    /// write lock on the same shard (e.g., `update_node`, `delete_node`) within the closure.
+    /// Doing so will cause a deadlock (lock re-entrancy hazard).
+    #[inline]
+    pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
+    where
+        F: FnOnce(&Node) -> R,
+    {
+        self.current.with_node(id, f)
+    }
+
     /// Get the current state of an edge.
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
         self.current.get_edge(edge_id)
