@@ -1499,8 +1499,23 @@ mod sentry_tests {
         // If the code is correct (<= capacity), it should detect "Buffer Full" and return Err after spinning.
         // If the mutant is present (< capacity), it will think "Another producer claimed it" and continue/loop forever.
 
-        let entry_c = PendingEntry::new_async(LSN(2), vec![]);
-        let result = buf.try_append(entry_c);
+        // Wrap the call in a separate thread with a timeout to prevent hanging the entire test suite
+        // if the regression reappears.
+        let buf = std::sync::Arc::new(buf);
+        let buf_clone = buf.clone();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let entry_c = PendingEntry::new_async(LSN(2), vec![]);
+            let result = buf_clone.try_append(entry_c);
+            tx.send(result).unwrap();
+        });
+
+        // Wait for the result with a timeout
+        let result = rx
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .expect("Test timed out: try_append hung (likely regression of infinite loop bug)");
 
         assert!(
             result.is_err(),
