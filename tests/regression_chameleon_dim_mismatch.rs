@@ -1,3 +1,5 @@
+#![cfg(feature = "nova")]
+
 use aletheiadb::AletheiaDB;
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::experimental::chameleon::Chameleon;
