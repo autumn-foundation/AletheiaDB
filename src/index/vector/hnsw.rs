@@ -1898,7 +1898,14 @@ impl HnswIndex {
                 // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
                 //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
                 let similarity = match self.config.metric {
-                    DistanceMetric::Cosine => 1.0 - distance,
+                    DistanceMetric::Cosine => {
+                        let sim = 1.0 - distance;
+                        if sim.is_nan() {
+                            0.0
+                        } else {
+                            sim.clamp(-1.0, 1.0)
+                        }
+                    }
                     DistanceMetric::Euclidean => -distance,
                     DistanceMetric::DotProduct => 1.0 - distance,
                     DistanceMetric::Haversine => -distance,
