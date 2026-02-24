@@ -3930,7 +3930,10 @@ mod tests {
             DeduplicationPolicy::Reject,
         );
 
-        assert!(result.is_ok(), "Reject policy should accept valid batch without duplicates");
+        assert!(
+            result.is_ok(),
+            "Reject policy should accept valid batch without duplicates"
+        );
     }
 
     #[test]
