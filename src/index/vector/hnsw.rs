@@ -2804,6 +2804,55 @@ mod tests {
     }
 
     #[test]
+    fn test_cosine_similarity_nan_handling() {
+        // Create index with Cosine metric
+        let index = HnswIndexBuilder::new(1, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        // Populate reverse mapping manually so convert_matches can resolve IDs
+        let id1 = NodeId::new(1).unwrap();
+        let id2 = NodeId::new(2).unwrap();
+        index.reverse_mapping.insert(1, id1);
+        index.reverse_mapping.insert(2, id2);
+
+        // Manually construct matches with NaN and Inf
+        let matches = Matches {
+            keys: vec![1, 2],
+            distances: vec![f32::NAN, f32::INFINITY],
+        };
+
+        // Convert matches (this is private but available in tests module due to super::*)
+        // Wait, convert_matches is private to HnswIndex, not exposed to tests module automatically if it's not pub(crate)
+        // But HnswIndex is in the parent module.
+        // HnswIndex::convert_matches is a private method.
+        // Rust tests in child module can access private items of parent module?
+        // No, parent cannot access child, child can access parent.
+        // BUT `tests` mod is a child of `hnsw`.
+        // So `super::HnswIndex` is accessible.
+        // Private methods of `HnswIndex` are NOT accessible unless we are in the same module.
+        // Tests are usually `mod tests` inside the file, so they are a child module.
+        // Child module CANNOT access private fields/methods of struct defined in parent, unless they are pub(super) or similar.
+        // HnswIndex is defined in `hnsw.rs` (parent).
+        // `convert_matches` is private.
+        // I need to make `convert_matches` pub(crate) or pub(super) or put the test in the impl block (but impl block can't have tests?).
+
+        // Wait, I can make `convert_matches` pub(crate) temporarily or permanently.
+        // Or I can put the test inside the `impl HnswIndex` block? No, `#[test]` fn inside impl block is not standard.
+        // Standard way is `convert_matches` -> `pub(crate)`.
+
+        let results = index.convert_matches(matches);
+
+        // Verify NaN -> 0.0
+        assert_eq!(results[0].0, id1);
+        assert_eq!(results[0].1, 0.0);
+
+        // Verify Inf -> -1.0 (clamped)
+        assert_eq!(results[1].0, id2);
+        assert_eq!(results[1].1, -1.0);
+    }
+
+    #[test]
     fn test_distance_to_similarity_conversion() -> Result<()> {
         // Test Cosine similarity conversion
         let cosine_index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
