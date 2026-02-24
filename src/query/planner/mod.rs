@@ -1779,7 +1779,7 @@ mod tests {
         let query_limit = Query {
             ops: vec![
                 QueryOp::StartNode(crate::core::NodeId::new(1).unwrap()),
-                QueryOp::Limit(MAX_PAGINATION_LIMIT + 1)
+                QueryOp::Limit(MAX_PAGINATION_LIMIT + 1),
             ],
             temporal_context: None,
             hints: QueryHints::default(),
@@ -1799,7 +1799,7 @@ mod tests {
         let query_skip = Query {
             ops: vec![
                 QueryOp::StartNode(crate::core::NodeId::new(1).unwrap()),
-                QueryOp::Skip(MAX_PAGINATION_LIMIT + 1)
+                QueryOp::Skip(MAX_PAGINATION_LIMIT + 1),
             ],
             temporal_context: None,
             hints: QueryHints::default(),
