@@ -129,7 +129,7 @@ impl<'a> Chameleon<'a> {
             return Ok(Vec::new());
         }
 
-        let clusters = MiniKMeans::cluster(&data, effective_k);
+        let clusters = MiniKMeans::cluster(&data, effective_k)?;
 
         // 4. Build Aspects
         let mut aspects = Vec::with_capacity(effective_k);
@@ -249,12 +249,22 @@ struct Cluster {
 struct MiniKMeans;
 
 impl MiniKMeans {
-    fn cluster(data: &[(NodeId, Vec<f32>)], k: usize) -> Vec<Cluster> {
+    fn cluster(data: &[(NodeId, Vec<f32>)], k: usize) -> Result<Vec<Cluster>> {
         if data.is_empty() || k == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let dim = data[0].1.len();
+
+        // Validate dimensions
+        for (_, vec) in data.iter().skip(1) {
+            if vec.len() != dim {
+                return Err(Error::Vector(VectorError::DimensionMismatch {
+                    expected: dim,
+                    actual: vec.len(),
+                }));
+            }
+        }
 
         // 1. Initialize Centroids (Deterministically: First k points)
         let mut centroids: Vec<Vec<f32>> = data.iter().take(k).map(|(_, v)| v.clone()).collect();
@@ -320,11 +330,12 @@ impl MiniKMeans {
             clusters[c_idx].points.push((*nid, vec.clone()));
         }
 
-        clusters
+        Ok(clusters)
     }
 }
 
 fn dist_sq(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len(), "dist_sq dimension mismatch");
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
 }
 
@@ -502,5 +513,28 @@ mod tests {
         // effective_k = min(2, 1) = 1.
         assert_eq!(aspects.len(), 1);
         assert_eq!(aspects[0].exemplars[0], n1);
+    }
+
+    #[test]
+    fn test_minikmeans_returns_error_on_mixed_dimensions() {
+        let nid1 = NodeId::new(1).unwrap();
+        let nid2 = NodeId::new(2).unwrap();
+
+        // Mixed dimensions: 2 and 3
+        let data = vec![
+            (nid1, vec![1.0, 0.0]),
+            (nid2, vec![1.0, 0.0, 0.0]),
+        ];
+
+        // Should return Error, not panic
+        let result = MiniKMeans::cluster(&data, 2);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::DimensionMismatch { expected, actual })) => {
+                assert_eq!(expected, 2);
+                assert_eq!(actual, 3);
+            }
+            _ => panic!("Expected DimensionMismatch error"),
+        }
     }
 }

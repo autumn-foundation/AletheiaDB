@@ -19,3 +19,13 @@
 1.  **Offload Blocking Tasks:** Wrapped potentially slow operations in `src/http/handlers.rs` using `actix_web::web::block`, offloading them to a dedicated thread pool.
 2.  **Async-Aware Indexing:** Implemented `maybe_block_in_place` helper in `src/index/vector/hnsw.rs`. This automatically detects if it's running in a multi-threaded Tokio runtime and uses `tokio::task::block_in_place` to prevent reactor starvation during vector operations and retries.
 3.  **Pagination Limits:** Verified existing `saturating_add` checks for deep pagination in `FindNode` and `FindNeighbors` to prevent memory exhaustion DoS.
+
+**2026-02-24 - Hardened MiniKMeans Input Validation**
+**Threat:**
+1.  **Panic on Mixed Dimensions:** The internal `MiniKMeans::cluster` function in `src/experimental/chameleon.rs` assumed all input vectors had the same dimension. If called with mixed dimensions (e.g. by internal misuse or future API exposure), it would panic with index out of bounds during centroid accumulation, causing a potential DoS.
+
+**Defense:**
+1.  **Input Validation:** Refactored `MiniKMeans::cluster` to return `Result` and explicitly validate that all input vectors match the dimension of the first vector.
+2.  **Error Propagation:** Updated `Chameleon::analyze_context` to handle errors from `MiniKMeans`, ensuring robust failure handling.
+3.  **Internal Consistency:** Added `debug_assert_eq!` to `dist_sq` helper to catch dimension mismatches during development.
+4.  **Verification:** Added `test_minikmeans_returns_error_on_mixed_dimensions` to regression-test the fix.
