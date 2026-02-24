@@ -128,6 +128,9 @@ pub mod hindsight;
 /// Janus: Semantic Bridge Detector.
 pub mod janus;
 #[cfg(feature = "nova")]
+/// Kairos: Semantic Event Detection & History Summarization.
+pub mod kairos;
+#[cfg(feature = "nova")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
 #[cfg(feature = "nova")]
