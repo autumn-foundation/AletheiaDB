@@ -533,6 +533,7 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
+// REQUIRES FEATURE: nova
 // [dependencies]
 // aletheiadb = { version = "0.1", features = ["nova"] }
 
