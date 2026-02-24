@@ -872,6 +872,49 @@ sequenceDiagram
     Muse-->>User: Inspiration
 ```
 
+**Semantic Memory Consolidation (Mnemosyne)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Mnemosyne {
+            +consolidate_memory(node_id, vec_prop, threshold)
+        }
+        class MemoryFrame {
+            +timestamp: i64
+            +version_id: VersionId
+            +reason: String
+            +properties: PropertyMap
+        }
+    }
+    class AletheiaDB
+    Mnemosyne --> AletheiaDB : Uses
+    Mnemosyne ..> MemoryFrame : Produces
+```
+
+**Sequence: Memory Consolidation**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Mnemosyne
+    participant DB as AletheiaDB
+
+    User->>Mnemosyne: consolidate_memory(node, vec_prop, threshold)
+    Mnemosyne->>DB: get_node_history(node)
+    DB-->>Mnemosyne: versions
+    loop Every Version
+        Mnemosyne->>Mnemosyne: dist = distance(prev_kept, curr)
+        alt dist > threshold OR props_changed
+            Mnemosyne->>Mnemosyne: keep(curr)
+            Mnemosyne->>Mnemosyne: prev_kept = curr
+        else
+            Mnemosyne->>Mnemosyne: discard(curr)
+        end
+    end
+    Mnemosyne-->>User: List<MemoryFrame>
+```
+
 ### Temporal Query Processing
 
 **Query Types:**
