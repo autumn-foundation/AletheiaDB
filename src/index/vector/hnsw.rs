@@ -1235,56 +1235,22 @@ impl VectorIndex for HnswIndex {
         self.maybe_block_in_place(|| {
             // Retry with exponential backoff to handle thread pool exhaustion
             // Under heavy concurrent load, usearch may fail with "No available threads to lock"
-            for attempt in 0..MAX_SEARCH_ATTEMPTS {
-                // Acquire lock inside the loop so we can drop it before sleeping on retry
-                let index = self.inner.read();
-                match index.search(query, k_capped) {
-                    Ok(matches) => {
-                        // Release lock immediately after search to minimize contention
-                        drop(index);
+            // Use retry_usearch helper to share retry logic and ensure coverage.
+            let matches = self.retry_usearch(
+                || {
+                    let index = self.inner.read();
+                    index.search(query, k_capped)
+                },
+                "Search failed",
+            )?;
 
-                        self.stats
-                            .searches_performed
-                            .fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .searches_performed
+                .fetch_add(1, Ordering::Relaxed);
 
-                        // Convert results using helper function (results are already sorted by usearch)
-                        let results = self.convert_matches(matches);
-                        return Ok(results);
-                    }
-                    Err(e) => {
-                        let error_msg = e.to_string();
-                        // Release lock before checking retry condition (which might sleep)
-                        drop(index);
-
-                        // Check if this is a transient thread pool exhaustion error
-                        if is_retryable_usearch_error(&error_msg)
-                            && attempt + 1 < MAX_SEARCH_ATTEMPTS
-                        {
-                            // Track retry for observability
-                            self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
-
-                            // Exponential backoff: 1ms, 2ms, 4ms
-                            let delay_ms = 1u64 << attempt;
-                            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                            continue;
-                        }
-                        // Non-retryable error or exhausted retries
-                        if attempt > 0 {
-                            // Track that we failed even after retries
-                            self.stats
-                                .search_retry_failures
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        return Err(Error::Vector(VectorError::IndexError(format!(
-                            "Search failed: {}",
-                            e
-                        ))));
-                    }
-                }
-            }
-
-            // Unreachable: loop always returns from inside
-            unreachable!("Search retry loop should always return from within the loop body")
+            // Convert results using helper function (results are already sorted by usearch)
+            let results = self.convert_matches(matches);
+            Ok(results)
         })
     }
 
@@ -1361,46 +1327,16 @@ impl VectorIndex for HnswIndex {
             let mut candidate_k = k_capped.min(max_candidates);
             loop {
                 let candidates = {
-                    let mut maybe_matches = None;
-
-                    for attempt in 0..MAX_SEARCH_ATTEMPTS {
-                        let index = self.inner.read();
-                        match index.search(query, candidate_k) {
-                            Ok(found) => {
-                                drop(index);
-                                maybe_matches = Some(found);
-                                break;
-                            }
-                            Err(e) => {
-                                let error_msg = e.to_string();
-                                drop(index);
-
-                                if is_retryable_usearch_error(&error_msg)
-                                    && attempt + 1 < MAX_SEARCH_ATTEMPTS
-                                {
-                                    self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
-                                    let delay_ms = 1u64 << attempt;
-                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                                    continue;
-                                }
-
-                                if attempt > 0 {
-                                    self.stats
-                                        .search_retry_failures
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                                return Err(Error::Vector(VectorError::IndexError(format!(
-                                    "Filtered search failed: {}",
-                                    e
-                                ))));
-                            }
-                        }
-                    }
+                    let matches = self.retry_usearch(
+                        || {
+                            let index = self.inner.read();
+                            index.search(query, candidate_k)
+                        },
+                        "Filtered search failed",
+                    )?;
 
                     // Convert matches (already sorted) so we can iterate by best similarity first
-                    self.convert_matches(maybe_matches.expect(
-                        "filtered search retry loop should have returned or produced matches",
-                    ))
+                    self.convert_matches(matches)
                 };
 
                 let mut filtered = Vec::with_capacity(k_capped.min(candidates.len()));
@@ -4428,6 +4364,14 @@ mod coverage_additions {
             .unwrap();
 
         let node_id = NodeId::new(1).unwrap();
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        // Call add again to hit Occupied path (line 900+ coverage)
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Call remove to hit Remove path
+        index.remove(node_id).unwrap();
+
+        // Re-add for search test
         index.add(node_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
         // Call search - should hit L1233, L1237, L1239
