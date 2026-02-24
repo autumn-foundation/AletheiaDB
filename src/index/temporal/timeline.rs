@@ -1,8 +1,8 @@
+use super::metadata::{IndexVec, TimelineVersionMetadata, VersionMetadataIndex};
+use super::policy::DeduplicationPolicy;
 use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
 use crate::core::temporal::{TimeRange, Timestamp};
-use super::metadata::{TimelineVersionMetadata, VersionMetadataIndex, IndexVec};
-use super::policy::DeduplicationPolicy;
 
 /// Entry in the timeline index.
 ///
@@ -56,7 +56,12 @@ impl EntityTimeline {
     /// * `start` - Start timestamp (inclusive)
     /// * `end` - End timestamp (exclusive)
     /// * `metadata_idx` - Index into the consolidated version metadata storage
-    pub(crate) fn insert(&mut self, start: Timestamp, end: Timestamp, metadata_idx: VersionMetadataIndex) {
+    pub(crate) fn insert(
+        &mut self,
+        start: Timestamp,
+        end: Timestamp,
+        metadata_idx: VersionMetadataIndex,
+    ) {
         let entry = TimelineEntry {
             start,
             end,
@@ -115,7 +120,11 @@ impl EntityTimeline {
     ///
     /// This method is O(1) thanks to the metadata_to_position HashMap. Without it,
     /// we'd need O(n) linear search, partially defeating the query optimization.
-    pub(crate) fn update_end_time(&mut self, metadata_idx: VersionMetadataIndex, new_end: Timestamp) -> bool {
+    pub(crate) fn update_end_time(
+        &mut self,
+        metadata_idx: VersionMetadataIndex,
+        new_end: Timestamp,
+    ) -> bool {
         // O(1) lookup via HashMap
         if let Some(&position) = self.metadata_to_position.get(&metadata_idx)
             && let Some(entry) = self.versions.get_mut(position)
@@ -388,7 +397,10 @@ impl EntityTimelines {
     /// Returns an error if the number of versions exceeds `u32::MAX`.
     /// This is a DoS protection measure aligned with max_versions_per_entity checks.
     #[inline]
-    pub(crate) fn add_version_metadata(&mut self, metadata: TimelineVersionMetadata) -> Result<VersionMetadataIndex> {
+    pub(crate) fn add_version_metadata(
+        &mut self,
+        metadata: TimelineVersionMetadata,
+    ) -> Result<VersionMetadataIndex> {
         let index = self.version_metadata.len();
         if index > u32::MAX as usize {
             return Err(StorageError::CapacityExceeded {
@@ -443,7 +455,10 @@ impl EntityTimelines {
     ///
     /// Returns `None` if the VersionId is not found in this entity's metadata.
     #[inline]
-    pub(crate) fn find_metadata_index(&self, version_id: VersionId) -> Option<VersionMetadataIndex> {
+    pub(crate) fn find_metadata_index(
+        &self,
+        version_id: VersionId,
+    ) -> Option<VersionMetadataIndex> {
         self.version_metadata
             .iter()
             .position(|m| m.version_id() == version_id)
@@ -469,7 +484,11 @@ impl EntityTimelines {
     ///
     /// In correct operation, this should always succeed (version exists in temporal index
     /// if it exists in storage). Debug builds assert this invariant.
-    pub(crate) fn update_valid_time_end(&mut self, version_id: VersionId, new_end: Timestamp) -> bool {
+    pub(crate) fn update_valid_time_end(
+        &mut self,
+        version_id: VersionId,
+        new_end: Timestamp,
+    ) -> bool {
         if let Some(metadata_idx) = self.find_metadata_index(version_id) {
             let result = self.valid.update_end_time(metadata_idx, new_end);
             debug_assert!(
@@ -506,7 +525,11 @@ impl EntityTimelines {
     ///
     /// In correct operation, this should always succeed (version exists in temporal index
     /// if it exists in storage). Debug builds assert this invariant.
-    pub(crate) fn update_transaction_time_end(&mut self, version_id: VersionId, new_end: Timestamp) -> bool {
+    pub(crate) fn update_transaction_time_end(
+        &mut self,
+        version_id: VersionId,
+        new_end: Timestamp,
+    ) -> bool {
         if let Some(metadata_idx) = self.find_metadata_index(version_id) {
             let result = self.tx.update_end_time(metadata_idx, new_end);
             debug_assert!(

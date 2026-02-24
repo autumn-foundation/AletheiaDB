@@ -46,14 +46,14 @@ pub mod config;
 pub mod metadata;
 /// Deduplication policies for batch operations.
 pub mod policy;
-/// Timeline implementation.
-pub mod timeline;
 #[cfg(test)]
 mod tests;
+/// Timeline implementation.
+pub mod timeline;
 
 pub use config::TemporalIndexConfig;
+use metadata::{IndexVec, TimelineVersionMetadata, VersionMetadataIndex};
 pub use policy::DeduplicationPolicy;
-use metadata::{TimelineVersionMetadata, IndexVec, VersionMetadataIndex};
 use timeline::{EntityTimelines, TimelineEntry};
 
 /// Temporal indexes for efficient time-based lookups.
