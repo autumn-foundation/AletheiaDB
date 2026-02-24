@@ -7,26 +7,43 @@
 
 use std::hash::Hasher;
 
-/// A hasher that passes through u32 and u64 values unchanged.
+/// A hasher that passes through integer values unchanged.
 ///
 /// Used for maps where keys are already unique integers or IDs.
 /// This avoids the overhead of hashing (SipHash) for lookups.
+///
+/// # Behavior for non-u64 types
+///
+/// - **u8, u16, u32, usize**: Cast to u64.
+/// - **u128**: XORs high and low 64 bits.
+/// - **Signed integers**: Cast to unsigned equivalent.
+/// - **Byte slices**: Uses FNV-1a hashing to prevent collisions.
 #[derive(Default)]
 pub struct IdentityHasher(u64);
 
 impl Hasher for IdentityHasher {
     fn write(&mut self, bytes: &[u8]) {
-        // Fallback for types that don't call write_u32/write_u64 directly.
-        // Try to interpret as u64 (little endian) if length matches.
-        if let Ok(bytes) = bytes.try_into() {
-            self.0 = u64::from_le_bytes(bytes);
-        } else if let Ok(bytes) = bytes.try_into() {
-            self.0 = u32::from_le_bytes(bytes) as u64;
-        } else {
-            // Fallback for unknown types - just use length to avoid collision on empty vs non-empty
-            // This case shouldn't happen for primitive integer keys we care about.
-            self.0 = bytes.len() as u64;
+        // Fallback for variable length types: FNV-1a hash
+        // Initial offset basis
+        let mut hash = 0xcbf29ce484222325u64;
+        // FNV prime
+        const PRIME: u64 = 0x100000001b3;
+
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(PRIME);
         }
+        self.0 = hash;
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.0 = i as u64;
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.0 = i as u64;
     }
 
     #[inline]
@@ -37,6 +54,46 @@ impl Hasher for IdentityHasher {
     #[inline]
     fn write_u64(&mut self, i: u64) {
         self.0 = i;
+    }
+
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.0 = (i as u64) ^ ((i >> 64) as u64);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0 = i as u64;
+    }
+
+    #[inline]
+    fn write_i8(&mut self, i: i8) {
+        self.0 = i as u64;
+    }
+
+    #[inline]
+    fn write_i16(&mut self, i: i16) {
+        self.0 = i as u64;
+    }
+
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.0 = i as u64;
+    }
+
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.0 = i as u64;
+    }
+
+    #[inline]
+    fn write_i128(&mut self, i: i128) {
+        self.0 = (i as u64) ^ ((i >> 64) as u64);
+    }
+
+    #[inline]
+    fn write_isize(&mut self, i: isize) {
+        self.0 = i as u64;
     }
 
     #[inline]
@@ -65,28 +122,52 @@ mod tests {
     }
 
     #[test]
-    fn test_identity_hasher_write_fallback_u32() {
+    fn test_identity_hasher_u8_cast() {
         let mut hasher = IdentityHasher::default();
-        let bytes = 12345u32.to_le_bytes();
-        hasher.write(&bytes);
-        assert_eq!(hasher.finish(), 12345);
+        hasher.write_u8(42);
+        assert_eq!(hasher.finish(), 42);
     }
 
     #[test]
-    fn test_identity_hasher_write_fallback_u64() {
-        let mut hasher = IdentityHasher::default();
-        let val = 0x1234567890ABCDEFu64;
-        let bytes = val.to_le_bytes();
-        hasher.write(&bytes);
-        assert_eq!(hasher.finish(), val);
-    }
-
-    #[test]
-    fn test_identity_hasher_write_fallback_other() {
+    fn test_identity_hasher_fnv_bytes() {
         let mut hasher = IdentityHasher::default();
         let bytes = [1u8, 2, 3];
         hasher.write(&bytes);
-        // Fallback is length
-        assert_eq!(hasher.finish(), 3);
+        // Should not be 3 (length) anymore
+        assert_ne!(hasher.finish(), 3);
+
+        let mut hasher2 = IdentityHasher::default();
+        hasher2.write(&[1u8, 2, 3]);
+        assert_eq!(hasher.finish(), hasher2.finish());
+    }
+}
+
+#[cfg(test)]
+mod reproduction_tests {
+    use super::*;
+    use std::hash::Hasher;
+
+    #[test]
+    fn test_repro_u8_collision() {
+        let mut h1 = IdentityHasher::default();
+        h1.write_u8(1);
+
+        let mut h2 = IdentityHasher::default();
+        h2.write_u8(2);
+
+        assert_ne!(h1.finish(), h2.finish(), "u8 values should not collide");
+        assert_eq!(h1.finish(), 1);
+        assert_eq!(h2.finish(), 2);
+    }
+
+    #[test]
+    fn test_repro_bytes_collision() {
+        let mut h1 = IdentityHasher::default();
+        h1.write(&[1, 2, 3]);
+
+        let mut h2 = IdentityHasher::default();
+        h2.write(&[4, 5, 6]);
+
+        assert_ne!(h1.finish(), h2.finish(), "Different byte arrays of same length should not collide");
     }
 }
