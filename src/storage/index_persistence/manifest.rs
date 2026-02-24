@@ -221,3 +221,96 @@ mod tests {
         assert!(err.to_string().contains("Index file corrupted"));
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_save_manifest_fails_on_io_error() {
+        let dir = tempdir().unwrap();
+        // Path inside non-existent subdirectory (should fail creation of temp file if atomic_write doesn't mkdir - which it doesn't)
+        let path = dir.path().join("subdir").join("manifest.idx");
+
+        let manifest = IndexManifest::new(1);
+        let result = save_manifest(&manifest, &path);
+
+        assert!(result.is_err());
+        // Should be I/O error (NotFound because directory doesn't exist)
+        assert!(result.unwrap_err().is_not_found());
+    }
+
+    #[test]
+    fn test_load_manifest_invalid_magic() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("manifest.idx");
+
+        let mut manifest = IndexManifest::new(1);
+        // Corrupt magic bytes
+        manifest.magic = *b"BADM";
+
+        // Manually save because save_manifest uses correct magic in new() if we just used constructor?
+        // Wait, IndexManifest::new() sets correct magic. We changed it.
+        // But bitcode::encode encodes the struct as is. So we can use save_manifest if we could change magic.
+        // manifest.magic is public, so we changed it.
+        // BUT save_manifest calculates CRC. So CRC will be valid for the BAD MAGIC.
+        // This tests that load_manifest checks magic *after* CRC validation.
+
+        save_manifest(&manifest, &path).unwrap();
+
+        let result = load_manifest(&path);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            IndexPersistenceError::InvalidMagic { .. }
+        ));
+    }
+
+    #[test]
+    fn test_load_manifest_unsupported_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("manifest.idx");
+
+        let mut manifest = IndexManifest::new(1);
+        manifest.version = MANIFEST_VERSION + 1;
+
+        save_manifest(&manifest, &path).unwrap();
+
+        let result = load_manifest(&path);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            IndexPersistenceError::UnsupportedVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn test_manifest_crc_covers_all_data() {
+        // Ensure CRC calculation includes all fields
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("manifest.idx");
+
+        let mut manifest = IndexManifest::new(1);
+        manifest.lsn = 100;
+        save_manifest(&manifest, &path).unwrap();
+
+        // Read file
+        let mut bytes = fs::read(&path).unwrap();
+        // Modify LSN in the serialized data
+        // LSN is near the beginning. Bitcode is variable length, but we can just flip bytes.
+        // Flipping ANY byte in the data section (except last 4 CRC bytes) should trigger checksum mismatch.
+        let len = bytes.len();
+        bytes[len - 5] ^= 0xFF; // Flip last byte of data
+
+        fs::write(&path, bytes).unwrap();
+
+        let result = load_manifest(&path);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            IndexPersistenceError::Corrupted { .. }
+        ));
+    }
+}
