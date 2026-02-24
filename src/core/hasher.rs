@@ -229,7 +229,15 @@ mod tests {
         let mut h2 = IdentityHasher::default();
         s2.hash(&mut h2);
 
-        assert_ne!(h1.finish(), h2.finish(), "Different strings must produce different hashes");
-        assert_ne!(h1.finish(), 255, "String hash should not collapse to the 0xff marker");
+        assert_ne!(
+            h1.finish(),
+            h2.finish(),
+            "Different strings must produce different hashes"
+        );
+        assert_ne!(
+            h1.finish(),
+            255,
+            "String hash should not collapse to the 0xff marker"
+        );
     }
 }
