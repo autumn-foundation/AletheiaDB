@@ -22,15 +22,13 @@ fn test_large_intersection_correctness() {
             TimeRange::from(0.into()),
         );
 
-        indexes.insert_node_version(node_id, version_id, interval).unwrap();
+        indexes
+            .insert_node_version(node_id, version_id, interval)
+            .unwrap();
     }
 
     // Query at the overlapping point
-    let results = indexes.find_node_version_at_point(
-        node_id,
-        1000.into(),
-        1000.into()
-    );
+    let results = indexes.find_node_version_at_point(node_id, 1000.into(), 1000.into());
 
     assert_eq!(
         results.len(),
@@ -59,32 +57,29 @@ fn test_batch_insert_reject_existing() {
     let v1 = VersionId::new(100).unwrap();
 
     // Insert v1 initially
-    indexes.insert_node_version(
-        node_id,
-        v1,
-        BiTemporalInterval::new(
-            TimeRange::new(0.into(), 1000.into()).unwrap(),
-            TimeRange::from(0.into()),
+    indexes
+        .insert_node_version(
+            node_id,
+            v1,
+            BiTemporalInterval::new(
+                TimeRange::new(0.into(), 1000.into()).unwrap(),
+                TimeRange::from(0.into()),
+            ),
         )
-    ).unwrap();
+        .unwrap();
 
     // Try to insert v1 again via batch with Reject policy
     // The batch itself has no duplicates, but it duplicates an existing version.
-    let batch = vec![
-        (
-            v1,
-            BiTemporalInterval::new(
-                TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                TimeRange::from(0.into()),
-            )
-        )
-    ];
+    let batch = vec![(
+        v1,
+        BiTemporalInterval::new(
+            TimeRange::new(1000.into(), 2000.into()).unwrap(),
+            TimeRange::from(0.into()),
+        ),
+    )];
 
-    let result = indexes.insert_node_versions_batch_with_policy(
-        node_id,
-        batch,
-        DeduplicationPolicy::Reject
-    );
+    let result =
+        indexes.insert_node_versions_batch_with_policy(node_id, batch, DeduplicationPolicy::Reject);
 
     assert!(
         result.is_err(),
