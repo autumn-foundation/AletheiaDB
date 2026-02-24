@@ -217,7 +217,7 @@ impl EntityTimeline {
 
         let idx = self
             .versions
-            .partition_point(|e| (e.start, e.metadata_idx) < new_key);
+            .partition_point(|e| (e.start, e.metadata_idx) <= new_key);
         self.versions.insert(idx, entry);
 
         // Rebuild position map after insertion (positions shifted)
@@ -3925,5 +3925,43 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&EntityId::Node(node_id)));
         assert!(ids.contains(&EntityId::Edge(edge_id)));
+    }
+
+    #[test]
+    fn test_entity_timeline_fifo_verification() {
+        let mut timeline = EntityTimeline::default();
+        // Insert identical keys: same start time, same metadata_idx
+        timeline.insert(100.into(), 200.into(), 1);
+        timeline.insert(100.into(), 300.into(), 1);
+
+        // Check order - this passes because of the optimization path (append at end)
+        let e0 = timeline.versions[0];
+        let e1 = timeline.versions[1];
+
+        assert_eq!(e0.end, 200.into(), "Expected FIFO order (first inserted first)");
+        assert_eq!(e1.end, 300.into(), "Expected FIFO order (second inserted second)");
+    }
+
+    #[test]
+    fn test_entity_timeline_middle_insertion_fifo() {
+        let mut timeline = EntityTimeline::default();
+        // Setup: [50, 150]
+        timeline.insert(50.into(), 60.into(), 1);
+        timeline.insert(150.into(), 160.into(), 1);
+
+        // Insert middle duplicate 1: (100, 110, 1)
+        timeline.insert(100.into(), 110.into(), 1);
+        // State: [50, 100(end=110), 150]
+
+        // Insert middle duplicate 2: (100, 120, 1)
+        // This hits partition_point because it's not at the end (100 < 150)
+        timeline.insert(100.into(), 120.into(), 1);
+
+        let mid1 = timeline.versions[1];
+        let mid2 = timeline.versions[2];
+
+        // Assert FIFO behavior
+        assert_eq!(mid1.end, 110.into(), "Middle insert should be FIFO (first inserted first)");
+        assert_eq!(mid2.end, 120.into(), "Middle insert should be FIFO (second inserted second)");
     }
 }
