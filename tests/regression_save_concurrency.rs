@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[test]
+#[serial_test::serial]
 fn regression_save_allows_concurrent_search() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("regression.index");

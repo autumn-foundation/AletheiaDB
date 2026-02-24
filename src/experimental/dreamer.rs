@@ -117,6 +117,13 @@ impl<'a> Dreamer<'a> {
 
                 // Linear projection: Future = Last + (Velocity * Horizon)
                 // Velocity = (Last - First) / Duration
+                if first_vec.len() != last_vec.len() {
+                    return Err(Error::Vector(VectorError::DimensionMismatch {
+                        expected: first_vec.len(),
+                        actual: last_vec.len(),
+                    }));
+                }
+
                 let mut proj = Vec::with_capacity(last_vec.len());
 
                 for (start, end) in first_vec.iter().zip(last_vec.iter()) {
@@ -268,5 +275,45 @@ mod tests {
 
         // Should match itself (as it's the closest to [1.0, 1.0])
         assert_eq!(res[0].0, node);
+    }
+
+    #[test]
+    fn test_dreamer_mixed_dimensions_error() {
+        let db = AletheiaDB::new().unwrap();
+        // Index not strictly required for dreamer logic until search, but needed for property setting usually
+        // We'll bypass index for creating mixed props
+
+        let t0 = time::now();
+        // V1: 2 dims
+        let props = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 0.0])
+            .build();
+        let node = db.create_node("Node", props).unwrap();
+
+        // V2: 3 dims (update)
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        db.write(|tx| {
+            tx.update_node(
+                node,
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 1.0, 1.0])
+                    .build(),
+            )
+        })
+        .unwrap();
+
+        let t1 = time::now();
+
+        let dreamer = Dreamer::new(&db);
+        let window = TimeRange::new(t0, t1).unwrap();
+
+        // Should error due to dimension mismatch
+        let res = dreamer.predict_future(node, "vec", window, Duration::from_secs(10), 1);
+
+        assert!(res.is_err());
+        match res {
+            Err(Error::Vector(VectorError::DimensionMismatch { .. })) => (),
+            _ => panic!("Expected DimensionMismatch error, got {:?}", res),
+        }
     }
 }
