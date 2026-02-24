@@ -90,16 +90,26 @@ impl<'a> Chameleon<'a> {
         property: &str,
         k: usize,
     ) -> Result<Vec<Aspect>> {
-        // 1. Gather Neighbors
+        // 1. Gather Neighbors (Limited)
         let neighbor_ids = self.get_neighbors(node_id)?;
         if neighbor_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        // 2. Extract Vectors
+        // 2. Extract Vectors with Dimension Consistency
         let mut data = Vec::with_capacity(neighbor_ids.len());
+        let mut expected_dim = None;
+
         for &nid in &neighbor_ids {
             if let Ok(vec) = self.get_node_vector(nid, property) {
+                // Establish expected dimension from the first valid vector
+                if let Some(dim) = expected_dim {
+                    if vec.len() != dim {
+                        continue; // Skip mismatched dimensions to prevent panic
+                    }
+                } else {
+                    expected_dim = Some(vec.len());
+                }
                 data.push((nid, vec));
             }
         }
@@ -197,12 +207,17 @@ impl<'a> Chameleon<'a> {
 
     // --- Helpers ---
 
+    const MAX_CONTEXT_NEIGHBORS: usize = 100;
+
     fn get_neighbors(&self, node_id: NodeId) -> Result<Vec<NodeId>> {
-        let outgoing = self.db.get_outgoing_edges(node_id);
-        let mut neighbors = Vec::with_capacity(outgoing.len());
-        for edge_id in outgoing {
-            let edge = self.db.get_edge(edge_id)?;
-            neighbors.push(edge.target);
+        let outgoing_iter = self.db.get_outgoing_edges_iter(node_id);
+        let mut neighbors = Vec::with_capacity(Self::MAX_CONTEXT_NEIGHBORS);
+
+        for edge_id in outgoing_iter.take(Self::MAX_CONTEXT_NEIGHBORS) {
+            // Use zero-copy access to target node
+            if let Ok(target) = self.db.get_edge_target(edge_id) {
+                neighbors.push(target);
+            }
         }
         Ok(neighbors)
     }
