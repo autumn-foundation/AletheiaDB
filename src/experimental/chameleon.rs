@@ -112,7 +112,9 @@ impl<'a> Chameleon<'a> {
                             // Note: Using eprintln! because 'log' crate is not a direct dependency of 'nova' feature
                             eprintln!(
                                 "WARN [Chameleon]: Skipping vector for neighbor {} due to dimension mismatch (expected {}, got {})",
-                                nid, dim, vec.len()
+                                nid,
+                                dim,
+                                vec.len()
                             );
                         }
                     }
