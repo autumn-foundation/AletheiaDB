@@ -483,6 +483,26 @@ impl CurrentStorage {
             .ok_or_else(|| StorageError::NodeNotFound(id).into())
     }
 
+    /// Access a node without cloning, executing a closure on the node data.
+    ///
+    /// This method provides zero-copy read access to node data for hot paths
+    /// where only specific fields are needed.
+    ///
+    /// # Performance
+    ///
+    /// - **No allocation**: Does not clone the Node
+    /// - **No Arc increment**: Does not increment PropertyMap reference count (unless cloned in closure)
+    /// - **Lock duration**: Holds DashMap read lock only during closure execution
+    #[inline]
+    pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
+    where
+        F: FnOnce(&Node) -> R,
+    {
+        self.indexes
+            .with_node(id, f)
+            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+    }
+
     /// Get an edge by ID.
     pub fn get_edge(&self, id: EdgeId) -> Result<Edge> {
         self.indexes
@@ -644,12 +664,12 @@ impl CurrentStorage {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
         // Save old node for vector index update
-        let old_node = self.indexes.get_node(node.id);
+        let old_props = self.indexes.with_node(node.id, |n| n.properties.clone());
 
         // Update vector index BEFORE updating node in main indexes.
         // If vector indexing fails, we haven't modified any state yet.
-        if let Some(ref old) = old_node {
-            self.update_vector_index(node.id, &node.properties, &old.properties)?;
+        if let Some(old_p) = old_props {
+            self.update_vector_index(node.id, &node.properties, &old_p)?;
         }
 
         // Update temporal vector index if enabled
@@ -2096,20 +2116,20 @@ impl CurrentStorage {
     ///
     /// Returns (property_name, index, config).
     fn get_node_vector(&self, node_id: NodeId, prop_name: &str) -> Result<Arc<[f32]>> {
-        let node = self
-            .indexes
-            .get_node(node_id)
-            .ok_or(StorageError::NodeNotFound(node_id))?;
-
-        node.properties
-            .get(prop_name)
-            .ok_or_else(|| StorageError::PropertyNotFound(prop_name.to_string()))?
-            .as_arc_vector()
-            .ok_or_else(|| {
-                crate::core::error::Error::Vector(crate::core::error::VectorError::InvalidVector {
-                    reason: "Property is not a vector".to_string(),
+        self.indexes
+            .with_node(node_id, |node| {
+                let val = node.properties.get(prop_name).ok_or_else(|| {
+                    crate::core::error::Error::Storage(StorageError::PropertyNotFound(
+                        prop_name.to_string(),
+                    ))
+                })?;
+                val.as_arc_vector().ok_or_else(|| {
+                    crate::core::error::Error::Vector(crate::core::error::VectorError::InvalidVector {
+                        reason: "Property is not a vector".to_string(),
+                    })
                 })
             })
+            .ok_or_else(|| crate::core::error::Error::Storage(StorageError::NodeNotFound(node_id)))?
     }
 
     fn get_vector_index_internal(
