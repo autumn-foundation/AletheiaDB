@@ -620,3 +620,60 @@ mod tests {
         assert_eq!(v, PredicateValue::String("hello".to_string()));
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    #[test]
+    fn test_predicate_not_identities() {
+        // 🛡️ Sentry Test: Verify boolean identities for negation.
+        // !True = False, !False = True.
+        // This targets mutants that might break the boolean logic in `not()`.
+
+        let not_true = !Predicate::True;
+        assert!(
+            matches!(not_true, Predicate::False),
+            "!True should be False, got {:?}",
+            not_true
+        );
+
+        let not_false = !Predicate::False;
+        assert!(
+            matches!(not_false, Predicate::True),
+            "!False should be True, got {:?}",
+            not_false
+        );
+    }
+
+    #[test]
+    fn test_predicate_double_negation_complex() {
+        // 🛡️ Sentry Test: Verify double negation simplification for nested predicates.
+        // !!(A AND B) -> (A AND B).
+        // The implementation recursively unwraps Not(Not(X)) -> X.
+
+        let inner = Predicate::And(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)]);
+
+        let not_inner = !inner.clone();
+        assert!(matches!(not_inner, Predicate::Not(_)));
+
+        let double_not = !not_inner;
+
+        // Should be structurally equal to inner
+        // We can't use assert_eq! directly because Predicate doesn't derive PartialEq
+        // So we match the structure.
+        if let Predicate::And(preds) = double_not {
+            assert_eq!(preds.len(), 2);
+            match &preds[0] {
+                Predicate::Eq { key, .. } => assert_eq!(key, "a"),
+                _ => panic!("Expected Eq"),
+            }
+            match &preds[1] {
+                Predicate::Eq { key, .. } => assert_eq!(key, "b"),
+                _ => panic!("Expected Eq"),
+            }
+        } else {
+            panic!("Expected And predicate after double negation");
+        }
+    }
+}

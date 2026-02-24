@@ -2465,6 +2465,37 @@ mod sentry_tests {
             panic!("Materialized value should be a Vector");
         }
     }
+
+    #[test]
+    fn test_vector_delta_apply_empty_changes() {
+        // 🛡️ Sentry Test: Applying sparse delta with no changes should return base vector unchanged.
+        let delta = VectorDelta::Sparse {
+            dimension: 5,
+            changes: Arc::new(vec![]),
+        };
+        let base = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let result = delta.apply(&base);
+        assert_eq!(result, base);
+    }
+
+    #[test]
+    fn test_vector_delta_apply_out_of_bounds() {
+        // 🛡️ Sentry Test: Verify out-of-bounds indices are ignored safely.
+        let delta = VectorDelta::Sparse {
+            dimension: 3,
+            changes: Arc::new(vec![
+                (0, 10.0), // Valid
+                (5, 20.0), // Invalid index
+            ]),
+        };
+        let base = vec![1.0, 2.0, 3.0];
+        let result = delta.apply(&base);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], 10.0); // Updated
+        assert_eq!(result[1], 2.0); // Unchanged
+        assert_eq!(result[2], 3.0); // Unchanged
+    }
 }
 
 #[cfg(test)]
