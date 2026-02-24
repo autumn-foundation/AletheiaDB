@@ -1257,6 +1257,19 @@ impl VectorIndex for HnswIndex {
 
                         // Exponential backoff: 1ms, 2ms, 4ms
                         let delay_ms = 1u64 << attempt;
+
+                        #[cfg(any(feature = "tokio", feature = "embeddings"))]
+                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                            #[allow(clippy::collapsible_if)]
+                            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+                            {
+                                tokio::task::block_in_place(|| {
+                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms))
+                                });
+                                continue;
+                            }
+                        }
+
                         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                         continue;
                     }
@@ -1371,6 +1384,22 @@ impl VectorIndex for HnswIndex {
                                 {
                                     self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
                                     let delay_ms = 1u64 << attempt;
+
+                                    #[cfg(any(feature = "tokio", feature = "embeddings"))]
+                                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                        #[allow(clippy::collapsible_if)]
+                                        if handle.runtime_flavor()
+                                            == tokio::runtime::RuntimeFlavor::MultiThread
+                                        {
+                                            tokio::task::block_in_place(|| {
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_millis(delay_ms),
+                                                )
+                                            });
+                                            continue;
+                                        }
+                                    }
+
                                     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                                     continue;
                                 }
@@ -1528,6 +1557,19 @@ impl HnswIndex {
                     if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
                         self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
                         let delay_ms = 1u64 << attempt;
+
+                        #[cfg(any(feature = "tokio", feature = "embeddings"))]
+                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                            #[allow(clippy::collapsible_if)]
+                            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+                            {
+                                tokio::task::block_in_place(|| {
+                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms))
+                                });
+                                continue;
+                            }
+                        }
+
                         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                         continue;
                     }
