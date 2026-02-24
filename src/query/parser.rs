@@ -147,7 +147,22 @@ impl Parser {
         parser.parse_query()
     }
 
-    /// Parse a complete query.
+    /// Parse a complete AQL query.
+    ///
+    /// This is the top-level parsing function. It expects the query to follow the general structure:
+    /// `[Temporal] [Source] [Rank] [Where] [Return] [Order] [Skip] [Limit]`
+    ///
+    /// # Grammar
+    /// ```text
+    /// query ::= temporal_clause?
+    ///           source_clause
+    ///           rank_clause?
+    ///           where_clause?
+    ///           return_clause?
+    ///           order_clause?
+    ///           skip_clause?
+    ///           limit_clause?
+    /// ```
     fn parse_query(&mut self) -> Result<QueryAst, ParseError> {
         // Parse optional temporal clause
         let temporal = self.parse_temporal_clause()?;
@@ -208,11 +223,18 @@ impl Parser {
 
     /// Parse an optional temporal clause (`AS OF ...` or `BETWEEN ...`).
     ///
-    /// Grammar:
+    /// The temporal clause sets the context for the query (valid time and transaction time).
+    ///
+    /// # Grammar
     /// ```text
     /// temporal_clause ::= "AS OF" timestamp ("," timestamp)?
     ///                   | "BETWEEN" timestamp "AND" timestamp
     /// ```
+    ///
+    /// # Examples
+    /// - `AS OF '2024-01-01'` (Valid time only)
+    /// - `AS OF '2024-01-01', '2024-01-02'` (Valid time + Transaction time)
+    /// - `BETWEEN '2024-01-01' AND '2024-02-01'` (Valid time range)
     fn parse_temporal_clause(&mut self) -> Result<Option<TemporalClause>, ParseError> {
         if self.check(&Token::As) {
             self.advance(); // consume AS
@@ -277,8 +299,15 @@ impl Parser {
 
     /// Parse the main source of data for the query.
     ///
-    /// This can be either a graph pattern match (`MATCH`) or a vector search
-    /// (`SIMILAR TO` or `FIND SIMILAR`).
+    /// This parses the `MATCH` clause or vector search clauses (`SIMILAR TO`, `FIND SIMILAR`).
+    /// Every query must have exactly one source clause.
+    ///
+    /// # Grammar
+    /// ```text
+    /// source_clause ::= match_clause
+    ///                 | similar_clause
+    ///                 | find_similar_clause
+    /// ```
     fn parse_source_clause(&mut self) -> Result<SourceClause, ParseError> {
         if self.check(&Token::Match) {
             return self.parse_match_clause();
@@ -300,7 +329,10 @@ impl Parser {
 
     /// Parse a `MATCH` clause containing one or more patterns.
     ///
-    /// Grammar:
+    /// The `MATCH` clause defines the graph patterns to search for. Multiple patterns
+    /// can be comma-separated (e.g., `MATCH (a), (b)`).
+    ///
+    /// # Grammar
     /// ```text
     /// match_clause ::= "MATCH" pattern ("," pattern)*
     /// ```
@@ -825,7 +857,9 @@ impl Parser {
 
     /// Parse a `WHERE` clause containing predicates.
     ///
-    /// Grammar:
+    /// The `WHERE` clause filters the results from the source clause using boolean logic.
+    ///
+    /// # Grammar
     /// ```text
     /// where_clause ::= "WHERE" predicate
     /// ```
@@ -840,10 +874,23 @@ impl Parser {
         Ok(Some(WhereClause { predicate }))
     }
 
+    /// Parse a boolean predicate expression.
+    ///
+    /// This is the entry point for parsing conditions in `WHERE` clauses.
+    /// It delegates to `parse_or_predicate` to handle operator precedence (OR has lowest precedence).
+    ///
+    /// # Recursion Limit
+    ///
+    /// Takes a `depth` argument to enforce `MAX_RECURSION_DEPTH` (100) to prevent stack overflows.
     fn parse_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
         self.parse_or_predicate(depth)
     }
 
+    /// Parse logical OR expressions.
+    ///
+    /// ```text
+    /// or_predicate ::= and_predicate ("OR" and_predicate)*
+    /// ```
     fn parse_or_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
         let mut left = self.parse_and_predicate(depth)?;
 
@@ -1131,6 +1178,17 @@ impl Parser {
     // RETURN Clause
     // =========================================================
 
+    /// Parse a `RETURN` clause.
+    ///
+    /// The `RETURN` clause specifies which data to include in the result set.
+    /// It supports aliasing (`AS alias`) and `DISTINCT` projections.
+    ///
+    /// # Grammar
+    /// ```text
+    /// return_clause ::= "RETURN" ("DISTINCT")? return_item ("," return_item)*
+    /// return_item   ::= expression ("AS" identifier)?
+    ///                 | "COUNT" "(" ("*" | expression) ")"
+    /// ```
     fn parse_return_clause(&mut self) -> Result<Option<ReturnClause>, ParseError> {
         if !self.check(&Token::Return) {
             return Ok(None);
@@ -1195,6 +1253,13 @@ impl Parser {
     // ORDER BY Clause
     // =========================================================
 
+    /// Parse an `ORDER BY` clause.
+    ///
+    /// # Grammar
+    /// ```text
+    /// order_clause ::= "ORDER BY" order_item ("," order_item)*
+    /// order_item   ::= expression ("ASC" | "DESC")?
+    /// ```
     fn parse_order_clause(&mut self) -> Result<Option<OrderClause>, ParseError> {
         if !self.check(&Token::Order) {
             return Ok(None);
