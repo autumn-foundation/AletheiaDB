@@ -3926,4 +3926,103 @@ mod tests {
         assert!(ids.contains(&EntityId::Node(node_id)));
         assert!(ids.contains(&EntityId::Edge(edge_id)));
     }
+
+    #[test]
+    fn test_deduplication_policy_reject_success() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+
+        // Batch with unique versions should succeed with Reject policy
+        let batch = vec![
+            (
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
+            ),
+            (
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(3000.into(), 4000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
+            ),
+        ];
+
+        let result = indexes.insert_node_versions_batch_with_policy(
+            node_id,
+            batch,
+            DeduplicationPolicy::Reject,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Reject policy should accept valid batch with no duplicates"
+        );
+
+        let entity_id = EntityId::Node(node_id);
+        let timelines = indexes.index.get(&entity_id).unwrap();
+        assert_eq!(timelines.valid.versions.len(), 2);
+    }
+
+    #[test]
+    fn test_large_intersection_hash_threshold() {
+        // This test ensures the HashSet path in intersect_metadata_indices is exercised
+        // HASH_THRESHOLD is 16, so we need > 16 overlapping versions.
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let num_versions = 20;
+
+        // Insert 20 versions that all overlap at t=1000
+        for i in 0..num_versions {
+            let version_id = VersionId::new(i).unwrap();
+            indexes
+                .insert_node_version(
+                    node_id,
+                    version_id,
+                    BiTemporalInterval::new(
+                        TimeRange::new(0.into(), 2000.into()).unwrap(), // Valid time covers 1000
+                        TimeRange::new(0.into(), 2000.into()).unwrap(), // Tx time covers 1000
+                    ),
+                )
+                .unwrap();
+        }
+
+        // Query at t=1000 (valid) and t=1000 (tx)
+        let results = indexes.find_node_version_at_point(node_id, 1000.into(), 1000.into());
+
+        assert_eq!(
+            results.len(),
+            num_versions as usize,
+            "Should find all overlapping versions"
+        );
+
+        // Verify all versions are present
+        for i in 0..num_versions {
+            let v_id = VersionId::new(i).unwrap();
+            assert!(
+                results.contains(&v_id),
+                "Result should contain version {:?}",
+                v_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_update_end_time_returns_false_if_missing() {
+        let mut timeline = EntityTimeline::default();
+        let metadata_idx = 1;
+
+        // Insert one entry
+        timeline.insert(0.into(), 1000.into(), metadata_idx);
+
+        // Try to update a non-existent metadata index
+        let missing_idx = 999;
+        let result = timeline.update_end_time(missing_idx, 2000.into());
+
+        assert!(!result, "Should return false for missing metadata index");
+    }
 }
