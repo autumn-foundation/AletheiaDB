@@ -1359,6 +1359,62 @@ mod tests {
         }
     }
 
+    /// Test HnswSearch with both property_key and label_filter.
+    /// This covers the code path where both are Some.
+    #[test]
+    fn test_hnsw_search_multi_property_with_label() {
+        let (current, historical, doc1, _doc2) = create_multi_property_vector_storage();
+        let executor = QueryExecutor::new(current, historical);
+
+        // Query title_embedding with vector similar to doc1's title_embedding, filtered by label "Document"
+        let plan = PhysicalPlan {
+            root: PhysicalOp::HnswSearch {
+                embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
+                k: 1,
+                label_filter: Some("Document".to_string()),
+                property_key: Some("title_embedding".to_string()),
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 1);
+        // The top result should be doc1
+        match &rows[0].entity {
+            EntityResult::NodeId(id) => {
+                assert_eq!(*id, doc1, "Should return doc1 for title_embedding query")
+            }
+            EntityResult::Node(node) => assert_eq!(
+                node.id, doc1,
+                "Should return doc1 for title_embedding query"
+            ),
+            _ => panic!("Expected Node or NodeId result"),
+        }
+
+        // Test with a non-matching label
+        let plan_no_match = PhysicalPlan {
+            root: PhysicalOp::HnswSearch {
+                embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
+                k: 1,
+                label_filter: Some("NonExistentLabel".to_string()),
+                property_key: Some("title_embedding".to_string()),
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan_no_match).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+        assert!(rows.is_empty());
+    }
+
     /// Test that VectorRerank uses property_key to rerank by the correct property.
     #[test]
     fn test_vector_rerank_multi_property() {
