@@ -2102,4 +2102,42 @@ mod sentry_tests {
         let result = Parser::parse(&query);
         assert!(result.is_ok(), "Should accept recursion up to the limit");
     }
+
+    #[test]
+    fn test_limit_zero_allowed() {
+        // 🎯 Target: Boundary condition in parse_usize (n < 0 vs n <= 0)
+        // 💣 Risk: LIMIT 0 should be valid but would fail if < became <=
+        let query = Parser::parse("MATCH (n) RETURN n LIMIT 0").unwrap();
+        assert_eq!(query.limit, Some(0));
+    }
+
+    #[test]
+    fn test_skip_zero_allowed() {
+        // 🎯 Target: Boundary condition in parse_usize (n < 0 vs n <= 0)
+        // 💣 Risk: SKIP 0 should be valid but would fail if < became <=
+        let query = Parser::parse("MATCH (n) RETURN n SKIP 0").unwrap();
+        assert_eq!(query.skip, Some(0));
+    }
+
+    #[test]
+    fn test_depth_range_equal_min_max() {
+        // 🎯 Target: Boundary condition in parse_depth_range (min > max vs min >= max)
+        // 💣 Risk: Range *2..2 (exact match syntax) would fail if > became >=
+        let query = Parser::parse("MATCH (a)-[:REL*2..2]->(b) RETURN b").unwrap();
+
+        if let SourceClause::Match(patterns) = &query.source {
+            if let PatternElement::Relationship(rel) = &patterns[0].elements[1] {
+                assert_eq!(
+                    rel.depth,
+                    Some(DepthSpec::Range { min: 2, max: 2 }),
+                    "Expected DepthSpec::Range {{ min: 2, max: 2 }}, got {:?}",
+                    rel.depth
+                );
+            } else {
+                panic!("Expected relationship pattern");
+            }
+        } else {
+            panic!("Expected Match clause");
+        }
+    }
 }
