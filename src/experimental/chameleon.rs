@@ -98,9 +98,23 @@ impl<'a> Chameleon<'a> {
 
         // 2. Extract Vectors
         let mut data = Vec::with_capacity(neighbor_ids.len());
+        let mut expected_dim: Option<usize> = None;
+
         for &nid in &neighbor_ids {
             if let Ok(vec) = self.get_node_vector(nid, property) {
-                data.push((nid, vec));
+                match expected_dim {
+                    Some(dim) => {
+                        if vec.len() == dim {
+                            data.push((nid, vec));
+                        }
+                    }
+                    None => {
+                        if !vec.is_empty() {
+                            expected_dim = Some(vec.len());
+                            data.push((nid, vec));
+                        }
+                    }
+                }
             }
         }
 
@@ -451,5 +465,42 @@ mod tests {
             "Centroid 0 {:?} should be near X or Y axis",
             c0
         );
+    }
+
+    #[test]
+    fn test_chameleon_mixed_dimensions_safe() {
+        let db = AletheiaDB::new().unwrap();
+
+        let center_props = PropertyMapBuilder::new().build();
+        let center = db.create_node("Center", center_props).unwrap();
+
+        // Node 1: 2 dims
+        let p1 = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let n1 = db.create_node("A", p1).unwrap();
+
+        // Node 2: 3 dims (Should be filtered out)
+        let p2 = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0, 0.0])
+            .build();
+        let n2 = db.create_node("B", p2).unwrap();
+
+        let edge_props = PropertyMapBuilder::new().build();
+        db.create_edge(center, n1, "LINK", edge_props.clone())
+            .unwrap();
+        db.create_edge(center, n2, "LINK", edge_props).unwrap();
+
+        let chameleon = Chameleon::new(&db);
+
+        // This used to panic because MiniKMeans::cluster assumes uniform dimensions.
+        // Now it should filter out the 3D vector and succeed with the 2D vector.
+        let aspects = chameleon.analyze_context(center, "vec", 2).unwrap();
+
+        // Should return 1 aspect (from n1) or maybe clamped k
+        // We requested k=2, but only 1 valid vector.
+        // effective_k = min(2, 1) = 1.
+        assert_eq!(aspects.len(), 1);
+        assert_eq!(aspects[0].exemplars[0], n1);
     }
 }
