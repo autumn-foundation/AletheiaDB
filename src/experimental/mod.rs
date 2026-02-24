@@ -42,6 +42,7 @@
 //! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
 //! | [`gestalt`] | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
 //! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
+//! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -93,6 +94,9 @@ pub mod cartographer;
 #[cfg(feature = "nova")]
 /// Chameleon: Context-Aware Faceted Search.
 pub mod chameleon;
+#[cfg(feature = "nova")]
+/// Chimera: Hybrid Entity Synthesis Engine.
+pub mod chimera;
 #[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
