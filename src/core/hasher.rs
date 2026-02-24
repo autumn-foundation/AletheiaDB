@@ -171,3 +171,53 @@ mod reproduction_tests {
         assert_ne!(h1.finish(), h2.finish(), "Different byte arrays of same length should not collide");
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use std::hash::Hasher;
+
+    #[test]
+    fn test_identity_hasher_unsigned_coverage() {
+        let mut hasher = IdentityHasher::default();
+
+        hasher.write_u16(42);
+        assert_eq!(hasher.finish(), 42);
+
+        hasher.write_usize(12345);
+        assert_eq!(hasher.finish(), 12345);
+
+        // u128 uses XOR folding: low ^ high
+        hasher.write_u128(0x0000000000000001_0000000000000002);
+        // low=2, high=1 -> 2 ^ 1 = 3
+        assert_eq!(hasher.finish(), 3);
+    }
+
+    #[test]
+    fn test_identity_hasher_signed_coverage() {
+        let mut hasher = IdentityHasher::default();
+
+        hasher.write_i8(10);
+        assert_eq!(hasher.finish(), 10);
+
+        hasher.write_i16(20);
+        assert_eq!(hasher.finish(), 20);
+
+        hasher.write_i32(30);
+        assert_eq!(hasher.finish(), 30);
+
+        hasher.write_i64(40);
+        assert_eq!(hasher.finish(), 40);
+
+        hasher.write_isize(50);
+        assert_eq!(hasher.finish(), 50);
+
+        // i128 uses XOR folding: low ^ high
+        // 1 << 64 is high bit 1, low bits 0.
+        // 2 is low bits 2.
+        let val: i128 = (1 << 64) | 2;
+        hasher.write_i128(val);
+        // low=2, high=1 -> 2 ^ 1 = 3
+        assert_eq!(hasher.finish(), 3);
+    }
+}
