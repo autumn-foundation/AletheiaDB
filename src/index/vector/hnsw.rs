@@ -4403,6 +4403,27 @@ mod coverage_additions {
         assert_eq!(index.stats.search_retry_failures.load(Ordering::Relaxed), 0);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_retry_usearch_logic_async_context() {
+        // This test replicates test_retry_usearch_logic but runs inside a multi-threaded tokio runtime.
+        // This ensures the block_in_place path is covered.
+        let index = create_test_index();
+        let mut attempts = 0;
+
+        // Simulate transient error loop
+        let result: crate::core::error::Result<()> = index.retry_usearch(
+            || {
+                attempts += 1;
+                Err("No available threads to lock".to_string())
+            },
+            "test_context",
+        );
+
+        // Should fail after retries (MAX_SEARCH_ATTEMPTS is 4)
+        assert!(result.is_err());
+        assert_eq!(attempts, 4);
+    }
+
     #[test]
     fn test_save_async_context() {
         let dir = tempfile::tempdir().unwrap();
