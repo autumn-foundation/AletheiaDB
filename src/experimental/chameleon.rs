@@ -72,6 +72,8 @@ pub struct Chameleon<'a> {
     db: &'a AletheiaDB,
 }
 
+const MAX_CONTEXT_NEIGHBORS: usize = 100;
+
 impl<'a> Chameleon<'a> {
     /// Create a new Chameleon instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -97,9 +99,20 @@ impl<'a> Chameleon<'a> {
         }
 
         // 2. Extract Vectors
-        let mut data = Vec::with_capacity(neighbor_ids.len());
+        // We limit collected vectors, not just candidate neighbors, to handle sparse graphs
+        let mut data: Vec<(NodeId, Vec<f32>)> =
+            Vec::with_capacity(neighbor_ids.len().min(MAX_CONTEXT_NEIGHBORS));
+
         for &nid in &neighbor_ids {
+            if data.len() >= MAX_CONTEXT_NEIGHBORS {
+                break;
+            }
+
             if let Ok(vec) = self.get_node_vector(nid, property) {
+                // Ensure consistent dimensions
+                if data.first().is_some_and(|first| vec.len() != first.1.len()) {
+                    continue;
+                }
                 data.push((nid, vec));
             }
         }
