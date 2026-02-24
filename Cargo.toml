@@ -105,7 +105,6 @@ tracy = ["tracy-client/enable"]
 # Observability features
 observability = ["dep:tracing", "dep:tracing-subscriber"]
 observability-tracy = ["observability", "dep:tracing-tracy", "tracy"]
-observability-honeycomb = ["observability", "honeycomb"]
 observability-prometheus = ["observability", "dep:metrics", "dep:metrics-exporter-prometheus"]
 
 # Default features
