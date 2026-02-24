@@ -20,6 +20,9 @@ use super::planner::physical::{PhysicalOp, PhysicalPlan};
 pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
 pub use iterators::TemporalNodeScanIterator;
+pub use iterators::{
+    FilterIterator, LimitIterator, ProjectIterator, ProvenanceFilterIterator, VectorRerankIterator,
+};
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
@@ -54,7 +57,7 @@ impl Default for ExecutionConfig {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust
 /// use std::sync::Arc;
 /// use parking_lot::RwLock;
 /// use aletheiadb::storage::current::CurrentStorage;
@@ -138,6 +141,39 @@ impl QueryExecutor {
     /// # Returns
     ///
     /// Returns a `QueryResults` iterator that produces `Result<QueryRow>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use parking_lot::RwLock;
+    /// use aletheiadb::storage::current::CurrentStorage;
+    /// use aletheiadb::storage::historical::HistoricalStorage;
+    /// use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+    /// use aletheiadb::query::planner::PhysicalOp;
+    ///
+    /// // 1. Setup storage and executor
+    /// let current = Arc::new(CurrentStorage::new());
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let executor = QueryExecutor::new(current, historical);
+    ///
+    /// // 2. Create a physical plan (usually done by planner)
+    /// let plan = PhysicalPlan {
+    ///     root: PhysicalOp::Empty, // Using Empty for example simplicity
+    ///     estimated_cost: Default::default(),
+    ///     temporal_context: None,
+    ///     parallel: false,
+    ///     include_provenance: true,
+    /// };
+    ///
+    /// // 3. Execute
+    /// let results = executor.execute(plan).unwrap();
+    ///
+    /// // 4. Iterate
+    /// for row in results {
+    ///     println!("Got row: {:?}", row);
+    /// }
+    /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;
         // Wrap with provenance filter to conditionally strip metadata
@@ -1321,6 +1357,62 @@ mod tests {
             ),
             _ => panic!("Expected Node or NodeId result"),
         }
+    }
+
+    /// Test HnswSearch with both property_key and label_filter.
+    /// This covers the code path where both are Some.
+    #[test]
+    fn test_hnsw_search_multi_property_with_label() {
+        let (current, historical, doc1, _doc2) = create_multi_property_vector_storage();
+        let executor = QueryExecutor::new(current, historical);
+
+        // Query title_embedding with vector similar to doc1's title_embedding, filtered by label "Document"
+        let plan = PhysicalPlan {
+            root: PhysicalOp::HnswSearch {
+                embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
+                k: 1,
+                label_filter: Some("Document".to_string()),
+                property_key: Some("title_embedding".to_string()),
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 1);
+        // The top result should be doc1
+        match &rows[0].entity {
+            EntityResult::NodeId(id) => {
+                assert_eq!(*id, doc1, "Should return doc1 for title_embedding query")
+            }
+            EntityResult::Node(node) => assert_eq!(
+                node.id, doc1,
+                "Should return doc1 for title_embedding query"
+            ),
+            _ => panic!("Expected Node or NodeId result"),
+        }
+
+        // Test with a non-matching label
+        let plan_no_match = PhysicalPlan {
+            root: PhysicalOp::HnswSearch {
+                embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
+                k: 1,
+                label_filter: Some("NonExistentLabel".to_string()),
+                property_key: Some("title_embedding".to_string()),
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan_no_match).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+        assert!(rows.is_empty());
     }
 
     /// Test that VectorRerank uses property_key to rerank by the correct property.
