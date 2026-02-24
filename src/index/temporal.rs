@@ -3942,10 +3942,7 @@ mod tests {
             .insert_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(
-                    TimeRange::from(0.into()),
-                    TimeRange::from(0.into()),
-                ),
+                BiTemporalInterval::new(TimeRange::from(0.into()), TimeRange::from(0.into())),
             )
             .unwrap();
 
@@ -3954,10 +3951,7 @@ mod tests {
             .insert_node_version(
                 node_id,
                 v3,
-                BiTemporalInterval::new(
-                    TimeRange::from(20.into()),
-                    TimeRange::from(0.into()),
-                ),
+                BiTemporalInterval::new(TimeRange::from(20.into()), TimeRange::from(0.into())),
             )
             .unwrap();
 
@@ -3966,10 +3960,7 @@ mod tests {
             .insert_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::new(
-                    TimeRange::from(10.into()),
-                    TimeRange::from(0.into()),
-                ),
+                BiTemporalInterval::new(TimeRange::from(10.into()), TimeRange::from(0.into())),
             )
             .unwrap();
 
@@ -4017,24 +4008,15 @@ mod tests {
         let batch = vec![
             (
                 v1,
-                BiTemporalInterval::new(
-                    TimeRange::from(0.into()),
-                    TimeRange::from(0.into()),
-                ),
+                BiTemporalInterval::new(TimeRange::from(0.into()), TimeRange::from(0.into())),
             ),
             (
                 v2,
-                BiTemporalInterval::new(
-                    TimeRange::from(20.into()),
-                    TimeRange::from(0.into()),
-                ),
+                BiTemporalInterval::new(TimeRange::from(20.into()), TimeRange::from(0.into())),
             ),
             (
                 v3,
-                BiTemporalInterval::new(
-                    TimeRange::from(10.into()),
-                    TimeRange::from(0.into()),
-                ),
+                BiTemporalInterval::new(TimeRange::from(10.into()), TimeRange::from(0.into())),
             ),
         ];
 
