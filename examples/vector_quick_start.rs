@@ -1,5 +1,5 @@
-use aletheiadb::{AletheiaDB, properties, HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
+use aletheiadb::{AletheiaDB, DistanceMetric, HnswConfig, properties};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new().unwrap();
@@ -14,19 +14,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Store node with embedding - automatically indexed!
     // Note: We convert the vector to a slice for the properties! macro
-    let doc_id = db.create_node("Document",
+    let doc_id = db.create_node(
+        "Document",
         properties! {
             "title" => "Introduction to Rust",
             "embedding" => &embedding[..],
-        }
+        },
     )?;
 
     // Create another similar node so we have something to find
-    let _doc2_id = db.create_node("Document",
+    let _doc2_id = db.create_node(
+        "Document",
         properties! {
             "title" => "Rust for Beginners",
             "embedding" => &embedding[..], // Same embedding for max similarity
-        }
+        },
     )?;
 
     // Find similar nodes
