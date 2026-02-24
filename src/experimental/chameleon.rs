@@ -521,10 +521,7 @@ mod tests {
         let nid2 = NodeId::new(2).unwrap();
 
         // Mixed dimensions: 2 and 3
-        let data = vec![
-            (nid1, vec![1.0, 0.0]),
-            (nid2, vec![1.0, 0.0, 0.0]),
-        ];
+        let data = vec![(nid1, vec![1.0, 0.0]), (nid2, vec![1.0, 0.0, 0.0])];
 
         // Should return Error, not panic
         let result = MiniKMeans::cluster(&data, 2);
