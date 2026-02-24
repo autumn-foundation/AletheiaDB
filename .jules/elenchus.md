@@ -273,3 +273,13 @@
 **Finding:** `normalize` zeroes out vectors with small squared magnitudes (< `SQUARED_MAGNITUDE_THRESHOLD`), but `normalize_in_place` leaves them unchanged. This creates inconsistent behavior depending on which API is used.
 **Evidence:** Reproduction test `tests/repro_normalize_inconsistency.rs` failed, showing that `normalize_in_place` did not modify a tiny vector.
 **Resolution:** Updated `normalize_in_place` to explicitly zero out the vector if its magnitude is below the threshold. Added regression test `test_normalize_in_place_tiny_vector` in `src/core/vector/tests.rs`.
+
+## [WAL RingBuffer Safety Gaps]
+**Module:** `src/storage/wal/ring_buffer.rs`
+**Verdict:** 🟡 Suspect
+**Finding:** `WalRingBuffer` lacked explicit tests for:
+1.  **Drop Safety:** Ensuring pending entries are dropped and waiters notified if the buffer is destroyed (shutdown/panic).
+2.  **Strict Sequence Ordering:** Ensuring `drain` stops at gaps rather than skipping them, which would violate WAL ordering.
+3.  **Wraparound Logic:** Explicit verification of the `distance_behind` check at `u64::MAX`.
+**Evidence:** Existing tests covered concurrency well but missed these specific safety properties.
+**Resolution:** Added 3 sentinel tests in `src/storage/wal/ring_buffer.rs`: `test_buffer_drop_notifies_waiters`, `test_drain_stops_at_gap`, and `test_wraparound_boundary_check`.

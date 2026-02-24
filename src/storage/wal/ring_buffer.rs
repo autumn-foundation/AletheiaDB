@@ -1457,4 +1457,165 @@ mod sentry_tests {
             "Error should mention dropped entry"
         );
     }
+
+    #[test]
+    fn test_buffer_drop_notifies_waiters() {
+        // 🛡️ Sentry: Verify that dropping the WalRingBuffer (e.g. during shutdown or panic)
+        // correctly drops all pending entries, which in turn triggers their error notification.
+        // This ensures no threads are left hanging waiting for a flush that will never happen.
+
+        let buf = WalRingBuffer::new(16);
+        let (entry, handle) = PendingEntry::new_sync(LSN(100), vec![]);
+
+        // Append entry to buffer
+        buf.try_append(entry).expect("Append should succeed");
+
+        // Verify it hasn't been flushed/completed yet
+        assert!(!handle.is_complete());
+
+        // Drop the buffer. The entry is inside.
+        // This simulates a shutdown or crash where the buffer is destroyed before flush.
+        drop(buf);
+
+        // The handle MUST return an error. If it blocks or returns Ok, we have a problem.
+        let result = handle.wait();
+        assert!(
+            result.is_err(),
+            "Waiter should be notified of error on buffer drop"
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("PendingEntry dropped"),
+            "Error should identify that entry was dropped"
+        );
+    }
+
+    #[test]
+    fn test_drain_stops_at_gap() {
+        // 🛡️ Sentry: Verify that drain() strictly adheres to sequence numbers and stops
+        // at the first gap. This ensures we never flush entries out of order.
+        //
+        // Scenario:
+        // - Buffer capacity 4
+        // - Write Pos 2 (expecting Slot 0 and Slot 1 to be filled)
+        // - Slot 1 is READY (seq updated)
+        // - Slot 0 is NOT READY (seq not updated)
+        //
+        // Outcome:
+        // - drain() should see Slot 0 is not ready and return NOTHING.
+        // - It must NOT skip Slot 0 and return Slot 1.
+
+        let mut buf = WalRingBuffer::new(4);
+
+        // Initialize state: write_pos=2, read_pos=0.
+        // set_state_for_wraparound_test initializes slots starting from write_pos.
+        // For write_pos=2:
+        // - Slot 2 (pos 2): seq 2
+        // - Slot 3 (pos 3): seq 3
+        // - Slot 0 (pos 4): seq 4
+        // - Slot 1 (pos 5): seq 5
+        buf.set_state_for_wraparound_test(2, 0);
+
+        // Manually overwrite Slot 0 to simulate a GAP (write started but not ready).
+        // For read_pos=0, expected_seq is 1.
+        // We set seq=0 (initial state), so 0 < 1. This is a true "behind" gap.
+        buf.slots[0].sequence.store(0, Ordering::Relaxed);
+        let (entry0, _) = PendingEntry::new_sync(LSN(0), vec![0]);
+        unsafe {
+            *buf.slots[0].entry.get() = Some(entry0);
+        }
+
+        // Manually overwrite Slot 1 to simulate READY (write completed).
+        // For read_pos=1, expected_seq is 2.
+        // We set seq=2 (ready state).
+        buf.slots[1].sequence.store(2, Ordering::Relaxed);
+        let (entry1, _) = PendingEntry::new_sync(LSN(1), vec![1]);
+        unsafe {
+            *buf.slots[1].entry.get() = Some(entry1);
+        }
+
+        // Attempt drain
+        let drained = buf.drain();
+
+        // 🛡️ CRITICAL ASSERTION: Must be empty!
+        // If it returns [entry1], we have violated ordering guarantees.
+        // drain() should see Slot 0's seq(0) != expected(1) and stop.
+        assert!(
+            drained.is_empty(),
+            "Drain must stop at gap (slot 0) even if subsequent slots (slot 1) are ready"
+        );
+
+        // Now "fix" the gap by marking Slot 0 as READY.
+        // Position 0. Ready sequence = 0 + 1 = 1.
+        buf.slots[0].sequence.store(1, Ordering::Relaxed);
+
+        // Attempt drain again
+        let drained_retry = buf.drain();
+
+        // Should now get both entries in order
+        assert_eq!(
+            drained_retry.len(),
+            2,
+            "Should drain both entries after gap is filled"
+        );
+        assert_eq!(drained_retry[0].lsn, LSN(0));
+        assert_eq!(drained_retry[1].lsn, LSN(1));
+    }
+
+    #[test]
+    fn test_wraparound_boundary_check() {
+        // 🛡️ Sentry: Verify try_append logic exactly at the u64::MAX boundary.
+        // Specifically check the logic `distance_behind <= capacity`.
+
+        let capacity = 4;
+        let mut buf = WalRingBuffer::new(capacity);
+
+        // Set state to u64::MAX.
+        // We want write_pos = u64::MAX.
+        let boundary = u64::MAX;
+        buf.set_state_for_wraparound_test(boundary, boundary);
+
+        // Slot for boundary (u64::MAX) is index 3.
+        let slot_idx = (boundary % capacity as u64) as usize; // 3
+
+        // Case 1: Simulate "Buffer Full" at boundary.
+        // We want try_append to hit the `distance_behind` check and fail.
+        // expected_seq = boundary (MAX).
+        // We set current_seq to simulate it holding data from previous cycle (MAX - capacity + 1).
+        // distance_behind = MAX - (MAX - 4 + 1) = 3.
+        // 0 < 3 <= 4. Condition met -> Return Err.
+        let busy_seq = boundary.wrapping_sub(capacity as u64).wrapping_add(1);
+        buf.slots[slot_idx]
+            .sequence
+            .store(busy_seq, Ordering::Relaxed);
+
+        let entry_fail = PendingEntry::new_async(LSN(1), vec![]);
+        let result = buf.try_append(entry_fail);
+        assert!(
+            result.is_err(),
+            "Should return error when buffer is full at boundary"
+        );
+
+        // Case 2: Simulate "Available" at boundary.
+        // We set current_seq = boundary (MAX).
+        // Condition `current_seq == expected_seq` -> Success.
+        buf.slots[slot_idx]
+            .sequence
+            .store(boundary, Ordering::Relaxed);
+
+        let entry_ok = PendingEntry::new_async(LSN(1), vec![]);
+        assert!(
+            buf.try_append(entry_ok).is_ok(),
+            "Should append successfully when slot is available at boundary"
+        );
+
+        // New write_pos should be 0 (u64::MAX + 1 wrapped).
+        assert_eq!(buf.write_pos.load(Ordering::Relaxed), 0);
+
+        // Check the slot state updated correctly.
+        // Logic: store(expected_seq.wrapping_add(1)) -> MAX + 1 -> 0.
+        let seq = buf.slots[slot_idx].sequence.load(Ordering::Relaxed);
+        assert_eq!(seq, 0, "Sequence should wrap to 0 after write at boundary");
+    }
 }
