@@ -1767,4 +1767,52 @@ mod tests {
             _ => panic!("Expected IndexNotFound error, got {:?}", err),
         }
     }
+
+    #[test]
+    fn test_pagination_limit_exceeded_error() {
+        use crate::core::error::{Error, QueryError};
+        use crate::query::plan::QueryHints;
+
+        let planner = test_planner();
+
+        // Test Limit exceeded
+        let query_limit = Query {
+            ops: vec![
+                QueryOp::StartNode(crate::core::NodeId::new(1).unwrap()),
+                QueryOp::Limit(MAX_PAGINATION_LIMIT + 1)
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let result_limit = planner.plan(query_limit);
+        assert!(result_limit.is_err());
+        match result_limit.unwrap_err() {
+            Error::Query(QueryError::InvalidParameter { parameter, reason }) => {
+                assert_eq!(parameter, "LIMIT");
+                assert!(reason.contains("exceeds maximum allowed"));
+            }
+            err => panic!("Expected InvalidParameter error, got {:?}", err),
+        }
+
+        // Test Skip exceeded
+        let query_skip = Query {
+            ops: vec![
+                QueryOp::StartNode(crate::core::NodeId::new(1).unwrap()),
+                QueryOp::Skip(MAX_PAGINATION_LIMIT + 1)
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let result_skip = planner.plan(query_skip);
+        assert!(result_skip.is_err());
+        match result_skip.unwrap_err() {
+            Error::Query(QueryError::InvalidParameter { parameter, reason }) => {
+                assert_eq!(parameter, "SKIP");
+                assert!(reason.contains("exceeds maximum allowed"));
+            }
+            err => panic!("Expected InvalidParameter error, got {:?}", err),
+        }
+    }
 }
