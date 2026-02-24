@@ -1,26 +1,56 @@
-# DX Audit Report - Echo 🗣️
+# DX Audit Report - Echo
+
+This report documents the Developer Experience (DX) audit performed by Echo (the impatient user).
+
+## 1. Quick Start Guide (`README.md` example)
+
+**Goal:** Run the "Basic Graph Operations" example from the README.
+
+**Action:** Created `examples/quick_start.rs` by copy-pasting code blocks from the README.
+
+**Issue Found:** ❌ **FAILED TO COMPILE** when wrapped in a standard `main` function.
+- The `aletheiadb::prelude::*` import brings `Result` into scope, which shadows `std::result::Result`.
+- Users expecting standard `Result` in `main` get a confusing type alias error.
+
+**Fix Applied:**
+- Updated `README.md` to explicitly wrap the example in `main` with `std::result::Result`.
+- This ensures copy-paste functionality works without ambiguity.
+
+---
+
+## 2. Vector Search Example (`README.md` example)
+
+**Goal:** Run the "Vector Search with HNSW" example from the README.
+
+**Action:** Created `examples/vector_quick_start.rs` by copy-pasting the code block.
+
+**Issue Found:** ⚠️ **RAN BUT CONFUSING**
+- The example creates one node and searches for similar nodes.
+- Since `find_similar` excludes the query node itself, the result was `[]`.
+- This looks like a failure to a new user.
+
+**Fix Applied:**
+- Updated `README.md` to create a second "similar" node (`doc2`) before searching.
+- The example now returns a visible result, confirming it works.
+
+---
+
+## 3. Story Demo (`examples/story_demo.rs`)
+
+**Goal:** Run the experimental "Narrative Generation" feature.
+
+**Action:** Ran `cargo run --example story_demo --features nova` as instructed in the README.
+
+**Outcome:** ✅ **SUCCESS**
+- Worked exactly as documented.
+- No changes needed.
+
+---
 
 ## Summary
-Audit performed by Echo to verify the Developer Experience of "Getting Started" with AletheiaDB.
 
-## Findings
+The audit identified two critical friction points in the "Getting Started" experience.
+1.  **Ambiguous Result Type:** Fixed by making the README example explicit.
+2.  **Silent Failure in Vector Example:** Fixed by making the example produce visible output.
 
-### 1. Feature Flag Visibility (Fixed)
-**Issue:** The "Narrative Generation" example requires the `nova` feature flag, which might be missed by users copying code blocks directly.
-**Fix:** Added explicit `// REQUIRES FEATURE: nova` comment to the top of the example code block in `README.md`.
-
-### 2. Result Type Shadowing (Action Required)
-**Issue:** `aletheiadb::prelude::Result` shadows `std::result::Result`.
-**Impact:** Users writing `fn main() -> Result<(), Box<dyn std::error::Error>>` will encounter a compilation error:
-```
-error[E0107]: type alias takes 1 generic argument but 2 generic arguments were supplied
-```
-This is because `aletheiadb::Result` expects 1 argument (`T`), defaulting `E` to `aletheiadb::Error`.
-
-**Recommendation:** Rename `Result` in `prelude` to `DbResult` or `AletheiaResult` in a future breaking release, or document this shadowing behavior prominently. Currently reverted to avoid breaking changes in patch/minor updates.
-
-### 3. Version Clarity
-**Observation:** `Cargo.toml` is at `0.1.0`. Documentation examples consistently use `0.1`. No discrepancies found in current state.
-
-## Conclusion
-The documentation has been improved to reduce friction regarding feature flags. The `Result` shadowing remains a potential stumble point for new users relying on standard Result patterns with prelude imports.
+**Status:** ✅ **Fixed**. The README examples are now robust and copy-paste friendly.
