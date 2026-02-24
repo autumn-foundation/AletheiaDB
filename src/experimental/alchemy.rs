@@ -111,11 +111,7 @@ impl<'a> Alchemist<'a> {
     ///
     /// # Returns
     /// The number of nodes merged (deleted).
-    pub fn fuse_synonyms(
-        &self,
-        candidates: &[NodeId],
-        similarity_threshold: f32,
-    ) -> Result<usize> {
+    pub fn fuse_synonyms(&self, candidates: &[NodeId], similarity_threshold: f32) -> Result<usize> {
         use std::collections::HashSet;
 
         if candidates.len() < 2 {
@@ -261,25 +257,30 @@ mod tests {
             .crystallize_wormholes(&candidates, 0.9, 2, "RELATED")
             .unwrap();
 
-        assert!(count >= 1, "Should create at least one edge (may be bidirectional)");
+        assert!(
+            count >= 1,
+            "Should create at least one edge (may be bidirectional)"
+        );
 
         // 3. Verify Edge Exists
-        let found = db.read(|tx| {
-            let outgoing = tx.get_outgoing_edges(a);
-            let mut found_edge = false;
-            for eid in outgoing {
-                if let Ok(edge) = tx.get_edge(eid) {
-                    if edge.target == b && edge.has_label_str("RELATED") {
-                        found_edge = true;
-                        // Verify metadata
-                        if let Some(sim) = edge.properties.get("similarity") {
-                            assert!(sim.as_float().unwrap() > 0.9);
+        let found = db
+            .read(|tx| {
+                let outgoing = tx.get_outgoing_edges(a);
+                let mut found_edge = false;
+                for eid in outgoing {
+                    if let Ok(edge) = tx.get_edge(eid) {
+                        if edge.target == b && edge.has_label_str("RELATED") {
+                            found_edge = true;
+                            // Verify metadata
+                            if let Some(sim) = edge.properties.get("similarity") {
+                                assert!(sim.as_float().unwrap() > 0.9);
+                            }
                         }
                     }
                 }
-            }
-            Ok::<_, crate::core::error::Error>(found_edge)
-        }).unwrap();
+                Ok::<_, crate::core::error::Error>(found_edge)
+            })
+            .unwrap();
 
         assert!(found, "Edge A->B with label RELATED should exist");
     }
@@ -304,17 +305,23 @@ mod tests {
         let b = db.create_node("Node", props_b).unwrap();
 
         // 2. Create Connections
-        let c = db.create_node("Other", PropertyMapBuilder::new().build()).unwrap();
-        let d = db.create_node("Other", PropertyMapBuilder::new().build()).unwrap();
+        let c = db
+            .create_node("Other", PropertyMapBuilder::new().build())
+            .unwrap();
+        let d = db
+            .create_node("Other", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // C -> A (should stay C -> A)
         db.create_edge(c, a, "LINKS", Default::default()).unwrap();
 
         // C -> B (should become C -> A)
-        db.create_edge(c, b, "LINKS_TO_B", Default::default()).unwrap();
+        db.create_edge(c, b, "LINKS_TO_B", Default::default())
+            .unwrap();
 
         // B -> D (should become A -> D)
-        db.create_edge(b, d, "LINKS_FROM_B", Default::default()).unwrap();
+        db.create_edge(b, d, "LINKS_FROM_B", Default::default())
+            .unwrap();
 
         // 3. Run Fuse
         let candidates = vec![a, b];
@@ -327,34 +334,41 @@ mod tests {
 
         // 5. Verify A has inherited edges
         // Check Outgoing: A -> D should exist (inherited from B -> D)
-        let has_a_to_d = db.read(|tx| {
-            let edges = tx.get_outgoing_edges(a);
-            let mut found = false;
-            for eid in edges {
-                if let Ok(edge) = tx.get_edge(eid) {
-                    if edge.target == d && edge.has_label_str("LINKS_FROM_B") {
-                        found = true;
+        let has_a_to_d = db
+            .read(|tx| {
+                let edges = tx.get_outgoing_edges(a);
+                let mut found = false;
+                for eid in edges {
+                    if let Ok(edge) = tx.get_edge(eid) {
+                        if edge.target == d && edge.has_label_str("LINKS_FROM_B") {
+                            found = true;
+                        }
                     }
                 }
-            }
-            Ok::<_, crate::core::error::Error>(found)
-        }).unwrap();
+                Ok::<_, crate::core::error::Error>(found)
+            })
+            .unwrap();
         assert!(has_a_to_d, "Survivor A should inherit outgoing edge to D");
 
         // Check Incoming: C -> A should exist twice (original + inherited)
         // One with label LINKS, one with label LINKS_TO_B
-        let has_c_to_a_inherited = db.read(|tx| {
-            let edges = tx.get_outgoing_edges(c);
-            let mut found = false;
-            for eid in edges {
-                if let Ok(edge) = tx.get_edge(eid) {
-                    if edge.target == a && edge.has_label_str("LINKS_TO_B") {
-                        found = true;
+        let has_c_to_a_inherited = db
+            .read(|tx| {
+                let edges = tx.get_outgoing_edges(c);
+                let mut found = false;
+                for eid in edges {
+                    if let Ok(edge) = tx.get_edge(eid) {
+                        if edge.target == a && edge.has_label_str("LINKS_TO_B") {
+                            found = true;
+                        }
                     }
                 }
-            }
-            Ok::<_, crate::core::error::Error>(found)
-        }).unwrap();
-        assert!(has_c_to_a_inherited, "Survivor A should inherit incoming edge from C");
+                Ok::<_, crate::core::error::Error>(found)
+            })
+            .unwrap();
+        assert!(
+            has_c_to_a_inherited,
+            "Survivor A should inherit incoming edge from C"
+        );
     }
 }
