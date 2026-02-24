@@ -81,11 +81,13 @@ impl Model {
         // 2. Acquire save_lock (shared)
         let _save_guard = self.save_lock.read().unwrap();
 
-        // 3. Remove from map (acquires map lock then drops)
+        // 3. Remove from map (acquires map locks sequentially)
         {
             let _map_guard = self.id_mapping.write().unwrap();
+        }
+        {
             let _rev_guard = self.reverse_mapping.write().unwrap();
-        } // Drop map locks
+        }
 
         // 4. Acquire inner write lock
         let _inner_guard = self.inner.write().unwrap();
