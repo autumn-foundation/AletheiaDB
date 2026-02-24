@@ -74,6 +74,13 @@ pub use physical::{PhysicalOp, PhysicalPlan};
 pub use rules::OptimizationRule;
 pub use stats::Statistics;
 
+/// Maximum allowed value for LIMIT and SKIP to prevent DoS.
+///
+/// Deep pagination (large SKIP) causes the executor to iterate and discard
+/// massive amounts of data, consuming CPU resources. Large LIMIT can cause
+/// excessive memory allocation or bandwidth usage.
+pub const MAX_PAGINATION_LIMIT: usize = 10_000;
+
 /// Query planner that transforms queries into executable physical plans.
 ///
 /// The planner is responsible for:
@@ -583,13 +590,33 @@ impl QueryPlanner {
                 predicate: predicate.clone(),
             }),
 
-            UnaryOp::Limit(n) => Ok(PhysicalOp::Limit {
-                input: Box::new(input),
-                count: *n,
-                offset: 0,
-            }),
+            UnaryOp::Limit(n) => {
+                if *n > MAX_PAGINATION_LIMIT {
+                    return Err(Error::Query(QueryError::InvalidParameter {
+                        parameter: "LIMIT".to_string(),
+                        reason: format!(
+                            "value {} exceeds maximum allowed {}",
+                            n, MAX_PAGINATION_LIMIT
+                        ),
+                    }));
+                }
+                Ok(PhysicalOp::Limit {
+                    input: Box::new(input),
+                    count: *n,
+                    offset: 0,
+                })
+            }
 
             UnaryOp::Skip(n) => {
+                if *n > MAX_PAGINATION_LIMIT {
+                    return Err(Error::Query(QueryError::InvalidParameter {
+                        parameter: "SKIP".to_string(),
+                        reason: format!(
+                            "value {} exceeds maximum allowed {} (deep pagination DoS protection)",
+                            n, MAX_PAGINATION_LIMIT
+                        ),
+                    }));
+                }
                 // Skip is implemented as Limit with offset
                 // We need to know the total to implement properly
                 // For now, wrap with a marker

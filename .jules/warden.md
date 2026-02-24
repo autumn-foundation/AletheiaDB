@@ -19,3 +19,13 @@
 1.  **Offload Blocking Tasks:** Wrapped potentially slow operations in `src/http/handlers.rs` using `actix_web::web::block`, offloading them to a dedicated thread pool.
 2.  **Async-Aware Indexing:** Implemented `maybe_block_in_place` helper in `src/index/vector/hnsw.rs`. This automatically detects if it's running in a multi-threaded Tokio runtime and uses `tokio::task::block_in_place` to prevent reactor starvation during vector operations and retries.
 3.  **Pagination Limits:** Verified existing `saturating_add` checks for deep pagination in `FindNode` and `FindNeighbors` to prevent memory exhaustion DoS.
+
+**2025-05-25 - DoS Prevention in AQL Execution via Deep Pagination**
+**Threat:**
+1. **Deep Pagination CPU Exhaustion:** The Query Planner implicitly trusted `SKIP` and `LIMIT` values in AQL queries. A malicious user could submit a query with a massive offset (e.g., `SKIP 100000000`), causing the `LimitIterator` to loop millions of times, consuming excessive CPU cycles on the worker thread. This bypasses the protections previously added to `FindNode` and `FindNeighbors` handlers.
+
+**Defense:**
+1. **Strict Limits in Planner:** Introduced `MAX_PAGINATION_LIMIT` (10,000) in `src/query/planner/mod.rs`.
+2. **Validation Logic:** Modified `QueryPlanner::unary_to_physical` to validate `UnaryOp::Skip` and `UnaryOp::Limit` values against this limit. Queries exceeding the limit are rejected immediately with `QueryError::InvalidParameter`.
+3. **HTTP Status Mapping:** Updated `src/http/handlers.rs` to catch "invalid query parameter" errors and return `400 Bad Request` instead of 500, providing correct feedback to the client.
+4. **Verification:** Added `tests/warden_deep_pagination.rs` to confirm that deep pagination attempts are rejected with a client error.
