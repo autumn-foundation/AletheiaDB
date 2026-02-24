@@ -1326,26 +1326,27 @@ impl VectorIndex for HnswIndex {
             // Evaluate user predicates outside the inner index lock to avoid callback/writer deadlocks.
             let mut candidate_k = k_capped.min(max_candidates);
             loop {
-                let candidates = {
-                    let matches = self.retry_usearch(
-                        || {
-                            let index = self.inner.read();
-                            index.search(query, candidate_k)
-                        },
-                        "Filtered search failed",
-                    )?;
+                let matches = self.retry_usearch(
+                    || {
+                        let index = self.inner.read();
+                        index.search(query, candidate_k)
+                    },
+                    "Filtered search failed",
+                )?;
 
-                    // Convert matches (already sorted) so we can iterate by best similarity first
-                    self.convert_matches(matches)
-                };
+                let mut filtered = Vec::with_capacity(k_capped.min(matches.keys.len()));
 
-                let mut filtered = Vec::with_capacity(k_capped.min(candidates.len()));
-                for (node_id, similarity) in candidates {
-                    let _guard = FilterCallbackGuard::new();
-                    if predicate(&node_id) {
-                        filtered.push((node_id, similarity));
-                        if filtered.len() == k_capped {
-                            break;
+                for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+                    if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                        let node_id = *node_id_ref.value();
+
+                        let _guard = FilterCallbackGuard::new();
+                        if predicate(&node_id) {
+                            let similarity = self.distance_to_similarity(*distance);
+                            filtered.push((node_id, similarity));
+                            if filtered.len() == k_capped {
+                                break;
+                            }
                         }
                     }
                 }
@@ -1809,6 +1810,35 @@ impl HnswIndex {
         Ok(())
     }
 
+    /// Convert a usearch distance to a similarity score based on the configured metric.
+    ///
+    /// usearch returns distances where lower = more similar (except for some metrics).
+    /// We convert to similarity where higher = more similar for consistent API.
+    ///
+    /// - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
+    ///   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
+    /// - Euclidean: usearch returns squared L2 distance, range [0, inf)
+    ///   Converting: similarity = -distance, so closer vectors have higher similarity
+    /// - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
+    ///   Converting: similarity = -distance = dot_product, higher is more similar
+    /// - Haversine: usearch returns great-circle distance, range [0, pi]
+    ///   Converting: similarity = -distance, closer points have higher similarity
+    /// - Hamming: usearch returns bit differences count, range [0, dims]
+    ///   Converting: similarity = -distance, fewer differences = more similar
+    /// - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
+    ///   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
+    #[inline(always)]
+    fn distance_to_similarity(&self, distance: f32) -> f32 {
+        match self.config.metric {
+            DistanceMetric::Cosine => 1.0 - distance,
+            DistanceMetric::Euclidean => -distance,
+            DistanceMetric::DotProduct => 1.0 - distance,
+            DistanceMetric::Haversine => -distance,
+            DistanceMetric::Hamming => -distance,
+            DistanceMetric::Tanimoto => 1.0 - distance,
+        }
+    }
+
     /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.
     ///
     /// This helper function encapsulates the common logic of:
@@ -1848,32 +1878,7 @@ impl HnswIndex {
         for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
             if let Some(node_id_ref) = self.reverse_mapping.get(key) {
                 let node_id = *node_id_ref.value();
-
-                // Convert distance to similarity based on metric.
-                // usearch returns distances where lower = more similar (except for some metrics).
-                // We convert to similarity where higher = more similar for consistent API.
-                //
-                // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
-                //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
-                // - Euclidean: usearch returns squared L2 distance, range [0, inf)
-                //   Converting: similarity = -distance, so closer vectors have higher similarity
-                // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
-                //   Converting: similarity = -distance = dot_product, higher is more similar
-                // - Haversine: usearch returns great-circle distance, range [0, pi]
-                //   Converting: similarity = -distance, closer points have higher similarity
-                // - Hamming: usearch returns bit differences count, range [0, dims]
-                //   Converting: similarity = -distance, fewer differences = more similar
-                // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
-                //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
-                let similarity = match self.config.metric {
-                    DistanceMetric::Cosine => 1.0 - distance,
-                    DistanceMetric::Euclidean => -distance,
-                    DistanceMetric::DotProduct => 1.0 - distance,
-                    DistanceMetric::Haversine => -distance,
-                    DistanceMetric::Hamming => -distance,
-                    DistanceMetric::Tanimoto => 1.0 - distance,
-                };
-
+                let similarity = self.distance_to_similarity(*distance);
                 results.push((node_id, similarity));
             }
         }
