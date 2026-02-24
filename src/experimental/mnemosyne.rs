@@ -115,10 +115,18 @@ impl<'a> Mnemosyne<'a> {
             if let (Some(last_vec), Some(curr_vec)) = (&last_kept_vector, &current_vector) {
                 // Calculate distance from LAST KEPT frame, not just previous version.
                 // This captures slow drift.
-                if let Ok(d) = euclidean_distance(last_vec, curr_vec) {
-                    distance = d;
-                    if distance > threshold {
+                match euclidean_distance(last_vec, curr_vec) {
+                    Ok(d) => {
+                        distance = d;
+                        if distance > threshold {
+                            semantic_change = true;
+                        }
+                    }
+                    Err(_) => {
+                        // Dimension mismatch or other vector error.
+                        // Treat as a significant structural change.
                         semantic_change = true;
+                        distance = f32::INFINITY;
                     }
                 }
             } else if last_kept_vector.is_some() != current_vector.is_some() {
