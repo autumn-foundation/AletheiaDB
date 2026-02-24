@@ -127,6 +127,37 @@ impl QueryPlanner {
     /// 2. **Optimization**: Applies registered `OptimizationRule`s to improve the plan.
     /// 3. **Physical Planning**: Converts the optimized logical plan into a `PhysicalPlan`.
     ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use aletheiadb::query::planner::{QueryPlanner, Statistics};
+    /// use aletheiadb::storage::CurrentStorage;
+    /// use aletheiadb::query::builder::QueryBuilder;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// // 1. Setup dependencies
+    /// let storage = Arc::new(CurrentStorage::new());
+    /// let stats = Arc::new(Statistics::default());
+    /// let planner = QueryPlanner::new(stats, storage);
+    ///
+    /// // 2. Build a query
+    /// let query = QueryBuilder::new()
+    ///     .start(NodeId::new(1).unwrap())
+    ///     .traverse("KNOWS")
+    ///     .filter(aletheiadb::query::ir::Predicate::eq("name", "Alice"))
+    ///     .build();
+    ///
+    /// // 3. Plan the query
+    /// match planner.plan(query) {
+    ///     Ok(physical_plan) => {
+    ///         println!("Plan created with cost: {:?}", physical_plan.estimated_cost);
+    ///         // Pass physical_plan to Executor...
+    ///     }
+    ///     Err(e) => eprintln!("Planning failed: {}", e),
+    /// }
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns an error if:

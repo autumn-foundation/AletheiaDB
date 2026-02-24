@@ -138,6 +138,39 @@ impl QueryExecutor {
     /// # Returns
     ///
     /// Returns a `QueryResults` iterator that produces `Result<QueryRow>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use parking_lot::RwLock;
+    /// use aletheiadb::storage::current::CurrentStorage;
+    /// use aletheiadb::storage::historical::HistoricalStorage;
+    /// use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+    /// use aletheiadb::query::planner::PhysicalOp;
+    ///
+    /// // 1. Setup storage and executor
+    /// let current = Arc::new(CurrentStorage::new());
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let executor = QueryExecutor::new(current, historical);
+    ///
+    /// // 2. Create a physical plan (usually done by planner)
+    /// let plan = PhysicalPlan {
+    ///     root: PhysicalOp::Empty, // Using Empty for example simplicity
+    ///     estimated_cost: Default::default(),
+    ///     temporal_context: None,
+    ///     parallel: false,
+    ///     include_provenance: true,
+    /// };
+    ///
+    /// // 3. Execute
+    /// let results = executor.execute(plan).unwrap();
+    ///
+    /// // 4. Iterate
+    /// for row in results {
+    ///     println!("Got row: {:?}", row);
+    /// }
+    /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;
         // Wrap with provenance filter to conditionally strip metadata

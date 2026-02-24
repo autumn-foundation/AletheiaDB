@@ -848,6 +848,22 @@ impl ResultIterator for TraversalIterator {
 }
 
 /// Iterator for filtering results.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use aletheiadb::query::executor::iterators::{FilterIterator, NodeScanIterator};
+/// use aletheiadb::query::ir::Predicate;
+/// use std::sync::Arc;
+///
+/// # let current = Arc::new(aletheiadb::storage::CurrentStorage::new());
+/// let input = Box::new(NodeScanIterator::new(Some("Person".to_string()), current));
+/// let predicate = Predicate::eq("name", "Alice");
+/// let filter_iter = FilterIterator::new(input, predicate);
+///
+/// // Iterate results
+/// // for row in filter_iter { ... }
+/// ```
 pub struct FilterIterator {
     input: Box<dyn ResultIterator>,
     predicate: Predicate,
@@ -1202,6 +1218,19 @@ impl ResultIterator for VectorRerankIterator {
 }
 
 /// Iterator for limiting results.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use aletheiadb::query::executor::iterators::{LimitIterator, NodeScanIterator};
+/// use std::sync::Arc;
+///
+/// # let current = Arc::new(aletheiadb::storage::CurrentStorage::new());
+/// let input = Box::new(NodeScanIterator::new(Some("Person".to_string()), current));
+///
+/// // Skip 5, take 10
+/// let limit_iter = LimitIterator::new(input, 5, 10);
+/// ```
 pub struct LimitIterator {
     input: Box<dyn ResultIterator>,
     offset: usize,
