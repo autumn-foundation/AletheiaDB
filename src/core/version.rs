@@ -2096,6 +2096,7 @@ mod sentry_tests {
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyMapBuilder};
+    use std::sync::Arc;
 
     #[test]
     fn test_materialize_vector_deltas_missing_base_property() {

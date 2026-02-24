@@ -225,8 +225,7 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use bitcode::Encode;
-    use crc32fast::Hasher;
+    use std::fs;
     use tempfile::tempdir;
 
     #[test]
@@ -239,13 +238,8 @@ mod sentry_tests {
         let result = save_manifest(&manifest, &path);
 
         assert!(result.is_err());
-        // Should be I/O error
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("No such file or directory")
-        );
+        // Should be I/O error (NotFound because directory doesn't exist)
+        assert!(result.unwrap_err().is_not_found());
     }
 
     #[test]
