@@ -3900,6 +3900,43 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_insert_reject_policy_valid_batch() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+
+        let batch = vec![
+            (
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
+            ),
+            (
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(2000.into(), 3000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
+            ),
+        ];
+
+        // This should succeed because there are no duplicates
+        let result = indexes.insert_node_versions_batch_with_policy(
+            node_id,
+            batch,
+            DeduplicationPolicy::Reject,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Reject policy should accept valid batch without duplicates"
+        );
+    }
+
+    #[test]
     fn test_get_all_entity_ids() {
         let indexes = TemporalIndexes::new();
         let node_id = NodeId::new(1).unwrap();
