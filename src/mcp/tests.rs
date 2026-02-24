@@ -1443,14 +1443,12 @@ mod coverage_tests {
         }
 
         // Request with a very large offset (should be capped)
-        // With recent DoS protections (Warden), this now returns an error if > 10,000
-        // We use 9,000 which is large but within the limit
         let response = server.list_nodes(ListNodesRequest {
             label: Some("OffsetTest".to_string()),
             property_key: None,
             property_value: None,
             limit: Some(10),
-            offset: Some(9_000),
+            offset: Some(100_000), // Very large offset, should be capped to MAX_PAGINATION_OFFSET
         });
 
         // Should not error, just return empty results due to offset being beyond data
