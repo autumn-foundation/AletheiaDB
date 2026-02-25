@@ -1,8 +1,8 @@
+use super::config::HnswConfig;
 use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::index::vector::{DistanceMetric, Quantization};
-use super::config::HnswConfig;
 use crc32fast::Hasher;
 use dashmap::DashMap;
 use std::fs::File;
@@ -48,11 +48,7 @@ where
     let mut hasher = Hasher::new();
     let count_u64 = count as u64;
 
-    fn write_and_hash<W: Write>(
-        writer: &mut W,
-        hasher: &mut Hasher,
-        data: &[u8],
-    ) -> Result<()> {
+    fn write_and_hash<W: Write>(writer: &mut W, hasher: &mut Hasher, data: &[u8]) -> Result<()> {
         writer.write_all(data).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to write mappings: {}",
@@ -366,7 +362,10 @@ pub(crate) fn verify_index_header(
 }
 
 /// Validate loaded index metadata against configuration.
-pub(crate) fn validate_metadata(metadata: Option<IndexMetadata>, config: &HnswConfig) -> Result<()> {
+pub(crate) fn validate_metadata(
+    metadata: Option<IndexMetadata>,
+    config: &HnswConfig,
+) -> Result<()> {
     if let Some(meta) = metadata {
         if meta.dimensions > MAX_VECTOR_DIMENSIONS {
             return Err(Error::Vector(VectorError::InvalidVector {

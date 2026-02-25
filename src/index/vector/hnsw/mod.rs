@@ -28,10 +28,8 @@ pub mod stats;
 mod tests;
 
 pub use config::{HnswConfig, HnswIndexBuilder};
+use persistence::{load_mappings_with_integrity, verify_index_header, write_mappings_to_writer};
 use stats::{IndexStats, MAX_SEARCH_ATTEMPTS};
-use persistence::{
-    load_mappings_with_integrity, verify_index_header, write_mappings_to_writer,
-};
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
 std::thread_local! {
