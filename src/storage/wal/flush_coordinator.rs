@@ -390,21 +390,9 @@ impl FlushCoordinator {
         if current_size >= self.config.segment_size as u64 {
             let closing_segment_id = self.current_segment_id.load(Ordering::Relaxed);
 
-            // Capture state for metadata/cleanup before resetting
-            let min_lsn = self.current_segment_min_lsn.load(Ordering::Relaxed);
-            let max_lsn = self.current_segment_max_lsn.load(Ordering::Relaxed);
-            let entry_count = self.current_segment_entry_count.load(Ordering::Relaxed);
-
-            // Reset size and LSN tracking for new segment immediately.
-            // This ensures that even if flush/sync/metadata fails, the internal state
-            // is clean for the next segment and doesn't inherit old LSN ranges ("smearing").
-            self.current_segment_size.store(0, Ordering::Relaxed);
-            self.current_segment_min_lsn
-                .store(u64::MAX, Ordering::Relaxed);
-            self.current_segment_max_lsn.store(0, Ordering::Relaxed);
-            self.current_segment_entry_count.store(0, Ordering::Relaxed);
-
-            // Flush current segment
+            // 1. Flush current segment first.
+            // If this fails, we return error and DO NOT reset state or close the writer.
+            // This allows the next flush attempt to retry.
             if let Some(writer) = writer_guard {
                 writer.flush().map_err(|e| {
                     Error::Storage(StorageError::IoError(format!(
@@ -413,10 +401,27 @@ impl FlushCoordinator {
                     )))
                 })?;
             }
-            // Close writer (drops BufWriter)
+
+            // 2. Capture state for metadata/cleanup before resetting
+            let min_lsn = self.current_segment_min_lsn.load(Ordering::Relaxed);
+            let max_lsn = self.current_segment_max_lsn.load(Ordering::Relaxed);
+            let entry_count = self.current_segment_entry_count.load(Ordering::Relaxed);
+
+            // 3. Close writer (drops BufWriter) - effectively "committing" to rotation
             *writer_guard = None;
 
-            // Sync before closing
+            // 4. Reset size and LSN tracking for new segment immediately.
+            // We do this BEFORE sync/metadata write. This ensures that even if those subsequent
+            // steps fail, the internal state is clean for the next segment (which will be a NEW segment
+            // because writer is None). This prevents "smearing" LSN ranges.
+            self.current_segment_size.store(0, Ordering::Relaxed);
+            self.current_segment_min_lsn
+                .store(u64::MAX, Ordering::Relaxed);
+            self.current_segment_max_lsn.store(0, Ordering::Relaxed);
+            self.current_segment_entry_count.store(0, Ordering::Relaxed);
+
+            // 5. Sync before closing (using separate handle)
+            // If this fails, we return error, but state is already reset and writer closed.
             if self.config.sync_on_flush {
                 let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref sync_file) = *sync_guard {
@@ -429,7 +434,8 @@ impl FlushCoordinator {
                 }
             }
 
-            // Write segment metadata (ADR-0025) using captured state
+            // 6. Write segment metadata (ADR-0025) using captured state
+            // If this fails, we return error, but state is already reset.
             self.write_segment_metadata(closing_segment_id, min_lsn, max_lsn, entry_count)?;
 
             // Clear sync handle

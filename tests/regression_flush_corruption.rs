@@ -6,6 +6,40 @@ use tempfile::tempdir;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+#[allow(dead_code)] // The guard is used for its side effects (setting permissions)
+struct DirPermissionGuard<'a> {
+    path: &'a std::path::Path,
+    original_mode: u32,
+}
+
+#[cfg(unix)]
+impl<'a> DirPermissionGuard<'a> {
+    #[allow(dead_code)] // The function is used in the test
+    fn new(path: &'a std::path::Path, new_mode: u32) -> Self {
+        let metadata = std::fs::metadata(path).unwrap();
+        let original_mode = metadata.permissions().mode();
+        let mut perms = metadata.permissions();
+        perms.set_mode(new_mode);
+        std::fs::set_permissions(path, perms).unwrap();
+        Self {
+            path,
+            original_mode,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl<'a> Drop for DirPermissionGuard<'a> {
+    fn drop(&mut self) {
+        if let Ok(metadata) = std::fs::metadata(self.path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(self.original_mode);
+            let _ = std::fs::set_permissions(self.path, perms);
+        }
+    }
+}
+
 #[test]
 #[cfg(unix)]
 fn test_metadata_corruption_on_error() {
