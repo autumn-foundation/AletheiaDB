@@ -104,9 +104,12 @@ impl AdjacencyIndex {
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
-        // Optimization: Zero-copy transmutation of compatible vectors
-        // This avoids large allocations during startup/graph loading
-        let node_ids_typed: Vec<NodeId> = cast_vec_u64_to_nodeid(node_ids);
+        // Optimization: Zero-copy transmutation of offsets on 64-bit systems
+        // node_ids requires mapping as NodeId is not guaranteed to be repr(transparent)
+        let node_ids_typed: Vec<NodeId> = node_ids
+            .iter()
+            .map(|&id| NodeId::new_unchecked(id))
+            .collect();
         let offsets_usize: Vec<usize> = cast_vec_u64_to_usize(offsets);
 
         let mut adjacency_entries = Vec::with_capacity(edge_ids.len());
@@ -316,19 +319,6 @@ impl AdjacencyIndex {
 impl Default for AdjacencyIndex {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Safely casts a `Vec<u64>` to `Vec<NodeId>`.
-///
-/// This is safe because `NodeId` is `#[repr(transparent)]` around `u64`,
-/// so they have identical memory layout and alignment.
-fn cast_vec_u64_to_nodeid(v: Vec<u64>) -> Vec<NodeId> {
-    let mut v = std::mem::ManuallyDrop::new(v);
-    unsafe {
-        // SAFETY: NodeId is #[repr(transparent)] wrapper around u64.
-        // The layout and alignment are guaranteed to be identical.
-        Vec::from_raw_parts(v.as_mut_ptr() as *mut NodeId, v.len(), v.capacity())
     }
 }
 

@@ -22,7 +22,6 @@ pub const MAX_VALID_ID: u64 = u64::MAX - 1000;
 
 /// Unique identifier for a node in the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[repr(transparent)]
 pub struct NodeId(u64);
 
 impl NodeId {
