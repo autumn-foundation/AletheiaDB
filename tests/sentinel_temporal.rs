@@ -1,7 +1,7 @@
-use aletheiadb::core::id::{NodeId, VersionId};
-use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange, MAX_VALID_TIMESTAMP};
-use aletheiadb::index::temporal::{DeduplicationPolicy, TemporalIndexes};
 use aletheiadb::core::error::TemporalError;
+use aletheiadb::core::id::{NodeId, VersionId};
+use aletheiadb::core::temporal::{BiTemporalInterval, MAX_VALID_TIMESTAMP, TimeRange};
+use aletheiadb::index::temporal::{DeduplicationPolicy, TemporalIndexes};
 
 // Test to verify that intersection of large sets (> 16 items) works correctly.
 // This targets the HashSet optimization branch in intersect_metadata_indices.
@@ -200,7 +200,10 @@ fn test_sentinel_timerange_new_validation() {
     // or removing the check entirely
     let err = TimeRange::new(t200, t100);
     assert!(err.is_err());
-    assert!(matches!(err.unwrap_err(), TemporalError::InvalidTimeRange { .. }));
+    assert!(matches!(
+        err.unwrap_err(),
+        TemporalError::InvalidTimeRange { .. }
+    ));
 }
 
 #[test]
