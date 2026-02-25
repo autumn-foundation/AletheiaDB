@@ -235,6 +235,10 @@ impl AletheiaDB {
                 && let Some(lsn) = loaded_lsn
             {
                 tracker.set_start_lsn(lsn);
+                tracker.update_last_persisted_counts(
+                    db.current.node_count() as u64,
+                    db.current.edge_count() as u64,
+                );
             }
         }
 
