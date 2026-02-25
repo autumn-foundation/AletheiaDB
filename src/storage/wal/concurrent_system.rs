@@ -1086,16 +1086,14 @@ mod tests {
 
         // Spawn a producer thread that fills the WAL
         let handle = thread::spawn(move || {
-            let mut i = 0;
             // Append enough to definitely fill the buffer multiple times
-            for _ in 0..1000 {
+            for i in 0..1000 {
                 let op = create_test_operation(i);
                 // This will block when buffer is full.
                 // If shutdown happens, it should return Err (closed).
                 if wal_inner.append_async(op).is_err() {
                     break;
                 }
-                i += 1;
             }
         });
 
