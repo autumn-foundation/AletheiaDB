@@ -919,8 +919,8 @@ impl VectorIndex for HnswIndex {
                         }
                     }
 
-                    // Acquire inner write lock to serialize structural mutations in usearch.
-                    let index = self.inner.write();
+                    // Acquire inner read lock. usearch handles concurrent updates internally.
+                    let mut index = self.inner.read();
 
                     // Re-verify mapping under Inner lock
                     // We need to lock the map again to check if the ID still maps to existing_key.
@@ -957,11 +957,19 @@ impl VectorIndex for HnswIndex {
                         // We must ensure capacity exists, as the optimistic check in
                         // check_and_expand_capacity might have been raced.
                         if index.size() >= index.capacity() {
-                            let new_capacity = (index.capacity() * 2).max(1024);
-                            self.retry_usearch(
-                                || index.reserve(new_capacity),
-                                "Failed to expand capacity (race recovery)",
-                            )?;
+                            drop(index);
+                            // Acquire write lock to expand capacity safely (serializing expansion)
+                            let index_write = self.inner.write();
+                            if index_write.size() >= index_write.capacity() {
+                                let new_capacity = (index_write.capacity() * 2).max(1024);
+                                self.retry_usearch(
+                                    || index_write.reserve(new_capacity),
+                                    "Failed to expand capacity (race recovery)",
+                                )?;
+                            }
+                            drop(index_write);
+                            // Re-acquire read lock
+                            index = self.inner.read();
                         }
                     }
                     // Note: If key doesn't exist, we skip remove() and proceed directly to add()
@@ -1022,19 +1030,26 @@ impl VectorIndex for HnswIndex {
 
                     // Note: save_lock is already held at start of function.
 
-                    // Step 2: Acquire inner write lock FIRST (follows lock ordering invariant).
+                    // Step 2: Acquire inner read lock FIRST (follows lock ordering invariant).
                     // Vacant path updates the index before claiming the map entry (Inner -> Map).
-                    let index = self.inner.write();
+                    let mut index = self.inner.read();
 
                     // Ensure capacity exists. The optimistic check in check_and_expand_capacity
-                    // might have been raced by other threads. Since we hold the write lock now,
-                    // we are the source of truth.
+                    // might have been raced by other threads.
                     if index.size() >= index.capacity() {
-                        let new_capacity = (index.capacity() * 2).max(1024);
-                        self.retry_usearch(
-                            || index.reserve(new_capacity),
-                            "Failed to expand capacity (race recovery)",
-                        )?;
+                        drop(index);
+                        // Acquire write lock to expand capacity safely (serializing expansion)
+                        let index_write = self.inner.write();
+                        if index_write.size() >= index_write.capacity() {
+                            let new_capacity = (index_write.capacity() * 2).max(1024);
+                            self.retry_usearch(
+                                || index_write.reserve(new_capacity),
+                                "Failed to expand capacity (race recovery)",
+                            )?;
+                        }
+                        drop(index_write);
+                        // Re-acquire read lock
+                        index = self.inner.read();
                     }
 
                     // Step 3: Add to inner usearch index while holding write lock
@@ -1154,8 +1169,8 @@ impl VectorIndex for HnswIndex {
             if let Some((_, key)) = self.id_mapping.remove(&id) {
                 self.reverse_mapping.remove(&key);
 
-                // Native delete in usearch (serialize with other structural mutations)
-                let index = self.inner.write();
+                // Native delete in usearch (thread-safe)
+                let index = self.inner.read();
                 self.retry_usearch(|| index.remove(key), "Failed to remove vector")?;
 
                 self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
