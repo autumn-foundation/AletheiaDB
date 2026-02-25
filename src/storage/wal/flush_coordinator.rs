@@ -282,10 +282,10 @@ impl FlushCoordinator {
             } else {
                 // Fallback: Read segment to find max LSN
                 let path = self.segment_path(max_segment_id);
-                if let Ok(entries) = super::segment_reader::read_segment(&path, LSN(0)) {
-                    if let Some(last) = entries.last() {
-                        max_lsn = last.lsn.0;
-                    }
+                if let Ok(entries) = super::segment_reader::read_segment(&path, LSN(0))
+                    && let Some(last) = entries.last()
+                {
+                    max_lsn = last.lsn.0;
                 }
             }
         }
@@ -1261,21 +1261,8 @@ mod tests {
         let coordinator = FlushCoordinator::new(config).unwrap();
         coordinator.set_expected_lsn(LSN(10));
 
-        // Flush entries with various LSNs
-        let entries = vec![
-            create_test_entry(10, &[1u8; 20]),
-            create_test_entry(20, &[2u8; 20]), // Gap 11-14, 16-19
-            create_test_entry(15, &[3u8; 20]),
-        ];
-        // Note: 20 and 15 will be buffered because of gaps. Only 10 will flush.
-        // Wait, if 10 flushes, next is 11.
-        // 15 is buffered. 20 is buffered.
-        // Metadata is written on rotation.
-        // We need contiguous stream to flush and rotate.
-        // So we should provide contiguous entries if we want to test metadata writing.
-        // Or update expected LSN manually? No, flush() updates it.
-
         // Let's use contiguous entries 10, 11, 12.
+        // We need contiguous stream to flush and rotate to verify metadata tracking.
         let entries = vec![
             create_test_entry(10, &[1u8; 20]),
             create_test_entry(11, &[2u8; 20]),
