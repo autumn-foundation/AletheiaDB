@@ -643,167 +643,166 @@ impl PropertyValue {
         }
 
         let tag = bytes[0];
-        let mut offset = 1;
 
         match tag {
-            TAG_NULL => Ok((PropertyValue::Null, offset)),
-
-            TAG_BOOL => {
-                if bytes.len() < 2 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for Bool value".to_string(),
-                    )
-                    .into());
-                }
-                let value = bytes[1] != 0;
-                Ok((PropertyValue::Bool(value), 2))
-            }
-
-            TAG_INT => {
-                if bytes.len() < 9 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for Int value".to_string(),
-                    )
-                    .into());
-                }
-                // SAFETY: Length check above guarantees slice has 8 bytes
-                let value = i64::from_le_bytes(bytes[1..9].try_into().unwrap());
-                Ok((PropertyValue::Int(value), 9))
-            }
-
-            TAG_FLOAT => {
-                if bytes.len() < 9 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for Float value".to_string(),
-                    )
-                    .into());
-                }
-                // SAFETY: Length check above guarantees slice has 8 bytes
-                let value = f64::from_le_bytes(bytes[1..9].try_into().unwrap());
-                Ok((PropertyValue::Float(value), 9))
-            }
-
-            TAG_STRING => {
-                if bytes.len() < 5 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for String length".to_string(),
-                    )
-                    .into());
-                }
-                let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-                offset = 5;
-
-                let required_len = offset.checked_add(len).ok_or_else(|| {
-                    StorageError::CorruptedData("String length overflow".to_string())
-                })?;
-
-                if bytes.len() < required_len {
-                    return Err(StorageError::CorruptedData(format!(
-                        "Buffer too short for String data: need {} bytes, have {}",
-                        required_len,
-                        bytes.len()
-                    ))
-                    .into());
-                }
-
-                let string_data = &bytes[offset..required_len];
-                let s = std::str::from_utf8(string_data).map_err(|e| {
-                    StorageError::CorruptedData(format!("Invalid UTF-8 in String: {}", e))
-                })?;
-                Ok((PropertyValue::String(Arc::from(s)), required_len))
-            }
-
-            TAG_BYTES => {
-                if bytes.len() < 5 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for Bytes length".to_string(),
-                    )
-                    .into());
-                }
-                let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-                offset = 5;
-
-                let required_len = offset.checked_add(len).ok_or_else(|| {
-                    StorageError::CorruptedData("Bytes length overflow".to_string())
-                })?;
-
-                if bytes.len() < required_len {
-                    return Err(StorageError::CorruptedData(format!(
-                        "Buffer too short for Bytes data: need {} bytes, have {}",
-                        required_len,
-                        bytes.len()
-                    ))
-                    .into());
-                }
-
-                let byte_data = &bytes[offset..required_len];
-                Ok((PropertyValue::Bytes(Arc::from(byte_data)), required_len))
-            }
-
-            TAG_ARRAY => {
-                if bytes.len() < 5 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for Array count".to_string(),
-                    )
-                    .into());
-                }
-                let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-                offset = 5;
-
-                // Prevent DoS via memory exhaustion from malicious input
-                if count > MAX_ARRAY_ELEMENTS {
-                    return Err(StorageError::CorruptedData(format!(
-                        "Array count {} exceeds maximum allowed {}",
-                        count, MAX_ARRAY_ELEMENTS
-                    ))
-                    .into());
-                }
-
-                // Prevent DoS via pre-allocation amplification:
-                // Ensure we have at least 1 byte per element in the buffer
-                // before allocating the vector.
-                if bytes.len().saturating_sub(offset) < count {
-                    return Err(StorageError::CorruptedData(format!(
-                        "Insufficient buffer size for Array elements: need {} bytes, have {}",
-                        count,
-                        bytes.len().saturating_sub(offset)
-                    ))
-                    .into());
-                }
-
-                let mut items = Vec::with_capacity(count);
-                for _ in 0..count {
-                    if offset >= bytes.len() {
-                        return Err(StorageError::CorruptedData(
-                            "Buffer exhausted while reading Array elements".to_string(),
-                        )
-                        .into());
-                    }
-                    // Recursive call with depth increment
-                    let (item, consumed) =
-                        PropertyValue::deserialize_recursive(&bytes[offset..], depth + 1)?;
-                    items.push(item);
-                    offset += consumed;
-                }
-                Ok((PropertyValue::Array(Arc::new(items)), offset))
-            }
-
+            TAG_NULL => Ok((PropertyValue::Null, 1)),
+            TAG_BOOL => Self::deserialize_bool(bytes),
+            TAG_INT => Self::deserialize_int(bytes),
+            TAG_FLOAT => Self::deserialize_float(bytes),
+            TAG_STRING => Self::deserialize_string(bytes),
+            TAG_BYTES => Self::deserialize_bytes(bytes),
+            TAG_ARRAY => Self::deserialize_array(bytes, depth),
             TAG_VECTOR => {
                 let (vector, consumed) = deserialize_vector(bytes)?;
                 Ok((PropertyValue::Vector(vector), consumed))
             }
-
             TAG_SPARSE_VECTOR => {
                 let (sparse_vector, consumed) = deserialize_sparse_vector(bytes)?;
                 Ok((PropertyValue::SparseVector(sparse_vector), consumed))
             }
-
             _ => Err(StorageError::CorruptedData(format!(
                 "Unknown PropertyValue type tag: {}",
                 tag
             ))
             .into()),
         }
+    }
+
+    fn deserialize_bool(bytes: &[u8]) -> Result<(Self, usize)> {
+        if bytes.len() < 2 {
+            return Err(
+                StorageError::CorruptedData("Buffer too short for Bool value".to_string()).into(),
+            );
+        }
+        let value = bytes[1] != 0;
+        Ok((PropertyValue::Bool(value), 2))
+    }
+
+    fn deserialize_int(bytes: &[u8]) -> Result<(Self, usize)> {
+        if bytes.len() < 9 {
+            return Err(
+                StorageError::CorruptedData("Buffer too short for Int value".to_string()).into(),
+            );
+        }
+        // SAFETY: Length check above guarantees slice has 8 bytes
+        let value = i64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        Ok((PropertyValue::Int(value), 9))
+    }
+
+    fn deserialize_float(bytes: &[u8]) -> Result<(Self, usize)> {
+        if bytes.len() < 9 {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for Float value".to_string(),
+            )
+            .into());
+        }
+        // SAFETY: Length check above guarantees slice has 8 bytes
+        let value = f64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        Ok((PropertyValue::Float(value), 9))
+    }
+
+    fn deserialize_string(bytes: &[u8]) -> Result<(Self, usize)> {
+        if bytes.len() < 5 {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for String length".to_string(),
+            )
+            .into());
+        }
+        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let offset: usize = 5;
+
+        let required_len = offset
+            .checked_add(len)
+            .ok_or_else(|| StorageError::CorruptedData("String length overflow".to_string()))?;
+
+        if bytes.len() < required_len {
+            return Err(StorageError::CorruptedData(format!(
+                "Buffer too short for String data: need {} bytes, have {}",
+                required_len,
+                bytes.len()
+            ))
+            .into());
+        }
+
+        let string_data = &bytes[offset..required_len];
+        let s = std::str::from_utf8(string_data)
+            .map_err(|e| StorageError::CorruptedData(format!("Invalid UTF-8 in String: {}", e)))?;
+        Ok((PropertyValue::String(Arc::from(s)), required_len))
+    }
+
+    fn deserialize_bytes(bytes: &[u8]) -> Result<(Self, usize)> {
+        if bytes.len() < 5 {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for Bytes length".to_string(),
+            )
+            .into());
+        }
+        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let offset: usize = 5;
+
+        let required_len = offset
+            .checked_add(len)
+            .ok_or_else(|| StorageError::CorruptedData("Bytes length overflow".to_string()))?;
+
+        if bytes.len() < required_len {
+            return Err(StorageError::CorruptedData(format!(
+                "Buffer too short for Bytes data: need {} bytes, have {}",
+                required_len,
+                bytes.len()
+            ))
+            .into());
+        }
+
+        let byte_data = &bytes[offset..required_len];
+        Ok((PropertyValue::Bytes(Arc::from(byte_data)), required_len))
+    }
+
+    fn deserialize_array(bytes: &[u8], depth: usize) -> Result<(Self, usize)> {
+        if bytes.len() < 5 {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for Array count".to_string(),
+            )
+            .into());
+        }
+        let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let mut offset = 5;
+
+        // Prevent DoS via memory exhaustion from malicious input
+        if count > MAX_ARRAY_ELEMENTS {
+            return Err(StorageError::CorruptedData(format!(
+                "Array count {} exceeds maximum allowed {}",
+                count, MAX_ARRAY_ELEMENTS
+            ))
+            .into());
+        }
+
+        // Prevent DoS via pre-allocation amplification:
+        // Ensure we have at least 1 byte per element in the buffer
+        // before allocating the vector.
+        if bytes.len().saturating_sub(offset) < count {
+            return Err(StorageError::CorruptedData(format!(
+                "Insufficient buffer size for Array elements: need {} bytes, have {}",
+                count,
+                bytes.len().saturating_sub(offset)
+            ))
+            .into());
+        }
+
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
+            if offset >= bytes.len() {
+                return Err(StorageError::CorruptedData(
+                    "Buffer exhausted while reading Array elements".to_string(),
+                )
+                .into());
+            }
+            // Recursive call with depth increment
+            let (item, consumed) =
+                PropertyValue::deserialize_recursive(&bytes[offset..], depth + 1)?;
+            items.push(item);
+            offset += consumed;
+        }
+        Ok((PropertyValue::Array(Arc::new(items)), offset))
     }
 
     /// Estimate the heap memory usage of this property value in bytes.
