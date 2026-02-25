@@ -663,7 +663,9 @@ impl HnswIndexBuilder {
             connectivity: self.config.m,
             expansion_add: self.config.ef_construction,
             expansion_search: self.config.ef_search,
-            multi: false,
+            // Enable multi-threading support in usearch.
+            // This allows concurrent additions when we hold a shared read lock.
+            multi: true,
         };
 
         // Create the index
