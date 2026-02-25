@@ -1,16 +1,12 @@
 use super::*;
 use crate::core::id::NodeId;
 use crate::index::vector::{DistanceMetric, Quantization, StorageMode};
-use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 // Helper to access persistence functions which are pub(crate)
-use super::persistence::{
-    IndexMetadata, MAPPING_MAGIC, MAPPING_VERSION, MAX_MAPPINGS_COUNT,
-    load_mappings_with_integrity, write_mappings_to_writer,
-};
+use super::persistence::IndexMetadata;
 
 #[cfg(test)]
 mod sentry_tests {

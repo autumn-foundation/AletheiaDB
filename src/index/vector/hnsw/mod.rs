@@ -752,14 +752,12 @@ impl VectorIndex for HnswIndex {
                             || index.remove(existing_key),
                             "Failed to remove existing vector",
                         )?;
-                    } else {
-                        if index.size() >= index.capacity() {
-                            let new_capacity = (index.capacity() * 2).max(1024);
-                            self.retry_usearch(
-                                || index.reserve(new_capacity),
-                                "Failed to expand capacity (race recovery)",
-                            )?;
-                        }
+                    } else if index.size() >= index.capacity() {
+                        let new_capacity = (index.capacity() * 2).max(1024);
+                        self.retry_usearch(
+                            || index.reserve(new_capacity),
+                            "Failed to expand capacity (race recovery)",
+                        )?;
                     }
 
                     if let Err(e) = self
