@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Alchemy: Semantic Graph Transformation Engine.
 //!
 //! "Turn lead into gold."
