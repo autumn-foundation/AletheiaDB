@@ -1,9 +1,13 @@
 use crate::AletheiaDB;
+#[cfg(feature = "nova")]
 use crate::core::GLOBAL_INTERNER;
 use crate::core::error::Result;
+#[cfg(feature = "nova")]
 use crate::core::history::{VersionDiff, VersionInfo};
 use crate::core::id::NodeId;
+#[cfg(feature = "nova")]
 use crate::core::interning::InternedString;
+#[cfg(feature = "nova")]
 use crate::core::temporal::time;
 
 /// A single event in the narrative history of an entity.
@@ -20,10 +24,19 @@ pub struct NarrativeEvent {
 }
 
 /// Generator for creating natural language narratives from temporal history.
+#[cfg(feature = "nova")]
 pub struct NarrativeGenerator<'a> {
     db: &'a AletheiaDB,
 }
 
+#[cfg(not(feature = "nova"))]
+/// Generator for creating natural language narratives from temporal history.
+#[deprecated(note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml.")]
+pub struct NarrativeGenerator<'a> {
+    _marker: std::marker::PhantomData<&'a AletheiaDB>,
+}
+
+#[cfg(feature = "nova")]
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -125,7 +138,33 @@ impl<'a> NarrativeGenerator<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "nova"))]
+#[allow(deprecated)]
+impl<'a> NarrativeGenerator<'a> {
+    /// Create a new narrative generator.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn new(db: &'a AletheiaDB) -> Self {
+        panic!("NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml.");
+    }
+
+    /// Generate a narrative for a specific node.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
+        panic!("NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml.");
+    }
+}
+
+#[cfg(all(test, feature = "nova"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
