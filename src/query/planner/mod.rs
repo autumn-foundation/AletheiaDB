@@ -641,8 +641,10 @@ impl QueryPlanner {
 
                 let (min_depth, max_depth) = match depth {
                     crate::query::ir::TraversalDepth::Exact(n) => (*n, *n),
-                    crate::query::ir::TraversalDepth::Max(n) => (1, *n),
+                    // Max(n) means 0..=n (start node inclusive up to n hops)
+                    crate::query::ir::TraversalDepth::Max(n) => (0, *n),
                     crate::query::ir::TraversalDepth::Range { min, max } => (*min, *max),
+                    // Variable means *1.. (at least 1 hop)
                     crate::query::ir::TraversalDepth::Variable => (1, 10),
                 };
 

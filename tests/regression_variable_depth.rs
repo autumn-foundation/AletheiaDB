@@ -184,3 +184,75 @@ fn test_variable_depth_min_depth_filter() {
     );
     assert_eq!(rows.len(), 2, "Should find exactly 2 nodes (C, D)");
 }
+
+#[test]
+fn test_variable_depth_max_includes_zero_depth() {
+    // 1. Setup storage
+    let current = Arc::new(CurrentStorage::new());
+    let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
+        AnchorConfig::default(),
+    )));
+
+    // 2. Create graph: A -> B
+    let props = PropertyMapBuilder::new().insert("name", "A").build();
+    let a = current.create_node("Node", props).unwrap();
+
+    let props = PropertyMapBuilder::new().insert("name", "B").build();
+    let b = current.create_node("Node", props).unwrap();
+
+    current
+        .create_edge(a, b, "REL", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // 3. Setup Executor
+    let executor = QueryExecutor::new(current.clone(), historical);
+
+    // 4. Construct Physical Plan Manually
+    // Look up A -> Traverse 0..1 (Should include A at depth 0 and B at depth 1)
+    let plan = PhysicalPlan {
+        root: PhysicalOp::IndexedTraversal {
+            input: Box::new(PhysicalOp::NodeLookup { node_ids: vec![a] }),
+            direction: aletheiadb::query::ir::Direction::Outgoing,
+            label: Some("REL".to_string()),
+            min_depth: 0,
+            max_depth: 1,
+            temporal_context: None,
+        },
+        estimated_cost: Cost::default(),
+        temporal_context: None,
+        parallel: false,
+        include_provenance: false,
+    };
+
+    // 5. Execute
+    let results = executor.execute(plan).expect("Execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+    // 6. Verify results
+    let names: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.entity
+                .as_node()
+                .unwrap()
+                .properties
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+
+    println!("Found nodes: {:?}", names);
+
+    assert!(
+        names.contains(&"A".to_string()),
+        "Should contain A (depth 0)"
+    );
+    assert!(
+        names.contains(&"B".to_string()),
+        "Should contain B (depth 1)"
+    );
+    assert_eq!(rows.len(), 2, "Should find exactly 2 nodes (A, B)");
+}
