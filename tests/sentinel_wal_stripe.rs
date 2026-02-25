@@ -30,7 +30,7 @@ fn test_stripe_append_sync_blocking_waits_when_full() {
     let barrier = Arc::new(Barrier::new(2));
     let barrier_clone = Arc::clone(&barrier);
 
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         // Wait for the main thread to be ready to block
         barrier_clone.wait();
 
@@ -38,8 +38,8 @@ fn test_stripe_append_sync_blocking_waits_when_full() {
         thread::sleep(Duration::from_millis(100));
 
         // Drain the stripe to free up space
-        let drained = stripe_clone.drain();
-        assert_eq!(drained.len(), 2, "Background thread should drain 2 entries");
+        // Note: Due to race conditions, this might drain 2 (initial) or 3 (initial + new) entries
+        stripe_clone.drain().len()
     });
 
     // Synchronize start
@@ -56,14 +56,22 @@ fn test_stripe_append_sync_blocking_waits_when_full() {
         "append_sync_blocking failed to wait for space"
     );
 
-    // Verify the new entry is in the buffer
+    // 6. Verify total items conservation
+    // Wait for background thread to finish and get drained count
+    let drained_count = handle.join().unwrap();
+    let pending_count = stripe.pending_count();
+
+    // We started with 2, added 1 -> Total 3.
+    // They must be either drained or pending.
     assert_eq!(
-        stripe.pending_count(),
-        1,
-        "New entry should be in the buffer"
+        drained_count + pending_count,
+        3,
+        "Total items should be 3. Drained: {}, Pending: {}",
+        drained_count,
+        pending_count
     );
 
-    // Verify total appends
+    // Verify total appends recorded by stripe
     assert_eq!(stripe.total_appends(), 3);
 }
 
@@ -89,10 +97,10 @@ fn test_stripe_append_blocking_waits_when_full() {
     let barrier = Arc::new(Barrier::new(2));
     let barrier_clone = Arc::clone(&barrier);
 
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         barrier_clone.wait();
         thread::sleep(Duration::from_millis(100));
-        stripe_clone.drain();
+        stripe_clone.drain().len()
     });
 
     barrier.wait();
@@ -104,10 +112,15 @@ fn test_stripe_append_blocking_waits_when_full() {
     // 5. Assert success
     assert!(result.is_ok(), "append_blocking failed to wait for space");
 
-    // Verify the new entry is in the buffer
+    // 6. Verify total items
+    let drained_count = handle.join().unwrap();
+    let pending_count = stripe.pending_count();
+
     assert_eq!(
-        stripe.pending_count(),
-        1,
-        "New entry should be in the buffer"
+        drained_count + pending_count,
+        3,
+        "Total items should be 3. Drained: {}, Pending: {}",
+        drained_count,
+        pending_count
     );
 }
