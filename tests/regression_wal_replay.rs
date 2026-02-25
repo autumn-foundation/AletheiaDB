@@ -1,6 +1,6 @@
-use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use aletheiadb::config::AletheiaDBConfig;
 use aletheiadb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use tempfile::TempDir;
 
 #[test]
@@ -10,7 +10,11 @@ fn test_repro_data_loss_missing_wal_replay() {
     let wal_dir = temp_dir.path().join("wal");
 
     let config = AletheiaDBConfig::builder()
-        .wal(aletheiadb::config::WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
+        .wal(
+            aletheiadb::config::WalConfigBuilder::new()
+                .wal_dir(wal_dir.clone())
+                .build(),
+        )
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),
@@ -26,8 +30,9 @@ fn test_repro_data_loss_missing_wal_replay() {
         for i in 0..10 {
             db.create_node(
                 "Person",
-                PropertyMapBuilder::new().insert("id", i as i64).build()
-            ).unwrap();
+                PropertyMapBuilder::new().insert("id", i as i64).build(),
+            )
+            .unwrap();
         }
 
         // Graceful shutdown (flushes WAL)
@@ -51,6 +56,10 @@ fn test_repro_data_loss_missing_wal_replay() {
         let count = db.node_count();
         println!("Node count after recovery: {}", count);
 
-        assert_eq!(count, 10, "Data loss detected! Expected 10 nodes (from WAL), found {}", count);
+        assert_eq!(
+            count, 10,
+            "Data loss detected! Expected 10 nodes (from WAL), found {}",
+            count
+        );
     }
 }

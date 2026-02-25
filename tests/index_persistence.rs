@@ -236,7 +236,10 @@ fn test_indexes_exist_detection() {
 // ============================================================================
 
 use aletheiadb::storage::index_persistence::PersistenceConfig;
-use aletheiadb::{AletheiaDB, config::{AletheiaDBConfig, WalConfigBuilder}};
+use aletheiadb::{
+    AletheiaDB,
+    config::{AletheiaDBConfig, WalConfigBuilder},
+};
 
 /// Test that AletheiaDB can persist indexes to disk (MVP - Phase 1).
 ///

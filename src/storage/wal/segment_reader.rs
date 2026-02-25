@@ -223,9 +223,7 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                     // Corruption or invalid data in the middle of the file - this is serious
                     eprintln!(
                         "CRITICAL: Failed to parse WAL entry in segment {:?} at offset {}: {}",
-                        path,
-                        offset,
-                        e
+                        path, offset, e
                     );
                     eprintln!("Header slice: {:?}", header_slice);
 

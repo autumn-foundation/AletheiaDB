@@ -66,8 +66,7 @@ pub(crate) fn replay_wal_into_storage(
 
                 // Transaction time comes from when the WAL entry was logged
                 let commit_timestamp = entry.timestamp;
-                let metadata =
-                    VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
+                let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
                 let version_id = VersionId::new(next_version_id)?;
                 next_version_id += 1;
 
@@ -112,8 +111,7 @@ pub(crate) fn replay_wal_into_storage(
                 let interned_label = label;
 
                 let commit_timestamp = entry.timestamp;
-                let metadata =
-                    VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
+                let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
                 let version_id = VersionId::new(next_version_id)?;
                 next_version_id += 1;
 
@@ -162,8 +160,7 @@ pub(crate) fn replay_wal_into_storage(
                 let interned_label = label;
 
                 let commit_timestamp = entry.timestamp;
-                let metadata =
-                    VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
+                let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
                 let node = Node::with_metadata(
                     node_id,
@@ -176,10 +173,8 @@ pub(crate) fn replay_wal_into_storage(
                 current.update_node_direct(node, commit_timestamp)?;
 
                 if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
-                    historical.close_node_version_transaction_time(
-                        prev_version_id,
-                        commit_timestamp,
-                    )?;
+                    historical
+                        .close_node_version_transaction_time(prev_version_id, commit_timestamp)?;
                 }
 
                 historical.add_node_version(
@@ -211,8 +206,7 @@ pub(crate) fn replay_wal_into_storage(
                 let interned_label = label;
 
                 let commit_timestamp = entry.timestamp;
-                let metadata =
-                    VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
+                let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
                 let edge = Edge::with_metadata(
                     edge_id,
@@ -227,10 +221,8 @@ pub(crate) fn replay_wal_into_storage(
                 current.update_edge_direct(edge)?;
 
                 if let Some(prev_version_id) = historical.get_current_edge_version(edge_id) {
-                    historical.close_edge_version_transaction_time(
-                        prev_version_id,
-                        commit_timestamp,
-                    )?;
+                    historical
+                        .close_edge_version_transaction_time(prev_version_id, commit_timestamp)?;
                 }
 
                 historical.add_edge_version(
