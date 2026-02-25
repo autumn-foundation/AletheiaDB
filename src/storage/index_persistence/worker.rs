@@ -214,13 +214,10 @@ pub(crate) fn spawn_background_persistence_thread(
                 let mut any_index_persisted = false;
 
                 // CRITICAL: Capture snapshot state BEFORE persistence operations start
-                // This ensures the manifest records a conservative LSN/counts that are
-                // guaranteed to be consistent with what gets written to disk, preventing
-                // data loss during recovery if concurrent writes happen during persistence.
+                // This ensures the manifest records a conservative LSN that is guaranteed
+                // to be consistent with what gets written to disk, preventing data loss
+                // during recovery if concurrent writes happen during persistence.
                 let snapshot_lsn = wal.current_lsn().0;
-                let node_count = current.node_count() as u64;
-                let edge_count = current.edge_count() as u64;
-                let string_count = crate::core::GLOBAL_INTERNER.len() as u64;
 
                 // Check vector index policy
                 let vector_mutations = tracker.get_vector_mutations();
@@ -246,7 +243,7 @@ pub(crate) fn spawn_background_persistence_thread(
                     || graph_seconds >= policies.graph.time_interval_secs as u64
                 {
                     match persist_graph_index(&current, &manager, Some(&tracker), snapshot_lsn) {
-                        Ok(()) => any_index_persisted = true,
+                        Ok(_) => any_index_persisted = true,
                         Err(e) => {
                             eprintln!(
                                 "Background persistence: Failed to persist graph index: {}",
@@ -286,7 +283,7 @@ pub(crate) fn spawn_background_persistence_thread(
                     || string_seconds >= policies.strings.time_interval_secs as u64
                 {
                     match persist_string_interner(&manager, &tracker, snapshot_lsn) {
-                        Ok(()) => any_index_persisted = true,
+                        Ok(_) => any_index_persisted = true,
                         Err(e) => {
                             eprintln!(
                                 "Background persistence: Failed to persist string interner: {}",
@@ -309,9 +306,9 @@ pub(crate) fn spawn_background_persistence_thread(
                         &manager,
                         &historical,
                         &tracker,
-                        node_count,
-                        edge_count,
-                        string_count,
+                        tracker.get_last_persisted_node_count(),
+                        tracker.get_last_persisted_edge_count(),
+                        tracker.get_last_persisted_string_count(),
                     );
                 }
             }

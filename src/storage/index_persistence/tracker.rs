@@ -58,6 +58,13 @@ pub(crate) struct PersistenceTracker {
     /// Last persisted LSN for string interner
     last_string_lsn: AtomicU64,
 
+    /// Last persisted node count (from graph index)
+    last_persisted_node_count: AtomicU64,
+    /// Last persisted edge count (from graph index)
+    last_persisted_edge_count: AtomicU64,
+    /// Last persisted string count (from string interner)
+    last_persisted_string_count: AtomicU64,
+
     /// Shutdown signal for background persistence thread
     shutdown: AtomicBool,
 }
@@ -83,6 +90,9 @@ impl PersistenceTracker {
             last_graph_lsn: AtomicU64::new(0),
             last_temporal_lsn: AtomicU64::new(0),
             last_string_lsn: AtomicU64::new(0),
+            last_persisted_node_count: AtomicU64::new(0),
+            last_persisted_edge_count: AtomicU64::new(0),
+            last_persisted_string_count: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
         }
     }
@@ -113,6 +123,35 @@ impl PersistenceTracker {
     /// Update the last persisted LSN for string interner.
     pub fn update_string_lsn(&self, lsn: u64) {
         self.last_string_lsn.fetch_max(lsn, Ordering::Release);
+    }
+
+    /// Update the last persisted node and edge counts.
+    pub fn update_last_persisted_counts(&self, node_count: u64, edge_count: u64) {
+        self.last_persisted_node_count
+            .store(node_count, Ordering::Release);
+        self.last_persisted_edge_count
+            .store(edge_count, Ordering::Release);
+    }
+
+    /// Get the last persisted node count.
+    pub fn get_last_persisted_node_count(&self) -> u64 {
+        self.last_persisted_node_count.load(Ordering::Acquire)
+    }
+
+    /// Get the last persisted edge count.
+    pub fn get_last_persisted_edge_count(&self) -> u64 {
+        self.last_persisted_edge_count.load(Ordering::Acquire)
+    }
+
+    /// Update the last persisted string count.
+    pub fn update_last_persisted_string_count(&self, count: u64) {
+        self.last_persisted_string_count
+            .store(count, Ordering::Release);
+    }
+
+    /// Get the last persisted string count.
+    pub fn get_last_persisted_string_count(&self) -> u64 {
+        self.last_persisted_string_count.load(Ordering::Acquire)
     }
 
     /// Get the safe manifest LSN (minimum of all component LSNs).
