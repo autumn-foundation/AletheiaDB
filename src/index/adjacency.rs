@@ -104,11 +104,11 @@ impl AdjacencyIndex {
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
-        let node_ids_typed: Vec<NodeId> = node_ids
-            .iter()
-            .map(|&id| NodeId::new_unchecked(id))
-            .collect();
-        let offsets_usize: Vec<usize> = offsets.iter().map(|&x| x as usize).collect();
+        // Optimization: Zero-copy transmutation of compatible vectors
+        // This avoids large allocations during startup/graph loading
+        let node_ids_typed: Vec<NodeId> = cast_vec_u64_to_nodeid(node_ids);
+        let offsets_usize: Vec<usize> = cast_vec_u64_to_usize(offsets);
+
         let mut adjacency_entries = Vec::with_capacity(edge_ids.len());
 
         for &edge_id_u64 in &edge_ids {
@@ -317,6 +317,37 @@ impl Default for AdjacencyIndex {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Safely casts a `Vec<u64>` to `Vec<NodeId>`.
+///
+/// This is safe because `NodeId` is `#[repr(transparent)]` around `u64`,
+/// so they have identical memory layout and alignment.
+fn cast_vec_u64_to_nodeid(v: Vec<u64>) -> Vec<NodeId> {
+    let mut v = std::mem::ManuallyDrop::new(v);
+    unsafe {
+        // SAFETY: NodeId is #[repr(transparent)] wrapper around u64.
+        // The layout and alignment are guaranteed to be identical.
+        Vec::from_raw_parts(v.as_mut_ptr() as *mut NodeId, v.len(), v.capacity())
+    }
+}
+
+/// Casts `Vec<u64>` to `Vec<usize>` avoiding allocation on 64-bit platforms.
+#[cfg(target_pointer_width = "64")]
+fn cast_vec_u64_to_usize(v: Vec<u64>) -> Vec<usize> {
+    // On 64-bit systems, usize is u64 (8 bytes).
+    // The memory layout is compatible.
+    let mut v = std::mem::ManuallyDrop::new(v);
+    unsafe {
+        // SAFETY: On 64-bit, usize and u64 have same size (8 bytes) and alignment (8 bytes).
+        Vec::from_raw_parts(v.as_mut_ptr() as *mut usize, v.len(), v.capacity())
+    }
+}
+
+/// Fallback for non-64-bit platforms where `usize` != `u64`.
+#[cfg(not(target_pointer_width = "64"))]
+fn cast_vec_u64_to_usize(v: Vec<u64>) -> Vec<usize> {
+    v.into_iter().map(|x| x as usize).collect()
 }
 
 #[cfg(test)]

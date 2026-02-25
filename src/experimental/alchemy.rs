@@ -30,6 +30,8 @@
 //! # }
 //! ```
 
+#![allow(clippy::collapsible_if)]
+
 use crate::AletheiaDB;
 use crate::api::transaction::{ReadOps, WriteOps};
 use crate::core::error::Result;
