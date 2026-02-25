@@ -21,26 +21,37 @@ use crate::storage::wal::{LSN, WalOperation};
 /// * `current` - Current storage to apply updates to
 /// * `historical` - Historical storage to apply updates to
 /// * `start_lsn` - The LSN to start replaying from (inclusive)
+/// * `next_version_id` - The starting version ID for new versions created during replay
 ///
 /// # Returns
 ///
-/// The final LSN reached after replay (current LSN of the WAL).
+/// A tuple containing:
+/// - The final LSN reached after replay (current LSN of the WAL)
+/// - The maximum node ID observed (if any)
+/// - The maximum edge ID observed (if any)
+/// - The next version ID to use (updated after replay)
 pub(crate) fn replay_wal_into_storage(
     wal: &ConcurrentWalSystem,
     current: &CurrentStorage,
     historical: &mut HistoricalStorage,
     start_lsn: LSN,
-) -> Result<LSN> {
+    mut next_version_id: u64,
+) -> Result<(LSN, Option<u64>, Option<u64>, u64)> {
     const RECOVERY_TX_ID: u64 = 0;
 
     let mut max_node_id: Option<u64> = None;
     let mut max_edge_id: Option<u64> = None;
-    let mut max_version_id: Option<u64> = None;
-    let mut next_version_id: u64 = 1;
 
     let wal_entries = wal.read_from(start_lsn)?;
 
     if !wal_entries.is_empty() {
+        #[cfg(feature = "observability")]
+        tracing::info!(
+            "Replaying {} WAL entries from LSN {}",
+            wal_entries.len(),
+            start_lsn.0
+        );
+        #[cfg(not(feature = "observability"))]
         eprintln!(
             "Replaying {} WAL entries from LSN {}",
             wal_entries.len(),
@@ -88,11 +99,6 @@ pub(crate) fn replay_wal_into_storage(
                     properties,
                     false, // not a tombstone
                 )?;
-
-                max_version_id = Some(match max_version_id {
-                    Some(current_max) => current_max.max(next_version_id - 1),
-                    None => next_version_id - 1,
-                });
             }
             WalOperation::CreateEdge {
                 edge_id,
@@ -137,11 +143,6 @@ pub(crate) fn replay_wal_into_storage(
                     properties,
                     false, // not a tombstone
                 )?;
-
-                max_version_id = Some(match max_version_id {
-                    Some(current_max) => current_max.max(next_version_id - 1),
-                    None => next_version_id - 1,
-                });
             }
             WalOperation::UpdateNode {
                 node_id,
@@ -150,10 +151,6 @@ pub(crate) fn replay_wal_into_storage(
                 properties,
                 valid_from,
             } => {
-                max_version_id = Some(match max_version_id {
-                    Some(current_max) => current_max.max(version_id.as_u64()),
-                    None => version_id.as_u64(),
-                });
                 next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
                 // Label is already an InternedString (no allocation needed!)
@@ -194,10 +191,6 @@ pub(crate) fn replay_wal_into_storage(
                 properties,
                 valid_from,
             } => {
-                max_version_id = Some(match max_version_id {
-                    Some(current_max) => current_max.max(version_id.as_u64()),
-                    None => version_id.as_u64(),
-                });
                 next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
                 let current_edge = current.get_edge(edge_id)?;
@@ -271,10 +264,6 @@ pub(crate) fn replay_wal_into_storage(
                     )?;
 
                     current.delete_node_direct(node_id, commit_timestamp)?;
-                    max_version_id = Some(match max_version_id {
-                        Some(current_max) => current_max.max(next_version_id - 1),
-                        None => next_version_id - 1,
-                    });
                 }
             }
             WalOperation::DeleteEdge {
@@ -309,10 +298,6 @@ pub(crate) fn replay_wal_into_storage(
                     )?;
 
                     current.delete_edge_direct(edge_id)?;
-                    max_version_id = Some(match max_version_id {
-                        Some(current_max) => current_max.max(next_version_id - 1),
-                        None => next_version_id - 1,
-                    });
                 }
             }
             WalOperation::Checkpoint { .. } => {
@@ -323,17 +308,5 @@ pub(crate) fn replay_wal_into_storage(
 
     let final_lsn = wal.current_lsn();
 
-    // Only update ID generators when replay observed IDs for that type.
-    // This preserves values from load_current_storage when no WAL replay happened.
-    if let Some(max_node_id) = max_node_id {
-        current.init_node_id_generator(max_node_id + 1);
-    }
-    if let Some(max_edge_id) = max_edge_id {
-        current.init_edge_id_generator(max_edge_id + 1);
-    }
-    if let Some(max_version_id) = max_version_id {
-        current.init_version_id_generator(max_version_id + 1);
-    }
-
-    Ok(final_lsn)
+    Ok((final_lsn, max_node_id, max_edge_id, next_version_id))
 }

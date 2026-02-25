@@ -1117,12 +1117,27 @@ impl CheckpointManager {
         mut historical: HistoricalStorage,
         start_lsn: LSN,
     ) -> Result<(CurrentStorage, HistoricalStorage, LSN)> {
-        let final_lsn = crate::storage::recovery::replay_wal_into_storage(
-            wal,
-            &current,
-            &mut historical,
-            start_lsn,
-        )?;
+        // Capture initial version ID before replay
+        let initial_version_id = current.get_version_id_generator_current();
+
+        let (final_lsn, max_node_id, max_edge_id, next_version_id) =
+            crate::storage::recovery::replay_wal_into_storage(
+                wal,
+                &current,
+                &mut historical,
+                start_lsn,
+                initial_version_id,
+            )?;
+
+        // Update ID generators to account for replayed entities
+        if let Some(max_node_id) = max_node_id {
+            current.init_node_id_generator(max_node_id + 1);
+        }
+        if let Some(max_edge_id) = max_edge_id {
+            current.init_edge_id_generator(max_edge_id + 1);
+        }
+        // Ensure version ID generator is updated
+        current.ensure_version_id_generator_at_least(next_version_id);
 
         Ok((current, historical, final_lsn))
     }
