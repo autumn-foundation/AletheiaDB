@@ -3,19 +3,29 @@
 //! These tests are specifically designed to catch regressions in semantic cost calculation
 //! and pathfinding logic identified by mutation testing.
 
+use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::query::semantic_pathfinding::SemanticPathfinder;
 use aletheiadb::{AletheiaDB, WriteOps};
+use tempfile::TempDir;
 
-fn create_test_db() -> AletheiaDB {
-    let db = AletheiaDB::new().unwrap();
+fn create_test_db() -> (AletheiaDB, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir).build())
+        .build();
+
+    let db = AletheiaDB::with_unified_config(config).unwrap();
+
     // Enable vector index
     db.vector_index("embedding")
         .hnsw(HnswConfig::new(3, DistanceMetric::Cosine))
         .enable()
         .unwrap();
-    db
+    (db, temp_dir)
 }
 
 #[test]
@@ -24,7 +34,7 @@ fn test_semantic_pathfinding_penalizes_opposite() {
     // 💣 Risk: If cost = 1.0 / sim, negative similarity (opposite vectors) becomes negative cost,
     // which effectively rewards dissimilarity instead of penalizing it.
 
-    let db = create_test_db();
+    let (db, _temp_dir) = create_test_db();
 
     // Start -> End
     let start = db
@@ -96,7 +106,7 @@ fn test_semantic_pathfinding_overcomes_structural_cost() {
     // We construct a case where the semantically "good" path is longer (more hops)
     // but semantically cheaper than the "bad" path.
 
-    let db = create_test_db();
+    let (db, _temp_dir) = create_test_db();
 
     let start = db
         .create_node("Start", PropertyMapBuilder::new().build())
