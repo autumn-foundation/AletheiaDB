@@ -484,7 +484,7 @@ fn test_wal_creation_failure_propagates_error() {
     );
 
     // Error should mention an I/O issue
-    let err = result.err().expect("Expected an error");
+    let err = result.expect_err("Expected an error");
     let err_msg = err.to_string().to_lowercase();
     assert!(
         err_msg.contains("i/o")
