@@ -490,6 +490,18 @@ impl PropertyValue {
                     .zip(b.iter())
                     .all(|(x, y)| if x.is_nan() { y.is_nan() } else { x == y })
             }
+            (PropertyValue::Array(a), PropertyValue::Array(b)) => {
+                // Optimization: If they point to the same allocation, they must be equal.
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| x.semantically_equal(y))
+            }
             // For other types, fallback to PartialEq
             _ => self == other,
         }
@@ -3894,5 +3906,34 @@ mod sentry_tests {
         // Verify it was serialized correctly
         let (deserialized, _) = deserialize_vector(&buffer).unwrap();
         assert_eq!(deserialized.len(), MAX_VECTOR_DIMENSIONS);
+    }
+
+    /// 🎯 Target: PropertyValue::semantically_equal (Arrays)
+    /// 💣 Risk: Arrays containing NaN should be semantically equal even if distinct allocations.
+    /// 🧪 Strategy: Create two distinct arrays with NaN and compare.
+    /// 🔬 Verification: semantically_equal returns true.
+    #[test]
+    fn test_semantically_equal_nested_array_nan_distinct_allocations() {
+        // Create two distinct arrays containing NaN
+        let nan_array_1 = PropertyValue::Array(Arc::new(vec![
+            PropertyValue::Float(1.0),
+            PropertyValue::Float(f64::NAN),
+        ]));
+
+        let nan_array_2 = PropertyValue::Array(Arc::new(vec![
+            PropertyValue::Float(1.0),
+            PropertyValue::Float(f64::NAN),
+        ]));
+
+        // Ensure they are NOT pointer equal
+        if let (PropertyValue::Array(a), PropertyValue::Array(b)) = (&nan_array_1, &nan_array_2) {
+            assert!(!Arc::ptr_eq(a, b), "Arrays should be distinct allocations");
+        }
+
+        // It should be semantically equal, treating NaN as equal
+        assert!(
+            nan_array_1.semantically_equal(&nan_array_2),
+            "Distinct arrays containing NaN should be semantically equal"
+        );
     }
 }
