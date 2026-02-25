@@ -734,6 +734,21 @@ mod tests {
             "max_node_id should consider target nodes"
         );
     }
+
+    #[test]
+    fn test_cast_vec_u64_to_usize_correctness() {
+        // Test the zero-copy optimization/fallback for offset casting
+        let original = vec![0, 10, 20, 30, 40];
+        // Clone for comparison since cast consumes the vector
+        let reference = original.clone();
+
+        let casted = cast_vec_u64_to_usize(original);
+
+        assert_eq!(casted.len(), reference.len());
+        for (i, val) in casted.iter().enumerate() {
+            assert_eq!(*val as u64, reference[i]);
+        }
+    }
 }
 
 #[cfg(test)]
