@@ -2248,10 +2248,7 @@ mod sentry_tests {
         let ret = query.return_clause.expect("Expected return clause");
         let item = &ret.items[0];
         // Use full equality check to avoid uncovered panic branches
-        assert_eq!(
-            item.expression,
-            Expression::Literal(PropertyValue::Int(-5))
-        );
+        assert_eq!(item.expression, Expression::Literal(PropertyValue::Int(-5)));
     }
 
     #[test]
@@ -2298,7 +2295,7 @@ mod sentry_tests {
             direction: RelationshipDirection::Outgoing,
             depth: Some(DepthSpec::Range {
                 min: 1,
-                max: usize::MAX / 2
+                max: usize::MAX / 2,
             }),
         });
 

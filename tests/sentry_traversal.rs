@@ -8,28 +8,47 @@
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use parking_lot::RwLock;
     use aletheiadb::core::id::NodeId;
     use aletheiadb::core::property::PropertyMapBuilder;
+    use aletheiadb::query::planner::physical::PhysicalOp;
+    use aletheiadb::query::planner::physical::PhysicalPlan;
+    use aletheiadb::query::QueryExecutor;
     use aletheiadb::storage::current::CurrentStorage;
     use aletheiadb::storage::historical::HistoricalStorage;
-    use aletheiadb::query::planner::physical::PhysicalOp;
-    use aletheiadb::query::QueryExecutor;
-    use aletheiadb::query::planner::physical::PhysicalPlan;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
 
-    fn create_cycle_graph() -> (Arc<CurrentStorage>, Arc<RwLock<HistoricalStorage>>, NodeId, NodeId) {
+    fn create_cycle_graph() -> (
+        Arc<CurrentStorage>,
+        Arc<RwLock<HistoricalStorage>>,
+        NodeId,
+        NodeId,
+    ) {
         let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
 
         // Create A and B
-        let a = current.create_node("Person", PropertyMapBuilder::new().insert("name", "A").build()).unwrap();
-        let b = current.create_node("Person", PropertyMapBuilder::new().insert("name", "B").build()).unwrap();
+        let a = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
 
         // A -> B
-        current.create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+        current
+            .create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
         // B -> A (Cycle)
-        current.create_edge(b, a, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+        current
+            .create_edge(b, a, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
 
         (current, historical, a, b)
     }
@@ -66,7 +85,11 @@ mod tests {
         // Depth 0: A (Visited: {A})
         // Depth 1: B (from A->B) (Visited: {A, B})
         // Depth 2: A (from B->A) -> Rejected because A is in Visited.
-        assert_eq!(rows.len(), 0, "TraversalIterator should enforce Node Isomorphism and suppress cycles");
+        assert_eq!(
+            rows.len(),
+            0,
+            "TraversalIterator should enforce Node Isomorphism and suppress cycles"
+        );
     }
 
     #[test]
@@ -79,7 +102,9 @@ mod tests {
 
         let plan = PhysicalPlan {
             root: PhysicalOp::IndexedTraversal {
-                input: Box::new(PhysicalOp::NodeLookup { node_ids: vec![a, a] }), // Double A
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![a, a],
+                }), // Double A
                 direction: aletheiadb::query::ir::Direction::Outgoing,
                 label: None,
                 depth: 1,
@@ -96,7 +121,11 @@ mod tests {
 
         // Should return B twice (once for each input A).
         // If state leaked, the second A might see 'B' as visited (if visited wasn't cleared) or similar issues.
-        assert_eq!(rows.len(), 2, "Should return result for each input node independently");
+        assert_eq!(
+            rows.len(),
+            2,
+            "Should return result for each input node independently"
+        );
         assert_eq!(rows[0].entity.node_id(), Some(b));
         assert_eq!(rows[1].entity.node_id(), Some(b));
     }
