@@ -2,62 +2,64 @@
 
 ## Summary
 
-**Status**: No critical high-severity correctness bugs found.
-**Risk Level**: Low to Medium.
+**Status**: 🚨 **CRITICAL RISKS DETECTED** 🚨
+**Risk Level**: **Critical** (Functionality Gaps & Data Consistency Risks)
 
-The codebase exhibits a strong defensive programming style, with careful handling of concurrency, race conditions, and memory safety (especially in `unsafe` blocks). However, there are significant performance bottlenecks due to conservative locking strategies and some theoretical edge cases in error handling.
+The review identified a critical discrepancy between documentation and implementation in the Sharding module, alongside a high-severity consistency issue in distributed transactions.
 
 ## Findings
 
-### 1. HNSW Ingestion Scalability Bottleneck (Performance - Medium)
+### 1. Sharding Functionality Stubbed (Critical)
+
+**File**: `src/storage/sharding/coordinator.rs`
+
+**Issue**: The `ShardCoordinator` relies on a local `ShardConnection` struct that stubs all network operations. The `prepare`, `commit`, and `abort` methods simply return `Ok(())` without communicating with any remote shard.
+
+**Impact**:
+- **Non-Functional Distributed Mode**: Multi-node deployments will **not work**. Transactions will appear to succeed locally but will not propagate to other nodes.
+- **Data Loss**: Data meant for other shards is not persisted on them.
+- **Misleading Status**: The documentation claims Sharding is "Complete ✅", which is factually incorrect for the current implementation path.
+
+**Reasoning**: `ShardCoordinator::new` instantiates `ShardConnection` directly instead of using the `HttpShardClient` (found in `rpc_client.rs`) or the `ShardClient` trait. `ShardConnection` contains explicit comments: `"In a real implementation, this would make an RPC call"`.
+
+**Recommendation**:
+- Update `ShardCoordinator` to hold `Box<dyn ShardClient>`.
+- In `ShardCoordinator::new`, verify the `sharding-rpc` feature and instantiate `HttpShardClient`.
+- Update README to reflect accurate status (e.g., "Architecture Complete, Networking WIP").
+
+### 2. Ambiguous Commit / "Ghost Success" (High)
+
+**File**: `src/storage/sharding/coordinator.rs`
+
+**Issue**: In `commit_distributed_transaction`, the function returns a `CommitFailed` error to the caller if network propagation fails, **even if the commit decision was already successfully logged to the WAL**.
+
+**Impact**:
+- **State Divergence**: The client believes the transaction failed (and might retry/rollback logic), but the system's recovery mechanism will eventually commit the transaction.
+- **Data Integrity**: Retrying a transaction that actually succeeded (but reported failure) can lead to duplicate data or logical inconsistencies depending on application logic.
+
+**Reasoning**: The "Point of No Return" is `log.log_commit`. Any failure after this point is a *liveness* issue (propagation delay), not a *correctness* failure (abort). Returning `Err(CommitFailed)` implies the latter.
+
+**Recommendation**:
+- Return a distinct error variant (e.g., `CommitPending` or `CommitAcceptedButNotPropagated`) when the decision is logged.
+- Implement a background "sweeper" task in `ShardCoordinator` to actively retry these stuck commits without waiting for a full system restart.
+
+### 3. HNSW Ingestion Scalability Bottleneck (Medium)
 
 **File**: `src/index/vector/hnsw.rs`
 
-**Issue**: The `add` method acquires a global `RwLock::write` lock on the inner `usearch` index (`self.inner.write()`), even though `usearch` claims to support concurrent modifications.
+**Issue**: The `add` method acquires a global `RwLock::write` lock on the inner `usearch` index (`self.inner.write()`).
 
-**Impact**: Vector ingestion is globally serialized. Multi-threaded ingestion will not scale beyond single-core performance. For a "high-performance" database, this is a significant limitation.
+**Impact**: Vector ingestion is strictly serialized. Parallel ingestion threads will block each other, limiting write throughput to single-core performance.
 
-**Reasoning**: The comment states this is "intentionally redundant" for safety. While safe, it negates the concurrency benefits of the underlying library.
+**Reasoning**: The implementation opts for "redundant safety" by wrapping the thread-safe C++ library in a Rust RwLock.
 
-**Recommendation**: Investigate if `usearch::Index::add` is thread-safe with `&self`. If so, downgrade the lock to `read()` to allow concurrent indexing (while relying on `entry_locks` for row-level consistency).
-
-### 2. Ambiguous Commit on WAL Flush Timeout (Correctness - Low)
-
-**File**: `src/storage/wal/group_commit.rs`
-
-**Issue**: In `wait_for_flush`, if the wait times out (default 60s), the function returns `StorageError::WalError`. However, the flush operation in the background thread is not cancelled and may eventually succeed.
-
-**Impact**: The client receives an error ("Timeout"), implying failure, but the data might be durably persisted later. This violates strict atomicity/consistency expectations (Ghost Success).
-
-**Reasoning**: "Two Generals Problem". It is difficult to cancel an in-flight flush.
-
-**Recommendation**: On timeout, consider treating it as a critical failure (panic/shutdown) to prevent inconsistency, or explicitly document that the transaction state is unknown.
-
-### 3. Fragile Error String Matching (Maintenance - Low)
-
-**File**: `src/index/vector/hnsw.rs`
-
-**Issue**: `is_retryable_usearch_error` relies on string matching: `error_msg.contains("No available threads to lock")`.
-
-**Impact**: If the upstream `usearch` library changes its error message format, retries will fail silently, leading to spurious errors under load.
-
-**Recommendation**: Advocate for structured error types in the upstream library or maintain a strict version pin and integration test suite.
-
-### 4. Theoretical WAL Epoch Wraparound (Correctness - Low)
-
-**File**: `src/storage/wal/group_commit.rs`
-
-**Issue**: `wait_for_flush` uses `state.flushed_epoch < epoch`. If `u64` epoch wraps around, this check will incorrectly return success immediately.
-
-**Impact**: Data loss (premature success) after ~584 years of operation at 1 billion tx/sec.
-
-**Recommendation**: Use modular arithmetic (`wrapping_sub`) for epoch comparisons, similar to `src/storage/wal/ring_buffer.rs`.
+**Recommendation**: Investigate removing the global write lock for `add` if `usearch` handles concurrent inserts safely (it claims to), or use finer-grained locking.
 
 ## Test Gaps
 
-- **HNSW Concurrency Perf**: No benchmark measuring multi-threaded ingestion scaling to confirm the bottleneck.
-- **WAL Timeout Recovery**: No test verifying behavior when `wait_for_flush` times out but flush eventually succeeds (hard to test deterministically).
+- **Integration Tests**: No tests verify actual network communication for sharding (impossible given the stubbed implementation).
+- **Failure Recovery**: No tests cover the "Ambiguous Commit" scenario where a client must handle a "Pending" state.
 
 ## Conclusion
 
-The system is safe but conservative. The primary recommendation is to address the HNSW global lock to unlock performance potential.
+The Sharding module requires immediate attention to wire up the actual RPC layer. Until then, it should be marked as "Experimental" or "In Progress". The Ambiguous Commit issue requires a logic update to safe-guard client assumptions.
