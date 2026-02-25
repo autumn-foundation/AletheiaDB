@@ -31,7 +31,9 @@ pub struct NarrativeGenerator<'a> {
 
 #[cfg(not(feature = "nova"))]
 /// Generator for creating natural language narratives from temporal history.
-#[deprecated(note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml.")]
+#[deprecated(
+    note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+)]
 pub struct NarrativeGenerator<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
@@ -149,7 +151,9 @@ impl<'a> NarrativeGenerator<'a> {
     #[allow(unused_variables)]
     #[track_caller]
     pub fn new(db: &'a AletheiaDB) -> Self {
-        panic!("NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml.");
+        panic!(
+            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
     }
 
     /// Generate a narrative for a specific node.
@@ -160,7 +164,9 @@ impl<'a> NarrativeGenerator<'a> {
     #[allow(unused_variables)]
     #[track_caller]
     pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
-        panic!("NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml.");
+        panic!(
+            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
     }
 }
 
@@ -279,5 +285,34 @@ mod tests {
                 .any(|s| s.contains("was '\"delete_me\"'")),
             "Expected original value in removal message"
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "nova")))]
+#[allow(deprecated)]
+mod stub_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_new() {
+        let db = AletheiaDB::new().unwrap();
+        // This should panic
+        let _ = NarrativeGenerator::new(&db);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_generate() {
+        // Construct a fake NarrativeGenerator to test method panic
+        // Safety: NarrativeGenerator is a ZST with PhantomData, so it's valid to transmute from unit or zeroed.
+        // We just need it to call the method.
+        let generator: NarrativeGenerator<'_> = unsafe { std::mem::transmute(()) };
+        // This should panic
+        let _ = generator.generate_node_narrative(NodeId::new(0).unwrap());
     }
 }
