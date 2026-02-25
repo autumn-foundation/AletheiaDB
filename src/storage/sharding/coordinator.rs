@@ -618,11 +618,15 @@ impl ShardCoordinator {
             };
 
             if should_log {
-                log.log_commit(tx_id, transaction.participant_shards(), commit_timestamp)
-                    .map_err(|e| DistributedTxError::Aborted {
-                        reason: format!("Failed to log commit decision: {}", e),
-                    })?;
-                transaction.commit_decision_logged = true;
+                match log.log_commit(tx_id, transaction.participant_shards(), commit_timestamp) {
+                    Ok(_) => transaction.commit_decision_logged = true,
+                    Err(e) => {
+                        self.reinsert_transaction(tx_id, transaction);
+                        return Err(DistributedTxError::Aborted {
+                            reason: format!("Failed to log commit decision: {}", e),
+                        });
+                    }
+                }
             }
         }
 
@@ -756,9 +760,16 @@ impl ShardCoordinator {
                 .map_err(|_| DistributedTxError::Aborted {
                     reason: "Lock poisoned".to_string(),
                 })?;
-            // We ignore error here because aborting is best-effort if logging fails?
-            // Or we should report it. But we are already aborting.
-            let _ = log.log_abort(tx_id, transaction.participant_shards());
+            if let Err(e) = log.log_abort(tx_id, transaction.participant_shards()) {
+                // If logging fails, we should still try to abort locally and remotely,
+                // but we might want to log this error.
+                // Reinserting the transaction isn't strictly necessary since we are aborting,
+                // but if we fail to log, recovery might be confused.
+                // However, the transaction is already doomed.
+                // We'll proceed with abort, but note the failure.
+                #[cfg(feature = "observability")]
+                tracing::warn!("Failed to log abort decision: {}", e);
+            }
         }
 
         // Send abort to all participants
