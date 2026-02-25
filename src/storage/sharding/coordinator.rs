@@ -267,7 +267,7 @@ impl ShardCoordinator {
 
         let router = ShardRouter::new(config);
 
-        Self {
+        let coordinator = Self {
             router,
             connections: RwLock::new(connections),
             shard_states: RwLock::new(shard_states),
@@ -280,7 +280,14 @@ impl ShardCoordinator {
             rebalance_config: RebalanceConfig::default(),
             transaction_timeout,
             dead_letter_queue: RwLock::new(HashMap::new()),
+        };
+
+        // Recover pending transactions on startup
+        if let Err(e) = coordinator.recover_pending_transactions() {
+            panic!("Failed to recover pending transactions on startup: {}", e);
         }
+
+        coordinator
     }
 
     /// Create a coordinator with custom rebalance config.

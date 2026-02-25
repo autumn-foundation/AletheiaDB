@@ -54,31 +54,20 @@ fn test_shard_recovery_data_loss_repro() {
     // Create new coordinator with SAME config (pointing to same WAL)
     let coordinator_recovered = ShardCoordinator::new(config);
 
-    // 6. Attempt Recovery
+    // 6. Attempt Recovery (Manual check)
+    // Since ShardCoordinator::new() now automatically recovers pending transactions,
+    // this manual call should find no pending transactions if auto-recovery worked.
     let result = coordinator_recovered
         .recover_pending_transactions()
         .unwrap();
 
     // 7. Verify Data Recovery (Fix Verification)
-    // The transaction should be in the 'recovered' list (or 'dead_lettered' if retry fails, but recovery logic might retry commit).
-    // Wait, recover_pending_transactions retries commit.
-    // But the shards are still unavailable (new coordinator creates new connections, but they point to "localhost:9000" which is not a real server).
-    // The mock ShardConnection is "healthy" by default.
-    // So recovery should SUCCEED because the new coordinator thinks shards are healthy!
-    // (Unless the mock connection actually tries network).
-    // ShardConnection logic:
-    // "Simulate a prepare call... In a real implementation, this would make an RPC call"
-    // It returns Ok if healthy.
-
-    // New coordinator -> New connections -> Default Healthy.
-    // So recover_pending_transactions -> commit_distributed_transaction -> conn.commit() -> Ok.
-    // So transaction should be in `recovered`.
-
+    // If auto-recovery worked, the transaction was committed and removed from the WAL pending list.
+    // If auto-recovery failed (bug), this list would contain the transaction.
     assert!(
-        !result.recovered.is_empty(),
-        "Transaction should be recovered from WAL"
+        result.recovered.is_empty(),
+        "Transaction should have been automatically recovered by ShardCoordinator::new()"
     );
-    assert!(result.recovered.contains(&tx_id));
     assert!(result.dead_lettered.is_empty());
 
     // Cleanup
