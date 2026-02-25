@@ -356,9 +356,8 @@ impl CommitLogEntry {
                         "Truncated commit timestamp".into(),
                     ));
                 }
-                let (ts, consumed) = HybridTimestamp::deserialize(&entry_data[offset..])
+                let (ts, _consumed) = HybridTimestamp::deserialize(&entry_data[offset..])
                     .map_err(|e| CommitLogError::InvalidEntry(e.to_string()))?;
-                offset += consumed;
                 Some(ts)
             } else {
                 None

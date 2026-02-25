@@ -3,6 +3,9 @@
 //! This module implements distributed transactions for writes that span multiple
 //! shards, ensuring ACID properties across shard boundaries.
 
+// Allow deprecation warnings for the legacy TwoPhaseCommitLog
+#![allow(deprecated)]
+
 use super::types::ShardId;
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::TxId;
