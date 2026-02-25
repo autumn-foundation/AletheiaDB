@@ -192,6 +192,17 @@ pub struct MigrationResponse {
 ///
 /// This trait abstracts network communication, allowing for different
 /// implementations (gRPC, HTTP, in-process for testing).
+///
+/// # ⚠️ Blocking API
+///
+/// All methods in this trait are **synchronous and blocking**.
+///
+/// - Implementations are expected to block the current thread until the network
+///   operation completes or times out.
+/// - Callers (like `QueryExecutor`) will block while waiting for responses.
+/// - This simplifies error handling and state management but limits concurrency.
+///
+/// For high-throughput scenarios, this trait will eventually be migrated to `async`.
 pub trait ShardClient: Send + Sync + fmt::Debug {
     /// Get the shard ID this client connects to.
     fn shard_id(&self) -> ShardId;
