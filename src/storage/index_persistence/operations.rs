@@ -317,7 +317,7 @@ pub(crate) fn persist_graph_index(
     manager: &Arc<IndexPersistenceManager>,
     tracker: Option<&Arc<PersistenceTracker>>,
     current_lsn: u64,
-) -> Result<(u64, u64)> {
+) -> Result<()> {
     use crate::storage::index_persistence::graph::{
         new_graph_index_data, persist_property_map, save_graph_index,
     };
@@ -390,9 +390,8 @@ pub(crate) fn persist_graph_index(
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
         tracker.update_graph_lsn(current_lsn);
-        tracker.update_last_persisted_counts(graph_data.node_count, graph_data.edge_count);
     }
-    Ok((graph_data.node_count, graph_data.edge_count))
+    Ok(())
 }
 
 /// Persist temporal index to disk.
@@ -470,22 +469,14 @@ pub(crate) fn persist_string_interner(
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
     current_lsn: u64,
-) -> Result<u64> {
+) -> Result<()> {
     manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
     })?;
 
-    // Capture the count *after* save completes. Since GLOBAL_INTERNER is append-only,
-    // this count is at least what was saved. If new strings were interned concurrently,
-    // they might not be in the file yet, but having a slightly higher count in the manifest
-    // is safer than lower (though ideally exact).
-    // Note: save_string_interner likely iterates and saves.
-    let count = crate::core::GLOBAL_INTERNER.len() as u64;
-
     tracker.reset_string_mutations();
     tracker.update_string_lsn(current_lsn);
-    tracker.update_last_persisted_string_count(count);
-    Ok(count)
+    Ok(())
 }
 
 /// Persist temporal adjacency index to disk.
@@ -568,22 +559,19 @@ pub(crate) fn persist_all_indexes(
     let mut manifest = IndexManifest::new(safe_lsn);
 
     // Add string interner entry
-    let string_count = tracker.get_last_persisted_string_count();
     manifest.string_interner = Some(StringInternerManifestEntry {
         interner_file: "strings/interner.idx".to_string(),
-        string_count,
+        string_count: crate::core::GLOBAL_INTERNER.len() as u64,
     });
 
     // Add graph index entry if we have nodes/edges
-    // Use tracker counts to ensure we only point to what was actually persisted
-    let node_count = tracker.get_last_persisted_node_count();
-    let edge_count = tracker.get_last_persisted_edge_count();
-
+    let node_count = current.all_nodes().count();
+    let edge_count = current.all_edges().count();
     if node_count > 0 || edge_count > 0 {
         manifest.graph_index = Some(GraphIndexManifestEntry {
             adjacency_file: "graph/adjacency.idx".to_string(),
-            node_count,
-            edge_count,
+            node_count: node_count as u64,
+            edge_count: edge_count as u64,
         });
     }
 

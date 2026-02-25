@@ -229,7 +229,7 @@ fn test_unaligned_vector_access() {
     );
     let (val, consumed) = result.unwrap();
     assert_eq!(consumed, vec_bytes.len());
-    if let PropertyValue::Vector(ref v) = val {
+    if let PropertyValue::Vector(v) = val {
         assert_eq!(v.len(), 4);
     } else {
         panic!("Expected Vector");

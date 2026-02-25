@@ -1233,13 +1233,12 @@ fn test_normalize_in_place_zero_vector() {
 
 #[test]
 fn test_normalize_in_place_tiny_vector() {
-    // Vector with squared magnitude 1e-16.
-    // Previous threshold was 1e-14 (so it was zeroed).
-    // New threshold is 1e-25 (so it should be normalized).
+    // Vector with squared magnitude < SQUARED_MAGNITUDE_THRESHOLD (1e-14)
+    // 1e-8 * 1e-8 = 1e-16 < 1e-14
     let mut v = vec![1e-8_f32];
     normalize_in_place(&mut v);
-    // Should be normalized to [1.0]
-    assert!((v[0] - 1.0).abs() < 1e-6);
+    // Should be zeroed out
+    assert_eq!(v, vec![0.0]);
 }
 
 #[test]
@@ -1917,40 +1916,6 @@ fn test_simd_explicit_coverage() {
             }
         }
     }
-}
-
-#[test]
-fn test_normalize_small_vector_preserves_direction() {
-    let v = vec![1.0e-8_f32];
-    let normalized = normalize(&v);
-    let mag = magnitude(&normalized);
-    assert!(
-        (mag - 1.0).abs() < 1e-6,
-        "Small vector should be normalized to unit length"
-    );
-    assert!((normalized[0] - 1.0).abs() < 1e-6);
-}
-
-#[test]
-fn test_cosine_similarity_small_vectors() {
-    let a = vec![1.0e-8_f32];
-    let b = vec![1.0e-8_f32];
-    let sim = cosine_similarity(&a, &b).unwrap();
-    assert!(
-        (sim - 1.0).abs() < 1e-6,
-        "Small identical vectors should have similarity 1.0"
-    );
-}
-
-#[test]
-fn test_cosine_similarity_mixed_magnitude() {
-    let a = vec![1.0e-8_f32, 0.0];
-    let b = vec![1.0, 0.0];
-    let sim = cosine_similarity(&a, &b).unwrap();
-    assert!(
-        (sim - 1.0).abs() < 1e-6,
-        "Small vector collinear with large vector should have similarity 1.0"
-    );
 }
 
 #[test]

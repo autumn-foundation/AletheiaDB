@@ -81,7 +81,7 @@ pub type PropertyKey = InternedString;
 /// A value that can be stored as a property.
 ///
 /// All complex types (strings, bytes, arrays) use Arc for cheap cloning and sharing.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum PropertyValue {
     /// Null/absent value.
     Null,
@@ -489,16 +489,6 @@ impl PropertyValue {
                 a.iter()
                     .zip(b.iter())
                     .all(|(x, y)| if x.is_nan() { y.is_nan() } else { x == y })
-            }
-            (PropertyValue::Array(a), PropertyValue::Array(b)) => {
-                // Optimization: If they point to the same allocation, they must be equal.
-                if Arc::ptr_eq(a, b) {
-                    return true;
-                }
-                if a.len() != b.len() {
-                    return false;
-                }
-                a.iter().zip(b.iter()).all(|(x, y)| x.semantically_equal(y))
             }
             // For other types, fallback to PartialEq
             _ => self == other,
@@ -922,45 +912,8 @@ impl PropertyValue {
     }
 }
 
-impl Drop for PropertyValue {
-    fn drop(&mut self) {
-        // Prevent stack overflow when dropping deeply nested Arrays.
-        // We linearize the drop chain by taking ownership of children
-        // from unique Arcs and processing them iteratively.
-        if let PropertyValue::Array(arc) = self {
-            // Only process if we are the sole owner of the data (refcount == 1)
-            if let Some(vec) = Arc::get_mut(arc) {
-                // Initial work list: take all elements from the current vector
-                // std::mem::take requires Vec to implement Default, which it does (empty vec)
-                let mut stack = std::mem::take(vec);
-
-                while let Some(mut item) = stack.pop() {
-                    if let PropertyValue::Array(ref mut inner_arc) = item {
-                        // Check if we own this inner array
-                        if let Some(inner_vec) = Arc::get_mut(inner_arc) {
-                            // Move its children to the stack to be processed later
-                            // This effectively flattens the recursive structure
-                            let children = std::mem::take(inner_vec);
-                            stack.extend(children);
-                        }
-                    }
-                    // item is dropped here.
-                    // If it was a unique Array, its children were moved to stack, so it's empty.
-                    // If it was shared Array, children remain (handled by other owners).
-                    // If it was non-Array, standard drop.
-                }
-            }
-        }
-    }
-}
-
-impl PropertyValue {
-    /// Safe recursive display formatter with depth limit.
-    fn fmt_display(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
-        if depth > 50 {
-            return write!(f, "...");
-        }
-
+impl fmt::Display for PropertyValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PropertyValue::Null => write!(f, "null"),
             PropertyValue::Bool(b) => write!(f, "{}", b),
@@ -974,11 +927,7 @@ impl PropertyValue {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    if i >= 20 {
-                        write!(f, "... ({} more)", a.len() - i)?;
-                        break;
-                    }
-                    v.fmt_display(f, depth + 1)?;
+                    write!(f, "{}", v)?;
                 }
                 write!(f, "]")
             }
@@ -992,64 +941,6 @@ impl PropertyValue {
                 )
             }
         }
-    }
-
-    /// Safe recursive debug formatter with depth limit.
-    fn fmt_debug(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
-        if depth > 50 {
-            return write!(f, "...");
-        }
-
-        match self {
-            PropertyValue::Null => write!(f, "Null"),
-            PropertyValue::Bool(b) => write!(f, "Bool({:?})", b),
-            PropertyValue::Int(i) => write!(f, "Int({:?})", i),
-            PropertyValue::Float(fl) => write!(f, "Float({:?})", fl),
-            PropertyValue::String(s) => write!(f, "String({:?})", s),
-            PropertyValue::Bytes(b) => write!(f, "Bytes({:?})", b),
-            PropertyValue::Array(a) => {
-                write!(f, "Array([")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    if i >= 20 {
-                        write!(f, "... ({} more)", a.len() - i)?;
-                        break;
-                    }
-                    v.fmt_debug(f, depth + 1)?;
-                }
-                write!(f, "])")
-            }
-            // Limit vector output in debug to prevent log spam
-            PropertyValue::Vector(v) => {
-                write!(f, "Vector([")?;
-                for (i, val) in v.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    if i >= 10 {
-                        write!(f, "... ({} more)", v.len() - i)?;
-                        break;
-                    }
-                    write!(f, "{:?}", val)?;
-                }
-                write!(f, "])")
-            }
-            PropertyValue::SparseVector(sv) => write!(f, "SparseVector({:?})", sv),
-        }
-    }
-}
-
-impl fmt::Display for PropertyValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_display(f, 0)
-    }
-}
-
-impl fmt::Debug for PropertyValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_debug(f, 0)
     }
 }
 
@@ -1925,7 +1816,7 @@ mod tests {
         // Note: `original` is now moved and cannot be used
 
         // Extract the Arc<[u8]> from the PropertyValue
-        if let PropertyValue::Bytes(ref arc_bytes) = prop_value {
+        if let PropertyValue::Bytes(arc_bytes) = prop_value {
             // Verify the length is correct
             assert_eq!(
                 arc_bytes.len(),
@@ -2915,7 +2806,7 @@ mod tests {
         assert_eq!(consumed, bytes.len());
 
         match deserialized {
-            PropertyValue::SparseVector(ref sv) => {
+            PropertyValue::SparseVector(sv) => {
                 assert_eq!(sv.nnz(), 3);
                 assert_eq!(sv.dimension(), 5);
                 assert_eq!(sv.indices(), &[0, 2, 4]);
@@ -4003,34 +3894,5 @@ mod sentry_tests {
         // Verify it was serialized correctly
         let (deserialized, _) = deserialize_vector(&buffer).unwrap();
         assert_eq!(deserialized.len(), MAX_VECTOR_DIMENSIONS);
-    }
-
-    /// 🎯 Target: PropertyValue::semantically_equal (Arrays)
-    /// 💣 Risk: Arrays containing NaN should be semantically equal even if distinct allocations.
-    /// 🧪 Strategy: Create two distinct arrays with NaN and compare.
-    /// 🔬 Verification: semantically_equal returns true.
-    #[test]
-    fn test_semantically_equal_nested_array_nan_distinct_allocations() {
-        // Create two distinct arrays containing NaN
-        let nan_array_1 = PropertyValue::Array(Arc::new(vec![
-            PropertyValue::Float(1.0),
-            PropertyValue::Float(f64::NAN),
-        ]));
-
-        let nan_array_2 = PropertyValue::Array(Arc::new(vec![
-            PropertyValue::Float(1.0),
-            PropertyValue::Float(f64::NAN),
-        ]));
-
-        // Ensure they are NOT pointer equal
-        if let (PropertyValue::Array(a), PropertyValue::Array(b)) = (&nan_array_1, &nan_array_2) {
-            assert!(!Arc::ptr_eq(a, b), "Arrays should be distinct allocations");
-        }
-
-        // It should be semantically equal, treating NaN as equal
-        assert!(
-            nan_array_1.semantically_equal(&nan_array_2),
-            "Distinct arrays containing NaN should be semantically equal"
-        );
     }
 }

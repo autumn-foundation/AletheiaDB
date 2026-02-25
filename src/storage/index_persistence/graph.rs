@@ -826,7 +826,7 @@ mod tests {
 
         let result = restore_property_value(&persisted);
         assert!(result.is_ok());
-        if let PropertyValue::Vector(ref v) = result.unwrap() {
+        if let PropertyValue::Vector(v) = result.unwrap() {
             assert_eq!(v.len(), super::super::MAX_VECTOR_DIMENSIONS);
         } else {
             panic!("Expected vector property");

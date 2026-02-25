@@ -47,7 +47,3 @@
 ## 2024-05-30 - The Case of the Fake Statistic
 **Confusion:** The `Statistics::avg_delta_chain` field (used for cost-based optimization of temporal queries) was documented as "collected statistics" but was actually hardcoded to `5.0` in `refresh_statistics`, with a TODO comment (Issue #366) hidden in the implementation. This could mislead users debugging query performance on deep historical graphs.
 **Clarification:** Refactored `AletheiaDB::refresh_statistics` to calculate the actual average chain length from `HistoricalStorage` metadata (`total_versions / total_anchors`). Updated `Statistics` documentation to explain its lifecycle and role in query planning.
-
-## 2026-02-25 - The Case of the Sequential Scatter
-**Confusion:** The architecture documentation described a "Scatter-Gather" query executor and "Distributed Transactions", implying high-concurrency parallelism. However, the implementation actually processes shards sequentially (one by one), meaning latency scales linearly ((N)$) rather than remaining constant.
-**Clarification:** Updated `src/storage/sharding/executor.rs`, `coordinator.rs`, and `network.rs` to explicitly document the sequential, blocking nature of the current implementation. Added performance warnings to the `README.md` to set correct expectations for Phase 1 sharding.
