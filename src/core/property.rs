@@ -490,6 +490,17 @@ impl PropertyValue {
                     .zip(b.iter())
                     .all(|(x, y)| if x.is_nan() { y.is_nan() } else { x == y })
             }
+            (PropertyValue::Array(a), PropertyValue::Array(b)) => {
+                // Optimization: If they point to the same allocation, they must be equal.
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
+                if a.len() != b.len() {
+                    return false;
+                }
+                // Recursively check semantic equality for all elements
+                a.iter().zip(b.iter()).all(|(x, y)| x.semantically_equal(y))
+            }
             // For other types, fallback to PartialEq
             _ => self == other,
         }
@@ -3894,5 +3905,61 @@ mod sentry_tests {
         // Verify it was serialized correctly
         let (deserialized, _) = deserialize_vector(&buffer).unwrap();
         assert_eq!(deserialized.len(), MAX_VECTOR_DIMENSIONS);
+    }
+
+    /// 🎯 Target: PropertyValue::semantically_equal
+    /// 💣 Risk: Arrays containing NaNs are not considered semantically equal.
+    /// 🧪 Strategy: Create arrays with NaNs and check equality.
+    /// 🔬 Verification: semantically_equal returns true.
+    #[test]
+    fn test_semantically_equal_array_nan() {
+        let nan1 = PropertyValue::Float(f64::NAN);
+        let nan2 = PropertyValue::Float(f64::NAN);
+
+        assert!(nan1.semantically_equal(&nan2));
+
+        let arr1 = PropertyValue::array(vec![PropertyValue::Float(f64::NAN)]);
+        let arr2 = PropertyValue::array(vec![PropertyValue::Float(f64::NAN)]);
+
+        // Standard PartialEq is false for NaN
+        assert_ne!(arr1, arr2);
+
+        // semantically_equal MUST be true for NaN
+        assert!(
+            arr1.semantically_equal(&arr2),
+            "Arrays containing NaNs should be semantically equal"
+        );
+    }
+
+    /// 🎯 Target: PropertyValue::deserialize (Array Truncation)
+    /// 💣 Risk: Buffer exhausted while reading array elements, despite passing pre-allocation check.
+    /// 🧪 Strategy: Construct a buffer with valid count but missing elements.
+    /// 🔬 Verification: Expect "Buffer exhausted" error.
+    #[test]
+    fn test_deserialize_array_truncated_mid_element() {
+        let mut bytes = Vec::new();
+        bytes.push(TAG_ARRAY);
+        bytes.extend_from_slice(&(2u32).to_le_bytes()); // Count = 2
+
+        // Element 1: Int(0) -> TagInt(1) + 8 bytes = 9 bytes.
+        bytes.push(TAG_INT);
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+
+        // Element 2 is missing.
+
+        let result = PropertyValue::deserialize(&bytes);
+
+        // Check failure
+        match result {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                // We expect "Buffer exhausted while reading Array elements"
+                assert!(
+                    msg.contains("Buffer exhausted"),
+                    "Unexpected error message: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected StorageError::CorruptedData, got {:?}", result),
+        }
     }
 }
