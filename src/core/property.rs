@@ -701,6 +701,7 @@ impl PropertyValue {
         Ok((PropertyValue::Float(value), 9))
     }
 
+    #[inline]
     fn deserialize_string(bytes: &[u8]) -> Result<(Self, usize)> {
         if bytes.len() < 5 {
             return Err(StorageError::CorruptedData(
@@ -709,7 +710,7 @@ impl PropertyValue {
             .into());
         }
         let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-        let offset: usize = 5;
+        let offset = 5usize;
 
         let required_len = offset
             .checked_add(len)
@@ -730,6 +731,7 @@ impl PropertyValue {
         Ok((PropertyValue::String(Arc::from(s)), required_len))
     }
 
+    #[inline]
     fn deserialize_bytes(bytes: &[u8]) -> Result<(Self, usize)> {
         if bytes.len() < 5 {
             return Err(StorageError::CorruptedData(
@@ -738,7 +740,7 @@ impl PropertyValue {
             .into());
         }
         let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-        let offset: usize = 5;
+        let offset = 5usize;
 
         let required_len = offset
             .checked_add(len)
@@ -765,7 +767,7 @@ impl PropertyValue {
             .into());
         }
         let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-        let mut offset = 5;
+        let mut offset: usize = 5;
 
         // Prevent DoS via memory exhaustion from malicious input
         if count > MAX_ARRAY_ELEMENTS {
