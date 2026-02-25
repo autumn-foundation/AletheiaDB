@@ -31,6 +31,7 @@
 //! ```
 
 use super::types::ShardId;
+use crate::core::hlc::HybridTimestamp;
 use crate::core::id::TxId;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -44,7 +45,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const COMMIT_LOG_MAGIC: [u8; 4] = *b"GDB2";
 
 /// Current commit log format version.
-const COMMIT_LOG_VERSION: u8 = 1;
+const COMMIT_LOG_VERSION: u8 = 2;
 
 /// Header size in bytes.
 const HEADER_SIZE: usize = 16;
@@ -112,6 +113,8 @@ pub struct CommitLogEntry {
     pub timestamp_us: u64,
     /// Participating shards.
     pub participants: Vec<ShardId>,
+    /// Commit timestamp (Hybrid Logical Clock).
+    pub commit_timestamp: Option<HybridTimestamp>,
 }
 
 /// Type of commit log entry.
@@ -127,13 +130,19 @@ pub enum EntryType {
 
 impl CommitLogEntry {
     /// Create a commit entry.
-    pub fn commit(lsn: u64, tx_id: TxId, participants: Vec<ShardId>) -> Self {
+    pub fn commit(
+        lsn: u64,
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+        commit_timestamp: Option<HybridTimestamp>,
+    ) -> Self {
         Self {
             lsn,
             entry_type: EntryType::Commit,
             tx_id,
             timestamp_us: current_timestamp_us(),
             participants,
+            commit_timestamp,
         }
     }
 
@@ -145,6 +154,7 @@ impl CommitLogEntry {
             tx_id,
             timestamp_us: current_timestamp_us(),
             participants,
+            commit_timestamp: None,
         }
     }
 
@@ -156,6 +166,7 @@ impl CommitLogEntry {
             tx_id,
             timestamp_us: current_timestamp_us(),
             participants: Vec::new(),
+            commit_timestamp: None,
         }
     }
 
@@ -184,6 +195,14 @@ impl CommitLogEntry {
         data.extend_from_slice(&(self.participants.len() as u16).to_le_bytes());
         for shard_id in &self.participants {
             data.extend_from_slice(&shard_id.as_u16().to_le_bytes());
+        }
+
+        // Commit Timestamp (Optional)
+        if let Some(ts) = self.commit_timestamp {
+            data.push(1); // Present
+            ts.serialize_into(&mut data);
+        } else {
+            data.push(0); // Absent
         }
 
         // Calculate checksum
@@ -325,17 +344,46 @@ impl CommitLogEntry {
             offset += 2;
         }
 
+        // Commit Timestamp (Optional, appended in V2)
+        // Check if there are bytes remaining before checksum
+        let commit_timestamp = if offset < checksum_offset {
+            let has_ts = entry_data[offset];
+            offset += 1;
+            if has_ts == 1 {
+                // Deserialize HybridTimestamp (12 bytes)
+                if offset + 12 > checksum_offset {
+                    return Err(CommitLogError::InvalidEntry(
+                        "Truncated commit timestamp".into(),
+                    ));
+                }
+                let (ts, _consumed) = HybridTimestamp::deserialize(&entry_data[offset..])
+                    .map_err(|e| CommitLogError::InvalidEntry(e.to_string()))?;
+                Some(ts)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(CommitLogEntry {
             lsn,
             entry_type,
             tx_id,
             timestamp_us,
             participants,
+            commit_timestamp,
         })
     }
 
     /// Get the total serialized size of this entry.
     pub fn serialized_size(&self) -> usize {
+        let ts_size = if self.commit_timestamp.is_some() {
+            1 + 12 // flag + timestamp
+        } else {
+            1 // flag
+        };
+
         4  // length prefix
         + 1 // entry type
         + 8 // lsn
@@ -343,6 +391,7 @@ impl CommitLogEntry {
         + 8 // timestamp
         + 2 // participant count
         + self.participants.len() * 2 // participant ids
+        + ts_size
         + 4 // checksum
     }
 }
@@ -479,9 +528,14 @@ impl PersistentCommitLog {
     /// Log a commit decision.
     ///
     /// CRITICAL: This must be called BEFORE sending commit messages to participants.
-    pub fn log_commit(&self, tx_id: TxId, participants: Vec<ShardId>) -> CommitLogResult<u64> {
+    pub fn log_commit(
+        &self,
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+        commit_timestamp: Option<HybridTimestamp>,
+    ) -> CommitLogResult<u64> {
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
-        let entry = CommitLogEntry::commit(lsn, tx_id, participants);
+        let entry = CommitLogEntry::commit(lsn, tx_id, participants, commit_timestamp);
 
         self.write_entry(&entry)?;
 
@@ -775,8 +829,13 @@ mod tests {
 
     #[test]
     fn test_entry_serialize_deserialize_commit() {
-        let entry =
-            CommitLogEntry::commit(1, TxId::new(100), vec![make_shard_id(0), make_shard_id(1)]);
+        let ts = HybridTimestamp::new(1000, 0).ok();
+        let entry = CommitLogEntry::commit(
+            1,
+            TxId::new(100),
+            vec![make_shard_id(0), make_shard_id(1)],
+            ts,
+        );
 
         let serialized = entry.serialize();
         let deserialized = CommitLogEntry::deserialize(&serialized).unwrap();
@@ -785,6 +844,22 @@ mod tests {
         assert_eq!(deserialized.entry_type, EntryType::Commit);
         assert_eq!(deserialized.tx_id, TxId::new(100));
         assert_eq!(deserialized.participants.len(), 2);
+        assert_eq!(deserialized.commit_timestamp, ts);
+    }
+
+    #[test]
+    fn test_entry_serialize_deserialize_commit_no_ts() {
+        let entry = CommitLogEntry::commit(
+            1,
+            TxId::new(100),
+            vec![make_shard_id(0), make_shard_id(1)],
+            None,
+        );
+
+        let serialized = entry.serialize();
+        let deserialized = CommitLogEntry::deserialize(&serialized).unwrap();
+
+        assert!(deserialized.commit_timestamp.is_none());
     }
 
     #[test]
@@ -797,6 +872,7 @@ mod tests {
         assert_eq!(deserialized.lsn, 2);
         assert_eq!(deserialized.entry_type, EntryType::Abort);
         assert_eq!(deserialized.tx_id, TxId::new(200));
+        assert!(deserialized.commit_timestamp.is_none());
     }
 
     #[test]
@@ -813,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_entry_checksum_validation() {
-        let entry = CommitLogEntry::commit(1, TxId::new(100), vec![make_shard_id(0)]);
+        let entry = CommitLogEntry::commit(1, TxId::new(100), vec![make_shard_id(0)], None);
         let mut serialized = entry.serialize();
 
         // Corrupt the data
@@ -859,7 +935,7 @@ mod tests {
         let log = PersistentCommitLog::in_memory();
 
         let lsn = log
-            .log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)])
+            .log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)], None)
             .unwrap();
         assert_eq!(lsn, 1);
 
@@ -875,7 +951,7 @@ mod tests {
     fn test_in_memory_log_complete() {
         let log = PersistentCommitLog::in_memory();
 
-        log.log_commit(TxId::new(1), vec![make_shard_id(0)])
+        log.log_commit(TxId::new(1), vec![make_shard_id(0)], None)
             .unwrap();
         assert!(log.has_pending_decision(TxId::new(1)));
 
@@ -887,7 +963,7 @@ mod tests {
     fn test_in_memory_log_stats() {
         let log = PersistentCommitLog::in_memory();
 
-        log.log_commit(TxId::new(1), vec![make_shard_id(0)])
+        log.log_commit(TxId::new(1), vec![make_shard_id(0)], None)
             .unwrap();
         log.log_abort(TxId::new(2), vec![make_shard_id(1)]).unwrap();
 
@@ -918,7 +994,7 @@ mod tests {
         // Write some entries
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            log.log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)])
+            log.log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)], None)
                 .unwrap();
             log.log_abort(TxId::new(2), vec![make_shard_id(2)]).unwrap();
             log.close().unwrap();
@@ -948,9 +1024,9 @@ mod tests {
         // Write entries including completion
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            log.log_commit(TxId::new(1), vec![make_shard_id(0)])
+            log.log_commit(TxId::new(1), vec![make_shard_id(0)], None)
                 .unwrap();
-            log.log_commit(TxId::new(2), vec![make_shard_id(1)])
+            log.log_commit(TxId::new(2), vec![make_shard_id(1)], None)
                 .unwrap();
             log.log_complete(TxId::new(1)).unwrap();
             log.close().unwrap();
@@ -973,9 +1049,9 @@ mod tests {
         // Write some entries
         let max_lsn = {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            log.log_commit(TxId::new(1), vec![make_shard_id(0)])
+            log.log_commit(TxId::new(1), vec![make_shard_id(0)], None)
                 .unwrap();
-            log.log_commit(TxId::new(2), vec![make_shard_id(1)])
+            log.log_commit(TxId::new(2), vec![make_shard_id(1)], None)
                 .unwrap();
             let lsn = log.current_lsn();
             log.close().unwrap();
@@ -986,7 +1062,7 @@ mod tests {
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
             let new_lsn = log
-                .log_commit(TxId::new(3), vec![make_shard_id(2)])
+                .log_commit(TxId::new(3), vec![make_shard_id(2)], None)
                 .unwrap();
             assert!(new_lsn >= max_lsn);
         }
@@ -996,7 +1072,7 @@ mod tests {
     fn test_persistent_log_get_decision() {
         let log = PersistentCommitLog::in_memory();
 
-        log.log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)])
+        log.log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)], None)
             .unwrap();
 
         let decision = log.get_decision(TxId::new(1));
