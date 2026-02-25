@@ -1,11 +1,11 @@
-use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
-use aletheiadb::storage::wal::{DurabilityMode, WalOperation};
+use aletheiadb::GLOBAL_INTERNER;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMap;
 use aletheiadb::core::temporal::time;
-use aletheiadb::GLOBAL_INTERNER;
-use std::sync::{Arc, Mutex};
+use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use aletheiadb::storage::wal::{DurabilityMode, WalOperation};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -99,7 +99,10 @@ fn test_shutdown_data_consistency() {
     // 5. flushed < accepted.
 
     println!("Accepted: {}, Flushed: {}", accepted, flushed);
-    assert_eq!(accepted, flushed, "Data loss detected: Accepted writes were not flushed");
+    assert_eq!(
+        accepted, flushed,
+        "Data loss detected: Accepted writes were not flushed"
+    );
 
     // Also verify internal counters match
     assert_eq!(total_appends, flushed, "Internal counters mismatch");
