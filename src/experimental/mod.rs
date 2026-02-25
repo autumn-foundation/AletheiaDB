@@ -86,6 +86,9 @@
 //! ```
 
 #[cfg(feature = "nova")]
+/// Alchemy: Semantic Graph Transformation Engine.
+pub mod alchemy;
+#[cfg(feature = "nova")]
 /// Ariadne: Semantic Thread Weaver.
 pub mod ariadne;
 #[cfg(feature = "nova")]
