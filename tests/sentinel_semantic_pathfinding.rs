@@ -7,6 +7,7 @@ use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::query::semantic_pathfinding::SemanticPathfinder;
+use aletheiadb::storage::index_persistence::PersistenceConfig;
 use aletheiadb::{AletheiaDB, WriteOps};
 use tempfile::TempDir;
 
@@ -16,6 +17,12 @@ fn create_test_db() -> (AletheiaDB, TempDir) {
 
     let config = AletheiaDBConfig::builder()
         .wal(WalConfigBuilder::new().wal_dir(wal_dir).build())
+        // Disable persistence to prevent loading from shared "data" directory
+        // or race conditions with other tests.
+        .persistence(PersistenceConfig {
+            enabled: false,
+            ..Default::default()
+        })
         .build();
 
     let db = AletheiaDB::with_unified_config(config).unwrap();
