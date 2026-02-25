@@ -79,7 +79,7 @@ pub use rebalance::{MigrationPlan, MigrationProgress, MigrationState, RebalanceM
 pub use router::{ShardRouter, TraversalPlan, TraversalStep};
 pub use rpc_client::{ClientStats, HttpShardClient, RpcConfig};
 pub use simulation::{EdgeCutAnalysis, ShardingSimulation, SimulationResult};
-pub use transaction::{DistributedTransaction, ParticipantState, TransactionPhase};
 #[allow(deprecated)]
 pub use transaction::TwoPhaseCommitLog;
+pub use transaction::{DistributedTransaction, ParticipantState, TransactionPhase};
 pub use types::{RemoteEdgeRef, RemoteNodeRef, ShardId, ShardMetrics, ShardState, ShardStatus};
