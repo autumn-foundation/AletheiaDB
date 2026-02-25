@@ -672,71 +672,54 @@ impl HnswIndex {
         match self.config.metric {
             DistanceMetric::Cosine => {
                 for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-                    if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                        let node_id = *node_id_ref.value();
-                        if predicate(node_id) {
-                            let sim = 1.0 - distance;
-                            let val = if sim.is_nan() {
-                                0.0
-                            } else {
-                                sim.clamp(-1.0, 1.0)
-                            };
-                            results.push((node_id, val));
-                            if results.len() >= limit {
-                                break;
-                            }
+                    let node_id = if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                        *node_id_ref.value()
+                    } else {
+                        continue;
+                    };
+
+                    if predicate(node_id) {
+                        let sim = 1.0 - distance;
+                        let val = if sim.is_nan() {
+                            0.0
+                        } else {
+                            sim.clamp(-1.0, 1.0)
+                        };
+                        results.push((node_id, val));
+                        if results.len() >= limit {
+                            break;
                         }
                     }
                 }
             }
-            DistanceMetric::Euclidean => {
+            DistanceMetric::Euclidean | DistanceMetric::Haversine | DistanceMetric::Hamming => {
                 for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-                    if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                        let node_id = *node_id_ref.value();
-                        if predicate(node_id) {
-                            results.push((node_id, -distance));
-                            if results.len() >= limit {
-                                break;
-                            }
+                    let node_id = if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                        *node_id_ref.value()
+                    } else {
+                        continue;
+                    };
+
+                    if predicate(node_id) {
+                        results.push((node_id, -distance));
+                        if results.len() >= limit {
+                            break;
                         }
                     }
                 }
             }
-            DistanceMetric::DotProduct => {
+            DistanceMetric::DotProduct | DistanceMetric::Tanimoto => {
                 for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-                    if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                        let node_id = *node_id_ref.value();
-                        if predicate(node_id) {
-                            results.push((node_id, 1.0 - distance));
-                            if results.len() >= limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            DistanceMetric::Haversine | DistanceMetric::Hamming => {
-                for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-                    if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                        let node_id = *node_id_ref.value();
-                        if predicate(node_id) {
-                            results.push((node_id, -distance));
-                            if results.len() >= limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            DistanceMetric::Tanimoto => {
-                for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-                    if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                        let node_id = *node_id_ref.value();
-                        if predicate(node_id) {
-                            results.push((node_id, 1.0 - distance));
-                            if results.len() >= limit {
-                                break;
-                            }
+                    let node_id = if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                        *node_id_ref.value()
+                    } else {
+                        continue;
+                    };
+
+                    if predicate(node_id) {
+                        results.push((node_id, 1.0 - distance));
+                        if results.len() >= limit {
+                            break;
                         }
                     }
                 }
