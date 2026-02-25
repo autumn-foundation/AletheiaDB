@@ -362,6 +362,58 @@ pub(crate) mod x86_ops {
         }
     }
 
+    /// Computes squared magnitude of a vector using AVX2.
+    ///
+    /// Optimized version that only loads the vector once (vs dot_product loading twice).
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 and FMA are available.
+    #[target_feature(enable = "avx2", enable = "fma")]
+    #[inline]
+    pub unsafe fn squared_magnitude_avx2(v: &[f32]) -> f32 {
+        unsafe {
+            let chunks = v.chunks_exact(8);
+            let rem = chunks.remainder();
+            let mut acc = _mm256_setzero_ps();
+
+            for chunk in chunks {
+                let va = _mm256_loadu_ps(chunk.as_ptr());
+                acc = _mm256_fmadd_ps(va, va, acc);
+            }
+            let mut sum = horizontal_sum_avx(acc);
+            for &x in rem {
+                sum += x * x;
+            }
+            sum
+        }
+    }
+
+    /// Computes squared magnitude of a vector using SSE2.
+    ///
+    /// Optimized version that only loads the vector once (vs dot_product loading twice).
+    ///
+    /// # Safety
+    /// Caller must ensure SSE2 is available.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn squared_magnitude_sse2(v: &[f32]) -> f32 {
+        unsafe {
+            let chunks = v.chunks_exact(4);
+            let rem = chunks.remainder();
+            let mut acc = _mm_setzero_ps();
+
+            for chunk in chunks {
+                let va = _mm_loadu_ps(chunk.as_ptr());
+                acc = _mm_add_ps(acc, _mm_mul_ps(va, va));
+            }
+            let mut sum = horizontal_sum_sse(acc);
+            for &x in rem {
+                sum += x * x;
+            }
+            sum
+        }
+    }
+
     /// Scales a vector in place by a scalar using AVX2.
     ///
     /// # Safety
@@ -485,6 +537,40 @@ pub(crate) mod x86_ops {
             }
         }
     }
+
+    #[test]
+    fn test_squared_magnitude_implementation_coverage() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        use crate::core::vector::simd::x86_ops;
+        use crate::core::vector::simd::{squared_magnitude, squared_magnitude_scalar};
+
+        let v = vec![1.0f32, 2.0, 3.0, 4.0, 5.0]; // 1^2 + ... + 5^2 = 1+4+9+16+25 = 55
+        let expected = 55.0;
+
+        // 1. Unconditional Scalar coverage
+        let res_scalar = squared_magnitude_scalar(&v);
+        assert_eq!(res_scalar, expected, "Scalar implementation failed");
+
+        // 2. Conditional x86 SIMD coverage
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Try SSE2
+            if is_x86_feature_detected!("sse2") {
+                let res_sse2 = unsafe { x86_ops::squared_magnitude_sse2(&v) };
+                assert_eq!(res_sse2, expected, "SSE2 implementation failed");
+            }
+
+            // Try AVX2
+            if is_x86_feature_detected!("avx2") {
+                let res_avx2 = unsafe { x86_ops::squared_magnitude_avx2(&v) };
+                assert_eq!(res_avx2, expected, "AVX2 implementation failed");
+            }
+        }
+
+        // 3. Dispatcher
+        let res_dispatch = squared_magnitude(&v);
+        assert_eq!(res_dispatch, expected, "Dispatcher failed");
+    }
 }
 
 /// Scalar fallback for computing dot product and magnitudes.
@@ -530,6 +616,16 @@ pub(crate) fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
 )]
 pub(crate) fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
+}
+
+/// Scalar fallback for squared magnitude.
+#[inline]
+#[cfg_attr(
+    all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
+    allow(dead_code)
+)]
+pub(crate) fn squared_magnitude_scalar(v: &[f32]) -> f32 {
+    v.iter().map(|&x| x * x).sum()
 }
 
 /// Scalar fallback for scaling a vector in place.
@@ -718,8 +814,32 @@ pub(crate) fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
     dot_product_scalar(a, b)
 }
 
+/// Computes squared magnitude using the best available SIMD instructions.
+///
+/// Optimized to load memory only once per element (vs dot_product loading twice).
+#[inline]
+pub(crate) fn squared_magnitude(v: &[f32]) -> f32 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        // Use runtime detection for best available instruction set.
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: We just verified AVX2 and FMA are available.
+            return unsafe { x86_ops::squared_magnitude_avx2(v) };
+        }
+        if is_x86_feature_detected!("sse2") {
+            // SAFETY: We just verified SSE2 is available.
+            return unsafe { x86_ops::squared_magnitude_sse2(v) };
+        }
+    }
+
+    // Fallback for non-x86 platforms or x86 CPUs without SSE2.
+    squared_magnitude_scalar(v)
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    use super::x86_ops;
     use super::*;
 
     // Helper to cast &mut [f32] to &mut [MaybeUninit<f32>]
