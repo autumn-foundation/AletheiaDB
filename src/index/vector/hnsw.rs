@@ -3949,7 +3949,7 @@ mod race_recovery_tests {
 
                 // Fill up to current capacity
                 for k in 0..(current_capacity - current_size) {
-                     let _ = index.add(1000 + k as u64, &[0.0, 1.0, 0.0, 0.0]);
+                    let _ = index.add(1000 + k as u64, &[0.0, 1.0, 0.0, 0.0]);
                 }
             }))
         });
