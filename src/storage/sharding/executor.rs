@@ -889,16 +889,54 @@ mod tests {
 
         let result = executor.execute(query).unwrap();
 
-        // First 4 bytes = number of shards
-        if result.data.len() >= 4 {
-            let shard_count = u32::from_le_bytes([
-                result.data[0],
-                result.data[1],
-                result.data[2],
-                result.data[3],
-            ]);
-            assert_eq!(shard_count, 2);
-        }
+        // Verify structure: [count: u32] ([shard_id: u16] [len: u32] [data...])*
+        let mut offset = 0;
+
+        // Count
+        let shard_count = u32::from_le_bytes([
+            result.data[offset],
+            result.data[offset + 1],
+            result.data[offset + 2],
+            result.data[offset + 3],
+        ]);
+        offset += 4;
+        assert_eq!(shard_count, 2);
+
+        // Result 1
+        let shard_id_1 = u16::from_le_bytes([
+            result.data[offset],
+            result.data[offset + 1],
+        ]);
+        offset += 2;
+        // MockClient returns empty vec by default for query
+        let len_1 = u32::from_le_bytes([
+            result.data[offset],
+            result.data[offset + 1],
+            result.data[offset + 2],
+            result.data[offset + 3],
+        ]);
+        offset += 4;
+        assert_eq!(len_1, 0);
+
+        // Result 2
+        let shard_id_2 = u16::from_le_bytes([
+            result.data[offset],
+            result.data[offset + 1],
+        ]);
+        offset += 2;
+        let len_2 = u32::from_le_bytes([
+            result.data[offset],
+            result.data[offset + 1],
+            result.data[offset + 2],
+            result.data[offset + 3],
+        ]);
+        // offset += 4; // Not needed for further checks
+        assert_eq!(len_2, 0);
+
+        // Check IDs are valid (0 and 1, order depends on iteration)
+        assert!(shard_id_1 == 0 || shard_id_1 == 1);
+        assert!(shard_id_2 == 0 || shard_id_2 == 1);
+        assert_ne!(shard_id_1, shard_id_2);
     }
 
     // ==================== ExecutorStats Tests ====================
