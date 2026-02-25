@@ -145,7 +145,8 @@ impl PersistenceTracker {
 
     /// Update the last persisted string count.
     pub fn update_last_persisted_string_count(&self, count: u64) {
-        self.last_persisted_string_count.store(count, Ordering::Release);
+        self.last_persisted_string_count
+            .store(count, Ordering::Release);
     }
 
     /// Get the last persisted string count.

@@ -240,9 +240,8 @@ impl AletheiaDB {
                     db.current.edge_count() as u64,
                 );
                 // Also initialize string count from current state
-                tracker.update_last_persisted_string_count(
-                    crate::core::GLOBAL_INTERNER.len() as u64,
-                );
+                tracker
+                    .update_last_persisted_string_count(crate::core::GLOBAL_INTERNER.len() as u64);
             }
         }
 
