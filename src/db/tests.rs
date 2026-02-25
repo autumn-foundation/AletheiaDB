@@ -412,8 +412,13 @@ fn test_with_full_config_returns_result() {
 
 #[test]
 fn test_with_unified_config_returns_result() {
+    // Use temp dir to avoid conflicts/corruption from default paths
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::AletheiaDBConfig::default();
+    config.wal.wal_dir = temp_dir.path().join("wal");
+    config.persistence.data_dir = temp_dir.path().join("data");
+
     // AletheiaDB::with_unified_config() should return Result<Self>
-    let config = crate::config::AletheiaDBConfig::default();
     let result = AletheiaDB::with_unified_config(config);
     assert!(
         result.is_ok(),

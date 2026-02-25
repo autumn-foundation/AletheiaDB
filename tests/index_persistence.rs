@@ -236,7 +236,7 @@ fn test_indexes_exist_detection() {
 // ============================================================================
 
 use aletheiadb::storage::index_persistence::PersistenceConfig;
-use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::{AletheiaDB, config::{AletheiaDBConfig, WalConfigBuilder}};
 
 /// Test that AletheiaDB can persist indexes to disk (MVP - Phase 1).
 ///
@@ -253,10 +253,12 @@ fn test_db_persist_indexes_mvp() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     // Phase 1: Create database, add data, persist indexes
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -359,6 +361,7 @@ fn test_full_persistence_lifecycle() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     let node1_id;
     let node2_id;
@@ -367,6 +370,7 @@ fn test_full_persistence_lifecycle() {
     // Phase 1: Create database, add data, persist
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -427,6 +431,7 @@ fn test_full_persistence_lifecycle() {
     // Phase 2: Restart database and verify data was restored
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -517,6 +522,7 @@ fn test_automatic_persistence_integration() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     // ========================================================================
     // Phase 1: Create database with automatic persistence enabled
@@ -552,6 +558,7 @@ fn test_automatic_persistence_integration() {
     };
 
     let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
         .persistence(persistence_config)
         .build();
 
@@ -630,6 +637,7 @@ fn test_automatic_persistence_integration() {
     };
 
     let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
         .persistence(persistence_config)
         .build();
 
@@ -674,6 +682,7 @@ fn test_automatic_persistence_integration() {
     };
 
     let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
         .persistence(persistence_config)
         .build();
 
@@ -1410,10 +1419,12 @@ fn test_invalid_id_detection() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     // Create database with data
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1460,6 +1471,7 @@ fn test_invalid_id_detection() {
     // Try to load - should handle gracefully
     // Note: Current implementation may skip invalid IDs during restoration
     let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),
@@ -1484,10 +1496,12 @@ fn test_missing_interner_entries() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     // Create database with data
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1514,6 +1528,7 @@ fn test_missing_interner_entries() {
 
     // Try to load - should handle missing interner gracefully
     let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),
@@ -1605,10 +1620,12 @@ fn test_multiple_restoration_errors() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     // Create database with multiple nodes
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1670,6 +1687,7 @@ fn test_multiple_restoration_errors() {
     // Load and verify it handles multiple errors gracefully
     // With our new logging, this should print warnings for each skipped node
     let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),
@@ -1713,6 +1731,7 @@ fn test_vector_index_persistence() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     let node_ids;
     let similar_results_before;
@@ -1727,6 +1746,7 @@ fn test_vector_index_persistence() {
         use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -1862,6 +1882,7 @@ fn test_vector_index_persistence() {
 
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -2112,6 +2133,7 @@ fn test_temporal_persistence_with_database() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     let node1_id;
     let node2_id;
@@ -2125,6 +2147,7 @@ fn test_temporal_persistence_with_database() {
 
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -2226,6 +2249,7 @@ fn test_temporal_persistence_with_database() {
 
     {
         let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
             .persistence(PersistenceConfig {
                 enabled: true,
                 data_dir: data_dir.clone(),
@@ -2577,8 +2601,10 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
 
     let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
         .persistence(PersistenceConfig {
             enabled: true,
             data_dir: data_dir.clone(),

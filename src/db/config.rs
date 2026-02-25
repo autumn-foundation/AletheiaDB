@@ -236,6 +236,22 @@ impl AletheiaDB {
             {
                 tracker.set_start_lsn(lsn);
             }
+
+            // Replay WAL entries that occurred after the persisted snapshot
+            // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
+            let start_lsn = match loaded_lsn {
+                Some(lsn) => crate::storage::wal::LSN(lsn).next(),
+                None => crate::storage::wal::LSN::initial(),
+            };
+
+            let mut historical_guard = db.historical.write();
+            crate::storage::recovery::replay_wal_into_storage(
+                &db.wal,
+                &db.current,
+                &mut historical_guard,
+                start_lsn,
+            )?;
+            drop(historical_guard);
         }
 
         // Start background persistence thread if enabled
