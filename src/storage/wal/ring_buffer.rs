@@ -199,6 +199,26 @@ impl PendingEntry {
     }
 }
 
+impl PartialEq for PendingEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.lsn == other.lsn
+    }
+}
+
+impl Eq for PendingEntry {}
+
+impl PartialOrd for PendingEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PendingEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.lsn.cmp(&other.lsn)
+    }
+}
+
 impl Drop for PendingEntry {
     fn drop(&mut self) {
         // If the entry is dropped and hasn't been completed yet, notify an error.

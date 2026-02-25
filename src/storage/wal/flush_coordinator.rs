@@ -30,6 +30,7 @@
 //! The coordinator is designed to be run from a single thread. Multiple
 //! threads should not call `flush()` concurrently.
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -216,6 +217,10 @@ pub struct FlushCoordinator {
     current_segment_max_lsn: AtomicU64,
     /// Entry count in the current segment.
     current_segment_entry_count: AtomicU64,
+    /// Next expected LSN to flush (for sequential ordering).
+    next_expected_lsn: AtomicU64,
+    /// Buffer for out-of-order entries (waiting for gaps to fill).
+    pending_buffer: Mutex<BTreeMap<u64, PendingEntry>>,
 }
 
 impl FlushCoordinator {
@@ -241,6 +246,8 @@ impl FlushCoordinator {
             current_segment_min_lsn: AtomicU64::new(u64::MAX),
             current_segment_max_lsn: AtomicU64::new(0),
             current_segment_entry_count: AtomicU64::new(0),
+            next_expected_lsn: AtomicU64::new(1),
+            pending_buffer: Mutex::new(BTreeMap::new()),
         };
 
         // Find the latest segment ID
@@ -266,6 +273,25 @@ impl FlushCoordinator {
                 }
             }
         }
+
+        // Initialize next_expected_lsn from the latest segment
+        let mut max_lsn = 0;
+        if max_segment_id > 0 {
+            if let Some(meta) = self.read_segment_metadata(max_segment_id) {
+                max_lsn = meta.max_lsn.0;
+            } else {
+                // Fallback: Read segment to find max LSN
+                let path = self.segment_path(max_segment_id);
+                if let Ok(entries) = super::segment_reader::read_segment(&path, LSN(0)) {
+                    if let Some(last) = entries.last() {
+                        max_lsn = last.lsn.0;
+                    }
+                }
+            }
+        }
+
+        self.next_expected_lsn
+            .store(max_lsn + 1, Ordering::Relaxed);
 
         self.current_segment_id
             .store(max_segment_id, Ordering::Relaxed);
@@ -575,6 +601,11 @@ impl FlushCoordinator {
             .min()
     }
 
+    /// Set the next expected LSN (used during recovery).
+    pub fn set_expected_lsn(&self, lsn: LSN) {
+        self.next_expected_lsn.store(lsn.0, Ordering::Relaxed);
+    }
+
     /// Flush a batch of entries to disk.
     ///
     /// Entries should already be sorted by LSN.
@@ -587,16 +618,45 @@ impl FlushCoordinator {
     /// # Returns
     ///
     /// Statistics about the flush operation.
-    pub fn flush(&self, entries: Vec<PendingEntry>, sync: bool) -> Result<FlushStats> {
-        if entries.is_empty() {
+    pub fn flush(&self, mut entries: Vec<PendingEntry>, sync: bool) -> Result<FlushStats> {
+        // Ensure entries are sorted by LSN (critical for gap detection)
+        entries.sort_by_key(|e| e.lsn);
+
+        // Lock the pending buffer to ensure serialization of the flush decision and update
+        let mut pending = self.pending_buffer.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut batch_to_write = Vec::new();
+        let mut next = self.next_expected_lsn.load(Ordering::Relaxed);
+
+        // Process incoming entries
+        for entry in entries {
+            let lsn = entry.lsn.0;
+            if lsn == next {
+                batch_to_write.push(entry);
+                next += 1;
+
+                // Check if we can fill more from buffer
+                while let Some(entry) = pending.remove(&next) {
+                    batch_to_write.push(entry);
+                    next += 1;
+                }
+            } else if lsn > next {
+                // Future entry, buffer it
+                pending.insert(lsn, entry);
+            } else {
+                // Duplicate or old entry (lsn < next)
+                entry.notify_completion();
+            }
+        }
+
+        if batch_to_write.is_empty() {
             return Ok(FlushStats::default());
         }
 
         let start = Instant::now();
 
         // Inner function to perform I/O operations.
-        // This allows us to catch errors and notify pending entries before returning.
-        let do_flush = || -> Result<FlushStats> {
+        let do_flush = |batch: &[PendingEntry]| -> Result<FlushStats> {
             // Acquire lock once for the entire operation to ensure thread safety
             let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -617,7 +677,7 @@ impl FlushCoordinator {
                     })
                 })?;
 
-                for entry in &entries {
+                for entry in batch {
                     // Track LSN range
                     batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
                     batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
@@ -647,7 +707,7 @@ impl FlushCoordinator {
             self.current_segment_max_lsn
                 .fetch_max(batch_max_lsn, Ordering::Relaxed);
             self.current_segment_entry_count
-                .fetch_add(entries.len() as u64, Ordering::Relaxed);
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
 
             // Sync to disk if requested
             if sync && self.config.sync_on_flush {
@@ -668,33 +728,41 @@ impl FlushCoordinator {
 
             // Update metrics
             self.total_entries_flushed
-                .fetch_add(entries.len() as u64, Ordering::Relaxed);
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
             self.total_bytes_written
                 .fetch_add(bytes_written as u64, Ordering::Relaxed);
             self.total_flushes.fetch_add(1, Ordering::Relaxed);
 
             Ok(FlushStats {
-                entries_flushed: entries.len(),
+                entries_flushed: batch.len(),
                 bytes_written,
                 flush_duration: start.elapsed(),
                 segment_rotated,
             })
         };
 
-        // Execute flush logic
-        match do_flush() {
+        // Execute flush logic holding the pending_buffer lock to ensure atomicity
+        match do_flush(&batch_to_write) {
             Ok(stats) => {
-                // Notify success
-                for entry in entries {
+                // Success: Update state and notify
+                self.next_expected_lsn.store(next, Ordering::Relaxed);
+
+                // Release lock
+                drop(pending);
+
+                for entry in batch_to_write {
                     entry.notify_completion();
                 }
                 Ok(stats)
             }
             Err(e) => {
-                // Notify error to prevent deadlocks (Sentry 🛡️)
-                // If we don't notify, threads waiting on these entries will hang forever.
+                // Failure: Do NOT update state.
+                // Entries in batch_to_write are dropped and treated as failed.
+                // Callers can retry.
+                drop(pending);
+
                 let error_msg = e.to_string();
-                for entry in entries {
+                for entry in batch_to_write {
                     entry.notify_error(&error_msg);
                 }
                 Err(e)
@@ -1189,12 +1257,27 @@ mod tests {
         config.segment_size = 50; // Very small to force rotation
 
         let coordinator = FlushCoordinator::new(config).unwrap();
+        coordinator.set_expected_lsn(LSN(10));
 
         // Flush entries with various LSNs
         let entries = vec![
             create_test_entry(10, &[1u8; 20]),
-            create_test_entry(20, &[2u8; 20]),
+            create_test_entry(20, &[2u8; 20]), // Gap 11-14, 16-19
             create_test_entry(15, &[3u8; 20]),
+        ];
+        // Note: 20 and 15 will be buffered because of gaps. Only 10 will flush.
+        // Wait, if 10 flushes, next is 11.
+        // 15 is buffered. 20 is buffered.
+        // Metadata is written on rotation.
+        // We need contiguous stream to flush and rotate.
+        // So we should provide contiguous entries if we want to test metadata writing.
+        // Or update expected LSN manually? No, flush() updates it.
+
+        // Let's use contiguous entries 10, 11, 12.
+        let entries = vec![
+            create_test_entry(10, &[1u8; 20]),
+            create_test_entry(11, &[2u8; 20]),
+            create_test_entry(12, &[3u8; 20]),
         ];
         coordinator.flush(entries, true).unwrap();
 
@@ -1209,7 +1292,7 @@ mod tests {
         // First segment should have min_lsn=10, max_lsn=20
         if let Some((_, meta)) = segments.first() {
             assert_eq!(meta.min_lsn, LSN(10));
-            assert_eq!(meta.max_lsn, LSN(20));
+            assert_eq!(meta.max_lsn, LSN(12));
             assert_eq!(meta.entry_count, 3);
         }
     }
@@ -1293,6 +1376,7 @@ mod tests {
         config.segments_to_retain = 100; // Don't auto-cleanup
 
         let coordinator = FlushCoordinator::new(config).unwrap();
+        coordinator.set_expected_lsn(LSN(100));
 
         // Create a segment with LSN 100-110
         for i in 100..=110 {
@@ -1347,6 +1431,7 @@ mod tests {
         config.segments_to_retain = 100;
 
         let coordinator = FlushCoordinator::new(config).unwrap();
+        coordinator.set_expected_lsn(LSN(50));
 
         // Initially no segments with metadata
         assert!(coordinator.get_min_lsn().is_none());
@@ -1531,5 +1616,59 @@ mod tests {
             oldest_segment_path.exists(),
             "Segment log file should still exist"
         );
+    }
+
+    #[test]
+    fn test_flush_buffers_out_of_order_entries() {
+        let dir = tempdir().unwrap();
+        let config = FlushCoordinatorConfig::new(dir.path());
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 1. Flush 1, 2, 4 (Gap at 3)
+        let entries1 = vec![
+            create_test_entry(1, b"1"),
+            create_test_entry(2, b"2"),
+            create_test_entry(4, b"4"),
+        ];
+
+        let stats1 = coordinator.flush(entries1, true).unwrap();
+
+        // Should flush 1, 2. Buffer 4.
+        assert_eq!(stats1.entries_flushed, 2, "Should only flush 1 and 2");
+        assert_eq!(coordinator.total_entries_flushed(), 2);
+
+        // Verify next expected is 3
+        assert_eq!(coordinator.next_expected_lsn.load(Ordering::Relaxed), 3);
+
+        // 2. Flush 3, 5 (Fills gap, adds new)
+        let entries2 = vec![
+            create_test_entry(3, b"3"),
+            create_test_entry(5, b"5"),
+        ];
+
+        let stats2 = coordinator.flush(entries2, true).unwrap();
+
+        // Should flush 3, then 4 (from buffer), then 5. Total 3.
+        assert_eq!(stats2.entries_flushed, 3, "Should flush 3, 4 (buffered), 5");
+        assert_eq!(coordinator.total_entries_flushed(), 5);
+
+        // Verify next expected is 6
+        assert_eq!(coordinator.next_expected_lsn.load(Ordering::Relaxed), 6);
+    }
+
+    #[test]
+    fn test_flush_handles_duplicates() {
+        let dir = tempdir().unwrap();
+        let config = FlushCoordinatorConfig::new(dir.path());
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Flush 1
+        coordinator.flush(vec![create_test_entry(1, b"1")], true).unwrap();
+
+        // Flush 1 again (Duplicate)
+        let stats = coordinator.flush(vec![create_test_entry(1, b"1")], true).unwrap();
+
+        assert_eq!(stats.entries_flushed, 0, "Duplicate should be ignored");
+        assert_eq!(coordinator.total_entries_flushed(), 1);
     }
 }

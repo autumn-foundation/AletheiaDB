@@ -679,6 +679,14 @@ impl ConcurrentWalSystem {
         self.consecutive_flush_errors() == 0
     }
 
+    /// Set the next LSN to allocate (used during recovery).
+    ///
+    /// This updates both the allocator and the flush coordinator's expectation.
+    pub fn set_next_lsn(&self, lsn: LSN) {
+        self.wal.set_next_lsn(lsn);
+        self.coordinator.set_expected_lsn(lsn);
+    }
+
     /// Get the WAL directory path.
     pub fn wal_dir(&self) -> &std::path::Path {
         self.coordinator.wal_dir()
