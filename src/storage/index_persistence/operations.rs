@@ -470,14 +470,22 @@ pub(crate) fn persist_string_interner(
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
     current_lsn: u64,
-) -> Result<()> {
+) -> Result<u64> {
     manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
     })?;
 
+    // Capture the count *after* save completes. Since GLOBAL_INTERNER is append-only,
+    // this count is at least what was saved. If new strings were interned concurrently,
+    // they might not be in the file yet, but having a slightly higher count in the manifest
+    // is safer than lower (though ideally exact).
+    // Note: save_string_interner likely iterates and saves.
+    let count = crate::core::GLOBAL_INTERNER.len() as u64;
+
     tracker.reset_string_mutations();
     tracker.update_string_lsn(current_lsn);
-    Ok(())
+    tracker.update_last_persisted_string_count(count);
+    Ok(count)
 }
 
 /// Persist temporal adjacency index to disk.
@@ -560,9 +568,10 @@ pub(crate) fn persist_all_indexes(
     let mut manifest = IndexManifest::new(safe_lsn);
 
     // Add string interner entry
+    let string_count = tracker.get_last_persisted_string_count();
     manifest.string_interner = Some(StringInternerManifestEntry {
         interner_file: "strings/interner.idx".to_string(),
-        string_count: crate::core::GLOBAL_INTERNER.len() as u64,
+        string_count,
     });
 
     // Add graph index entry if we have nodes/edges

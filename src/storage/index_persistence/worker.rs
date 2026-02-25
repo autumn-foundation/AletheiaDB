@@ -218,7 +218,6 @@ pub(crate) fn spawn_background_persistence_thread(
                 // to be consistent with what gets written to disk, preventing data loss
                 // during recovery if concurrent writes happen during persistence.
                 let snapshot_lsn = wal.current_lsn().0;
-                let string_count = crate::core::GLOBAL_INTERNER.len() as u64;
 
                 // Check vector index policy
                 let vector_mutations = tracker.get_vector_mutations();
@@ -284,7 +283,7 @@ pub(crate) fn spawn_background_persistence_thread(
                     || string_seconds >= policies.strings.time_interval_secs as u64
                 {
                     match persist_string_interner(&manager, &tracker, snapshot_lsn) {
-                        Ok(()) => any_index_persisted = true,
+                        Ok(_) => any_index_persisted = true,
                         Err(e) => {
                             eprintln!(
                                 "Background persistence: Failed to persist string interner: {}",
@@ -309,7 +308,7 @@ pub(crate) fn spawn_background_persistence_thread(
                         &tracker,
                         tracker.get_last_persisted_node_count(),
                         tracker.get_last_persisted_edge_count(),
-                        string_count,
+                        tracker.get_last_persisted_string_count(),
                     );
                 }
             }
