@@ -19,10 +19,11 @@ pub const NORMALIZATION_TOLERANCE: f32 = 1e-6;
 /// in normalization operations. This prevents numerical instability from denormal
 /// numbers and avoids division by very small values that could cause overflow.
 ///
-/// Value: 1e-14 corresponds to magnitude ≈ 1e-7, providing safety margin for f32
-/// precision (which has ~7 significant digits). This is more conservative than
-/// 1e-20 (magnitude ≈ 1e-10) which is too close to f32's precision limits.
-pub(crate) const SQUARED_MAGNITUDE_THRESHOLD: f32 = 1e-14;
+/// Value: 1e-25 corresponds to magnitude ≈ 3e-13, allowing normalization of
+/// small but valid vectors (e.g., 1e-8 components). This is well above the
+/// smallest normal f32 value (1.17e-38) and provides sufficient headroom
+/// before denormal range.
+pub(crate) const SQUARED_MAGNITUDE_THRESHOLD: f32 = 1e-25;
 
 /// Maximum allowed vector dimension.
 ///

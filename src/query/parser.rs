@@ -2238,4 +2238,68 @@ mod sentry_tests {
             panic!("Expected Match clause");
         }
     }
+
+    #[test]
+    fn test_spaced_negative_integer() {
+        // 🎯 Target: Parser token interaction (Token::Dash -> IntegerLiteral)
+        // 💣 Risk: Code path handling spaced negatives (e.g. RETURN - 5) is rarely exercised
+        // compared to unspaced negatives handled by Lexer.
+        let query = Parser::parse("MATCH (n) RETURN - 5").unwrap();
+        let ret = query.return_clause.expect("Expected return clause");
+        let item = &ret.items[0];
+        // Use full equality check to avoid uncovered panic branches
+        assert_eq!(item.expression, Expression::Literal(PropertyValue::Int(-5)));
+    }
+
+    #[test]
+    fn test_spaced_negative_float() {
+        // 🎯 Target: Parser token interaction (Token::Dash -> FloatLiteral)
+        let query = Parser::parse("MATCH (n) RETURN - 5.5").unwrap();
+        let ret = query.return_clause.expect("Expected return clause");
+        let item = &ret.items[0];
+        assert_eq!(
+            item.expression,
+            Expression::Literal(PropertyValue::Float(-5.5))
+        );
+    }
+
+    #[test]
+    fn test_spaced_negative_in_float_list() {
+        // 🎯 Target: parse_float_list state machine
+        // 💣 Risk: Ensure list parsing doesn't break on spaced negatives
+        let query = Parser::parse("SIMILAR TO [ - 1.0, - 2.0 ] LIMIT 1").unwrap();
+        // Construct expected source clause to avoid partial matching with panic
+        let expected_source = SourceClause::VectorSearch {
+            embedding: EmbeddingRef::Literal(Arc::from(vec![-1.0, -2.0])),
+            metric: None,
+            limit: 1,
+        };
+        assert_eq!(query.source, expected_source);
+    }
+
+    #[test]
+    fn test_unbounded_max_depth() {
+        // 🎯 Target: parse_depth_range logic for missing max
+        // 💣 Risk: Ensure *1.. is treated as 1..MAX (unbounded)
+        let query = Parser::parse("MATCH (a)-[:REL*1..]->(b) RETURN b").unwrap();
+
+        let SourceClause::Match(patterns) = query.source else {
+            panic!("Expected Match clause");
+        };
+
+        // Construct expected relationship pattern to verify
+        // Parser defaults: variable=None, direction=Outgoing (due to ->), depth=1..MAX/2
+        let expected_rel = PatternElement::Relationship(RelationshipPattern {
+            variable: None,
+            rel_type: Some("REL".to_string()),
+            direction: RelationshipDirection::Outgoing,
+            depth: Some(DepthSpec::Range {
+                min: 1,
+                max: usize::MAX / 2,
+            }),
+        });
+
+        // Element 1 is the relationship
+        assert_eq!(patterns[0].elements[1], expected_rel);
+    }
 }

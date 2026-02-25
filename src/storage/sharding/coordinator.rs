@@ -25,6 +25,18 @@
 //!     *   The coordinator tells all participants to commit.
 //!     *   Once all acknowledge, the decision log is cleared.
 //!
+//! # ⚠️ Performance Warning: Sequential 2PC
+//!
+//! Currently, the 2PC protocol phases (Prepare and Commit) are executed **sequentially**
+//! across participants.
+//!
+//! - **Latency**: The commit latency is the *sum* of participant latencies, not the max.
+//! - **Lock Duration**: Locks are held on early participants while waiting for later ones.
+//! - **Scalability**: Transaction throughput may degrade linearly with the number of participants.
+//!
+//! This design prioritizes simplicity and determinism over concurrency in the current
+//! version. Future versions will introduce parallel 2PC execution.
+//!
 //! # Recovery
 //!
 //! If the coordinator crashes during the Commit phase, the `recover_pending_transactions`

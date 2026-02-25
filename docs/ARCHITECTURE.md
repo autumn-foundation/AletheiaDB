@@ -1065,6 +1065,181 @@ sequenceDiagram
     Core-->>User: Result (Temporal Path)
 ```
 
+## Tiered Storage Architecture
+
+AletheiaDB employs a three-tier storage architecture to support datasets larger than available RAM while maintaining sub-microsecond latency for current-state queries.
+
+### Architecture Overview
+
+```mermaid
+flowchart TB
+    subgraph QueryEngine["Query Engine"]
+        CQ["Current Queries"]
+        TQ["Time-Travel Queries"]
+    end
+
+    subgraph Tiers["Storage Tiers"]
+        subgraph Hot["HOT TIER<br/>(Always RAM)"]
+            HN["Current nodes"]
+            HE["Current edges"]
+            HI["CSR indexes"]
+            HL["22ns lookup"]
+        end
+
+        subgraph Warm["WARM TIER<br/>(RAM Cache)"]
+            WH["Recent history"]
+            WC["LRU cache"]
+            WL["<1μs lookup"]
+        end
+
+        subgraph Cold["COLD TIER<br/>(Disk - Redb)"]
+            CV["Old versions"]
+            CC["Compressed"]
+            CR["Redb B-Trees"]
+            CL["<1ms lookup"]
+        end
+    end
+
+    CQ --> Hot
+    TQ --> Warm
+    TQ --> Cold
+
+    Hot -.->|"Migration Service<br/>(Background)"| Cold
+    Cold -->|"Cache Miss"| Warm
+```
+
+### Storage Tiers
+
+| Tier | Storage | Latency | Content |
+|------|---------|---------|---------|
+| **Hot** | RAM (DashMap) | 22-70ns | Current state, live indexes |
+| **Warm** | RAM (LRU Cache) | 100ns-1µs | Recently accessed history |
+| **Cold** | Disk (Redb) | 100µs-1ms | Compressed historical versions |
+
+### Data Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant HistoricalStorage
+    participant HotTier as Hot Tier (RAM)
+    participant WarmCache as Warm Cache (LRU)
+    participant ColdTier as Cold Tier (Redb)
+
+    Client->>HistoricalStorage: get_version(id)
+    HistoricalStorage->>HotTier: lookup(id)
+
+    alt Found in Hot
+        HotTier-->>HistoricalStorage: version
+        HistoricalStorage-->>Client: Ok(version)
+    else Not in Hot
+        HotTier-->>HistoricalStorage: None
+        HistoricalStorage->>WarmCache: get(id)
+
+        alt Found in Warm
+            WarmCache-->>HistoricalStorage: cached_version
+            HistoricalStorage-->>Client: Ok(version)
+        else Not in Warm
+            WarmCache-->>HistoricalStorage: None
+            HistoricalStorage->>ColdTier: get(id)
+            ColdTier-->>HistoricalStorage: version
+            HistoricalStorage->>WarmCache: insert(id, version)
+            HistoricalStorage-->>Client: Ok(version)
+        end
+    end
+```
+
+## Distributed Architecture (Sharding)
+
+To scale beyond single-machine limits, AletheiaDB implements domain-based partitioning with edge replication.
+
+### Sharding Overview
+
+```mermaid
+flowchart TB
+    subgraph Coordinator["Shard Coordinator"]
+        QR[Query Router]
+        TC[Transaction Coordinator]
+        SD[Shard Discovery]
+        RM[Rebalance Manager]
+    end
+
+    subgraph Shard0["Shard 0 - People"]
+        N0[Nodes]
+        E0[Edges]
+        H0[History]
+        W0[WAL]
+    end
+
+    subgraph Shard1["Shard 1 - Places"]
+        N1[Nodes]
+        E1[Edges]
+        H1[History]
+        W1[WAL]
+    end
+
+    subgraph Shard2["Shard 2 - Events"]
+        N2[Nodes]
+        E2[Edges]
+        H2[History]
+        W2[WAL]
+    end
+
+    Client --> Coordinator
+    QR --> Shard0
+    QR --> Shard1
+    QR --> Shard2
+    TC --> Shard0
+    TC --> Shard1
+    TC --> Shard2
+
+    Shard0 <-.->|"Cross-shard edges"| Shard1
+    Shard1 <-.->|"Cross-shard edges"| Shard2
+    Shard0 <-.->|"Cross-shard edges"| Shard2
+```
+
+### Core Concepts
+
+1.  **Domain-Based Partitioning**: Nodes are partitioned by label (e.g., "Person" on Shard 0, "Place" on Shard 1). This ensures related data stays local.
+2.  **Edge Replication**: Edges crossing shard boundaries are stored on **both** source and target shards, enabling fast single-hop traversal without network overhead.
+3.  **Circuit Breakers**: Network communication is guarded by circuit breakers to prevent cascading failures.
+
+### Distributed Transactions (Two-Phase Commit)
+
+Writes spanning multiple shards are coordinated using a Two-Phase Commit (2PC) protocol with a persistent commit log for crash recovery.
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant CL as Commit Log
+    participant SA as Shard A
+    participant SB as Shard B
+
+    Note over C: Begin Transaction
+    C->>CL: Log PREPARING (participants: A, B)
+
+    par Phase 1: Prepare
+        C->>SA: PREPARE(tx_id, operations)
+        C->>SB: PREPARE(tx_id, operations)
+    end
+
+    SA-->>C: PREPARED
+    SB-->>C: PREPARED
+
+    Note over C: All prepared - commit decision
+    C->>CL: Log COMMITTED (tx_id)
+
+    par Phase 2: Commit
+        C->>SA: COMMIT(tx_id)
+        C->>SB: COMMIT(tx_id)
+    end
+
+    SA-->>C: COMMITTED
+    SB-->>C: COMMITTED
+
+    C->>CL: Clear entry (tx complete)
+```
+
 ## Temporal Query Processing
 
 ### Point-in-Time Queries
@@ -1168,9 +1343,9 @@ for row in result {
 
 ### Scalability
 
-- **Sharding**: Horizontal scale by partitioning graph
-- **Distributed Transactions**: Two-phase commit across shards
-- **Replication**: High availability via replicas
+- **Replication**: High availability via replicas (raft-based)
+- **Automatic Sharding**: Infer domains from label distribution
+- **Shard Splitting**: Subdivide large shards automatically
 
 ### Query Language
 

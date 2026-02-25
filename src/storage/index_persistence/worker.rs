@@ -332,9 +332,7 @@ pub(crate) fn spawn_background_persistence_thread(
 
         match result {
             Ok(()) => {
-                eprintln!(
-                    "Warning: Background persistence thread exited normally but unexpectedly. Future persistence operations will fail."
-                );
+                // Normal exit (only happens when shutdown is signaled)
             }
             Err(e) => {
                 eprintln!("CRITICAL: Background persistence thread panicked: {:?}", e);
