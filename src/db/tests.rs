@@ -2241,3 +2241,15 @@ fn test_multiple_edges_same_nodes() {
     assert_eq!(db.out_degree(bob), 1);
     assert_eq!(db.in_degree(bob), 2);
 }
+
+#[test]
+fn test_debug_implementation() {
+    let db = AletheiaDB::new().unwrap();
+    let debug_output = format!("{:?}", db);
+
+    assert!(debug_output.contains("AletheiaDB"));
+    assert!(debug_output.contains("current_timestamp"));
+    assert!(debug_output.contains("default_durability"));
+    assert!(debug_output.contains("persistence_enabled"));
+    assert!(debug_output.contains("stats"));
+}
