@@ -498,9 +498,7 @@ impl PropertyValue {
                 if a.len() != b.len() {
                     return false;
                 }
-                a.iter()
-                    .zip(b.iter())
-                    .all(|(x, y)| x.semantically_equal(y))
+                a.iter().zip(b.iter()).all(|(x, y)| x.semantically_equal(y))
             }
             // For other types, fallback to PartialEq
             _ => self == other,
