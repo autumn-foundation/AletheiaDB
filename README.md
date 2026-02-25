@@ -22,7 +22,7 @@ AletheiaDB tracks both **valid time** (when facts were true in reality) and **tr
 - **Hybrid Query API**: Combine graph traversal + vector similarity + bi-temporal queries
 - **Query Language**: Cypher-like AQL with temporal and vector extensions
 - **MCP Server**: Model Context Protocol server for LLM integration (Claude, etc.)
-- **Graph Sharding**: Domain-based horizontal scaling with 2PC distributed transactions
+- **Graph Sharding**: Domain-based horizontal scaling with 2PC distributed transactions*
 - **Semantic Drift Tracking**: Detect how embeddings evolve over time for knowledge evolution analysis
 - **Production Observability**: Distributed tracing, metrics, and profiling (optional)
 - **High Performance**: Sub-microsecond traversals (~22ns node lookup, ~23ns edge traversal)
@@ -288,10 +288,12 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 ### Graph Sharding (Complete ✅)
 - [x] Domain-based node partitioning by label
 - [x] Edge replication for cross-shard traversal
-- [x] Two-Phase Commit (2PC) distributed transactions
+- [x] Two-Phase Commit (2PC) distributed transactions*
 - [x] Circuit breakers for fault tolerance
 - [x] Online migration with dual-write support
 - [x] Connection pooling and query executor
+
+*\*Note: Current implementation uses sequential scatter-gather and 2PC. Latency scales linearly with participant count.*
 
 ### Tiered Storage (Complete ✅)
 - [x] Three-tier architecture (hot/warm/cold)

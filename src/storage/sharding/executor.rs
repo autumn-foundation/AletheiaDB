@@ -22,6 +22,18 @@
 //! │  └────────────────────────────────────────────────────────────┘  │
 //! └──────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # ⚠️ Performance Warning: Sequential Execution
+//!
+//! Currently, the "Scatter" phase is implemented as a **Sequential Send-and-Wait** loop.
+//!
+//! - **Latency**: Scales linearly with the number of target shards ($O(N)$), not constant ($O(1)$).
+//!   Total latency ≈ $\sum \text{latency}(\text{shard}_i)$.
+//! - **Throughput**: Limited by the single-threaded dispatch loop.
+//!
+//! This implementation is suitable for small clusters or low-latency local shards but
+//! may become a bottleneck in large distributed deployments. Future versions will
+//! implement true parallel scatter-gather using async/await or thread pools.
 
 use super::network::{NetworkError, NetworkResult, ShardClient};
 use super::router::{ShardRouter, TraversalPlan};
@@ -304,6 +316,18 @@ impl<C: ShardClient> QueryExecutor<C> {
     }
 
     /// Execute a query across shards.
+    ///
+    /// This method iterates through the target shards **sequentially** and collects
+    /// results.
+    ///
+    /// # Partial Results and Timeouts
+    ///
+    /// If `allow_partial_results` is enabled and the query times out:
+    /// - Results collected *so far* are returned.
+    /// - Shards that have not yet been contacted (due to being later in the iteration order)
+    ///   are marked as `pending` in the timeout error (or silently omitted if results are returned).
+    ///
+    /// This means the order of `target_shards` matters: earlier shards are prioritized.
     pub fn execute(&self, query: DistributedQuery) -> ExecutorResult<QueryResult> {
         let start = Instant::now();
         let timeout = query.timeout.unwrap_or(self.config.default_timeout);
@@ -587,9 +611,9 @@ mod tests {
 
     fn test_config() -> ShardConfig {
         ShardConfig::new(vec![
-            ShardDefinition::new(0, "shard0:9000", vec!["Person"]),
-            ShardDefinition::new(1, "shard1:9000", vec!["Place"]),
-            ShardDefinition::new(2, "shard2:9000", vec!["Event"]),
+            ShardDefinition::new(0, "shard0:9000", vec!["Person", "User", "Account"]),
+            ShardDefinition::new(1, "shard1:9000", vec!["Place", "Location", "Address"]),
+            ShardDefinition::new(2, "shard2:9000", vec!["Event", "Transaction", "Activity"]),
         ])
     }
 
