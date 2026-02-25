@@ -285,11 +285,13 @@ impl FlushCoordinator {
     }
 
     /// Write segment metadata to a companion file.
-    fn write_segment_metadata(&self, segment_id: u64) -> Result<()> {
-        let min_lsn = self.current_segment_min_lsn.load(Ordering::Relaxed);
-        let max_lsn = self.current_segment_max_lsn.load(Ordering::Relaxed);
-        let entry_count = self.current_segment_entry_count.load(Ordering::Relaxed);
-
+    fn write_segment_metadata(
+        &self,
+        segment_id: u64,
+        min_lsn: u64,
+        max_lsn: u64,
+        entry_count: u64,
+    ) -> Result<()> {
         // Only write metadata if we have valid LSN range
         if min_lsn <= max_lsn && entry_count > 0 {
             let metadata = SegmentMetadata::new(LSN(min_lsn), LSN(max_lsn), entry_count);
@@ -388,6 +390,20 @@ impl FlushCoordinator {
         if current_size >= self.config.segment_size as u64 {
             let closing_segment_id = self.current_segment_id.load(Ordering::Relaxed);
 
+            // Capture state for metadata/cleanup before resetting
+            let min_lsn = self.current_segment_min_lsn.load(Ordering::Relaxed);
+            let max_lsn = self.current_segment_max_lsn.load(Ordering::Relaxed);
+            let entry_count = self.current_segment_entry_count.load(Ordering::Relaxed);
+
+            // Reset size and LSN tracking for new segment immediately.
+            // This ensures that even if flush/sync/metadata fails, the internal state
+            // is clean for the next segment and doesn't inherit old LSN ranges ("smearing").
+            self.current_segment_size.store(0, Ordering::Relaxed);
+            self.current_segment_min_lsn
+                .store(u64::MAX, Ordering::Relaxed);
+            self.current_segment_max_lsn.store(0, Ordering::Relaxed);
+            self.current_segment_entry_count.store(0, Ordering::Relaxed);
+
             // Flush current segment
             if let Some(writer) = writer_guard {
                 writer.flush().map_err(|e| {
@@ -413,21 +429,14 @@ impl FlushCoordinator {
                 }
             }
 
-            // Write segment metadata before closing (ADR-0025)
-            self.write_segment_metadata(closing_segment_id)?;
+            // Write segment metadata (ADR-0025) using captured state
+            self.write_segment_metadata(closing_segment_id, min_lsn, max_lsn, entry_count)?;
 
             // Clear sync handle
             {
                 let mut sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
                 *sync_guard = None;
             }
-
-            // Reset size and LSN tracking for new segment
-            self.current_segment_size.store(0, Ordering::Relaxed);
-            self.current_segment_min_lsn
-                .store(u64::MAX, Ordering::Relaxed);
-            self.current_segment_max_lsn.store(0, Ordering::Relaxed);
-            self.current_segment_entry_count.store(0, Ordering::Relaxed);
 
             // Clean up old segments
             self.cleanup_old_segments()?;
