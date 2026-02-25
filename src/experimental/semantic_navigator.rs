@@ -306,7 +306,11 @@ mod tests {
         let nav = SemanticNavigator::new(&db);
         let path = nav.find_path(a, c, "vec").unwrap();
 
-        assert_eq!(path, vec![a, b, c], "Should choose the semantically closer path via B");
+        assert_eq!(
+            path,
+            vec![a, b, c],
+            "Should choose the semantically closer path via B"
+        );
     }
 
     #[test]
@@ -321,6 +325,9 @@ mod tests {
 
         let nav = SemanticNavigator::new(&db);
         let result = nav.find_path(a, b, "vec");
-        assert!(result.is_err(), "Should fail if start/end nodes lack vectors");
+        assert!(
+            result.is_err(),
+            "Should fail if start/end nodes lack vectors"
+        );
     }
 }
