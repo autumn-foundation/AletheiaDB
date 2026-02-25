@@ -1,10 +1,10 @@
 use aletheiadb::core::PropertyMapBuilder;
-use aletheiadb::storage::CurrentStorage;
-use aletheiadb::query::QueryExecutor;
-use aletheiadb::query::planner::{PhysicalOp, PhysicalPlan};
-use aletheiadb::query::planner::cost::Cost;
-use aletheiadb::storage::historical::HistoricalStorage;
 use aletheiadb::core::version::AnchorConfig;
+use aletheiadb::query::QueryExecutor;
+use aletheiadb::query::planner::cost::Cost;
+use aletheiadb::query::planner::{PhysicalOp, PhysicalPlan};
+use aletheiadb::storage::CurrentStorage;
+use aletheiadb::storage::historical::HistoricalStorage;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -29,9 +29,15 @@ fn test_variable_depth_traversal_bug() {
     let props = PropertyMapBuilder::new().insert("name", "D").build();
     let d = current.create_node("Node", props).unwrap();
 
-    current.create_edge(a, b, "REL", PropertyMapBuilder::new().build()).unwrap();
-    current.create_edge(b, c, "REL", PropertyMapBuilder::new().build()).unwrap();
-    current.create_edge(c, d, "REL", PropertyMapBuilder::new().build()).unwrap();
+    current
+        .create_edge(a, b, "REL", PropertyMapBuilder::new().build())
+        .unwrap();
+    current
+        .create_edge(b, c, "REL", PropertyMapBuilder::new().build())
+        .unwrap();
+    current
+        .create_edge(c, d, "REL", PropertyMapBuilder::new().build())
+        .unwrap();
 
     // 3. Setup Executor
     let executor = QueryExecutor::new(current.clone(), historical);
@@ -40,9 +46,7 @@ fn test_variable_depth_traversal_bug() {
     // Look up A -> Traverse 1..3
     let plan = PhysicalPlan {
         root: PhysicalOp::IndexedTraversal {
-            input: Box::new(PhysicalOp::NodeLookup {
-                node_ids: vec![a],
-            }),
+            input: Box::new(PhysicalOp::NodeLookup { node_ids: vec![a] }),
             direction: aletheiadb::query::ir::Direction::Outgoing,
             label: Some("REL".to_string()),
             min_depth: 1,
@@ -60,16 +64,36 @@ fn test_variable_depth_traversal_bug() {
     let rows: Vec<_> = results.collect_all().expect("Collection failed");
 
     // 6. Verify results
-    let names: Vec<String> = rows.iter()
-        .map(|r| r.entity.as_node().unwrap().properties.get("name").unwrap().as_str().unwrap().to_string())
+    let names: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.entity
+                .as_node()
+                .unwrap()
+                .properties
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect();
 
     println!("Found nodes: {:?}", names);
 
     // B, C, D should be found
-    assert!(names.contains(&"B".to_string()), "Should contain B (depth 1)");
-    assert!(names.contains(&"C".to_string()), "Should contain C (depth 2)");
-    assert!(names.contains(&"D".to_string()), "Should contain D (depth 3)");
+    assert!(
+        names.contains(&"B".to_string()),
+        "Should contain B (depth 1)"
+    );
+    assert!(
+        names.contains(&"C".to_string()),
+        "Should contain C (depth 2)"
+    );
+    assert!(
+        names.contains(&"D".to_string()),
+        "Should contain D (depth 3)"
+    );
     assert_eq!(rows.len(), 3, "Should find exactly 3 nodes");
 }
 
@@ -94,9 +118,15 @@ fn test_variable_depth_min_depth_filter() {
     let props = PropertyMapBuilder::new().insert("name", "D").build();
     let d = current.create_node("Node", props).unwrap();
 
-    current.create_edge(a, b, "REL", PropertyMapBuilder::new().build()).unwrap();
-    current.create_edge(b, c, "REL", PropertyMapBuilder::new().build()).unwrap();
-    current.create_edge(c, d, "REL", PropertyMapBuilder::new().build()).unwrap();
+    current
+        .create_edge(a, b, "REL", PropertyMapBuilder::new().build())
+        .unwrap();
+    current
+        .create_edge(b, c, "REL", PropertyMapBuilder::new().build())
+        .unwrap();
+    current
+        .create_edge(c, d, "REL", PropertyMapBuilder::new().build())
+        .unwrap();
 
     // 3. Setup Executor
     let executor = QueryExecutor::new(current.clone(), historical);
@@ -105,9 +135,7 @@ fn test_variable_depth_min_depth_filter() {
     // Look up A -> Traverse 2..3 (Should skip B at depth 1)
     let plan = PhysicalPlan {
         root: PhysicalOp::IndexedTraversal {
-            input: Box::new(PhysicalOp::NodeLookup {
-                node_ids: vec![a],
-            }),
+            input: Box::new(PhysicalOp::NodeLookup { node_ids: vec![a] }),
             direction: aletheiadb::query::ir::Direction::Outgoing,
             label: Some("REL".to_string()),
             min_depth: 2,
@@ -125,14 +153,34 @@ fn test_variable_depth_min_depth_filter() {
     let rows: Vec<_> = results.collect_all().expect("Collection failed");
 
     // 6. Verify results
-    let names: Vec<String> = rows.iter()
-        .map(|r| r.entity.as_node().unwrap().properties.get("name").unwrap().as_str().unwrap().to_string())
+    let names: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.entity
+                .as_node()
+                .unwrap()
+                .properties
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect();
 
     println!("Found nodes: {:?}", names);
 
-    assert!(!names.contains(&"B".to_string()), "Should NOT contain B (depth 1)");
-    assert!(names.contains(&"C".to_string()), "Should contain C (depth 2)");
-    assert!(names.contains(&"D".to_string()), "Should contain D (depth 3)");
+    assert!(
+        !names.contains(&"B".to_string()),
+        "Should NOT contain B (depth 1)"
+    );
+    assert!(
+        names.contains(&"C".to_string()),
+        "Should contain C (depth 2)"
+    );
+    assert!(
+        names.contains(&"D".to_string()),
+        "Should contain D (depth 3)"
+    );
     assert_eq!(rows.len(), 2, "Should find exactly 2 nodes (C, D)");
 }
