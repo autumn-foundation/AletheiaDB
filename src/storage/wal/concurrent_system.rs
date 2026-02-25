@@ -697,6 +697,12 @@ impl ConcurrentWalSystem {
     /// This signals the background thread to stop, waits for it to finish,
     /// and performs a final flush of all pending entries.
     pub fn shutdown(&mut self) {
+        // Close the WAL (prevent new appends)
+        // This must be called BEFORE signaling the flush thread to stop,
+        // because closing waits for active appends, and active appends might
+        // be blocked waiting for the flush thread to drain the buffer.
+        self.wal.close();
+
         // Signal shutdown
         self.shutdown_signal.store(true, Ordering::Relaxed);
 
@@ -707,9 +713,6 @@ impl ConcurrentWalSystem {
         if let Some(handle) = self.flush_thread.take() {
             let _ = handle.join();
         }
-
-        // Close the WAL (prevent new appends)
-        self.wal.close();
     }
 }
 
@@ -1059,5 +1062,52 @@ mod tests {
             "Batch should be flushed immediately"
         );
         assert_eq!(lsns.len(), 2);
+    }
+
+    #[test]
+    fn test_shutdown_deadlock_repro() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tempdir().unwrap();
+        // Use a tiny buffer to force backpressure quickly
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_num_stripes(1)
+            .with_durability_mode(DurabilityMode::Async {
+                flush_interval_ms: 100,
+            });
+
+        let mut config = config;
+        config.stripe_capacity = 2; // Very small capacity
+
+        let mut wal_system = ConcurrentWalSystem::new(config).unwrap();
+        // Access the private field 'wal'
+        let wal_inner = Arc::clone(&wal_system.wal);
+
+        // Spawn a producer thread that fills the WAL
+        let handle = thread::spawn(move || {
+            let mut i = 0;
+            // Append enough to definitely fill the buffer multiple times
+            for _ in 0..1000 {
+                let op = create_test_operation(i);
+                // This will block when buffer is full.
+                // If shutdown happens, it should return Err (closed).
+                if wal_inner.append_async(op).is_err() {
+                    break;
+                }
+                i += 1;
+            }
+        });
+
+        // Wait a bit for producer to fill buffer and likely block
+        thread::sleep(Duration::from_millis(50));
+
+        println!("Shutting down WAL system...");
+        // This call is expected to hang if there is a deadlock
+        // because shutdown stops flush thread -> buffer full -> append blocks -> close waits for append -> deadlock
+        wal_system.shutdown();
+        println!("Shutdown complete.");
+
+        handle.join().unwrap();
     }
 }
