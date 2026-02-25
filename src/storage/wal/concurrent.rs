@@ -68,7 +68,7 @@
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::lsn_allocator::LsnAllocator;
 use super::ring_buffer::{CompletionHandle, PendingEntry};
@@ -143,6 +143,40 @@ thread_local! {
     static THREAD_ID_HASH: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
+/// RAII guard for active batch operations.
+///
+/// Ensures that `active_batches` counter is decremented even if the operation panics.
+struct ActiveBatchGuard<'a> {
+    wal: &'a ConcurrentWal,
+}
+
+impl<'a> ActiveBatchGuard<'a> {
+    /// Try to create a new guard.
+    ///
+    /// Returns `Err` if shutdown has been requested.
+    fn new(wal: &'a ConcurrentWal) -> Result<Self> {
+        // 1. Optimistically register intent to write (SeqCst for global visibility)
+        wal.active_batches.fetch_add(1, Ordering::SeqCst);
+
+        // 2. Check if shutdown was requested AFTER registration
+        if wal.shutdown_requested.load(Ordering::SeqCst) {
+            // Back out: Deregister and fail
+            wal.active_batches.fetch_sub(1, Ordering::SeqCst);
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "WAL is shutting down".to_string(),
+            }));
+        }
+
+        Ok(Self { wal })
+    }
+}
+
+impl<'a> Drop for ActiveBatchGuard<'a> {
+    fn drop(&mut self) {
+        self.wal.active_batches.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Concurrent Write-Ahead Log with striped architecture.
 ///
 /// Provides high-throughput, low-latency WAL operations by distributing
@@ -160,6 +194,10 @@ pub struct ConcurrentWal {
     stripe_mask: usize,
     /// Total entries appended across all stripes.
     total_appends: AtomicU64,
+    /// Number of active batch operations.
+    active_batches: AtomicUsize,
+    /// Whether shutdown has been requested.
+    shutdown_requested: AtomicBool,
 }
 
 impl ConcurrentWal {
@@ -180,6 +218,8 @@ impl ConcurrentWal {
             num_stripes,
             stripe_mask,
             total_appends: AtomicU64::new(0),
+            active_batches: AtomicUsize::new(0),
+            shutdown_requested: AtomicBool::new(false),
         })
     }
 
@@ -356,6 +396,8 @@ impl ConcurrentWal {
     /// assert_eq!(lsns.len(), 3);
     /// ```
     pub fn append_batch(&self, operations: Vec<WalOperation>) -> Result<Vec<LSN>> {
+        let _guard = ActiveBatchGuard::new(self)?;
+
         // Handle empty batch early
         if operations.is_empty() {
             return Ok(Vec::new());
@@ -410,6 +452,8 @@ impl ConcurrentWal {
         &self,
         operations: Vec<WalOperation>,
     ) -> Result<(Vec<LSN>, Vec<CompletionHandle>)> {
+        let _guard = ActiveBatchGuard::new(self)?;
+
         // Handle empty batch early
         if operations.is_empty() {
             return Ok((Vec::new(), Vec::new()));
@@ -519,6 +563,23 @@ impl ConcurrentWal {
         for stripe in &self.stripes {
             stripe.close();
         }
+    }
+
+    /// Gracefully shutdown the WAL.
+    ///
+    /// 1. Sets shutdown flag to prevent new batch starts.
+    /// 2. Waits for active batches to complete.
+    /// 3. Closes stripes.
+    pub fn shutdown_graceful(&self) {
+        // 1. Signal shutdown (SeqCst ensures this Store is visible before the Load below)
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+
+        // 2. Wait for active batches to drain
+        while self.active_batches.load(Ordering::SeqCst) > 0 {
+            std::thread::yield_now();
+        }
+
+        self.close();
     }
 
     /// Check if the WAL is closed.
