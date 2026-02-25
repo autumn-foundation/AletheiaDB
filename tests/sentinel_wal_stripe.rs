@@ -56,16 +56,21 @@ fn test_stripe_append_sync_blocking_waits_when_full() {
     let duration = start.elapsed();
 
     // 5. Assert success
-    assert!(result.is_ok(), "append_sync_blocking failed to wait for space");
+    assert!(
+        result.is_ok(),
+        "append_sync_blocking failed to wait for space"
+    );
 
     // 6. Verify blocking actually happened.
     // If the main thread wasn't scheduled for >300ms, the drain happens first,
     // and append succeeds immediately. This would be a false positive (mutant survives).
     // We assert duration > 50ms to catch this case (fail safe).
     // We expect duration ~300ms.
-    assert!(duration >= Duration::from_millis(50),
+    assert!(
+        duration >= Duration::from_millis(50),
         "Operation completed too fast ({:?}), suggesting it didn't block (or race condition occurred)",
-        duration);
+        duration
+    );
 
     // 7. Verify total items conservation
     let drained_count = handle.join().unwrap();
@@ -73,8 +78,13 @@ fn test_stripe_append_sync_blocking_waits_when_full() {
 
     // We started with 2, added 1 -> Total 3.
     // They must be either drained or pending.
-    assert_eq!(drained_count + pending_count, 3,
-        "Total items should be 3. Drained: {}, Pending: {}", drained_count, pending_count);
+    assert_eq!(
+        drained_count + pending_count,
+        3,
+        "Total items should be 3. Drained: {}, Pending: {}",
+        drained_count,
+        pending_count
+    );
 
     // Verify total appends recorded by stripe
     assert_eq!(stripe.total_appends(), 3);
@@ -121,14 +131,21 @@ fn test_stripe_append_blocking_waits_when_full() {
     assert!(result.is_ok(), "append_blocking failed to wait for space");
 
     // 6. Verify blocking duration
-    assert!(duration >= Duration::from_millis(50),
+    assert!(
+        duration >= Duration::from_millis(50),
         "Operation completed too fast ({:?}), suggesting it didn't block (or race condition occurred)",
-        duration);
+        duration
+    );
 
     // 7. Verify total items
     let drained_count = handle.join().unwrap();
     let pending_count = stripe.pending_count();
 
-    assert_eq!(drained_count + pending_count, 3,
-        "Total items should be 3. Drained: {}, Pending: {}", drained_count, pending_count);
+    assert_eq!(
+        drained_count + pending_count,
+        3,
+        "Total items should be 3. Drained: {}, Pending: {}",
+        drained_count,
+        pending_count
+    );
 }
