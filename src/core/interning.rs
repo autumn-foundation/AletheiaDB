@@ -42,7 +42,6 @@ pub const COMMON_STRINGS: &[&str] = &[
 /// This is just a u32 ID that can be used to look up the original string
 /// in the interner. It's Copy, so passing it around is very cheap.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[repr(transparent)]
 pub struct InternedString(u32);
 
 impl InternedString {

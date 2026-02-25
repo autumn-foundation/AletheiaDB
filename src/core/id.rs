@@ -66,7 +66,6 @@ impl fmt::Display for NodeId {
 
 /// Unique identifier for an edge in the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[repr(transparent)]
 pub struct EdgeId(u64);
 
 impl EdgeId {
@@ -110,7 +109,6 @@ impl fmt::Display for EdgeId {
 
 /// Unique identifier for a version of a node or edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[repr(transparent)]
 pub struct VersionId(u64);
 
 impl VersionId {
@@ -1448,7 +1446,6 @@ mod proptests {
 
 /// Transaction ID - globally unique identifier for transactions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
 pub struct TxId(u64);
 
 impl TxId {
