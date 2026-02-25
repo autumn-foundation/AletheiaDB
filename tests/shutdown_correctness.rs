@@ -107,3 +107,77 @@ fn test_shutdown_data_consistency() {
     // Also verify internal counters match
     assert_eq!(total_appends, flushed, "Internal counters mismatch");
 }
+
+#[test]
+fn test_shutdown_batch_atomicity() {
+    // Verifies that a batch append either fully succeeds or is fully rejected,
+    // and never results in partial writes during shutdown.
+    // This specifically tests the `active_batches` wait logic.
+
+    let dir = tempdir().unwrap();
+
+    // Use ConcurrentWal directly to allow simultaneous append and shutdown
+    // (ConcurrentWalSystem shutdown requires &mut self which forces Mutex serialization)
+    // We simulate the flush thread with a background drainer.
+    use aletheiadb::storage::wal::concurrent::{ConcurrentWal, ConcurrentWalConfig};
+
+    let config = ConcurrentWalConfig::new(dir.path())
+        .with_stripe_capacity(2) // Capacity 2
+        .with_num_stripes(1); // Single stripe
+
+    let wal = Arc::new(ConcurrentWal::new(config).unwrap());
+
+    // Background drainer (simulates flush thread)
+    let wal_drain = Arc::clone(&wal);
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let running_clone = Arc::clone(&running);
+    let collected_entries = Arc::new(Mutex::new(Vec::new()));
+    let collected_clone = Arc::clone(&collected_entries);
+
+    let drainer = thread::spawn(move || {
+        while running_clone.load(Ordering::SeqCst) {
+            let mut entries = wal_drain.drain_all();
+            if !entries.is_empty() {
+                collected_clone.lock().unwrap().append(&mut entries);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Final drain
+        let mut entries = wal_drain.drain_all();
+        if !entries.is_empty() {
+            collected_clone.lock().unwrap().append(&mut entries);
+        }
+    });
+
+    // Thread 1: Append batch
+    let wal_clone = Arc::clone(&wal);
+    let writer = thread::spawn(move || {
+        let ops = vec![
+            create_test_operation(1),
+            create_test_operation(2),
+            create_test_operation(3),
+            create_test_operation(4),
+        ];
+        wal_clone.append_batch(ops)
+    });
+
+    // Wait for writer to block
+    thread::sleep(Duration::from_millis(50));
+
+    // Thread 2: Shutdown
+    wal.shutdown_graceful();
+
+    // Stop drainer
+    running.store(false, Ordering::SeqCst);
+    drainer.join().unwrap();
+
+    // Verify
+    let result = writer.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "append_batch should succeed with graceful shutdown"
+    );
+
+    let entries = collected_entries.lock().unwrap();
+    assert_eq!(entries.len(), 4, "Expected all 4 entries (full batch)");
+}
