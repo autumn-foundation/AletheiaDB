@@ -10,9 +10,9 @@
 mod tests {
     use aletheiadb::core::id::NodeId;
     use aletheiadb::core::property::PropertyMapBuilder;
+    use aletheiadb::query::QueryExecutor;
     use aletheiadb::query::planner::physical::PhysicalOp;
     use aletheiadb::query::planner::physical::PhysicalPlan;
-    use aletheiadb::query::QueryExecutor;
     use aletheiadb::storage::current::CurrentStorage;
     use aletheiadb::storage::historical::HistoricalStorage;
     use parking_lot::RwLock;
