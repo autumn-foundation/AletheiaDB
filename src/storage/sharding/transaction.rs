@@ -401,6 +401,7 @@ impl DistributedTransaction {
 /// The commit log ensures that after a coordinator crash, we can
 /// determine which transactions should be committed vs. aborted.
 #[derive(Debug)]
+#[deprecated(note = "Use PersistentCommitLog instead")]
 pub struct TwoPhaseCommitLog {
     /// Pending commit decisions.
     pending_decisions: HashMap<TxId, CommitDecision>,

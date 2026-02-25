@@ -95,6 +95,9 @@ pub struct ShardConfig {
     pub max_retries: u32,
     /// Base delay for exponential backoff.
     pub retry_base_delay: Duration,
+    /// Path to the write-ahead log (optional).
+    /// If None, an in-memory log is used (not durable).
+    pub wal_path: Option<std::path::PathBuf>,
 }
 
 impl ShardConfig {
@@ -116,6 +119,7 @@ impl ShardConfig {
             health_check_interval: Duration::from_secs(10),
             max_retries: 3,
             retry_base_delay: Duration::from_millis(100),
+            wal_path: None,
         }
     }
 
@@ -151,6 +155,12 @@ impl ShardConfig {
     /// Set max connections per shard.
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.max_connections_per_shard = max;
+        self
+    }
+
+    /// Set the WAL path.
+    pub fn with_wal_path<P: Into<std::path::PathBuf>>(mut self, path: P) -> Self {
+        self.wal_path = Some(path.into());
         self
     }
 
