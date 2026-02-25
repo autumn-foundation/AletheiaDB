@@ -903,10 +903,7 @@ mod tests {
         assert_eq!(shard_count, 2);
 
         // Result 1
-        let shard_id_1 = u16::from_le_bytes([
-            result.data[offset],
-            result.data[offset + 1],
-        ]);
+        let shard_id_1 = u16::from_le_bytes([result.data[offset], result.data[offset + 1]]);
         offset += 2;
         // MockClient returns empty vec by default for query
         let len_1 = u32::from_le_bytes([
@@ -919,10 +916,7 @@ mod tests {
         assert_eq!(len_1, 0);
 
         // Result 2
-        let shard_id_2 = u16::from_le_bytes([
-            result.data[offset],
-            result.data[offset + 1],
-        ]);
+        let shard_id_2 = u16::from_le_bytes([result.data[offset], result.data[offset + 1]]);
         offset += 2;
         let len_2 = u32::from_le_bytes([
             result.data[offset],
