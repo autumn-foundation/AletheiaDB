@@ -790,7 +790,8 @@ impl VectorIndex for HnswIndex {
     /// This method is thread-safe and supports high concurrency.
     /// - Uses sharded locking based on `id` to allow concurrent updates to different nodes.
     /// - Only blocks other writers to the *same* node (or colliding lock shard).
-    /// - Readers (`search`) are generally not blocked, except during rare capacity expansions.
+    /// - **Note**: Acquires a write lock on the underlying index, so it *will* block concurrent
+    ///   searches for the duration of the insertion (typically microseconds).
     ///
     /// # Errors
     ///
