@@ -618,6 +618,7 @@ pub struct TraversalIterator {
 }
 
 impl TraversalIterator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
