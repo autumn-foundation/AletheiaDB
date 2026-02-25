@@ -20,7 +20,6 @@ pub mod history;
 pub mod hlc;
 pub mod id;
 pub mod interning;
-pub mod observer;
 pub mod property;
 pub mod temporal;
 pub mod vector;

@@ -15,7 +15,6 @@ use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
-use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
 use crate::core::version::{
@@ -246,12 +245,6 @@ pub struct HistoricalStorage {
     /// Tracks cache misses requiring full property reconstruction from deltas.
     /// High values indicate insufficient cache capacity overall.
     full_reconstructions: Arc<AtomicU64>,
-    /// Observers subscribed to storage events
-    ///
-    /// Multiple components can observe storage events (anchors, deletes, etc.)
-    /// for indexing, metrics, logging, or coordination. Observers are notified
-    /// asynchronously and errors don't block storage operations.
-    observers: Vec<Observer>,
     /// Pre-anchor hook for node anchors (called before storage).
     ///
     /// This hook is called **before** storing a node anchor to create synchronized
@@ -394,48 +387,12 @@ impl HistoricalStorage {
             primary_cache_hits: Arc::new(AtomicU64::new(0)),
             anchor_cache_hits: Arc::new(AtomicU64::new(0)),
             full_reconstructions: Arc::new(AtomicU64::new(0)),
-            observers: Vec::new(),
             pre_node_anchor_hook: None,
             pre_edge_anchor_hook: None,
             tiered_storage: None,
             temporal_indexes: None,
             temporal_adjacency_index: None,
         }
-    }
-
-    /// Add an observer to receive storage events.
-    ///
-    /// Observers are notified of storage events (anchors, deletes, etc.) for indexing,
-    /// metrics, logging, or coordination. Multiple observers can be registered, and all
-    /// will be notified of events they're interested in.
-    ///
-    /// # Arguments
-    /// * `observer` - Component implementing the StorageObserver trait
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use aletheiadb::storage::historical::HistoricalStorage;
-    /// # use aletheiadb::core::observer::{StorageObserver, StorageEvent};
-    /// # use std::sync::Arc;
-    /// struct VectorIndexObserver;
-    ///
-    /// impl StorageObserver for VectorIndexObserver {
-    ///     fn on_event(&self, event: &StorageEvent) -> aletheiadb::core::error::Result<()> {
-    ///         match event {
-    ///             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
-    ///                 println!("Anchor {} created at {}", version_id, timestamp);
-    ///                 Ok(())
-    ///             }
-    ///             _ => Ok(())
-    ///         }
-    ///     }
-    /// }
-    ///
-    /// let mut storage = HistoricalStorage::new();
-    /// storage.add_observer(Arc::new(VectorIndexObserver));
-    /// ```
-    pub fn add_observer(&mut self, observer: Observer) {
-        self.observers.push(observer);
     }
 
     /// Register a pre-anchor hook for nodes.
@@ -688,28 +645,6 @@ impl HistoricalStorage {
             self.node_anchor_cache.insert(version_id, props_arc);
         }
 
-        // Notify observers
-        let timestamp = temporal.transaction_time().start();
-        notify_observers(
-            &self.observers,
-            &StorageEvent::NodeVersionCreated {
-                version_id,
-                node_id,
-                timestamp,
-                is_anchor,
-            },
-        );
-        if is_anchor {
-            notify_observers(
-                &self.observers,
-                &StorageEvent::NodeAnchorCreated {
-                    version_id,
-                    node_id,
-                    timestamp,
-                },
-            );
-        }
-
         Ok(())
     }
 
@@ -900,28 +835,6 @@ impl HistoricalStorage {
         // Anchors are also cached in the dedicated anchor cache for fallback
         if is_anchor {
             self.edge_anchor_cache.insert(version_id, props_arc);
-        }
-
-        // Notify observers
-        let timestamp = temporal.transaction_time().start();
-        notify_observers(
-            &self.observers,
-            &StorageEvent::EdgeVersionCreated {
-                version_id,
-                edge_id,
-                timestamp,
-                is_anchor,
-            },
-        );
-        if is_anchor {
-            notify_observers(
-                &self.observers,
-                &StorageEvent::EdgeAnchorCreated {
-                    version_id,
-                    edge_id,
-                    timestamp,
-                },
-            );
         }
 
         // Update temporal adjacency index if configured
@@ -2962,7 +2875,7 @@ impl HistoricalStorage {
     ///
     /// # Safety
     /// This method directly modifies internal state and should only be used
-    /// in tests. It does not update caches or notify observers.
+    /// in tests. It does not update caches.
     #[doc(hidden)]
     pub fn __test_remove_node_version(&mut self, version_id: VersionId) {
         self.node_versions.remove(&version_id);

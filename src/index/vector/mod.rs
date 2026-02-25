@@ -725,7 +725,7 @@ pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
 // Re-export temporal types for convenience
 pub use temporal::{
     DriftMetric, RetentionPolicy, SnapshotInfo, SnapshotStrategy, TemporalVectorConfig,
-    TemporalVectorIndex, VectorIndexObserver,
+    TemporalVectorIndex,
 };
 
 // Sparse vector index (Phase 5)
