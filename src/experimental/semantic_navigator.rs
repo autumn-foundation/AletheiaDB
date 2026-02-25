@@ -254,11 +254,27 @@ impl<'a> SemanticNavigator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AletheiaDBConfig;
+    use crate::config::WalConfigBuilder;
     use crate::core::property::PropertyMapBuilder;
+    use tempfile::tempdir;
+
+    fn create_test_db() -> (AletheiaDB, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.path().join("wal"))
+                    .build(),
+            )
+            .build();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
+        (db, dir)
+    }
 
     #[test]
     fn test_semantic_path_linear() {
-        let db = AletheiaDB::new().unwrap();
+        let (db, _dir) = create_test_db();
 
         // A -> B -> C
         // Vectors:
@@ -315,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_missing_vector_fail() {
-        let db = AletheiaDB::new().unwrap();
+        let (db, _dir) = create_test_db();
         let a = db
             .create_node("Node", PropertyMapBuilder::new().build())
             .unwrap();
