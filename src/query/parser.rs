@@ -2238,4 +2238,67 @@ mod sentry_tests {
             panic!("Expected Match clause");
         }
     }
+
+    #[test]
+    fn test_spaced_negative_integer() {
+        // 🎯 Target: Parser token interaction (Token::Dash -> IntegerLiteral)
+        // 💣 Risk: Code path handling spaced negatives (e.g. RETURN - 5) is rarely exercised
+        // compared to unspaced negatives handled by Lexer.
+        let query = Parser::parse("MATCH (n) RETURN - 5").unwrap();
+        if let Some(ret) = query.return_clause {
+            let item = &ret.items[0];
+            if let Expression::Literal(PropertyValue::Int(n)) = item.expression {
+                assert_eq!(n, -5);
+            } else {
+                panic!("Expected integer literal -5");
+            }
+        }
+    }
+
+    #[test]
+    fn test_spaced_negative_float() {
+        // 🎯 Target: Parser token interaction (Token::Dash -> FloatLiteral)
+        let query = Parser::parse("MATCH (n) RETURN - 5.5").unwrap();
+        if let Some(ret) = query.return_clause {
+            let item = &ret.items[0];
+            if let Expression::Literal(PropertyValue::Float(f)) = item.expression {
+                assert_eq!(f, -5.5);
+            } else {
+                panic!("Expected float literal -5.5");
+            }
+        }
+    }
+
+    #[test]
+    fn test_spaced_negative_in_float_list() {
+        // 🎯 Target: parse_float_list state machine
+        // 💣 Risk: Ensure list parsing doesn't break on spaced negatives
+        let query = Parser::parse("SIMILAR TO [ - 1.0, - 2.0 ] LIMIT 1").unwrap();
+        if let SourceClause::VectorSearch { embedding, .. } = query.source {
+            if let EmbeddingRef::Literal(vals) = embedding {
+                assert_eq!(vals[0], -1.0);
+                assert_eq!(vals[1], -2.0);
+            } else {
+                panic!("Expected literal embedding");
+            }
+        }
+    }
+
+    #[test]
+    fn test_unbounded_max_depth() {
+        // 🎯 Target: parse_depth_range logic for missing max
+        // 💣 Risk: Ensure *1.. is treated as 1..MAX (unbounded)
+        let query = Parser::parse("MATCH (a)-[:REL*1..]->(b) RETURN b").unwrap();
+        if let SourceClause::Match(patterns) = query.source {
+            if let PatternElement::Relationship(rel) = &patterns[0].elements[1] {
+                if let Some(DepthSpec::Range { min, max }) = rel.depth {
+                    assert_eq!(min, 1);
+                    // Parser uses usize::MAX / 2 to avoid overflow issues
+                    assert_eq!(max, usize::MAX / 2);
+                } else {
+                    panic!("Expected range depth");
+                }
+            }
+        }
+    }
 }
