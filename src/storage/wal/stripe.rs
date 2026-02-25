@@ -390,4 +390,48 @@ mod tests {
             assert_eq!(stripe.total_appends(), ((cycle + 1) * 3) as u64);
         }
     }
+
+    #[test]
+    fn test_stripe_metrics_on_failure() {
+        // Capacity 2 means we can hold 2 items
+        let stripe = WalStripe::with_capacity(0, 2);
+
+        let mut successful_appends = 0;
+
+        // Try to append 10 items
+        for i in 0..10 {
+            let payload = vec![i as u8];
+            match stripe.append_async(LSN(i), payload) {
+                Ok(_) => successful_appends += 1,
+                Err(_) => {
+                    // Buffer is full
+                }
+            }
+        }
+
+        assert!(
+            successful_appends < 10,
+            "Expected some appends to fail due to full buffer"
+        );
+        assert_eq!(stripe.total_appends(), successful_appends);
+    }
+
+    #[test]
+    fn test_stripe_metrics_on_closed_failure() {
+        let stripe = Arc::new(WalStripe::with_capacity(1, 10));
+
+        // Append one success
+        stripe.append_async(LSN(1), vec![1]).unwrap();
+
+        // Close the stripe
+        stripe.close();
+
+        // Try to append (should fail)
+        let result = stripe.append_blocking(LSN(2), vec![2]);
+        assert!(result.is_err());
+
+        // Metrics should only count the successful one
+        assert_eq!(stripe.total_appends(), 1);
+        assert_eq!(stripe.total_bytes(), 1);
+    }
 }
