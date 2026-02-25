@@ -593,21 +593,19 @@ impl ResultIterator for TemporalNodeScanIterator {
 /// - If multiple input nodes can reach the same target, it appears multiple times
 /// - This is intentional for path-based semantics (e.g., "all friends of each person")
 ///
-/// For global deduplication across all inputs, wrap the output in a `DistinctIterator`.
+/// # Variable Length Paths (Issue #411)
 ///
-/// # Example
-///
-/// ```text
-/// Input: [A, B]
-/// Graph: A → C, B → C
-///
-/// Output: [C (from A), C (from B)]  // C appears twice
-/// ```
+/// Supports `min_depth..max_depth` traversals.
+/// - Yields all unique nodes encountered at depth >= `min_depth`.
+/// - Expands nodes as long as depth < `max_depth`.
+/// - Uses BFS (Shortest Path) semantics: a node is visited at the shortest distance from start.
+///   If a node is reachable at multiple depths within the range, it is yielded only once (at shortest dist).
 pub struct TraversalIterator {
     input: Box<dyn ResultIterator>,
     direction: Direction,
     label: Option<String>,
-    depth: usize,
+    min_depth: usize,
+    max_depth: usize,
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
     /// Optional temporal context (valid_time, transaction_time) for edge filtering.
@@ -624,7 +622,8 @@ impl TraversalIterator {
         input: Box<dyn ResultIterator>,
         direction: Direction,
         label: Option<String>,
-        depth: usize,
+        min_depth: usize,
+        max_depth: usize,
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_context: Option<(Timestamp, Timestamp)>,
@@ -633,7 +632,8 @@ impl TraversalIterator {
             input,
             direction,
             label,
-            depth,
+            min_depth,
+            max_depth,
             current,
             historical,
             temporal_context,
@@ -796,8 +796,25 @@ impl ResultIterator for TraversalIterator {
         loop {
             // Process current frontier
             if let Some((node_id, path, current_depth)) = self.frontier.pop_front() {
-                if current_depth >= self.depth {
-                    // Reached target depth, yield result
+                // Expand neighbors if we haven't reached max depth
+                if current_depth < self.max_depth {
+                    let neighbors = self.get_neighbors(node_id);
+                    for (target, edge_id) in neighbors {
+                        if self.visited.insert(target) {
+                            let mut new_path = path.clone();
+                            new_path.push(EntityId::Edge(edge_id));
+                            new_path.push(EntityId::Node(target));
+                            self.frontier
+                                .push_back((target, new_path, current_depth + 1));
+                        }
+                    }
+                }
+
+                // Yield result if we are within the requested depth range.
+                // Note: We check min_depth here.
+                // - If min_depth=0, we yield the start node (depth=0).
+                // - If min_depth=1, we skip the start node.
+                if current_depth >= self.min_depth {
                     match self.current.get_node(node_id) {
                         Ok(node) => {
                             return Some(Ok(QueryRow::with_path(EntityResult::Node(node), path)));
@@ -806,17 +823,7 @@ impl ResultIterator for TraversalIterator {
                     }
                 }
 
-                // Expand neighbors
-                let neighbors = self.get_neighbors(node_id);
-                for (target, edge_id) in neighbors {
-                    if self.visited.insert(target) {
-                        let mut new_path = path.clone();
-                        new_path.push(EntityId::Edge(edge_id));
-                        new_path.push(EntityId::Node(target));
-                        self.frontier
-                            .push_back((target, new_path, current_depth + 1));
-                    }
-                }
+                // If not yielding, continue loop to process next item in frontier
                 continue;
             }
 
@@ -830,6 +837,7 @@ impl ResultIterator for TraversalIterator {
                     if let Some(node_id) = row.entity.node_id() {
                         self.visited.clear();
                         self.visited.insert(node_id);
+                        // Initialize frontier with start node at depth 0
                         self.frontier
                             .push_back((node_id, vec![EntityId::Node(node_id)], 0));
                     }

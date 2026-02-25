@@ -638,11 +638,20 @@ impl QueryPlanner {
             } => {
                 // Extract temporal context for edge filtering during traversal
                 let temporal_ctx = temporal.as_ref().and_then(|ctx| ctx.as_of_tuple());
+
+                let (min_depth, max_depth) = match depth {
+                    crate::query::ir::TraversalDepth::Exact(n) => (*n, *n),
+                    crate::query::ir::TraversalDepth::Max(n) => (1, *n),
+                    crate::query::ir::TraversalDepth::Range { min, max } => (*min, *max),
+                    crate::query::ir::TraversalDepth::Variable => (1, 10),
+                };
+
                 Ok(PhysicalOp::IndexedTraversal {
                     input: Box::new(input),
                     direction: *direction,
                     label: label.clone(),
-                    depth: depth.max_depth().unwrap_or(10),
+                    min_depth,
+                    max_depth,
                     temporal_context: temporal_ctx,
                 })
             }

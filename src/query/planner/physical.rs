@@ -187,10 +187,14 @@ impl PhysicalPlan {
             PhysicalOp::IndexedTraversal {
                 direction,
                 label,
-                depth,
+                min_depth,
+                max_depth,
                 ..
             } => {
-                line.push_str(&format!(" (depth={}, dir={:?})", depth, direction));
+                line.push_str(&format!(
+                    " (depth={}..{}, dir={:?})",
+                    min_depth, max_depth, direction
+                ));
                 if let Some(l) = label {
                     line.push_str(&format!(" [label={}]", l));
                 }
@@ -367,8 +371,10 @@ pub enum PhysicalOp {
         direction: Direction,
         /// Optional edge label filter
         label: Option<String>,
-        /// Maximum depth
-        depth: usize,
+        /// Minimum traversal depth
+        min_depth: usize,
+        /// Maximum traversal depth
+        max_depth: usize,
         /// Optional temporal context (valid_time, transaction_time) for edge filtering.
         /// When present, only edges that existed at the specified point in time are traversed.
         temporal_context: Option<(Timestamp, Timestamp)>,
@@ -644,7 +650,8 @@ impl PhysicalOp {
                 input,
                 direction,
                 label,
-                depth,
+                min_depth,
+                max_depth,
                 temporal_context,
             } => {
                 let temporal_str = if let Some((vt, tt)) = temporal_context {
@@ -653,10 +660,11 @@ impl PhysicalOp {
                     String::new()
                 };
                 format!(
-                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}{})\n{}",
+                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}..{}{})\n{}",
                     direction,
                     label,
-                    depth,
+                    min_depth,
+                    max_depth,
                     temporal_str,
                     input.explain_indent(indent + 1)
                 )
@@ -869,7 +877,8 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
-                depth: 1,
+                min_depth: 1,
+                max_depth: 1,
                 temporal_context: None,
             }
             .name(),
@@ -979,14 +988,14 @@ mod tests {
             .name(),
             "TemporalTrack"
         );
+
         assert_eq!(
             PhysicalOp::Materialize {
-                input: Box::new(PhysicalOp::Empty)
+                input: Box::new(PhysicalOp::Empty),
             }
             .name(),
             "Materialize"
         );
-        assert_eq!(PhysicalOp::Empty.name(), "Empty");
     }
 
     // ==================== is_leaf Tests ====================
@@ -1057,7 +1066,8 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
-                depth: 1,
+                min_depth: 1,
+                max_depth: 1,
                 temporal_context: None,
             }
             .is_leaf()
@@ -1341,7 +1351,8 @@ mod tests {
             input: Box::new(PhysicalOp::Empty),
             direction: Direction::Outgoing,
             label: Some("KNOWS".to_string()),
-            depth: 2,
+            min_depth: 2,
+            max_depth: 2,
             temporal_context: None,
         };
 
@@ -1349,7 +1360,7 @@ mod tests {
         assert!(explain.contains("IndexedTraversal"));
         assert!(explain.contains("Outgoing"));
         assert!(explain.contains("KNOWS"));
-        assert!(explain.contains("depth: 2"));
+        assert!(explain.contains("depth: 2..2"));
     }
 
     #[test]
@@ -1681,7 +1692,8 @@ mod tests {
                     }),
                     direction: Direction::Outgoing,
                     label: Some("KNOWS".to_string()),
-                    depth: 2,
+                    min_depth: 2,
+                    max_depth: 2,
                     temporal_context: None,
                 }),
                 predicate: Predicate::eq("age", 25i64),

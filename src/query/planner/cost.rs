@@ -231,10 +231,12 @@ impl CostModel {
                 self.estimate_temporal_vector_search(*k, stats)
             }
 
-            PhysicalOp::IndexedTraversal { input, depth, .. } => {
+            PhysicalOp::IndexedTraversal {
+                input, max_depth, ..
+            } => {
                 let input_cost = self.estimate(input, stats);
                 let input_card = self.estimate_cardinality(input, stats);
-                self.estimate_traversal(input_cost, input_card, *depth, stats)
+                self.estimate_traversal(input_cost, input_card, *max_depth, stats)
             }
 
             PhysicalOp::Filter { input, .. } => {
@@ -305,10 +307,12 @@ impl CostModel {
             PhysicalOp::HnswSearch { k, .. } => *k,
             PhysicalOp::TemporalNodeLookup { node_ids, .. } => node_ids.len(),
             PhysicalOp::TemporalVectorSearch { k, .. } => *k,
-            PhysicalOp::IndexedTraversal { input, depth, .. } => {
+            PhysicalOp::IndexedTraversal {
+                input, max_depth, ..
+            } => {
                 let input_card = self.estimate_cardinality(input, stats);
                 let avg_degree = stats.average_out_degree();
-                (input_card as f64 * avg_degree.powi(*depth as i32)) as usize
+                (input_card as f64 * avg_degree.powi(*max_depth as i32)) as usize
             }
             PhysicalOp::Filter { input, .. } => {
                 // Assume 10% selectivity by default
@@ -590,7 +594,8 @@ mod tests {
             }),
             direction: crate::query::ir::Direction::Outgoing,
             label: None,
-            depth: 2,
+            min_depth: 2,
+            max_depth: 2,
             temporal_context: None,
         };
 
