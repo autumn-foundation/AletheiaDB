@@ -5,6 +5,7 @@
 //! Alchemy allows you to define "Semantic Reactions" that automatically evolve your
 //! knowledge graph. It unifies Analysis (finding patterns) with Evolution (modifying the graph).
 //!
+#![allow(clippy::collapsible_if)]
 //! # Features
 //! - **Crystallize Wormholes**: Turns potential "wormholes" (semantic gaps) into real edges.
 //! - **Fuse Synonyms**: Merges nodes that are semantically identical.
