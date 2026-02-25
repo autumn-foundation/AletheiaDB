@@ -697,6 +697,10 @@ impl ConcurrentWalSystem {
     /// This signals the background thread to stop, waits for it to finish,
     /// and performs a final flush of all pending entries.
     pub fn shutdown(&mut self) {
+        // Wake up the flush thread immediately to drain any full buffers that might
+        // be blocking active batches.
+        self.flush_notifier.notify();
+
         // Close the WAL (prevent new appends, wait for active batches)
         // CRITICAL: This must happen BEFORE stopping the flush thread,
         // because waiting for active batches might block on full buffers
@@ -706,7 +710,7 @@ impl ConcurrentWalSystem {
         // Signal shutdown
         self.shutdown_signal.store(true, Ordering::Relaxed);
 
-        // Wake up flush thread so it can see the shutdown signal
+        // Wake up flush thread again so it can see the shutdown signal
         self.flush_notifier.notify();
 
         // Wait for flush thread to finish
