@@ -290,8 +290,7 @@ impl FlushCoordinator {
             }
         }
 
-        self.next_expected_lsn
-            .store(max_lsn + 1, Ordering::Relaxed);
+        self.next_expected_lsn.store(max_lsn + 1, Ordering::Relaxed);
 
         self.current_segment_id
             .store(max_segment_id, Ordering::Relaxed);
@@ -623,7 +622,10 @@ impl FlushCoordinator {
         entries.sort_by_key(|e| e.lsn);
 
         // Lock the pending buffer to ensure serialization of the flush decision and update
-        let mut pending = self.pending_buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self
+            .pending_buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let mut batch_to_write = Vec::new();
         let mut next = self.next_expected_lsn.load(Ordering::Relaxed);
@@ -1641,10 +1643,7 @@ mod tests {
         assert_eq!(coordinator.next_expected_lsn.load(Ordering::Relaxed), 3);
 
         // 2. Flush 3, 5 (Fills gap, adds new)
-        let entries2 = vec![
-            create_test_entry(3, b"3"),
-            create_test_entry(5, b"5"),
-        ];
+        let entries2 = vec![create_test_entry(3, b"3"), create_test_entry(5, b"5")];
 
         let stats2 = coordinator.flush(entries2, true).unwrap();
 
@@ -1663,10 +1662,14 @@ mod tests {
         let coordinator = FlushCoordinator::new(config).unwrap();
 
         // Flush 1
-        coordinator.flush(vec![create_test_entry(1, b"1")], true).unwrap();
+        coordinator
+            .flush(vec![create_test_entry(1, b"1")], true)
+            .unwrap();
 
         // Flush 1 again (Duplicate)
-        let stats = coordinator.flush(vec![create_test_entry(1, b"1")], true).unwrap();
+        let stats = coordinator
+            .flush(vec![create_test_entry(1, b"1")], true)
+            .unwrap();
 
         assert_eq!(stats.entries_flushed, 0, "Duplicate should be ignored");
         assert_eq!(coordinator.total_entries_flushed(), 1);
