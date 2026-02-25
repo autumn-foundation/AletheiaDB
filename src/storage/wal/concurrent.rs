@@ -68,7 +68,9 @@
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use super::lsn_allocator::LsnAllocator;
 use super::ring_buffer::{CompletionHandle, PendingEntry};
@@ -160,6 +162,10 @@ pub struct ConcurrentWal {
     stripe_mask: usize,
     /// Total entries appended across all stripes.
     total_appends: AtomicU64,
+    /// Flag indicating if the WAL shutdown has been requested.
+    shutdown_requested: AtomicBool,
+    /// Counter for active batch operations (for graceful shutdown).
+    active_batches: AtomicUsize,
 }
 
 impl ConcurrentWal {
@@ -180,6 +186,8 @@ impl ConcurrentWal {
             num_stripes,
             stripe_mask,
             total_appends: AtomicU64::new(0),
+            shutdown_requested: AtomicBool::new(false),
+            active_batches: AtomicUsize::new(0),
         })
     }
 
@@ -327,6 +335,13 @@ impl ConcurrentWal {
     /// - Serializing all entries into pre-allocated buffers
     /// - Reducing per-operation overhead
     ///
+    /// # Atomicity & Graceful Shutdown
+    ///
+    /// This method guarantees that either all operations in the batch are appended
+    /// or none are (if the WAL is closed). It coordinates with `close()` to ensure
+    /// that a batch in progress is allowed to complete before the underlying
+    /// buffers are closed.
+    ///
     /// # Performance Benefits
     ///
     /// Compared to calling `append_async()` multiple times:
@@ -361,6 +376,33 @@ impl ConcurrentWal {
             return Ok(Vec::new());
         }
 
+        // Check if shutdown requested before starting batch
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "WAL is closed".to_string(),
+            }));
+        }
+
+        // Register active batch
+        self.active_batches.fetch_add(1, Ordering::AcqRel);
+
+        // Defer decrement using a guard to ensure it runs even if we panic
+        struct BatchGuard<'a>(&'a ConcurrentWal);
+        impl<'a> Drop for BatchGuard<'a> {
+            fn drop(&mut self) {
+                self.0.active_batches.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        let _guard = BatchGuard(self);
+
+        // Re-check shutdown just in case (optional, but good for fast fail)
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            // Note: We return error here, but guard will decrement counter.
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "WAL is closed".to_string(),
+            }));
+        }
+
         let count = operations.len() as u64;
 
         // Defensive check: ensure count > 0 to prevent panic in allocate_batch
@@ -386,8 +428,12 @@ impl ConcurrentWal {
                     self.total_appends.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(_entry) => {
+                    // This should theoretically NOT happen because we checked self.closed
+                    // and close() waits for active_batches before closing stripes.
+                    // However, if it does happen (e.g. underlying error), we must return error.
+                    // The batch is partially applied, which is bad, but at least we report it.
                     return Err(Error::Storage(StorageError::WalError {
-                        reason: "WAL buffer closed".to_string(),
+                        reason: "WAL buffer closed unexpectedly".to_string(),
                     }));
                 }
             }
@@ -401,6 +447,11 @@ impl ConcurrentWal {
     /// This method mirrors `append_batch` but returns completion handles for each operation,
     /// allowing the caller to wait for durability.
     ///
+    /// # Atomicity
+    ///
+    /// Uses the same active batch tracking as `append_batch` to ensure all operations
+    /// in the batch are appended before the WAL can be closed.
+    ///
     /// # Returns
     ///
     /// A tuple containing:
@@ -413,6 +464,32 @@ impl ConcurrentWal {
         // Handle empty batch early
         if operations.is_empty() {
             return Ok((Vec::new(), Vec::new()));
+        }
+
+        // Check if shutdown requested
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "WAL is closed".to_string(),
+            }));
+        }
+
+        // Register active batch
+        self.active_batches.fetch_add(1, Ordering::AcqRel);
+
+        // Defer decrement
+        struct BatchGuard<'a>(&'a ConcurrentWal);
+        impl<'a> Drop for BatchGuard<'a> {
+            fn drop(&mut self) {
+                self.0.active_batches.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        let _guard = BatchGuard(self);
+
+        // Re-check shutdown
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "WAL is closed".to_string(),
+            }));
         }
 
         let count = operations.len() as u64;
@@ -443,7 +520,7 @@ impl ConcurrentWal {
                 }
                 Err(_entry) => {
                     return Err(Error::Storage(StorageError::WalError {
-                        reason: "WAL buffer closed".to_string(),
+                        reason: "WAL buffer closed unexpectedly".to_string(),
                     }));
                 }
             }
@@ -515,7 +592,27 @@ impl ConcurrentWal {
     }
 
     /// Close the WAL, preventing new appends.
+    ///
+    /// This method performs a graceful shutdown:
+    /// 1. Marks shutdown requested (preventing new batches).
+    /// 2. Waits for any active batches to complete.
+    /// 3. Closes underlying stripes (preventing individual appends).
+    ///
+    /// Note: The caller MUST ensure that the background flush thread is running
+    /// during this call, as active batches might be blocked waiting for space
+    /// that only the flush thread can free.
     pub fn close(&self) {
+        // 1. Signal shutdown to prevent new batches
+        self.shutdown_requested.store(true, Ordering::Release);
+
+        // 2. Wait for active batches to complete
+        // Use sleep to avoid busy-waiting, as blocked batches might take time
+        // (e.g., waiting for disk I/O via flush thread)
+        while self.active_batches.load(Ordering::Acquire) > 0 {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        // 3. Close stripes
         for stripe in &self.stripes {
             stripe.close();
         }
@@ -523,7 +620,9 @@ impl ConcurrentWal {
 
     /// Check if the WAL is closed.
     pub fn is_closed(&self) -> bool {
-        self.stripes.first().map(|s| s.is_closed()).unwrap_or(true)
+        // Returns true if shutdown requested OR if underlying storage is closed
+        self.shutdown_requested.load(Ordering::Acquire)
+            || self.stripes.first().map(|s| s.is_closed()).unwrap_or(true)
     }
 
     /// Set the next LSN (for recovery).

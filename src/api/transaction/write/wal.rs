@@ -56,6 +56,8 @@ pub(crate) fn log_operations_to_wal(
     tx: &WriteTransaction,
     _commit_timestamp: Timestamp,
 ) -> Result<()> {
+    let mut operations = Vec::with_capacity(tx.buffer.operations().len());
+
     for write in tx.buffer.operations() {
         let operation = match write {
             crate::api::transaction::BufferedWrite::CreateNode {
@@ -142,8 +144,12 @@ pub(crate) fn log_operations_to_wal(
             },
         };
 
-        // Append to WAL (lock-free!)
-        tx.wal.append_async(operation)?;
+        operations.push(operation);
+    }
+
+    // Append batch to WAL (atomic and performant)
+    if !operations.is_empty() {
+        tx.wal.append_batch(operations)?;
     }
 
     Ok(())

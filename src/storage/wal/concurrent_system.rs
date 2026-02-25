@@ -697,6 +697,12 @@ impl ConcurrentWalSystem {
     /// This signals the background thread to stop, waits for it to finish,
     /// and performs a final flush of all pending entries.
     pub fn shutdown(&mut self) {
+        // Close the WAL (prevent new appends, wait for active batches)
+        // CRITICAL: This must happen BEFORE stopping the flush thread,
+        // because waiting for active batches might block on full buffers
+        // that only the flush thread can drain.
+        self.wal.close();
+
         // Signal shutdown
         self.shutdown_signal.store(true, Ordering::Relaxed);
 
@@ -707,9 +713,6 @@ impl ConcurrentWalSystem {
         if let Some(handle) = self.flush_thread.take() {
             let _ = handle.join();
         }
-
-        // Close the WAL (prevent new appends)
-        self.wal.close();
     }
 }
 
