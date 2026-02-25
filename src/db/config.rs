@@ -243,6 +243,59 @@ impl AletheiaDB {
                 tracker
                     .update_last_persisted_string_count(crate::core::GLOBAL_INTERNER.len() as u64);
             }
+
+            // Replay WAL entries that occurred after the persisted snapshot
+            // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
+            let start_lsn = match loaded_lsn {
+                Some(lsn) => crate::storage::wal::LSN(lsn).next(),
+                None => {
+                    // Safety check: if we have data but no LSN, replaying from initial is dangerous
+                    // as it might overwrite existing data with old WAL entries or duplicate IDs.
+                    if db.current.node_count() > 0 {
+                        #[cfg(feature = "observability")]
+                        tracing::error!(
+                            "Database contains data ({} nodes) but no persistence LSN found. \
+                             Skipping WAL replay to prevent potential data corruption. \
+                             This may indicate a missing or corrupted manifest file.",
+                            db.current.node_count()
+                        );
+                        #[cfg(not(feature = "observability"))]
+                        eprintln!(
+                            "ERROR: Database contains data ({} nodes) but no persistence LSN found. \
+                             Skipping WAL replay to prevent potential data corruption.",
+                            db.current.node_count()
+                        );
+                        // Skip replay by setting start_lsn to current WAL LSN (effectively no-op)
+                        db.wal.current_lsn()
+                    } else {
+                        crate::storage::wal::LSN::initial()
+                    }
+                }
+            };
+
+            // Capture initial version ID before replay
+            let initial_version_id = db.version_id_gen.current();
+
+            let mut historical_guard = db.historical.write();
+            let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
+                crate::storage::recovery::replay_wal_into_storage(
+                    &db.wal,
+                    &db.current,
+                    &mut historical_guard,
+                    start_lsn,
+                    initial_version_id,
+                )?;
+            drop(historical_guard);
+
+            // Update ID generators to account for replayed entities.
+            // This ensures that subsequent writes use IDs that don't collide with replayed data.
+            if let Some(max_nid) = max_node_id {
+                db.node_id_gen.ensure_at_least(max_nid + 1);
+            }
+            if let Some(max_eid) = max_edge_id {
+                db.edge_id_gen.ensure_at_least(max_eid + 1);
+            }
+            db.version_id_gen.ensure_at_least(next_version_id);
         }
 
         // Start background persistence thread if enabled
