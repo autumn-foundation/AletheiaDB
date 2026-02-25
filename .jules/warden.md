@@ -30,3 +30,13 @@
 1.  **Update `tokenizers`:** Updated `tokenizers` to version `0.22` in `Cargo.toml`. This version drops the dependency on `number_prefix` and includes fixes for known vulnerabilities.
 2.  **Update Dependencies:** Ran `cargo update` to pull in the latest compatible versions of all dependencies, resolving the yanked `bumpalo` issue in `wasm-bindgen`.
 3.  **Verification:** Ran `cargo audit` to confirm the vulnerabilities are resolved. Ran tests (`cargo test --features embedding-onnx`) to ensure no regressions.
+
+**2026-02-19 - Information Disclosure and Input Validation Fixes**
+**Threat:**
+1.  **Schema Leak:** `similar_to` query execution revealed the configured indexed property name in the error message when a mismatched property key was provided. This allowed schema enumeration.
+2.  **Input Logic Bug (DoS/Usability):** JSON conversion logic prevented creation of large numeric arrays (e.g. >100k items) by eagerly validating them as vectors and rejecting them based on vector dimension limits, even if they fit within generic array limits.
+
+**Defense:**
+1.  **Obfuscation:** Updated `src/query/executor/mod.rs` to return a generic error message ("Property key is not indexed") instead of revealing the expected property name.
+2.  **Fallback Logic:** Updated `src/http/converters.rs` to fallback to `PropertyValue::Array` if a numeric array exceeds `MAX_VECTOR_DIMENSIONS` but is within `MAX_ARRAY_ELEMENTS`.
+3.  **Verification:** Added `tests/warden_fixes.rs` and unit tests to verify the fixes.

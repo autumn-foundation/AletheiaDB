@@ -321,27 +321,23 @@ fn json_to_property_value_recursive(
             }
 
             if arr.iter().all(|v| v.is_number()) && !arr.is_empty() {
-                // Early check for vector dimension limit before allocation
-                if arr.len() > crate::core::property::MAX_VECTOR_DIMENSIONS {
-                    return Err(format!(
-                        "Vector dimension {} exceeds limit {}",
-                        arr.len(),
-                        crate::core::property::MAX_VECTOR_DIMENSIONS
-                    ));
-                }
+                // Try to convert to vector if dimensions allow
+                if arr.len() <= crate::core::property::MAX_VECTOR_DIMENSIONS {
+                    let floats: Result<Vec<f32>, String> = arr
+                        .iter()
+                        .map(|v| {
+                            v.as_f64()
+                                .map(|f| f as f32)
+                                .ok_or_else(|| "Invalid float in array".to_string())
+                        })
+                        .collect();
 
-                let floats: Result<Vec<f32>, String> = arr
-                    .iter()
-                    .map(|v| {
-                        v.as_f64()
-                            .map(|f| f as f32)
-                            .ok_or_else(|| "Invalid float in array".to_string())
-                    })
-                    .collect();
-
-                if let Ok(floats) = floats {
-                    return Ok(PropertyValue::Vector(Arc::from(floats)));
+                    if let Ok(floats) = floats {
+                        return Ok(PropertyValue::Vector(Arc::from(floats)));
+                    }
                 }
+                // If dimensions exceed MAX_VECTOR_DIMENSIONS, fall back to generic Array
+                // (which supports up to MAX_ARRAY_ELEMENTS).
             }
 
             let values: Result<Vec<PropertyValue>, String> = arr
@@ -491,5 +487,33 @@ mod tests {
         assert!(res.is_err());
         // Should hit vector limit, not array limit
         assert!(res.unwrap_err().contains("Vector dimension"));
+    }
+
+    #[test]
+    fn test_large_numeric_array_fallback() {
+        use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyValue};
+
+        // Create numeric array larger than vector limit (100,000) but within array limit (10,000,000)
+        let size = MAX_VECTOR_DIMENSIONS + 10;
+        let vec: Vec<serde_json::Value> = std::iter::repeat_n(json!(1.0), size).collect();
+        let val = serde_json::Value::Array(vec);
+
+        // Before fix: Fails with "Vector dimension ... exceeds limit"
+        // After fix: Returns Ok(PropertyValue::Array(...))
+        let result = json_to_property_value(&val);
+
+        assert!(
+            result.is_ok(),
+            "Should fall back to Array for large numeric lists. Error: {:?}",
+            result.err()
+        );
+        let prop = result.unwrap();
+        assert!(
+            matches!(prop, PropertyValue::Array(_)),
+            "Should be converted to Array"
+        );
+        if let PropertyValue::Array(ref arr) = prop {
+            assert_eq!(arr.len(), size);
+        }
     }
 }

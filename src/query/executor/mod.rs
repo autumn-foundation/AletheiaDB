@@ -364,9 +364,8 @@ impl QueryExecutor {
                     return Err(crate::core::error::Error::Query(
                         crate::core::error::QueryError::ExecutionError {
                             message: format!(
-                                "Property key '{}' does not match indexed property '{}'. \
-                                 Vector index was built on '{}', so similar_to queries must use the same property.",
-                                property_key, indexed_property, indexed_property
+                                "Property key '{}' is not indexed. Please verify the property name or configuration.",
+                                property_key
                             ),
                         },
                     ));
