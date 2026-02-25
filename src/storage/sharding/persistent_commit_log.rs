@@ -936,11 +936,7 @@ mod tests {
         let log = PersistentCommitLog::in_memory();
 
         let lsn = log
-            .log_commit(
-                TxId::new(1),
-                vec![make_shard_id(0), make_shard_id(1)],
-                None,
-            )
+            .log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)], None)
             .unwrap();
         assert_eq!(lsn, 1);
 
@@ -999,12 +995,8 @@ mod tests {
         // Write some entries
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            log.log_commit(
-                TxId::new(1),
-                vec![make_shard_id(0), make_shard_id(1)],
-                None,
-            )
-            .unwrap();
+            log.log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)], None)
+                .unwrap();
             log.log_abort(TxId::new(2), vec![make_shard_id(2)]).unwrap();
             log.close().unwrap();
         }
@@ -1081,12 +1073,8 @@ mod tests {
     fn test_persistent_log_get_decision() {
         let log = PersistentCommitLog::in_memory();
 
-        log.log_commit(
-            TxId::new(1),
-            vec![make_shard_id(0), make_shard_id(1)],
-            None,
-        )
-        .unwrap();
+        log.log_commit(TxId::new(1), vec![make_shard_id(0), make_shard_id(1)], None)
+            .unwrap();
 
         let decision = log.get_decision(TxId::new(1));
         assert!(decision.is_some());

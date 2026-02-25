@@ -24,10 +24,14 @@ fn test_shard_recovery_data_loss_repro() {
 
     // 3. Start a transaction
     let participants = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
-    let tx_id = coordinator.begin_distributed_transaction(participants).unwrap();
+    let tx_id = coordinator
+        .begin_distributed_transaction(participants)
+        .unwrap();
 
     // 4. Move to Commit phase (this logs the decision)
-    coordinator.prepare_distributed_transaction(tx_id).expect("Prepare should succeed");
+    coordinator
+        .prepare_distributed_transaction(tx_id)
+        .expect("Prepare should succeed");
 
     // Mark shards unavailable to cause commit failure (but after logging!)
     coordinator.mark_shard_unavailable(ShardId::new(0).unwrap());
@@ -39,7 +43,10 @@ fn test_shard_recovery_data_loss_repro() {
 
     // Verify transaction is in Failed state in active map
     let tx = coordinator.get_transaction(tx_id).unwrap();
-    assert!(tx.commit_decision_logged, "Commit decision should be logged");
+    assert!(
+        tx.commit_decision_logged,
+        "Commit decision should be logged"
+    );
 
     // 5. "Crash" and Restart
     drop(coordinator);
@@ -48,7 +55,9 @@ fn test_shard_recovery_data_loss_repro() {
     let coordinator_recovered = ShardCoordinator::new(config);
 
     // 6. Attempt Recovery
-    let result = coordinator_recovered.recover_pending_transactions().unwrap();
+    let result = coordinator_recovered
+        .recover_pending_transactions()
+        .unwrap();
 
     // 7. Verify Data Recovery (Fix Verification)
     // The transaction should be in the 'recovered' list (or 'dead_lettered' if retry fails, but recovery logic might retry commit).
@@ -65,7 +74,10 @@ fn test_shard_recovery_data_loss_repro() {
     // So recover_pending_transactions -> commit_distributed_transaction -> conn.commit() -> Ok.
     // So transaction should be in `recovered`.
 
-    assert!(!result.recovered.is_empty(), "Transaction should be recovered from WAL");
+    assert!(
+        !result.recovered.is_empty(),
+        "Transaction should be recovered from WAL"
+    );
     assert!(result.recovered.contains(&tx_id));
     assert!(result.dead_lettered.is_empty());
 
