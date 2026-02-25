@@ -218,7 +218,11 @@ impl<'a> GravitySimulator<'a> {
     ) -> Result<Vec<(NodeId, Vec<f32>)>> {
         // Get Center Vector (Current State)
         let center_node = self.db.get_node(center_id)?;
-        let center_vec = match center_node.properties.get(property).and_then(|v| v.as_vector()) {
+        let center_vec = match center_node
+            .properties
+            .get(property)
+            .and_then(|v| v.as_vector())
+        {
             Some(v) => v,
             None => return Ok(Vec::new()), // No gravity without a vector
         };
@@ -242,7 +246,11 @@ impl<'a> GravitySimulator<'a> {
                 Err(_) => continue,
             };
 
-            let target_vec = match target_node.properties.get(property).and_then(|v| v.as_vector()) {
+            let target_vec = match target_node
+                .properties
+                .get(property)
+                .and_then(|v| v.as_vector())
+            {
                 Some(v) => v,
                 None => continue,
             };
@@ -444,9 +452,17 @@ mod tests {
         assert_eq!(*id, neighbor);
 
         // Check X component increased (moved towards 1.0)
-        assert!(new_vec[0] > 0.1, "X component should increase (got {})", new_vec[0]);
+        assert!(
+            new_vec[0] > 0.1,
+            "X component should increase (got {})",
+            new_vec[0]
+        );
         // Check Y component decreased (moved away from 1.0)
-        assert!(new_vec[1] < 0.95, "Y component should decrease (got {})", new_vec[1]);
+        assert!(
+            new_vec[1] < 0.95,
+            "Y component should decrease (got {})",
+            new_vec[1]
+        );
 
         // Verify normalization
         let mag = new_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
