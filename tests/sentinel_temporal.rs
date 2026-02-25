@@ -1,6 +1,7 @@
 use aletheiadb::core::id::{NodeId, VersionId};
-use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange, MAX_VALID_TIMESTAMP};
 use aletheiadb::index::temporal::{DeduplicationPolicy, TemporalIndexes};
+use aletheiadb::core::error::TemporalError;
 
 // Test to verify that intersection of large sets (> 16 items) works correctly.
 // This targets the HashSet optimization branch in intersect_metadata_indices.
@@ -92,4 +93,145 @@ fn test_batch_insert_reject_existing() {
         "Error should indicate version already exists, got: {}",
         err
     );
+}
+
+// 🛡️ Sentinel Tests added by Sentinel agent
+
+#[test]
+fn test_sentinel_bitemporal_visible_at_boundaries() {
+    // 🛡️ Sentinel Test: Verify BiTemporalInterval::is_visible_at logic.
+    // Specifically targets:
+    // - Off-by-one errors at boundaries
+    // - Logic errors (e.g. using || instead of &&)
+
+    let valid_start = 100.into();
+    let valid_end = 200.into();
+    let tx_start = 300.into();
+    let tx_end = 400.into();
+
+    let valid_range = TimeRange::new(valid_start, valid_end).unwrap();
+    let tx_range = TimeRange::new(tx_start, tx_end).unwrap();
+    let interval = BiTemporalInterval::new(valid_range, tx_range);
+
+    // Case 1: Both inside (middle) -> Visible
+    assert!(interval.is_visible_at(150.into(), 350.into()));
+
+    // Case 2: Valid inside, Tx inside (exact start boundary) -> Visible
+    assert!(interval.is_visible_at(100.into(), 300.into()));
+
+    // Case 3: Valid inside, Tx inside (just before end) -> Visible
+    assert!(interval.is_visible_at(199.into(), 399.into()));
+
+    // Case 4: Valid OUT (before), Tx inside -> Not Visible
+    assert!(!interval.is_visible_at(99.into(), 350.into()));
+
+    // Case 5: Valid OUT (at end), Tx inside -> Not Visible (end is exclusive)
+    assert!(!interval.is_visible_at(200.into(), 350.into()));
+
+    // Case 6: Valid inside, Tx OUT (before) -> Not Visible
+    assert!(!interval.is_visible_at(150.into(), 299.into()));
+
+    // Case 7: Valid inside, Tx OUT (at end) -> Not Visible (end is exclusive)
+    assert!(!interval.is_visible_at(150.into(), 400.into()));
+
+    // Case 8: Both OUT -> Not Visible
+    assert!(!interval.is_visible_at(99.into(), 299.into()));
+}
+
+#[test]
+fn test_sentinel_timerange_overlaps_touching() {
+    // 🛡️ Sentinel Test: Verify strict inequality in overlaps().
+    // Touching ranges [100, 200) and [200, 300) must NOT overlap.
+
+    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+    let r2 = TimeRange::new(200.into(), 300.into()).unwrap();
+
+    // r1 overlaps r2? (100 < 300 && 200 < 200) -> False
+    assert!(!r1.overlaps(&r2));
+
+    // r2 overlaps r1? (200 < 200 && 100 < 300) -> False
+    assert!(!r2.overlaps(&r1));
+}
+
+#[test]
+fn test_sentinel_timerange_contains_range_strict() {
+    // 🛡️ Sentinel Test: Verify contains_range logic.
+    // Targets: self.start <= other.start && other.end <= self.end
+
+    let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+
+    // Exact match -> Contained
+    let inner_exact = TimeRange::new(100.into(), 300.into()).unwrap();
+    assert!(outer.contains_range(&inner_exact));
+
+    // Ends exactly at boundary -> Contained
+    let inner_end_boundary = TimeRange::new(150.into(), 300.into()).unwrap();
+    assert!(outer.contains_range(&inner_end_boundary));
+
+    // Starts exactly at boundary -> Contained
+    let inner_start_boundary = TimeRange::new(100.into(), 250.into()).unwrap();
+    assert!(outer.contains_range(&inner_start_boundary));
+
+    // Extends beyond start -> Not contained
+    let inner_out_start = TimeRange::new(99.into(), 200.into()).unwrap();
+    assert!(!outer.contains_range(&inner_out_start));
+
+    // Extends beyond end -> Not contained
+    let inner_out_end = TimeRange::new(200.into(), 301.into()).unwrap();
+    assert!(!outer.contains_range(&inner_out_end));
+}
+
+#[test]
+fn test_sentinel_timerange_new_validation() {
+    // 🛡️ Sentinel Test: Verify constructor validation logic.
+
+    let t100 = 100.into();
+    let t200 = 200.into();
+
+    // Valid: start < end
+    assert!(TimeRange::new(t100, t200).is_ok());
+
+    // Valid: start == end (empty range)
+    // This is crucial: mutating > to >= would break this
+    assert!(TimeRange::new(t100, t100).is_ok());
+
+    // Invalid: start > end
+    // This targets mutating > to >= (which would make equal invalid, caught above)
+    // or removing the check entirely
+    let err = TimeRange::new(t200, t100);
+    assert!(err.is_err());
+    assert!(matches!(err.unwrap_err(), TemporalError::InvalidTimeRange { .. }));
+}
+
+#[test]
+fn test_sentinel_timerange_duration_overflow_check() {
+    // 🛡️ Sentinel Test: Verify duration calculation handles overflow safely.
+    // If end - start overflows i64, it should saturate, not panic or wrap.
+
+    // Create timestamps far apart
+    let start = 0.into();
+    // i64::MAX is valid as a wallclock value in HybridTimestamp (but check constraints)
+    // MAX_VALID_TIMESTAMP is i64::MAX - 1000.
+
+    let max_valid = MAX_VALID_TIMESTAMP.into();
+    let range = TimeRange::new(start, max_valid).unwrap();
+
+    // Duration should be MAX_VALID_TIMESTAMP
+    assert_eq!(range.duration_micros(), Some(MAX_VALID_TIMESTAMP));
+
+    // Use start = i64::MIN.
+    // TimeRange::new checks start > MAX_VALID_TIMESTAMP. i64::MIN is negative, so < MAX.
+
+    let min_start = i64::MIN.into();
+    let max_end = MAX_VALID_TIMESTAMP.into();
+
+    let extreme_range = TimeRange::new(min_start, max_end).unwrap();
+
+    // Duration: (MAX - 1000) - MIN = MAX - 1000 - (-MAX - 1) = 2*MAX - 999.
+    // This definitely overflows i64.
+    // The implementation uses checked_sub.
+    // If it overflows, it returns None, then `or(Some(i64::MAX))`.
+    // So it should return i64::MAX.
+
+    assert_eq!(extreme_range.duration_micros(), Some(i64::MAX));
 }
