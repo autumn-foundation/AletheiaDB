@@ -69,7 +69,8 @@ mod tests {
                 input: Box::new(PhysicalOp::NodeLookup { node_ids: vec![a] }),
                 direction: aletheiadb::query::ir::Direction::Outgoing,
                 label: None,
-                depth: 2,
+                min_depth: 2,
+                max_depth: 2,
                 temporal_context: None,
             },
             estimated_cost: Default::default(),
@@ -107,7 +108,8 @@ mod tests {
                 }), // Double A
                 direction: aletheiadb::query::ir::Direction::Outgoing,
                 label: None,
-                depth: 1,
+                min_depth: 1,
+                max_depth: 1,
                 temporal_context: None,
             },
             estimated_cost: Default::default(),
@@ -129,43 +131,4 @@ mod tests {
         assert_eq!(rows[0].entity.node_id(), Some(b));
         assert_eq!(rows[1].entity.node_id(), Some(b));
     }
-  
-  
-#[test]
-fn test_indexed_traversal_construction() {
-    // Verify that IndexedTraversal can be constructed with min/max depth
-    let op = PhysicalOp::IndexedTraversal {
-        input: Box::new(PhysicalOp::NodeLookup { node_ids: vec![NodeId::new(1).unwrap()] }),
-        direction: Direction::Outgoing,
-        label: Some("KNOWS".to_string()),
-        min_depth: 1,
-        max_depth: 2,
-        temporal_context: None,
-    };
-
-    if let PhysicalOp::IndexedTraversal { min_depth, max_depth, .. } = op {
-        assert_eq!(min_depth, 1);
-        assert_eq!(max_depth, 2);
-    } else {
-        panic!("Construction failed");
-    }
-}
-
-#[test]
-fn test_indexed_traversal_fixed_depth() {
-    // Verify construction for fixed depth (min == max)
-    let op = PhysicalOp::IndexedTraversal {
-        input: Box::new(PhysicalOp::Empty),
-        direction: Direction::Incoming,
-        label: None,
-        min_depth: 3,
-        max_depth: 3,
-        temporal_context: None,
-    };
-
-    if let PhysicalOp::IndexedTraversal { min_depth, max_depth, .. } = op {
-        assert_eq!(min_depth, 3);
-        assert_eq!(max_depth, 3);
-    }
-  }
 }

@@ -144,23 +144,6 @@ pub struct AletheiaDB {
     pub(crate) persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
-impl std::fmt::Debug for AletheiaDB {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let current_ts = self
-            .current_timestamp
-            .try_lock()
-            .map(|ts| format!("{:?}", ts))
-            .unwrap_or_else(|_| "<locked>".to_string());
-
-        f.debug_struct("AletheiaDB")
-            .field("current_timestamp", &current_ts)
-            .field("default_durability", &self.default_durability)
-            .field("persistence_enabled", &self.persistence_manager.is_some())
-            .field("stats", &self.stats)
-            .finish_non_exhaustive()
-    }
-}
-
 impl Drop for AletheiaDB {
     fn drop(&mut self) {
         // Signal shutdown to background persistence thread

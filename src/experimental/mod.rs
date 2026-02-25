@@ -43,7 +43,6 @@
 //! | [`gestalt`] | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
 //! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
 //! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
-//! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -86,9 +85,6 @@
 //! # }
 //! ```
 
-#[cfg(feature = "nova")]
-/// Alchemy: Semantic Graph Transformation Engine.
-pub mod alchemy;
 #[cfg(feature = "nova")]
 /// Ariadne: Semantic Thread Weaver.
 pub mod ariadne;
@@ -196,7 +192,3 @@ pub mod mnemosyne;
 #[cfg(feature = "nova")]
 /// Muse: The Semantic Ideator.
 pub mod muse;
-
-#[cfg(feature = "nova")]
-/// Oracle: Probabilistic Graph Reasoning.
-pub mod oracle;

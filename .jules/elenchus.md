@@ -283,24 +283,3 @@
 3.  **Wraparound Logic:** Explicit verification of the `distance_behind` check at `u64::MAX`.
 **Evidence:** Existing tests covered concurrency well but missed these specific safety properties.
 **Resolution:** Added 3 sentinel tests in `src/storage/wal/ring_buffer.rs`: `test_buffer_drop_notifies_waiters`, `test_drain_stops_at_gap`, and `test_wraparound_boundary_check`.
-
-## [Parser Logic Coverage Gap]
-**Module:** `src/query/parser.rs`
-**Verdict:** 🟢 Acquitted (Strengthened)
-**Finding:**
-1.  **Robust Core:** The parser logic for recursion depth and basic syntax is sound and well-tested by existing `sentry_tests`.
-2.  **Implicit Coverage:** Logic for spaced negative numbers (`- 5`) and unbounded max depth (`*1..`) existed but lacked explicit test cases, relying on implicit behavior or unrelated tests.
-3.  **Lexer/Parser Handshake:** The `Token::Dash` handling in `parse_value` correctly handles spaced negatives, preventing a potential parsing gap.
-**Recommendation:** Added 4 specific test cases to `mod sentry_tests` covering spaced negatives (int/float), spaced negatives in lists, and unbounded max depth to lock in this behavior.
-
-## [TraversalIterator Coverage Gap]
-**Module:** `src/query/executor/iterators.rs`
-**Verdict:** 🟡 Suspect
-**Finding:**
-1.  **TraversalIterator Zero Coverage:** The `TraversalIterator` (handling BFS, history, cycles) had *zero* unit tests in the module. It was only tested via high-level integration tests, leaving edge cases like cycles and input isolation unverified.
-2.  **Node Isomorphism:** Investigation confirmed `TraversalIterator` enforces Node Isomorphism (suppressing cycles like A->B->A), which is a significant behavioral constraint not documented or explicitly tested.
-3.  **VectorRerank Memory Risk:** `VectorRerankIterator` buffers the *entire* input into a `Vec` before sorting, even though it only needs top-K. This is O(N) memory where N is input size, creating a DoS risk for large inputs.
-4.  **FilterIterator Strictness:** `evaluate_predicate` enforces strict type equality (e.g., `Int(5) != Float(5.0)`). While correct for Rust, this may surprise users expecting SQL-like casting.
-**Recommendation:**
-1.  **Add Traversal Tests:** Create `tests/sentry_traversal.rs` to permanently test `TraversalIterator` cycle suppression and input isolation.
-2.  **Optimize VectorRerank:** Future optimization should use a bounded Min-Heap during iteration to keep memory O(K) instead of O(N).
