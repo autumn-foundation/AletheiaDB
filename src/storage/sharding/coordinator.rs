@@ -769,6 +769,8 @@ impl ShardCoordinator {
                 // We'll proceed with abort, but note the failure.
                 #[cfg(feature = "observability")]
                 tracing::warn!("Failed to log abort decision: {}", e);
+                #[cfg(not(feature = "observability"))]
+                let _ = e;
             }
         }
 
