@@ -561,7 +561,7 @@ pub(crate) mod x86_ops {
             }
 
             // Try AVX2
-            if is_x86_feature_detected!("avx2") {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                 let res_avx2 = unsafe { x86_ops::squared_magnitude_avx2(&v) };
                 assert_eq!(res_avx2, expected, "AVX2 implementation failed");
             }
