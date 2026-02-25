@@ -30,8 +30,6 @@
 //! # }
 //! ```
 
-#![allow(clippy::collapsible_if)]
-
 use crate::AletheiaDB;
 use crate::api::transaction::{ReadOps, WriteOps};
 use crate::core::error::Result;
@@ -270,6 +268,7 @@ mod tests {
                 let outgoing = tx.get_outgoing_edges(a);
                 let mut found_edge = false;
                 for eid in outgoing {
+                    #[allow(clippy::collapsible_if)]
                     if let Ok(edge) = tx.get_edge(eid) {
                         if edge.target == b && edge.has_label_str("RELATED") {
                             found_edge = true;
@@ -341,6 +340,7 @@ mod tests {
                 let edges = tx.get_outgoing_edges(a);
                 let mut found = false;
                 for eid in edges {
+                    #[allow(clippy::collapsible_if)]
                     if let Ok(edge) = tx.get_edge(eid) {
                         if edge.target == d && edge.has_label_str("LINKS_FROM_B") {
                             found = true;
@@ -359,6 +359,7 @@ mod tests {
                 let edges = tx.get_outgoing_edges(c);
                 let mut found = false;
                 for eid in edges {
+                    #[allow(clippy::collapsible_if)]
                     if let Ok(edge) = tx.get_edge(eid) {
                         if edge.target == a && edge.has_label_str("LINKS_TO_B") {
                             found = true;
