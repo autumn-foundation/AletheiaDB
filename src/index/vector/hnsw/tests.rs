@@ -1773,3 +1773,33 @@ mod coverage_additions {
         }
     }
 }
+
+#[cfg(test)]
+mod optimization_tests {
+    use super::*;
+
+    #[test]
+    fn test_search_filter_optimization() -> Result<()> {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .m(16)
+            .ef_construction(100)
+            .build()?;
+
+        // Add 100 vectors
+        for i in 1..=100 {
+            let vec = vec![1.0, 0.0, 0.0, 0.0]; // All identical
+            index.add(NodeId::new(i).unwrap(), &vec)?;
+        }
+
+        // Search with filter for even IDs, limit 5
+        let results =
+            index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 5, |id| id.as_u64() % 2 == 0)?;
+
+        assert_eq!(results.len(), 5);
+        for (id, _) in results {
+            assert!(id.as_u64() % 2 == 0);
+        }
+
+        Ok(())
+    }
+}
