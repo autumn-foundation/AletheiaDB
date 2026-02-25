@@ -14,11 +14,13 @@
 //! - **Influence Mapping**: Identifying nodes that drive semantic change in their community.
 //! - **Community Dynamics**: Detecting if a community is tightening (converging) or dispersing (diverging).
 //! - **Trend Analysis**: Measuring the velocity of adoption for new concepts.
+//! - **Simulation**: Predicting how vectors should move if influenced by "Gravity".
 
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp, time};
+use crate::core::vector::{magnitude, normalize};
 
 /// Metrics describing the orbital dynamics of a neighbor relative to a center node.
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +186,119 @@ impl<'a> GravityWell<'a> {
     }
 }
 
+/// The Gravity Simulator applies semantic forces to propose new vector positions.
+pub struct GravitySimulator<'a> {
+    db: &'a AletheiaDB,
+}
+
+impl<'a> GravitySimulator<'a> {
+    /// Create a new Gravity Simulator.
+    pub fn new(db: &'a AletheiaDB) -> Self {
+        Self { db }
+    }
+
+    /// Simulate gravitational pull from a center node on its neighbors.
+    ///
+    /// # Arguments
+    ///
+    /// * `center_id` - The node exerting the force.
+    /// * `property` - The vector property to simulate.
+    /// * `mass` - The "mass" of the center node (strength of pull).
+    /// * `step_size` - Simulation step size (0.0 to 1.0).
+    ///
+    /// # Returns
+    ///
+    /// A list of `(NodeId, Vec<f32>)` pairs representing the proposed new vector positions for neighbors.
+    pub fn simulate_pull(
+        &self,
+        center_id: NodeId,
+        property: &str,
+        mass: f32,
+        step_size: f32,
+    ) -> Result<Vec<(NodeId, Vec<f32>)>> {
+        // Get Center Vector (Current State)
+        let center_node = self.db.get_node(center_id)?;
+        let center_vec = match center_node
+            .properties
+            .get(property)
+            .and_then(|v| v.as_vector())
+        {
+            Some(v) => v,
+            None => return Ok(Vec::new()), // No gravity without a vector
+        };
+
+        // Get Neighbors
+        let edge_ids = self.db.get_outgoing_edges(center_id);
+        if edge_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut proposed_updates = Vec::new();
+
+        for edge_id in edge_ids {
+            let target_id = match self.db.get_edge_target(edge_id) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            let target_node = match self.db.get_node(target_id) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
+            let target_vec = match target_node
+                .properties
+                .get(property)
+                .and_then(|v| v.as_vector())
+            {
+                Some(v) => v,
+                None => continue,
+            };
+
+            // Physics Calculation
+            // 1. Direction Vector (Center - Neighbor)
+            // Note: Vectors might have different lengths if database is messy, assuming same dim.
+            if center_vec.len() != target_vec.len() {
+                continue;
+            }
+
+            let mut diff = Vec::with_capacity(center_vec.len());
+            for (c, t) in center_vec.iter().zip(target_vec.iter()) {
+                diff.push(c - t);
+            }
+
+            let dist = magnitude(&diff);
+
+            // Avoid division by zero or extreme forces at close range
+            let effective_dist = dist.max(0.0001);
+
+            // Force Magnitude: F = G * M / r^2 (Assume G=1, neighbor mass=1)
+            // Damping factor to prevent explosion
+            let force = mass / (effective_dist * effective_dist + 0.1);
+
+            // Apply force
+            // New = Old + (Direction * Force * Step)
+            // Direction = Diff / Dist (Unit vector)
+            // So: New = Old + (Diff / Dist) * Force * Step
+            //     New = Old + Diff * (Force * Step / Dist)
+
+            let scale = (force * step_size) / effective_dist;
+
+            let mut new_vec = Vec::with_capacity(target_vec.len());
+            for (t, d) in target_vec.iter().zip(diff.iter()) {
+                new_vec.push(t + d * scale);
+            }
+
+            // Normalize result to keep it on the hypersphere
+            let normalized_vec = normalize(&new_vec);
+
+            proposed_updates.push((target_id, normalized_vec));
+        }
+
+        Ok(proposed_updates)
+    }
+}
+
 /// Calculate Cosine Distance (1.0 - Cosine Similarity).
 /// Range: [0.0, 2.0]. 0.0 = identical, 1.0 = orthogonal, 2.0 = opposite.
 fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
@@ -282,5 +397,75 @@ mod tests {
             m.velocity.unwrap() < 0.0,
             "Velocity should be negative (attraction)"
         );
+    }
+
+    #[test]
+    fn test_gravity_simulator() {
+        let db = AletheiaDB::new().unwrap();
+
+        // Center: [1.0, 0.0]
+        let center = db
+            .create_node(
+                "Sun",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Neighbor: [0.0, 1.0] (Orthogonal)
+        let neighbor = db
+            .create_node(
+                "Planet",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 1.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Connect
+        db.create_edge(
+            center,
+            neighbor,
+            "ORBITS",
+            PropertyMapBuilder::new().build(),
+        )
+        .unwrap();
+
+        let sim = GravitySimulator::new(&db);
+
+        // Simulate
+        // Mass = 10.0, Step = 0.1
+        // Force will be significant.
+        // Diff = [1, -1]
+        // Dist = sqrt(2) = 1.414
+        // Force = 10 / (2 + 0.1) = 4.76
+        // Scale = 4.76 * 0.1 / 1.414 = 0.33
+        // NewVec = [0, 1] + [1, -1] * 0.33 = [0.33, 0.67]
+        // Normalize([0.33, 0.67]) -> [0.44, 0.89] approx
+        // It moved towards [1, 0] (x increased from 0)
+
+        let updates = sim.simulate_pull(center, "vec", 10.0, 0.1).unwrap();
+
+        assert_eq!(updates.len(), 1);
+        let (id, new_vec) = &updates[0];
+        assert_eq!(*id, neighbor);
+
+        // Check X component increased (moved towards 1.0)
+        assert!(
+            new_vec[0] > 0.1,
+            "X component should increase (got {})",
+            new_vec[0]
+        );
+        // Check Y component decreased (moved away from 1.0)
+        assert!(
+            new_vec[1] < 0.95,
+            "Y component should decrease (got {})",
+            new_vec[1]
+        );
+
+        // Verify normalization
+        let mag = new_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((mag - 1.0).abs() < 1e-5, "Vector should be normalized");
     }
 }

@@ -48,3 +48,6 @@ pub use tiered_storage::{
 };
 pub use wal::{LSN, WalEntry, WalOperation};
 pub use wal_reader::read_wal_entries;
+
+/// Recovery logic for replaying WAL into storage.
+pub(crate) mod recovery;

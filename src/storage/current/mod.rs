@@ -142,6 +142,15 @@ impl CurrentStorage {
         self.version_id_gen.ensure_at_least(min_value);
     }
 
+    /// Get the current value of the version ID generator.
+    ///
+    /// This is used during recovery to determine the starting version ID for
+    /// WAL replay.
+    #[inline]
+    pub(crate) fn get_version_id_generator_current(&self) -> u64 {
+        self.version_id_gen.current()
+    }
+
     /// Enable vector indexing for a specific property.
     ///
     /// Multiple properties can be indexed simultaneously with different configurations.

@@ -202,6 +202,24 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                     );
                     break;
                 } else {
+                    // Check if we hit a zeroed region (common in pre-allocated files)
+                    // If the header area (next 24 bytes) is all zeros, treat as EOF.
+                    // LSN 0 is reserved/invalid, so a valid entry cannot start with 8 bytes of zeros
+                    // if we assume LSNs start at 1.
+                    // Even if LSN 0 is valid, a full 24 bytes of zeros (LSN+TS+Checksum) is extremely unlikely to be valid
+                    // (Checksum 0 implies data is 0, but OpType would be 0 which is invalid).
+                    let header_slice = &buffer[offset..offset + 24];
+                    if header_slice.iter().all(|&b| b == 0) {
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Zeroed region at end of WAL segment {:?} (offset {}/{}), stopping read",
+                            path,
+                            offset,
+                            buffer.len()
+                        );
+                        break;
+                    }
+
                     // Corruption or invalid data in the middle of the file - this is serious
                     #[cfg(feature = "observability")]
                     tracing::error!(
@@ -210,6 +228,14 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                         offset,
                         e
                     );
+                    #[cfg(not(feature = "observability"))]
+                    {
+                        eprintln!(
+                            "CRITICAL: Failed to parse WAL entry in segment {:?} at offset {}: {}",
+                            path, offset, e
+                        );
+                        eprintln!("Header slice: {:?}", header_slice);
+                    }
                     return Err(e);
                 }
             }

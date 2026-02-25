@@ -107,9 +107,10 @@ pub use core::error::{Error, QueryError, Result, StorageError, TemporalError, Tr
 pub use db::{AletheiaDB, VectorIndexBuilder};
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
-    vector::{DistanceMetric, HnswConfig},
+    vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},
 };
 pub use storage::CurrentStorage;
+pub use storage::index_persistence::PersistenceConfig;
 pub use storage::wal::{DurabilityMode, WriteOptions};
 
 // Query planner re-exports (VS-060)

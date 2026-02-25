@@ -412,8 +412,13 @@ fn test_with_full_config_returns_result() {
 
 #[test]
 fn test_with_unified_config_returns_result() {
+    // Use temp dir to avoid conflicts/corruption from default paths
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::AletheiaDBConfig::default();
+    config.wal.wal_dir = temp_dir.path().join("wal");
+    config.persistence.data_dir = temp_dir.path().join("data");
+
     // AletheiaDB::with_unified_config() should return Result<Self>
-    let config = crate::config::AletheiaDBConfig::default();
     let result = AletheiaDB::with_unified_config(config);
     assert!(
         result.is_ok(),
@@ -484,7 +489,7 @@ fn test_wal_creation_failure_propagates_error() {
     );
 
     // Error should mention an I/O issue
-    let err = result.err().expect("Expected an error");
+    let err = result.expect_err("Expected an error");
     let err_msg = err.to_string().to_lowercase();
     assert!(
         err_msg.contains("i/o")
@@ -2240,4 +2245,16 @@ fn test_multiple_edges_same_nodes() {
     assert_eq!(db.in_degree(alice), 1);
     assert_eq!(db.out_degree(bob), 1);
     assert_eq!(db.in_degree(bob), 2);
+}
+
+#[test]
+fn test_debug_implementation() {
+    let db = AletheiaDB::new().unwrap();
+    let debug_output = format!("{:?}", db);
+
+    assert!(debug_output.contains("AletheiaDB"));
+    assert!(debug_output.contains("current_timestamp"));
+    assert!(debug_output.contains("default_durability"));
+    assert!(debug_output.contains("persistence_enabled"));
+    assert!(debug_output.contains("stats"));
 }

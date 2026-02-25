@@ -491,15 +491,15 @@ pub fn sparse_dot_product(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 /// - Much faster than dense cosine for sparse data
 pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
     let dot = sparse_dot_product(a, b)?;
-    let mag_a = a.magnitude();
-    let mag_b = b.magnitude();
+    let sq_mag_a = a.squared_magnitude();
+    let sq_mag_b = b.squared_magnitude();
 
     // Handle zero magnitude vectors
-    if mag_a < SQUARED_MAGNITUDE_THRESHOLD || mag_b < SQUARED_MAGNITUDE_THRESHOLD {
+    if sq_mag_a < SQUARED_MAGNITUDE_THRESHOLD || sq_mag_b < SQUARED_MAGNITUDE_THRESHOLD {
         return Ok(0.0);
     }
 
-    let similarity = dot / (mag_a * mag_b);
+    let similarity = dot / (sq_mag_a.sqrt() * sq_mag_b.sqrt());
 
     // Clamp to [-1, 1] to handle floating-point errors
     Ok(similarity.clamp(-1.0, 1.0))

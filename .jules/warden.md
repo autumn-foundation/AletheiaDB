@@ -29,3 +29,13 @@
 2.  **Error Propagation:** Updated `Chameleon::analyze_context` to handle errors from `MiniKMeans`, ensuring robust failure handling.
 3.  **Internal Consistency:** Added `debug_assert_eq!` to `dist_sq` helper to catch dimension mismatches during development.
 4.  **Verification:** Added `test_minikmeans_returns_error_on_mixed_dimensions` to regression-test the fix.
+**2026-01-03 - Supply Chain Security Update (tokenizers)**
+**Threat:**
+1.  **Unmaintained Dependency:** `tokenizers` (0.15.2) depended on `number_prefix` (0.4.0) which is unmaintained (RUSTSEC-2025-0119).
+2.  **Yanked Dependency:** `wasm-bindgen` (via `reqwest`) depended on `bumpalo` (3.20.0) which was yanked.
+3.  **Vulnerability:** CVE-2024-3205 affects `tokenizers` < 0.19.1 (Out-of-bounds Read).
+
+**Defense:**
+1.  **Update `tokenizers`:** Updated `tokenizers` to version `0.22` in `Cargo.toml`. This version drops the dependency on `number_prefix` and includes fixes for known vulnerabilities.
+2.  **Update Dependencies:** Ran `cargo update` to pull in the latest compatible versions of all dependencies, resolving the yanked `bumpalo` issue in `wasm-bindgen`.
+3.  **Verification:** Ran `cargo audit` to confirm the vulnerabilities are resolved. Ran tests (`cargo test --features embedding-onnx`) to ensure no regressions.

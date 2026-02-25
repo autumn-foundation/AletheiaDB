@@ -22,7 +22,7 @@ AletheiaDB tracks both **valid time** (when facts were true in reality) and **tr
 - **Hybrid Query API**: Combine graph traversal + vector similarity + bi-temporal queries
 - **Query Language**: Cypher-like AQL with temporal and vector extensions
 - **MCP Server**: Model Context Protocol server for LLM integration (Claude, etc.)
-- **Graph Sharding**: Domain-based horizontal scaling with 2PC distributed transactions
+- **Graph Sharding**: Domain-based horizontal scaling with 2PC distributed transactions*
 - **Semantic Drift Tracking**: Detect how embeddings evolve over time for knowledge evolution analysis
 - **Production Observability**: Distributed tracing, metrics, and profiling (optional)
 - **High Performance**: Sub-microsecond traversals (~22ns node lookup, ~23ns edge traversal)
@@ -288,10 +288,12 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 ### Graph Sharding (Complete ✅)
 - [x] Domain-based node partitioning by label
 - [x] Edge replication for cross-shard traversal
-- [x] Two-Phase Commit (2PC) distributed transactions
+- [x] Two-Phase Commit (2PC) distributed transactions*
 - [x] Circuit breakers for fault tolerance
 - [x] Online migration with dual-write support
 - [x] Connection pooling and query executor
+
+*\*Note: Current implementation uses sequential scatter-gather and 2PC. Latency scales linearly with participant count.*
 
 ### Tiered Storage (Complete ✅)
 - [x] Three-tier architecture (hot/warm/cold)
@@ -379,20 +381,29 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 ### Time-Travel Queries
 
 ```rust
+use aletheiadb::prelude::*;
 use aletheiadb::time;
 
-// Get current time
-let now = time::now();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Setup: Create a node
+    let db = AletheiaDB::new().unwrap();
+    let alice_id = db.create_node("Person", properties! { "name" => "Alice", "age" => 30 })?;
 
-// Get node at a specific point in time
-let historical_alice = db.get_node_at_time(
-    alice_id,
-    now,  // valid time
-    now,  // transaction time
-)?;
+    // Get current time
+    let now = time::now();
 
-// Track how properties changed
-println!("Alice's age was: {:?}", historical_alice.properties.get("age"));
+    // Get node at a specific point in time
+    let historical_alice = db.get_node_at_time(
+        alice_id,
+        now,  // valid time
+        now,  // transaction time
+    )?;
+
+    // Track how properties changed
+    println!("Alice's age was: {:?}", historical_alice.properties.get("age"));
+
+    Ok(())
+}
 ```
 
 ### Vector Search with HNSW

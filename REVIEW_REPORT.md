@@ -61,3 +61,24 @@ The codebase exhibits a strong defensive programming style, with careful handlin
 ## Conclusion
 
 The system is safe but conservative. The primary recommendation is to address the HNSW global lock to unlock performance potential.
+
+## Review: DX Improvements (Commit 353f5a6)
+
+**Status**: No high-severity findings.
+**Scope**: `src/storage/index_persistence/worker.rs`, `src/lib.rs`, `src/index/vector/mod.rs`, `README.md`.
+
+### Findings
+
+1.  **Log Fix Verified (Low Risk)**
+    -   **File**: `src/storage/index_persistence/worker.rs`
+    -   **Observation**: The fix correctly removes a misleading warning by checking `tracker.is_shutdown()`. The logic ensures clean exit.
+    -   **Verification**: Code review confirms the fix is safe and effective.
+
+2.  **API Re-exports Verified (Low Risk)**
+    -   **Files**: `src/lib.rs`, `src/index/vector/mod.rs`
+    -   **Observation**: `PersistenceConfig` and `TemporalVectorConfig` are correctly re-exported.
+    -   **Verification**: `cargo test` passed, confirming no breaking changes.
+
+### Conclusion
+
+The changes in commit `353f5a6` are safe and improve the developer experience as intended. No regressions found in persistence or vector APIs.
