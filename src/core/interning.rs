@@ -1311,8 +1311,8 @@ mod mutant_kill_tests {
                     for (i, s) in snapshot.iter().enumerate() {
                         if s.is_empty() {
                             // Found potential hole. Check if anything follows it.
-                            for j in (i + 1)..len {
-                                if !snapshot[j].is_empty() {
+                            for s in snapshot.iter().skip(i + 1) {
+                                if !s.is_empty() {
                                     found_hole = true;
                                     break;
                                 }
