@@ -1577,10 +1577,12 @@ mod tests {
         // If the code ignores `sync=true` (because config says false), it will succeed (return Ok).
         let result = coordinator.flush(vec![entry], true);
 
-        // We assert that it returns Ok, proving the bug exists.
+        // We expect this to fail because we requested a sync (flush(..., true))
+        // and the sync handle is broken (socket).
+        // If it returns Ok, it means it ignored our sync request!
         assert!(
-            result.is_ok(),
-            "HA! flush(true) returned Ok, meaning it silently ignored the sync request! Durability is a lie!"
+            result.is_err(),
+            "flush(true) should have failed due to broken sync handle! It returned Ok, meaning it ignored the sync request."
         );
     }
 }
