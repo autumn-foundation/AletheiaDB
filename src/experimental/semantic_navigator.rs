@@ -96,7 +96,12 @@ impl<'a> SemanticNavigator<'a> {
         let mut f_score: HashMap<NodeId, f32> = HashMap::new();
         // h(start) = 1.0 - sim(start, end)
         // We know start has a vector.
-        let h_start = 1.0 - cosine_similarity(&_start_vec, &end_vec)?;
+        let sim_start = cosine_similarity(&_start_vec, &end_vec)?;
+        let h_start = if sim_start.is_nan() {
+            1.0
+        } else {
+            1.0 - sim_start
+        };
         f_score.insert(start, h_start);
 
         while let Some(State {
@@ -134,7 +139,10 @@ impl<'a> SemanticNavigator<'a> {
 
                 // Cost(current, neighbor)
                 let distance_cost = match (&current_vec, &neighbor_vec) {
-                    (Some(a), Some(b)) => 1.0 - cosine_similarity(a, b)?,
+                    (Some(a), Some(b)) => {
+                        let sim = cosine_similarity(a, b)?;
+                        if sim.is_nan() { 1.0 } else { 1.0 - sim }
+                    }
                     _ => 1.0, // Penalize missing vectors
                 };
 
@@ -146,7 +154,10 @@ impl<'a> SemanticNavigator<'a> {
 
                     // h(neighbor) = 1.0 - sim(neighbor, goal)
                     let h_score = match &neighbor_vec {
-                        Some(vec) => 1.0 - cosine_similarity(vec, &end_vec)?,
+                        Some(vec) => {
+                            let sim = cosine_similarity(vec, &end_vec)?;
+                            if sim.is_nan() { 1.0 } else { 1.0 - sim }
+                        }
                         None => 1.0, // High heuristic if missing vector
                     };
 
@@ -246,5 +257,40 @@ mod tests {
         let nav = SemanticNavigator::new(&db);
         let result = nav.find_path(a, b, "vec");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_semantic_path_with_nan_vector() {
+        let db = AletheiaDB::new().unwrap();
+
+        // A -> B
+        // A has normal vector
+        // B has vector with NaN
+        // Should default to cost 1.0 and not panic or hang
+
+        let props_a = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let a = db.create_node("Node", props_a).unwrap();
+
+        let props_b = PropertyMapBuilder::new()
+            .insert_vector("vec", &[f32::NAN, 0.0])
+            .build();
+        let b = db.create_node("Node", props_b).unwrap();
+
+        db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let nav = SemanticNavigator::new(&db);
+
+        // This should not panic or hang
+        let result = nav.find_path(a, b, "vec");
+
+        // B has NaN vector, so sim(A, B) -> NaN. Cost(A, B) -> 1.0 (default).
+        // h(B) -> sim(B, B) (if target is B) -> NaN. h(B) -> 1.0.
+        // It might find the path A->B with valid costs.
+        if let Ok(path) = result {
+            assert_eq!(path, vec![a, b]);
+        }
     }
 }
