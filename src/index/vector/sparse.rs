@@ -61,6 +61,7 @@
 //! - No approximation - exact similarity scores
 
 use crate::core::error::{Error, Result, VectorError};
+use crate::core::hasher::BuildIdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::SparseVec;
@@ -229,15 +230,15 @@ pub struct SparseVectorIndex {
     /// Configuration
     config: SparseIndexConfig,
     /// Inverted index: dimension -> list of (node_id, value) postings
-    inverted_index: DashMap<u32, Vec<Posting>>,
+    inverted_index: DashMap<u32, Vec<Posting>, BuildIdentityHasher>,
     /// Forward index: node_id -> stored vector (for removal and updates)
-    vectors: DashMap<NodeId, StoredVector>,
+    vectors: DashMap<NodeId, StoredVector, BuildIdentityHasher>,
     /// Number of vectors in the index
     count: AtomicUsize,
     /// Sum of all vector lengths (for BM25 avgdl)
     total_length: AtomicUsize,
     /// Document frequency: dimension -> count of documents containing it
-    doc_freq: DashMap<u32, usize>,
+    doc_freq: DashMap<u32, usize, BuildIdentityHasher>,
     /// Write lock to ensure atomicity of add/remove operations
     write_lock: Mutex<()>,
 }
@@ -274,11 +275,11 @@ impl SparseVectorIndex {
         let capacity = config.initial_capacity;
         Ok(SparseVectorIndex {
             config,
-            inverted_index: DashMap::with_capacity(capacity),
-            vectors: DashMap::with_capacity(capacity),
+            inverted_index: DashMap::with_capacity_and_hasher(capacity, BuildIdentityHasher),
+            vectors: DashMap::with_capacity_and_hasher(capacity, BuildIdentityHasher),
             count: AtomicUsize::new(0),
             total_length: AtomicUsize::new(0),
-            doc_freq: DashMap::with_capacity(capacity),
+            doc_freq: DashMap::with_capacity_and_hasher(capacity, BuildIdentityHasher),
             write_lock: Mutex::new(()),
         })
     }
@@ -453,11 +454,14 @@ impl SparseVectorIndex {
         // For cosine similarity, we track magnitudes to avoid second lookups
         // For BM25, we track document lengths to avoid second lookups
         let is_cosine = matches!(self.config.scoring, ScoringMethod::Cosine);
-        let mut scores: HashMap<NodeId, f32> = HashMap::new();
+        let mut scores: HashMap<NodeId, f32, BuildIdentityHasher> =
+            HashMap::with_hasher(BuildIdentityHasher);
         // Magnitudes map is only used for cosine, but we always create it (cheap)
-        let mut magnitudes: HashMap<NodeId, f32> = HashMap::new();
+        let mut magnitudes: HashMap<NodeId, f32, BuildIdentityHasher> =
+            HashMap::with_hasher(BuildIdentityHasher);
         // Document lengths map is only used for BM25, but we always create it (cheap)
-        let mut doc_lengths: HashMap<NodeId, f32> = HashMap::new();
+        let mut doc_lengths: HashMap<NodeId, f32, BuildIdentityHasher> =
+            HashMap::with_hasher(BuildIdentityHasher);
         let query_magnitude = query.magnitude();
         // Use Acquire ordering to synchronize with Release stores, ensuring we see
         // all data modifications that happened before the count was updated
@@ -811,11 +815,14 @@ impl SparseVectorIndex {
 
         let index = SparseVectorIndex {
             config: loaded_config,
-            inverted_index: DashMap::with_capacity(data.count as usize),
-            vectors: DashMap::with_capacity(data.count as usize),
+            inverted_index: DashMap::with_capacity_and_hasher(
+                data.count as usize,
+                BuildIdentityHasher,
+            ),
+            vectors: DashMap::with_capacity_and_hasher(data.count as usize, BuildIdentityHasher),
             count: AtomicUsize::new(data.count as usize),
             total_length: AtomicUsize::new(data.total_length as usize),
-            doc_freq: DashMap::with_capacity(data.doc_freq.len()),
+            doc_freq: DashMap::with_capacity_and_hasher(data.doc_freq.len(), BuildIdentityHasher),
             write_lock: Mutex::new(()),
         };
 
@@ -1072,7 +1079,8 @@ pub fn hybrid_fusion(
     let sparse_normalized = normalize_scores(sparse_results);
 
     // Combine scores
-    let mut combined: HashMap<NodeId, f32> = HashMap::new();
+    let mut combined: HashMap<NodeId, f32, BuildIdentityHasher> =
+        HashMap::with_hasher(BuildIdentityHasher);
 
     for (id, score) in dense_normalized {
         *combined.entry(id).or_insert(0.0) += alpha * score;
@@ -1133,7 +1141,8 @@ pub fn reciprocal_rank_fusion(
     let k = k.min(MAX_K);
     let k_constant = k_constant.max(1.0);
 
-    let mut rrf_scores: HashMap<NodeId, f32> = HashMap::new();
+    let mut rrf_scores: HashMap<NodeId, f32, BuildIdentityHasher> =
+        HashMap::with_hasher(BuildIdentityHasher);
 
     // Add RRF contribution from dense results
     for (rank, (id, _)) in dense_results.iter().enumerate() {

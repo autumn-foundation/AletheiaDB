@@ -5,7 +5,7 @@
 //! are already high-quality unique identifiers (like `NodeId`, `EdgeId`, or `InternedString`),
 //! avoiding the unnecessary overhead of hashing (SipHash).
 
-use std::hash::Hasher;
+use std::hash::{BuildHasher, Hasher};
 
 const FNV_PRIME: u64 = 0x100000001b3;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -110,6 +110,18 @@ impl Hasher for IdentityHasher {
     #[inline]
     fn finish(&self) -> u64 {
         self.0
+    }
+}
+
+/// A builder for `IdentityHasher`.
+#[derive(Default, Clone, Copy)]
+pub struct BuildIdentityHasher;
+
+impl BuildHasher for BuildIdentityHasher {
+    type Hasher = IdentityHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        IdentityHasher::default()
     }
 }
 
@@ -239,5 +251,13 @@ mod tests {
             255,
             "String hash should not collapse to the 0xff marker"
         );
+    }
+
+    #[test]
+    fn test_build_identity_hasher() {
+        let builder = BuildIdentityHasher::default();
+        let mut hasher = builder.build_hasher();
+        hasher.write_u64(42);
+        assert_eq!(hasher.finish(), 42);
     }
 }
