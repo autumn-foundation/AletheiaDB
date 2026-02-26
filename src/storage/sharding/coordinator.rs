@@ -265,13 +265,14 @@ impl ShardCoordinator {
             PersistentCommitLog::in_memory()
         };
 
+        let max_tx_id = commit_log.max_seen_tx_id();
         let router = ShardRouter::new(config);
 
         Self {
             router,
             connections: RwLock::new(connections),
             shard_states: RwLock::new(shard_states),
-            tx_id_generator: IdGenerator::new(),
+            tx_id_generator: IdGenerator::with_start(max_tx_id + 1),
             active_transactions: RwLock::new(HashMap::new()),
             commit_log: RwLock::new(commit_log),
             commit_clock: Mutex::new(time::now()),

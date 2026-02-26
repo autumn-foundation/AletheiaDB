@@ -418,6 +418,8 @@ pub struct PersistentCommitLog {
     entries_written: AtomicU64,
     /// Total bytes written.
     bytes_written: AtomicU64,
+    /// Maximum transaction ID seen.
+    max_seen_tx_id: AtomicU64,
 }
 
 /// Configuration for the persistent commit log.
@@ -456,9 +458,9 @@ impl PersistentCommitLog {
             })?;
         }
 
-        let (writer, lsn, pending) = if path.exists() {
+        let (writer, lsn, pending, max_tx_id) = if path.exists() {
             // Open existing file and recover state
-            let (entries, max_lsn) = Self::read_entries(&path)?;
+            let (entries, max_lsn, max_tx_id) = Self::read_entries(&path)?;
 
             // Build pending map (entries without completion)
             let mut pending_map = HashMap::new();
@@ -485,7 +487,7 @@ impl PersistentCommitLog {
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
-            (Some(BufWriter::new(file)), max_lsn + 1, pending_map)
+            (Some(BufWriter::new(file)), max_lsn + 1, pending_map, max_tx_id)
         } else {
             // Create new file with header
             let file = OpenOptions::new()
@@ -498,7 +500,7 @@ impl PersistentCommitLog {
             let mut writer = BufWriter::new(file);
             Self::write_header(&mut writer)?;
 
-            (Some(writer), 1, HashMap::new())
+            (Some(writer), 1, HashMap::new(), 0)
         };
 
         Ok(Self {
@@ -509,6 +511,7 @@ impl PersistentCommitLog {
             config,
             entries_written: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
+            max_seen_tx_id: AtomicU64::new(max_tx_id),
         })
     }
 
@@ -522,6 +525,7 @@ impl PersistentCommitLog {
             config: CommitLogConfig::default(),
             entries_written: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
+            max_seen_tx_id: AtomicU64::new(0),
         }
     }
 
@@ -536,6 +540,7 @@ impl PersistentCommitLog {
     ) -> CommitLogResult<u64> {
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::commit(lsn, tx_id, participants, commit_timestamp);
+        self.max_seen_tx_id.fetch_max(tx_id.as_u64(), Ordering::SeqCst);
 
         self.write_entry(&entry)?;
 
@@ -551,6 +556,7 @@ impl PersistentCommitLog {
     pub fn log_abort(&self, tx_id: TxId, participants: Vec<ShardId>) -> CommitLogResult<u64> {
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::abort(lsn, tx_id, participants);
+        self.max_seen_tx_id.fetch_max(tx_id.as_u64(), Ordering::SeqCst);
 
         self.write_entry(&entry)?;
 
@@ -568,6 +574,7 @@ impl PersistentCommitLog {
     pub fn log_complete(&self, tx_id: TxId) -> CommitLogResult<u64> {
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::complete(lsn, tx_id);
+        self.max_seen_tx_id.fetch_max(tx_id.as_u64(), Ordering::SeqCst);
 
         self.write_entry(&entry)?;
 
@@ -624,6 +631,11 @@ impl PersistentCommitLog {
     /// Get the decision for a transaction.
     pub fn get_decision(&self, tx_id: TxId) -> Option<CommitLogEntry> {
         self.pending.read().ok()?.get(&tx_id).cloned()
+    }
+
+    /// Get the maximum transaction ID seen in the log.
+    pub fn max_seen_tx_id(&self) -> u64 {
+        self.max_seen_tx_id.load(Ordering::SeqCst)
     }
 
     /// Get the current LSN.
@@ -720,7 +732,7 @@ impl PersistentCommitLog {
         Ok(())
     }
 
-    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64)> {
+    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64)> {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
@@ -752,6 +764,7 @@ impl PersistentCommitLog {
         let mut entries = Vec::new();
         let mut offset = HEADER_SIZE;
         let mut max_lsn = 0u64;
+        let mut max_tx_id = 0u64;
 
         while offset < buffer.len() {
             if offset + 4 > buffer.len() {
@@ -774,6 +787,10 @@ impl PersistentCommitLog {
                     if entry.lsn > max_lsn {
                         max_lsn = entry.lsn;
                     }
+                    let tx_id_val = entry.tx_id.as_u64();
+                    if tx_id_val > max_tx_id {
+                        max_tx_id = tx_id_val;
+                    }
                     entries.push(entry);
                     offset += 4 + len;
                 }
@@ -784,7 +801,7 @@ impl PersistentCommitLog {
             }
         }
 
-        Ok((entries, max_lsn))
+        Ok((entries, max_lsn, max_tx_id))
     }
 }
 
