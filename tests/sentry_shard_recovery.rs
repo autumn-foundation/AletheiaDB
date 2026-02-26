@@ -1,7 +1,6 @@
 use aletheiadb::storage::sharding::config::{ShardConfig, ShardDefinition};
 use aletheiadb::storage::sharding::coordinator::ShardCoordinator;
 use aletheiadb::storage::sharding::types::ShardId;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -76,7 +75,7 @@ fn test_shard_recovery_data_loss_repro() {
         .get_metrics(ShardId::new(0).unwrap())
         .expect("Shard 0 metrics should exist");
     assert!(
-        metrics0.writes_total.load(Ordering::Relaxed) >= 1,
+        metrics0.writes_total.load(std::sync::atomic::Ordering::Relaxed) >= 1,
         "Shard 0 should have recorded a write during recovery"
     );
 
@@ -84,7 +83,7 @@ fn test_shard_recovery_data_loss_repro() {
         .get_metrics(ShardId::new(1).unwrap())
         .expect("Shard 1 metrics should exist");
     assert!(
-        metrics1.writes_total.load(Ordering::Relaxed) >= 1,
+        metrics1.writes_total.load(std::sync::atomic::Ordering::Relaxed) >= 1,
         "Shard 1 should have recorded a write during recovery"
     );
 
