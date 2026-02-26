@@ -78,13 +78,25 @@ use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::{TimeRange, Timestamp};
+#[cfg(feature = "nova")]
 use std::collections::{HashSet, VecDeque};
 
+#[cfg(feature = "nova")]
 /// The Time Lord of the Graph.
 pub struct Chronos<'a> {
     db: &'a AletheiaDB,
 }
 
+#[cfg(not(feature = "nova"))]
+/// The Time Lord of the Graph.
+#[deprecated(
+    note = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+)]
+pub struct Chronos<'a> {
+    _marker: std::marker::PhantomData<&'a AletheiaDB>,
+}
+
+#[cfg(feature = "nova")]
 impl<'a> Chronos<'a> {
     /// Create a new Chronos instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -304,7 +316,69 @@ impl<'a> Chronos<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "nova"))]
+#[allow(deprecated)]
+impl<'a> Chronos<'a> {
+    /// Create a new Chronos instance.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn new(db: &'a AletheiaDB) -> Self {
+        panic!(
+            "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Find a path from `start` to `end` that existed at `valid_time`.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn find_path_at_time(
+        &self,
+        start: NodeId,
+        end: NodeId,
+        valid_time: Timestamp,
+        tx_time: Timestamp,
+    ) -> Result<Option<Vec<NodeId>>> {
+        panic!(
+            "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Calculate the volatility of a node over a time window.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn node_volatility(&self, node_id: NodeId, window: TimeRange) -> Result<f32> {
+        panic!(
+            "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Calculate the stability of a path over a time window.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn path_stability(&self, path: &[EdgeId], window: TimeRange) -> Result<f32> {
+        panic!(
+            "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+}
+
+#[cfg(all(test, feature = "nova"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -393,5 +467,20 @@ mod tests {
         assert!(vol > 0.0);
         // Loose check because time is non-deterministic
         assert!(vol > 10.0, "Volatility should be high (got {})", vol);
+    }
+}
+
+#[cfg(all(test, not(feature = "nova")))]
+#[allow(deprecated)]
+mod stub_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_new() {
+        let db = AletheiaDB::new().unwrap();
+        let _ = Chronos::new(&db);
     }
 }
