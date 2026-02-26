@@ -2,83 +2,84 @@
 
 ## Summary
 
-**Status**: No critical high-severity correctness bugs found.
-**Risk Level**: Low to Medium.
+**Status**: 🔴 **CRITICAL CORRECTNESS BUG FOUND**
+**Risk Level**: Critical.
 
-The codebase exhibits a strong defensive programming style, with careful handling of concurrency, race conditions, and memory safety (especially in `unsafe` blocks). However, there are significant performance bottlenecks due to conservative locking strategies and some theoretical edge cases in error handling.
+This review focused on the `ShardCoordinator` and `PersistentCommitLog` implementation in `src/storage/sharding/`. A critical correctness issue was identified where partial writes (due to crashes) corrupt the append-only log, causing permanent data loss for subsequent transactions. Additionally, severe operational risks exist due to unbounded log growth.
 
 ## Findings
 
-### 1. HNSW Ingestion Scalability Bottleneck (Performance - Medium)
+### 1. Data Loss on Log Append Corruption (Correctness - Critical)
 
-**File**: `src/index/vector/hnsw.rs`
+**File**: `src/storage/sharding/persistent_commit_log.rs`
 
-**Issue**: The `add` method acquires a global `RwLock::write` lock on the inner `usearch` index (`self.inner.write()`), even though `usearch` claims to support concurrent modifications.
+**Issue**: The `PersistentCommitLog` opens the log file in append mode (`OpenOptions::new().append(true)`). However, `read_entries` stops parsing at the first error (e.g., a partial write from a crash). New writes are appended to the *physical* end of the file, after the garbage data.
 
-**Impact**: Vector ingestion is globally serialized. Multi-threaded ingestion will not scale beyond single-core performance. For a "high-performance" database, this is a significant limitation.
+**Scenario**:
+1.  Node crashes while writing a commit entry (partial write).
+2.  Node restarts. `read_entries` reads up to the partial write and stops (ignoring the garbage).
+3.  Node appends new entries to the end of the file (after the garbage).
+4.  Node restarts again. `read_entries` reads up to the partial write and STOPS.
+5.  **Result**: All entries written in step 3 are effectively lost/invisible to recovery.
 
-**Reasoning**: The comment states this is "intentionally redundant" for safety. While safe, it negates the concurrency benefits of the underlying library.
+**Recommendation**:
+-   **Immediate Fix**: In `PersistentCommitLog::new`, after `read_entries` returns the valid entries and `max_lsn`, truncate the file to the end of the valid data using `File::set_len`.
+-   **Prevention**: Add a checksum/validation step that verifies the file end matches the last valid entry end.
 
-**Recommendation**: Investigate if `usearch::Index::add` is thread-safe with `&self`. If so, downgrade the lock to `read()` to allow concurrent indexing (while relying on `entry_locks` for row-level consistency).
+### 2. Unbounded Log Growth / OOM (Availability - High)
 
-### 2. Ambiguous Commit on WAL Flush Timeout (Correctness - Low)
+**File**: `src/storage/sharding/persistent_commit_log.rs`
 
-**File**: `src/storage/wal/group_commit.rs`
+**Issue**: `PersistentCommitLog` defines `max_file_size` in config but never checks it. The log file grows indefinitely.
+**Impact**:
+-   **Disk Exhaustion**: Eventually fills the disk.
+-   **Startup OOM**: `read_entries` reads the **entire file** into memory (`Vec<u8>`). A large log file will cause the process to crash on startup due to OOM.
 
-**Issue**: In `wait_for_flush`, if the wait times out (default 60s), the function returns `StorageError::WalError`. However, the flush operation in the background thread is not cancelled and may eventually succeed.
+**Recommendation**: Implement log rotation or compaction. Periodically write active (pending) transactions to a new file and atomically replace the old one.
 
-**Impact**: The client receives an error ("Timeout"), implying failure, but the data might be durably persisted later. This violates strict atomicity/consistency expectations (Ghost Success).
+### 3. V1 -> V2 Timestamp Inconsistency (Correctness - Medium)
 
-**Reasoning**: "Two Generals Problem". It is difficult to cancel an in-flight flush.
+**File**: `src/storage/sharding/coordinator.rs`
 
-**Recommendation**: On timeout, consider treating it as a critical failure (panic/shutdown) to prevent inconsistency, or explicitly document that the transaction state is unknown.
+**Issue**: Recovering V1 transactions (which lack persisted timestamps) causes `ShardCoordinator` to generate *new* commit timestamps.
+**Impact**: If a V1 transaction was partially committed with Timestamp A, and recovery commits the rest with Timestamp B, the system enters an inconsistent state.
+**Mitigation**: Accept the risk as part of the V1->V2 migration (assuming V1 was experimental), but document it clearly.
 
-### 3. Fragile Error String Matching (Maintenance - Low)
+### 4. Unlogged Aborts (Correctness - Low)
 
-**File**: `src/index/vector/hnsw.rs`
+**File**: `src/storage/sharding/coordinator.rs`
 
-**Issue**: `is_retryable_usearch_error` relies on string matching: `error_msg.contains("No available threads to lock")`.
-
-**Impact**: If the upstream `usearch` library changes its error message format, retries will fail silently, leading to spurious errors under load.
-
-**Recommendation**: Advocate for structured error types in the upstream library or maintain a strict version pin and integration test suite.
-
-### 4. Theoretical WAL Epoch Wraparound (Correctness - Low)
-
-**File**: `src/storage/wal/group_commit.rs`
-
-**Issue**: `wait_for_flush` uses `state.flushed_epoch < epoch`. If `u64` epoch wraps around, this check will incorrectly return success immediately.
-
-**Impact**: Data loss (premature success) after ~584 years of operation at 1 billion tx/sec.
-
-**Recommendation**: Use modular arithmetic (`wrapping_sub`) for epoch comparisons, similar to `src/storage/wal/ring_buffer.rs`.
+**Issue**: `abort_distributed_transaction` attempts to log the abort decision but swallows the error if logging fails.
+**Impact**: Minor. In 2PC, an unknown transaction (not prepared/committed) is implicitly aborted. The lack of an explicit Abort record is acceptable but makes debugging harder.
 
 ## Test Gaps
 
-- **HNSW Concurrency Perf**: No benchmark measuring multi-threaded ingestion scaling to confirm the bottleneck.
-- **WAL Timeout Recovery**: No test verifying behavior when `wait_for_flush` times out but flush eventually succeeds (hard to test deterministically).
+-   **Partial Write Recovery**: No test validates behavior when the log file ends with garbage bytes (simulating a crash during write).
+-   **Large Log Files**: No test verifies behavior with log files larger than memory.
+-   **Log Rotation**: No tests for rotation (as it's unimplemented).
 
-## Conclusion
+## Minimal Patch Plan (Critical Fix)
 
-The system is safe but conservative. The primary recommendation is to address the HNSW global lock to unlock performance potential.
+To fix the critical data loss bug (#1), apply the following change to `PersistentCommitLog::new`:
 
-## Review: DX Improvements (Commit 353f5a6)
+```rust
+// ... inside PersistentCommitLog::new ...
+if path.exists() {
+    let (entries, max_lsn, valid_len) = Self::read_entries(&path)?; // Update read_entries to return valid_len
 
-**Status**: No high-severity findings.
-**Scope**: `src/storage/index_persistence/worker.rs`, `src/lib.rs`, `src/index/vector/mod.rs`, `README.md`.
+    // ... (logic to build pending map) ...
 
-### Findings
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true) // Open with write access to allow truncation
+        .append(true)
+        .open(&path)?;
 
-1.  **Log Fix Verified (Low Risk)**
-    -   **File**: `src/storage/index_persistence/worker.rs`
-    -   **Observation**: The fix correctly removes a misleading warning by checking `tracker.is_shutdown()`. The logic ensures clean exit.
-    -   **Verification**: Code review confirms the fix is safe and effective.
+    // TRUNCATE to valid length to remove partial writes/garbage
+    file.set_len(valid_len)?;
 
-2.  **API Re-exports Verified (Low Risk)**
-    -   **Files**: `src/lib.rs`, `src/index/vector/mod.rs`
-    -   **Observation**: `PersistenceConfig` and `TemporalVectorConfig` are correctly re-exported.
-    -   **Verification**: `cargo test` passed, confirming no breaking changes.
+    // ...
+}
+```
 
-### Conclusion
-
-The changes in commit `353f5a6` are safe and improve the developer experience as intended. No regressions found in persistence or vector APIs.
+This ensures new writes are appended immediately after the last valid entry, preserving the integrity of the log chain.

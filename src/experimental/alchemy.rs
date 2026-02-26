@@ -12,6 +12,8 @@
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
+
+#![allow(clippy::collapsible_if)]
 //! use aletheiadb::experimental::alchemy::Alchemist;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
