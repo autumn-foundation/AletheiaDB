@@ -660,54 +660,54 @@ impl FlushCoordinator {
             // Sync to disk if requested
             if sync && self.config.sync_on_flush {
                 let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref sync_file) = *sync_guard {
-                    if let Err(e) = sync_file.sync_data() {
-                        // 🛡️ CRITICAL: If sync fails, we MUST truncate the file back to start_size.
-                        // Otherwise, the data we just wrote to the OS cache remains in the file
-                        // but we return an error to the client. If the system restarts, this "failed"
-                        // transaction would be replayed (Phantom Commit).
-                        //
-                        // We use the writer_guard to access the underlying file since it is still locked.
-                        if let Some(writer) = writer_guard.as_mut() {
-                            // writer.flush() was already called above, so data is in the file (OS cache).
-                            // We get the mutable reference to the inner File to truncate it.
-                            let file = writer.get_mut();
+                if let Some(ref sync_file) = *sync_guard
+                    && let Err(e) = sync_file.sync_data()
+                {
+                    // 🛡️ CRITICAL: If sync fails, we MUST truncate the file back to start_size.
+                    // Otherwise, the data we just wrote to the OS cache remains in the file
+                    // but we return an error to the client. If the system restarts, this "failed"
+                    // transaction would be replayed (Phantom Commit).
+                    //
+                    // We use the writer_guard to access the underlying file since it is still locked.
+                    if let Some(writer) = writer_guard.as_mut() {
+                        // writer.flush() was already called above, so data is in the file (OS cache).
+                        // We get the mutable reference to the inner File to truncate it.
+                        let file = writer.get_mut();
 
-                            // Attempt truncation. If this fails, we are in a very bad state (likely disk failure),
-                            // but we must try to rollback the phantom data.
-                            if let Err(trunc_err) = file.set_len(start_size) {
-                                // We can't do much if truncation fails, but we log it critically.
+                        // Attempt truncation. If this fails, we are in a very bad state (likely disk failure),
+                        // but we must try to rollback the phantom data.
+                        if let Err(trunc_err) = file.set_len(start_size) {
+                            // We can't do much if truncation fails, but we log it critically.
+                            eprintln!(
+                                "CRITICAL: Failed to truncate WAL segment after sync failure. \
+                                 Data consistency may be compromised. Error: {}",
+                                trunc_err
+                            );
+                        } else {
+                            // Truncation succeeded. We successfully prevented a phantom commit.
+                            // The file size is now restored to start_size.
+
+                            // 🛡️ CRITICAL: We must also reset the file cursor (seek) back to start_size.
+                            // set_len() truncates the file but leaves the cursor at the end of the failed write.
+                            // If we don't seek, the next write will start after the hole, creating a sparse file.
+                            if let Err(seek_err) = file.seek(SeekFrom::Start(start_size)) {
                                 eprintln!(
-                                    "CRITICAL: Failed to truncate WAL segment after sync failure. \
+                                    "CRITICAL: Failed to seek WAL segment after sync failure. \
                                      Data consistency may be compromised. Error: {}",
-                                    trunc_err
+                                    seek_err
                                 );
-                            } else {
-                                // Truncation succeeded. We successfully prevented a phantom commit.
-                                // The file size is now restored to start_size.
-
-                                // 🛡️ CRITICAL: We must also reset the file cursor (seek) back to start_size.
-                                // set_len() truncates the file but leaves the cursor at the end of the failed write.
-                                // If we don't seek, the next write will start after the hole, creating a sparse file.
-                                if let Err(seek_err) = file.seek(SeekFrom::Start(start_size)) {
-                                    eprintln!(
-                                        "CRITICAL: Failed to seek WAL segment after sync failure. \
-                                         Data consistency may be compromised. Error: {}",
-                                        seek_err
-                                    );
-                                }
-
-                                // Reset in-memory size to match file state (defensive, though flush updates it later)
-                                self.current_segment_size
-                                    .store(start_size, Ordering::Relaxed);
                             }
-                        }
 
-                        return Err(Error::Storage(StorageError::IoError(format!(
-                            "Failed to sync WAL: {}",
-                            e
-                        ))));
+                            // Reset in-memory size to match file state (defensive, though flush updates it later)
+                            self.current_segment_size
+                                .store(start_size, Ordering::Relaxed);
+                        }
                     }
+
+                    return Err(Error::Storage(StorageError::IoError(format!(
+                        "Failed to sync WAL: {}",
+                        e
+                    ))));
                 }
             }
 
