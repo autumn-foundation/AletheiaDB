@@ -237,6 +237,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::collapsible_if)]
     fn test_crystallize_wormholes_creates_edges() {
         let db = create_test_db();
         let alchemist = Alchemist::new(&db);
@@ -287,6 +288,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::collapsible_if)]
     fn test_fuse_synonyms_merges_nodes() {
         let db = create_test_db();
         let alchemist = Alchemist::new(&db);
