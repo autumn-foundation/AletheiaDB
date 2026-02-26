@@ -1554,15 +1554,17 @@ mod tests {
         assert!(result.is_err(), "Should return error");
         let err_msg = format!("{}", result.unwrap_err());
 
-        // This verifies we hit the catastrophic failure path (L665-666)
+        // Verify we hit one of the error paths.
+        // On Linux, /dev/null fails both sync and truncate (EINVAL), triggering "CRITICAL".
+        // On MacOS, /dev/null fails sync (ENODEV) but allows truncate (success), triggering "truncated back to safety".
+        // Both outcomes prove we are handling the sync failure correctly.
+        let is_critical_failure =
+            err_msg.contains("CRITICAL: Sync failed") && err_msg.contains("Truncate failed");
+        let is_safe_rollback = err_msg.contains("truncated back to safety");
+
         assert!(
-            err_msg.contains("CRITICAL: Sync failed"),
-            "Error should indicate critical sync failure, got: {}",
-            err_msg
-        );
-        assert!(
-            err_msg.contains("Truncate failed"),
-            "Error should indicate truncate failure, got: {}",
+            is_critical_failure || is_safe_rollback,
+            "Error should indicate either critical failure or safe rollback, got: {}",
             err_msg
         );
     }
