@@ -85,6 +85,10 @@ impl AdjacencyIndex {
     /// * `offsets` - CSR offset array
     /// * `edge_ids` - Flat array of edge IDs
     /// * `edges_map` - Map from edge ID to (target, label) for reconstruction
+    ///
+    /// # Errors
+    /// Returns an error if the input data violates CSR invariants (e.g. unsorted nodes,
+    /// non-monotonic offsets, or bounds violations).
     pub fn import_csr(
         node_ids: Vec<u64>,
         offsets: Vec<u64>,
@@ -94,13 +98,13 @@ impl AdjacencyIndex {
             (NodeId, InternedString),
             BuildHasherDefault<IdentityHasher>,
         >,
-    ) -> Self {
+    ) -> Result<Self, String> {
         if offsets.is_empty() || edge_ids.is_empty() {
-            return Self::new();
+            return Ok(Self::new());
         }
 
-        // Validate CSR invariants
-        Self::validate_csr_invariants(&node_ids, &offsets, &edge_ids).unwrap();
+        // Validate CSR invariants strictly
+        Self::validate_csr_invariants(&node_ids, &offsets, &edge_ids)?;
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
@@ -128,12 +132,12 @@ impl AdjacencyIndex {
             }
         }
 
-        Self {
+        Ok(Self {
             node_ids: node_ids_typed,
             offsets: offsets_usize,
             edges: adjacency_entries,
             max_node_id,
-        }
+        })
     }
 }
 
@@ -300,6 +304,20 @@ impl AdjacencyIndex {
             ));
         }
 
+        // Validate monotonicity and bounds of offsets
+        // offsets[i] <= offsets[i+1] and offsets[i] <= edge_ids.len()
+        for i in 0..offsets.len() - 1 {
+            if offsets[i] > offsets[i + 1] {
+                return Err(format!(
+                    "CSR offsets not monotonic: offsets[{}]={} > offsets[{}]={}",
+                    i,
+                    offsets[i],
+                    i + 1,
+                    offsets[i + 1]
+                ));
+            }
+        }
+
         #[allow(clippy::collapsible_if)]
         if let Some(&last_offset) = offsets.last() {
             if last_offset != edge_ids.len() as u64 {
@@ -307,6 +325,19 @@ impl AdjacencyIndex {
                     "CSR last offset mismatch: expected {}, got {}",
                     edge_ids.len(),
                     last_offset
+                ));
+            }
+        }
+
+        // Validate node_ids are sorted
+        for i in 0..node_ids.len().saturating_sub(1) {
+            if node_ids[i] >= node_ids[i + 1] {
+                return Err(format!(
+                    "CSR node_ids not sorted or duplicate: node_ids[{}]={} >= node_ids[{}]={}",
+                    i,
+                    node_ids[i],
+                    i + 1,
+                    node_ids[i + 1]
                 ));
             }
         }
@@ -782,7 +813,7 @@ mod tests {
         edges_map.insert(EdgeId::new(10).unwrap(), (NodeId::new(2).unwrap(), label));
         edges_map.insert(EdgeId::new(20).unwrap(), (NodeId::new(1).unwrap(), label));
 
-        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map).unwrap();
         assert_eq!(index.node_count(), 2);
         assert_eq!(index.edge_count(), 2);
     }
@@ -815,17 +846,31 @@ mod sentry_tests {
             AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_val, &edge_ids)
                 .unwrap_err();
         assert!(err_val.contains("CSR last offset mismatch"));
+
+        // 4. Non-monotonic offsets
+        let non_monotonic = vec![0, 2, 1];
+        let err_mono = AdjacencyIndex::validate_csr_invariants(&node_ids, &non_monotonic, &edge_ids)
+            .unwrap_err();
+        assert!(err_mono.contains("CSR offsets not monotonic"));
+
+        // 5. Unsorted node_ids
+        let unsorted_nodes = vec![20, 10];
+        let err_unsorted =
+            AdjacencyIndex::validate_csr_invariants(&unsorted_nodes, &offsets, &edge_ids)
+                .unwrap_err();
+        assert!(err_unsorted.contains("CSR node_ids not sorted"));
     }
 
     #[test]
-    #[should_panic(expected = "CSR offsets length mismatch")]
-    fn test_import_csr_panics_on_invalid() {
-        // Integration check: ensure import_csr actually calls validate and panics
+    fn test_import_csr_errors_on_invalid() {
+        // Integration check: ensure import_csr actually calls validate and returns error
         let node_ids = vec![10];
         let offsets = vec![0]; // invalid len (should be 2)
         let edge_ids = vec![100]; // Non-empty to bypass early return
         let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
-        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let res = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("CSR offsets length mismatch"));
     }
 
     #[test]
@@ -844,7 +889,7 @@ mod sentry_tests {
         edges_map.insert(EdgeId::new(101).unwrap(), (target, label));
 
         // Should not panic
-        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map).unwrap();
 
         assert_eq!(index.edge_count(), 2);
         assert_eq!(index.node_count(), 2);

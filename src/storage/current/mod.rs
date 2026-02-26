@@ -977,6 +977,9 @@ impl CurrentStorage {
     /// Import CSR adjacency data from persistence.
     ///
     /// This bypasses the need to rebuild adjacency structures from scratch.
+    ///
+    /// # Errors
+    /// Returns an error if the CSR data is invalid (e.g. non-monotonic offsets).
     pub fn import_csr(
         &self,
         outgoing_node_ids: Vec<u64>,
@@ -985,7 +988,7 @@ impl CurrentStorage {
         incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
-    ) {
+    ) -> std::result::Result<(), String> {
         self.indexes.import_csr(
             outgoing_node_ids,
             outgoing_offsets,
@@ -993,7 +996,7 @@ impl CurrentStorage {
             incoming_node_ids,
             incoming_offsets,
             incoming_edge_ids,
-        );
+        )
     }
 
     /// Get the number of nodes.

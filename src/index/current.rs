@@ -107,21 +107,29 @@ impl CurrentIndexes {
     /// - `Ok(())` if shutdown was successful or no scheduler was running
     /// - `Err(String)` if the background thread panicked during shutdown
     pub fn shutdown_background_compaction(&mut self) -> Result<(), String> {
+        let mut result = Ok(());
+
         // Shutdown outgoing compaction
         if let Some((scheduler, handle)) = self.outgoing_compaction.take() {
             scheduler.shutdown();
-            handle
-                .join()
-                .map_err(|e| format!("Outgoing compaction thread panicked: {:?}", e))?;
+            if let Err(e) = handle.join() {
+                eprintln!("Outgoing compaction thread panicked during shutdown: {:?}", e);
+                if result.is_ok() {
+                    result = Err("Outgoing compaction thread panicked".to_string());
+                }
+            }
         }
         // Shutdown incoming compaction
         if let Some((scheduler, handle)) = self.incoming_compaction.take() {
             scheduler.shutdown();
-            handle
-                .join()
-                .map_err(|e| format!("Incoming compaction thread panicked: {:?}", e))?;
+            if let Err(e) = handle.join() {
+                eprintln!("Incoming compaction thread panicked during shutdown: {:?}", e);
+                if result.is_ok() {
+                    result = Err("Incoming compaction thread panicked".to_string());
+                }
+            }
         }
-        Ok(())
+        result
     }
 
     /// Get frozen edge count for outgoing adjacency (for testing).
@@ -781,7 +789,7 @@ impl CurrentIndexes {
         incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
-    ) {
+    ) -> Result<(), String> {
         use crate::core::hasher::IdentityHasher;
         use std::collections::{HashMap, HashSet};
         use std::hash::BuildHasherDefault;
@@ -790,14 +798,14 @@ impl CurrentIndexes {
         // If we have tombstones, importing would cause deleted edges to reappear.
         let outgoing_tombstones = self.outgoing.tombstone_count();
         let incoming_tombstones = self.incoming.tombstone_count();
-        assert!(
-            outgoing_tombstones == 0 && incoming_tombstones == 0,
-            "Cannot import CSR with uncommitted tombstones: {} outgoing, {} incoming. \
-             Deleted edges would reappear! Call compact() first or ensure import is \
-             only called on a fresh index during startup.",
-            outgoing_tombstones,
-            incoming_tombstones
-        );
+        if outgoing_tombstones > 0 || incoming_tombstones > 0 {
+            return Err(format!(
+                "Cannot import CSR with uncommitted tombstones: {} outgoing, {} incoming. \
+                 Deleted edges would reappear! Call compact() first or ensure import is \
+                 only called on a fresh index during startup.",
+                outgoing_tombstones, incoming_tombstones
+            ));
+        }
 
         // Build edges map for CSR reconstruction
         let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
@@ -812,7 +820,7 @@ impl CurrentIndexes {
             outgoing_offsets.clone(),
             outgoing_edge_ids.clone(),
             &edges_map,
-        );
+        ).map_err(|e| format!("Outgoing CSR import failed: {}", e))?;
         self.outgoing.import_frozen_csr(Arc::new(outgoing_csr));
 
         // Rebuild edges map for incoming (maps edge_id to source, not target)
@@ -828,7 +836,7 @@ impl CurrentIndexes {
             incoming_offsets,
             incoming_edge_ids.clone(),
             &edges_map,
-        );
+        ).map_err(|e| format!("Incoming CSR import failed: {}", e))?;
         self.incoming.import_frozen_csr(Arc::new(incoming_csr));
 
         // ===== Phase 7: Reconstruct Delta Buffer =====
@@ -858,6 +866,8 @@ impl CurrentIndexes {
                 );
             }
         }
+
+        Ok(())
     }
 }
 
@@ -875,11 +885,15 @@ impl Drop for CurrentIndexes {
             scheduler.shutdown();
             // Give thread a moment to finish, but don't block indefinitely
             // on drop since that could cause deadlocks.
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                eprintln!("Outgoing compaction thread panicked during drop: {:?}", e);
+            }
         }
         if let Some((scheduler, handle)) = self.incoming_compaction.take() {
             scheduler.shutdown();
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                eprintln!("Incoming compaction thread panicked during drop: {:?}", e);
+            }
         }
     }
 }
