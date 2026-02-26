@@ -165,9 +165,7 @@ impl<'a> Spectre<'a> {
                 // Ignore edge fetch errors
                 if let Ok(neighbor) = self.db.get_edge_target(edge_id) {
                     // Calculate cost to enter neighbor based on semantic alignment
-                    let focus_score = self
-                        .focus(neighbor, lens, vector_prop)
-                        .unwrap_or(-1.0); // High penalty for missing info
+                    let focus_score = self.focus(neighbor, lens, vector_prop).unwrap_or(-1.0); // High penalty for missing info
 
                     // Map [-1, 1] to [2, 0] cost
                     // We add a tiny epsilon to ensure non-zero cost for cycles unless perfect alignment
