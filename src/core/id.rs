@@ -549,6 +549,52 @@ mod sentry_tests {
         assert_eq!(entity_edge.as_node(), None);
         assert_eq!(entity_edge.as_edge(), Some(edge_id));
     }
+
+    #[test]
+    fn test_id_generator_boundary() {
+        // 🛡️ Sentry Test: Verify behavior at MAX_VALID_ID boundary.
+        // This targets mutants replacing `>` with `==` in IdGenerator::next.
+        let generator = IdGenerator::with_start(MAX_VALID_ID);
+
+        // MAX_VALID_ID is valid, so this should succeed.
+        assert!(generator.next().is_ok());
+
+        // Next call exceeds MAX_VALID_ID, so this should fail.
+        let result = generator.next();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            StorageError::InvalidId { .. }
+        ));
+    }
+
+    #[test]
+    fn test_ensure_at_least_exact() {
+        // 🛡️ Sentry Test: Verify ensure_at_least handles strict inequality correctly.
+        // This targets mutants replacing `>` with `>=`.
+        let generator = IdGenerator::with_start(100);
+
+        // ensure_at_least(100) should do nothing because current (100) is not < 100.
+        // If logic was `>=` (i.e. `while min_value >= current`), it might loop or change behavior unnecessarily,
+        // although in the specific implementation `compare_exchange` would just replace 100 with 100.
+        // However, we want to ensure `current` doesn't change.
+        generator.ensure_at_least(100);
+        assert_eq!(generator.current(), 100);
+
+        // ensure_at_least(101) should update.
+        generator.ensure_at_least(101);
+        assert_eq!(generator.current(), 101);
+    }
+
+    #[test]
+    #[should_panic(expected = "Transaction ID overflow")]
+    fn test_tx_id_overflow_panic_simulation() {
+        // 🛡️ Sentry Test: Verify TxIdGenerator panics on overflow.
+        // This targets mutants replacing `==` with `!=` in the overflow check.
+        let generator = TxIdGenerator::new();
+        generator.set_counter(u64::MAX); // Use testing method to simulate state
+        let _ = generator.next();
+    }
 }
 
 #[cfg(test)]

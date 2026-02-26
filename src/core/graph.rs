@@ -621,7 +621,64 @@ mod sentry_tests {
     }
 
     #[test]
-    fn test_node_with_metadata() {
+    fn test_matches_label_interned_ne() {
+        // 🛡️ Sentry Test: Verify matches_label returns false for mismatched interned labels.
+        // This targets mutants that replace `==` with `!=` in matches_label.
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let other_label_str = "Company";
+        GLOBAL_INTERNER.intern(other_label_str).unwrap(); // Ensure it exists
+
+        // If matches_label had `!=`, then (label != "Company") would be true, returning true incorrectly.
+        assert!(
+            !matches_label(label, other_label_str),
+            "matches_label should return false for mismatched interned label"
+        );
+    }
+
+    #[test]
+    fn test_node_has_label_negative() {
+        // 🛡️ Sentry Test: Verify Node::has_label returns false for mismatched label.
+        // This targets mutants that replace `==` with `!=`.
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let other_label = GLOBAL_INTERNER.intern("Company").unwrap();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            !node.has_label(other_label),
+            "has_label should return false for mismatched label"
+        );
+    }
+
+    #[test]
+    fn test_edge_has_label_negative() {
+        // 🛡️ Sentry Test: Verify Edge::has_label returns false for mismatched label.
+        // This targets mutants that replace `==` with `!=`.
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let other_label = GLOBAL_INTERNER.intern("LIKES").unwrap();
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            !edge.has_label(other_label),
+            "has_label should return false for mismatched label"
+        );
+    }
+
+    #[test]
+    fn test_node_with_metadata_storage() {
         // 🛡️ Sentry Test: Verify Node::with_metadata correctly stores metadata.
         // This targets mutants where the metadata argument is ignored and replaced with default.
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
@@ -634,7 +691,7 @@ mod sentry_tests {
             NodeId::new(1).unwrap(),
             label,
             props,
-            VersionId::new(10).unwrap(),
+            VersionId::new(1).unwrap(),
             metadata,
         );
 
@@ -647,7 +704,7 @@ mod sentry_tests {
     }
 
     #[test]
-    fn test_edge_with_metadata() {
+    fn test_edge_with_metadata_storage() {
         // 🛡️ Sentry Test: Verify Edge::with_metadata correctly stores metadata.
         // This targets mutants where the metadata argument is ignored and replaced with default.
         let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
@@ -705,5 +762,28 @@ mod sentry_tests {
 
         // Case 4: Both mismatch (False)
         assert!(!edge.connects(other, other));
+    }
+
+    #[test]
+    fn test_edge_connects_target_mismatch() {
+        // 🛡️ Sentry Test: Verify Edge::connects checks both source and target.
+        // This targets mutants where the target check is omitted or replaced with ||.
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let other = NodeId::new(3).unwrap();
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            source,
+            target,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            !edge.connects(source, other),
+            "Edge should not connect when target mismatches"
+        );
     }
 }
