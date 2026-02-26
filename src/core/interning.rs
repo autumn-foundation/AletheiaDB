@@ -1247,7 +1247,9 @@ mod retry_tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            crate::core::error::Error::Storage(crate::core::error::StorageError::InternerSnapshotError) => (),
+            crate::core::error::Error::Storage(
+                crate::core::error::StorageError::InternerSnapshotError,
+            ) => (),
             e => panic!("Expected InternerSnapshotError, got {:?}", e),
         }
     }

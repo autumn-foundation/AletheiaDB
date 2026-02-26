@@ -35,21 +35,21 @@ fn test_havoc_interner_snapshot_consistency() {
     let stop_clone = stop.clone();
     let reader = thread::spawn(move || {
         while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-            let snapshot = interner_clone.get_all_strings();
+            let snapshot_result = interner_clone.get_all_strings();
 
-            // Check for holes?
-            // Actually, holes are expected if an intern operation is in progress (ID reserved but not inserted).
-            // But we must ensure that we captured all strings up to the max ID found.
-            // The fix in get_all_strings ensures we resize the vector to include the max ID.
-
-            // We just verify that we don't panic and the snapshot looks sane.
-            let len = snapshot.len();
-            if len > 0 {
-                // Verify that we have at least some content
-                let content_count = snapshot.iter().filter(|s| !s.is_empty()).count();
-                // We might have holes, but we shouldn't have ONLY holes if we are writing.
-                if content_count == 0 {
-                    // This might happen at very start, but unlikely later.
+            // It's possible to get an error if contention is extremely high (timeout).
+            // That's acceptable behavior for this stress test - we just care that we don't
+            // get a corrupted snapshot (Vec with holes) or panic.
+            if let Ok(snapshot) = snapshot_result {
+                let len = snapshot.len();
+                if len > 0 {
+                    // With the fix, we should NEVER have holes (empty strings) in the snapshot.
+                    // The new implementation either returns a complete snapshot or an error.
+                    let hole_count = snapshot.iter().filter(|s| s.is_empty()).count();
+                    assert_eq!(
+                        hole_count, 0,
+                        "Snapshot contained holes (empty strings)! This indicates data corruption."
+                    );
                 }
             }
         }
