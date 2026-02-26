@@ -8,5 +8,5 @@ mod persistence_version_ids;
 mod property_deserialization_dos;
 mod temporal_query_visibility;
 mod temporal_version_lookup;
-mod wal_group_commit_epochs;
 mod tx_id_recovery_collision;
+mod wal_group_commit_epochs;

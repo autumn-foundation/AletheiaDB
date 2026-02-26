@@ -10,12 +10,9 @@ fn test_coordinator_tx_id_collision_on_restart() {
     let db_path = dir.path().to_path_buf();
     let wal_path = db_path.join("commit.log");
 
-    let shard_config = ShardConfig::new(vec![ShardDefinition::new(
-        0,
-        "shard0:9000",
-        vec!["Person"],
-    )])
-    .with_wal_path(wal_path.clone());
+    let shard_config =
+        ShardConfig::new(vec![ShardDefinition::new(0, "shard0:9000", vec!["Person"])])
+            .with_wal_path(wal_path.clone());
 
     // 1. Start Coordinator and generate some transactions
     let mut last_tx_id_run1 = TxId::new(0);
@@ -32,12 +29,8 @@ fn test_coordinator_tx_id_collision_on_restart() {
             // Log them as committed so they persist in WAL
             // Note: In real life, we'd go through prepare/commit, but we can cheat by accessing log if needed,
             // but going through public API is better.
-            coordinator
-                .prepare_distributed_transaction(tx_id)
-                .unwrap();
-            coordinator
-                .commit_distributed_transaction(tx_id)
-                .unwrap();
+            coordinator.prepare_distributed_transaction(tx_id).unwrap();
+            coordinator.commit_distributed_transaction(tx_id).unwrap();
         }
     }
 

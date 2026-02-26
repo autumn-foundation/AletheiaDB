@@ -487,7 +487,12 @@ impl PersistentCommitLog {
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
-            (Some(BufWriter::new(file)), max_lsn + 1, pending_map, max_tx_id)
+            (
+                Some(BufWriter::new(file)),
+                max_lsn + 1,
+                pending_map,
+                max_tx_id,
+            )
         } else {
             // Create new file with header
             let file = OpenOptions::new()
@@ -540,7 +545,8 @@ impl PersistentCommitLog {
     ) -> CommitLogResult<u64> {
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::commit(lsn, tx_id, participants, commit_timestamp);
-        self.max_seen_tx_id.fetch_max(tx_id.as_u64(), Ordering::SeqCst);
+        self.max_seen_tx_id
+            .fetch_max(tx_id.as_u64(), Ordering::SeqCst);
 
         self.write_entry(&entry)?;
 
@@ -556,7 +562,8 @@ impl PersistentCommitLog {
     pub fn log_abort(&self, tx_id: TxId, participants: Vec<ShardId>) -> CommitLogResult<u64> {
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::abort(lsn, tx_id, participants);
-        self.max_seen_tx_id.fetch_max(tx_id.as_u64(), Ordering::SeqCst);
+        self.max_seen_tx_id
+            .fetch_max(tx_id.as_u64(), Ordering::SeqCst);
 
         self.write_entry(&entry)?;
 
@@ -574,7 +581,8 @@ impl PersistentCommitLog {
     pub fn log_complete(&self, tx_id: TxId) -> CommitLogResult<u64> {
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::complete(lsn, tx_id);
-        self.max_seen_tx_id.fetch_max(tx_id.as_u64(), Ordering::SeqCst);
+        self.max_seen_tx_id
+            .fetch_max(tx_id.as_u64(), Ordering::SeqCst);
 
         self.write_entry(&entry)?;
 
