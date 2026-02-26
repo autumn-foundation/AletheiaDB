@@ -418,6 +418,8 @@ pub struct PersistentCommitLog {
     entries_written: AtomicU64,
     /// Total bytes written.
     bytes_written: AtomicU64,
+    /// Maximum transaction ID seen in the log (or u64::MAX if none).
+    max_seen_tx_id: AtomicU64,
 }
 
 /// Configuration for the persistent commit log.
@@ -456,15 +458,22 @@ impl PersistentCommitLog {
             })?;
         }
 
-        let (writer, lsn, pending) = if path.exists() {
+        let (writer, lsn, pending, max_seen_tx) = if path.exists() {
             // Open existing file and recover state
             let (entries, max_lsn) = Self::read_entries(&path)?;
 
             // Build pending map (entries without completion)
             let mut pending_map = HashMap::new();
             let mut completed = std::collections::HashSet::new();
+            let mut max_seen = u64::MAX;
 
             for entry in entries {
+                // Track max seen TxId
+                let tx_id_val = entry.tx_id.as_u64();
+                if max_seen == u64::MAX || tx_id_val > max_seen {
+                    max_seen = tx_id_val;
+                }
+
                 match entry.entry_type {
                     EntryType::Commit | EntryType::Abort => {
                         if !completed.contains(&entry.tx_id) {
@@ -485,7 +494,12 @@ impl PersistentCommitLog {
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
-            (Some(BufWriter::new(file)), max_lsn + 1, pending_map)
+            (
+                Some(BufWriter::new(file)),
+                max_lsn + 1,
+                pending_map,
+                max_seen,
+            )
         } else {
             // Create new file with header
             let file = OpenOptions::new()
@@ -498,7 +512,7 @@ impl PersistentCommitLog {
             let mut writer = BufWriter::new(file);
             Self::write_header(&mut writer)?;
 
-            (Some(writer), 1, HashMap::new())
+            (Some(writer), 1, HashMap::new(), u64::MAX)
         };
 
         Ok(Self {
@@ -509,6 +523,7 @@ impl PersistentCommitLog {
             config,
             entries_written: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
+            max_seen_tx_id: AtomicU64::new(max_seen_tx),
         })
     }
 
@@ -522,6 +537,7 @@ impl PersistentCommitLog {
             config: CommitLogConfig::default(),
             entries_written: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
+            max_seen_tx_id: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -534,6 +550,7 @@ impl PersistentCommitLog {
         participants: Vec<ShardId>,
         commit_timestamp: Option<HybridTimestamp>,
     ) -> CommitLogResult<u64> {
+        self.update_max_tx_id(tx_id);
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::commit(lsn, tx_id, participants, commit_timestamp);
 
@@ -549,6 +566,7 @@ impl PersistentCommitLog {
 
     /// Log an abort decision.
     pub fn log_abort(&self, tx_id: TxId, participants: Vec<ShardId>) -> CommitLogResult<u64> {
+        self.update_max_tx_id(tx_id);
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::abort(lsn, tx_id, participants);
 
@@ -566,6 +584,7 @@ impl PersistentCommitLog {
     ///
     /// This allows the entry to be garbage collected.
     pub fn log_complete(&self, tx_id: TxId) -> CommitLogResult<u64> {
+        self.update_max_tx_id(tx_id);
         let lsn = self.lsn.fetch_add(1, Ordering::SeqCst);
         let entry = CommitLogEntry::complete(lsn, tx_id);
 
@@ -631,6 +650,16 @@ impl PersistentCommitLog {
         self.lsn.load(Ordering::SeqCst)
     }
 
+    /// Get the maximum transaction ID seen in the log.
+    pub fn max_seen_tx_id(&self) -> Option<TxId> {
+        let max = self.max_seen_tx_id.load(Ordering::Relaxed);
+        if max == u64::MAX {
+            None
+        } else {
+            Some(TxId::new(max))
+        }
+    }
+
     /// Get statistics.
     pub fn stats(&self) -> CommitLogStats {
         CommitLogStats {
@@ -668,6 +697,25 @@ impl PersistentCommitLog {
     }
 
     // ==================== Private Methods ====================
+
+    fn update_max_tx_id(&self, tx_id: TxId) {
+        let val = tx_id.as_u64();
+        let mut current = self.max_seen_tx_id.load(Ordering::Relaxed);
+        loop {
+            if current != u64::MAX && val <= current {
+                break;
+            }
+            match self.max_seen_tx_id.compare_exchange_weak(
+                current,
+                val,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
 
     fn write_header(writer: &mut BufWriter<File>) -> CommitLogResult<()> {
         let mut header = [0u8; HEADER_SIZE];

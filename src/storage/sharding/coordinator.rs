@@ -267,11 +267,16 @@ impl ShardCoordinator {
 
         let router = ShardRouter::new(config);
 
+        let tx_id_generator = IdGenerator::new();
+        if let Some(max_id) = commit_log.max_seen_tx_id() {
+            tx_id_generator.reset_to(max_id.as_u64() + 1);
+        }
+
         Self {
             router,
             connections: RwLock::new(connections),
             shard_states: RwLock::new(shard_states),
-            tx_id_generator: IdGenerator::new(),
+            tx_id_generator,
             active_transactions: RwLock::new(HashMap::new()),
             commit_log: RwLock::new(commit_log),
             commit_clock: Mutex::new(time::now()),
