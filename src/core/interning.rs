@@ -373,6 +373,15 @@ impl StringInterner {
                 // In practice this is very short (just the time for a DashMap insert).
                 let mut spins = 0;
                 loop {
+                    // Check if ID is still within valid range. If next_id has been rolled back
+                    // (e.g. due to capacity exceeded), we should stop waiting.
+                    // Note: We use relaxed ordering as we are in a spin loop.
+                    let current_max_id = self.next_id.load(Ordering::Relaxed) as usize;
+                    if id >= current_max_id {
+                        // The ID was rolled back or invalid, stop waiting.
+                        break;
+                    }
+
                     if let Some(entry) = self.id_to_string.get(&InternedString::from_raw(id as u32))
                     {
                         strings[id] = Some(entry.value().to_string());
@@ -397,8 +406,9 @@ impl StringInterner {
             }
         }
 
-        // Unwrap all options (safe because we filled all holes)
-        strings.into_iter().map(|s| s.unwrap()).collect()
+        // Return only the strings that were successfully resolved.
+        // This implicitly handles rolled-back IDs by filtering out the Nones.
+        strings.into_iter().flatten().collect()
     }
 
     /// Pre-intern common strings at startup to avoid initial allocation overhead.

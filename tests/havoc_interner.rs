@@ -8,17 +8,24 @@ fn test_interner_snapshot_consistency() {
     let interner = Arc::new(StringInterner::new());
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
+    struct RunningGuard(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for RunningGuard {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     // Writer thread: continuously interns unique strings
     let writer = {
         let interner = interner.clone();
         let running = running.clone();
         thread::spawn(move || {
-            let mut i = 0;
+            let mut i: u64 = 0;
             while running.load(std::sync::atomic::Ordering::Relaxed) {
                 // Intern a non-empty string
                 let s = format!("s-{}", i);
                 let _ = interner.intern(&s);
-                i += 1;
+                i = i.wrapping_add(1);
                 if i % 100 == 0 {
                     thread::yield_now();
                 }
@@ -31,6 +38,9 @@ fn test_interner_snapshot_consistency() {
         let interner = interner.clone();
         let running = running.clone();
         thread::spawn(move || {
+            // Ensure writer stops even if reader panics
+            let _guard = RunningGuard(running);
+
             let start = std::time::Instant::now();
             while start.elapsed() < Duration::from_secs(2) {
                 let snapshot = interner.get_all_strings();
@@ -41,7 +51,6 @@ fn test_interner_snapshot_consistency() {
                 // for an ID but didn't find the string in the map yet.
                 for (id, s) in snapshot.iter().enumerate() {
                     if s.is_empty() {
-                        running.store(false, std::sync::atomic::Ordering::Relaxed);
                         panic!(
                             "Consistency violation! ID {} exists in snapshot (len {}) but string is empty. \
                              Race condition detected: ID reserved but string not yet visible.",
@@ -51,7 +60,6 @@ fn test_interner_snapshot_consistency() {
                 }
                 thread::yield_now();
             }
-            running.store(false, std::sync::atomic::Ordering::Relaxed);
         })
     };
 
