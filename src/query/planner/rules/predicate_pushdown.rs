@@ -123,6 +123,23 @@ impl PredicatePushdown {
 
                 // Check if we can push the filter below the optimized input operator
                 match &optimized_input {
+                    // STOP: Can't push below scans (they are the source)
+                    LogicalOp::Scan(_) => Ok((
+                        LogicalOp::unary(UnaryOp::Filter(predicate.clone()), optimized_input),
+                        input_changed,
+                    )),
+
+                    // STOP: For traversal, we generally can't push blindly.
+                    // We need to know if the predicate applies to the source or target.
+                    // Current implementation is conservative and stops here.
+                    LogicalOp::Unary {
+                        op: UnaryOp::Traverse { .. },
+                        ..
+                    } => Ok((
+                        LogicalOp::unary(UnaryOp::Filter(predicate.clone()), optimized_input),
+                        input_changed,
+                    )),
+
                     // PUSH: VectorRank
                     // Only safe if top_k is None (pure re-scoring).
                     // If top_k is set, pushing filter changes semantics (Top-K then Filter != Filter then Top-K).
@@ -433,35 +450,48 @@ mod sentry_tests {
         );
 
         // Binary Op: Union(Left, Right)
-        let root = LogicalOp::binary(
-            BinaryOp::Union,
-            left,
-            right,
-        );
+        let root = LogicalOp::binary(BinaryOp::Union, left, right);
 
         let plan = LogicalPlan::new(root);
 
         let result = rule.apply(&plan, &stats).unwrap();
 
         // Must be Some (changed)
-        assert!(result.is_some(), "Partial optimization (left branch) should trigger change");
+        assert!(
+            result.is_some(),
+            "Partial optimization (left branch) should trigger change"
+        );
 
         let new_plan = result.unwrap();
         // Verify structure
         if let LogicalOp::Binary { left, right, .. } = new_plan.root {
-             // Left should be Sort(Filter...)
-             if let LogicalOp::Unary { op: UnaryOp::Sort { .. }, input } = *left {
-                 assert!(matches!(*input, LogicalOp::Unary { op: UnaryOp::Filter(_), .. }));
-             } else {
-                 panic!("Left branch was not optimized");
-             }
+            // Left should be Sort(Filter...)
+            if let LogicalOp::Unary {
+                op: UnaryOp::Sort { .. },
+                input,
+            } = *left
+            {
+                assert!(matches!(
+                    *input,
+                    LogicalOp::Unary {
+                        op: UnaryOp::Filter(_),
+                        ..
+                    }
+                ));
+            } else {
+                panic!("Left branch was not optimized");
+            }
 
-             // Right should still be Filter(Scan)
-             if let LogicalOp::Unary { op: UnaryOp::Filter(_), input } = *right {
-                 assert!(matches!(*input, LogicalOp::Scan(_)));
-             } else {
-                 panic!("Right branch was unexpectedly modified or corrupted");
-             }
+            // Right should still be Filter(Scan)
+            if let LogicalOp::Unary {
+                op: UnaryOp::Filter(_),
+                input,
+            } = *right
+            {
+                assert!(matches!(*input, LogicalOp::Scan(_)));
+            } else {
+                panic!("Right branch was unexpectedly modified or corrupted");
+            }
         } else {
             panic!("Root should be Binary");
         }
