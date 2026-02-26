@@ -529,7 +529,17 @@ pub async fn handle_query(
                     Ok(results) => {
                         // 3. Serialize results
                         let mut json_results = Vec::new();
-                        for row_result in results {
+                        // Warden: Enforce hard limit on result set size to prevent OOM DoS
+                        const MAX_QUERY_RESULTS: usize = 10_000;
+
+                        for (i, row_result) in results.enumerate() {
+                            if i >= MAX_QUERY_RESULTS {
+                                return Err(format!(
+                                    "Query result exceeded maximum limit of {}. Please use LIMIT clause.",
+                                    MAX_QUERY_RESULTS
+                                ));
+                            }
+
                             match row_result {
                                 Ok(row) => match query_row_to_json(row) {
                                     Ok(json) => json_results.push(json),

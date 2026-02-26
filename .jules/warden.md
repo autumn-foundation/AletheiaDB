@@ -20,6 +20,13 @@
 2.  **Async-Aware Indexing:** Implemented `maybe_block_in_place` helper in `src/index/vector/hnsw.rs`. This automatically detects if it's running in a multi-threaded Tokio runtime and uses `tokio::task::block_in_place` to prevent reactor starvation during vector operations and retries.
 3.  **Pagination Limits:** Verified existing `saturating_add` checks for deep pagination in `FindNode` and `FindNeighbors` to prevent memory exhaustion DoS.
 
+**2025-05-24 - Unbounded Query Result Serialization DoS**
+**Threat:**
+1.  **Unbounded Allocation:** `ExecuteQuery` endpoint serialized all query results into a `Vec` before returning JSON. A query like `MATCH (n) RETURN n` on a large database would cause OOM and crash the server.
+
+**Defense:**
+1.  **Result Limit:** Enforced `MAX_QUERY_RESULTS = 10_000` hard limit in `src/http/handlers.rs`. Queries exceeding this limit are aborted and return an error, preventing memory exhaustion.
+
 **2026-01-03 - Supply Chain Security Update (tokenizers)**
 **Threat:**
 1.  **Unmaintained Dependency:** `tokenizers` (0.15.2) depended on `number_prefix` (0.4.0) which is unmaintained (RUSTSEC-2025-0119).

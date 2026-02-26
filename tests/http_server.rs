@@ -73,6 +73,7 @@ async fn test_cors_headers_present() {
 
     // Send OPTIONS preflight request
     let req = test::TestRequest::default()
+        .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
         .method(actix_web::http::Method::OPTIONS)
         .uri("/status")
         .insert_header(("Origin", "http://example.com"))
