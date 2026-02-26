@@ -58,9 +58,7 @@ fn test_shard_recovery_data_loss_repro() {
     // 6. Attempt Recovery (Manual check)
     // Since ShardCoordinator::new() now automatically recovers pending transactions,
     // this manual call should find no pending transactions if auto-recovery worked.
-    let result = coordinator_recovered
-        .recover_pending_transactions()
-        .unwrap();
+    let result = coordinator_recovered.recover_pending_transactions();
 
     // 7. Verify Data Recovery (Fix Verification)
     // If auto-recovery worked, the transaction was committed and removed from the WAL pending list.

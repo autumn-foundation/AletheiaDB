@@ -283,11 +283,8 @@ impl ShardCoordinator {
         };
 
         // Recover pending transactions on startup
-        if let Err(e) = coordinator.recover_pending_transactions() {
-            // This path is practically unreachable as it only triggers on lock poisoning
-            // within a freshly created struct.
-            panic!("Failed to recover pending transactions on startup: {}", e);
-        }
+        // This will panic if the commit log lock is poisoned (unlikely on startup)
+        coordinator.recover_pending_transactions();
 
         coordinator
     }
@@ -855,14 +852,9 @@ impl ShardCoordinator {
     /// A `RecoveryResult` containing:
     /// *   `recovered`: List of `TxId`s that were successfully completed.
     /// *   `dead_lettered`: List of transactions that failed after max retries and require manual intervention.
-    pub fn recover_pending_transactions(&self) -> Result<RecoveryResult, DistributedTxError> {
+    pub fn recover_pending_transactions(&self) -> RecoveryResult {
         let decisions = {
-            let log = self
-                .commit_log
-                .read()
-                .map_err(|_| DistributedTxError::Aborted {
-                    reason: "Lock poisoned".to_string(),
-                })?;
+            let log = self.commit_log.read().expect("Commit log lock poisoned");
             log.pending_commits()
                 .into_iter()
                 .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
@@ -946,10 +938,10 @@ impl ShardCoordinator {
             }
         }
 
-        Ok(RecoveryResult {
+        RecoveryResult {
             recovered,
             dead_lettered,
-        })
+        }
     }
 
     /// Get transactions in the dead letter queue.
