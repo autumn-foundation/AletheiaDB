@@ -1,9 +1,13 @@
 use crate::AletheiaDB;
+#[cfg(feature = "nova")]
 use crate::core::GLOBAL_INTERNER;
 use crate::core::error::Result;
+#[cfg(feature = "nova")]
 use crate::core::history::{VersionDiff, VersionInfo};
 use crate::core::id::NodeId;
+#[cfg(feature = "nova")]
 use crate::core::interning::InternedString;
+#[cfg(feature = "nova")]
 use crate::core::temporal::time;
 
 /// A single event in the narrative history of an entity.
@@ -20,10 +24,21 @@ pub struct NarrativeEvent {
 }
 
 /// Generator for creating natural language narratives from temporal history.
+#[cfg(feature = "nova")]
 pub struct NarrativeGenerator<'a> {
     db: &'a AletheiaDB,
 }
 
+#[cfg(not(feature = "nova"))]
+/// Generator for creating natural language narratives from temporal history.
+#[deprecated(
+    note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+)]
+pub struct NarrativeGenerator<'a> {
+    _marker: std::marker::PhantomData<&'a AletheiaDB>,
+}
+
+#[cfg(feature = "nova")]
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -125,7 +140,37 @@ impl<'a> NarrativeGenerator<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "nova"))]
+#[allow(deprecated)]
+impl<'a> NarrativeGenerator<'a> {
+    /// Create a new narrative generator.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn new(db: &'a AletheiaDB) -> Self {
+        panic!(
+            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Generate a narrative for a specific node.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
+        panic!(
+            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+}
+
+#[cfg(all(test, feature = "nova"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -240,5 +285,34 @@ mod tests {
                 .any(|s| s.contains("was '\"delete_me\"'")),
             "Expected original value in removal message"
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "nova")))]
+#[allow(deprecated)]
+mod stub_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_new() {
+        let db = AletheiaDB::new().unwrap();
+        // This should panic
+        let _ = NarrativeGenerator::new(&db);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_generate() {
+        // Construct a fake NarrativeGenerator to test method panic
+        // Safety: NarrativeGenerator is a ZST with PhantomData, so it's valid to transmute from unit or zeroed.
+        // We just need it to call the method.
+        let generator: NarrativeGenerator<'_> = unsafe { std::mem::transmute(()) };
+        // This should panic
+        let _ = generator.generate_node_narrative(NodeId::new(0).unwrap());
     }
 }
