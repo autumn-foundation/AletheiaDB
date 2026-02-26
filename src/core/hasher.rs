@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_build_identity_hasher() {
-        let builder = BuildIdentityHasher::default();
+        let builder = BuildIdentityHasher;
         let mut hasher = builder.build_hasher();
         hasher.write_u64(42);
         assert_eq!(hasher.finish(), 42);
