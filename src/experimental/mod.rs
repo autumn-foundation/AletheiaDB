@@ -44,6 +44,7 @@
 //! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
 //! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
 //! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
+//! | [`pygmalion`] | **Pygmalion** | Semantic Imputation Engine. "Fill in the missing values." |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -143,6 +144,9 @@ pub mod prism;
 #[cfg(feature = "nova")]
 /// Prophet Link Prediction Engine.
 pub mod prophet;
+#[cfg(feature = "nova")]
+/// Pygmalion: Semantic Imputation Engine.
+pub mod pygmalion;
 #[cfg(feature = "nova")]
 /// Ripple: Semantic Causality Detector.
 pub mod ripple;
