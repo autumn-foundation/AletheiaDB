@@ -822,6 +822,18 @@ mod tests {
     }
 
     #[test]
+    fn test_backpressure_config_equal_spins() {
+        let config = BackpressureConfig {
+            initial_spins: 10,
+            max_spins: 10, // Equal is valid
+            base_sleep_us: 1,
+            max_sleep_us: 10,
+        };
+        // Should not panic
+        let _ = WalRingBuffer::with_config(1024, config);
+    }
+
+    #[test]
     fn test_completion_notifier_error() {
         let notifier = CompletionNotifier::new();
 
