@@ -1572,8 +1572,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_stream_position_failure() {
-        use tempfile::tempdir;
         use std::process::Command;
+        use tempfile::tempdir;
 
         // 1. Setup
         let dir = tempdir().unwrap();
