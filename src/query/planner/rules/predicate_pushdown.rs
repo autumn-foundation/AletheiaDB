@@ -414,4 +414,64 @@ mod tests {
             panic!("Expected Sort at root, got {:?}", root);
         }
     }
+
+    #[test]
+    fn test_binary_op_recursion_logic() {
+        use crate::query::plan::BinaryOp;
+
+        let rule = PredicatePushdown;
+        let stats = test_stats();
+
+        // Binary(Union, Filter(Sort(Scan)), Scan)
+        // Left side: Filter(Sort(Scan)) -> Sort(Filter(Scan)) (Optimized, changed=true)
+        // Right side: Scan -> Scan (No change, changed=false)
+        // Total change: true || false = true
+
+        let left_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("active", true)),
+            LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: SortKey::Property("created".to_string()),
+                    descending: true,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+
+        let right_op = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left_op, right_op));
+
+        // Expect optimization to occur on the left branch
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_some(),
+            "Binary op with one changed branch should return Some"
+        );
+
+        let new_plan = result.unwrap();
+        if let LogicalOp::Binary { left, .. } = new_plan.root {
+            // Verify left side is optimized: Sort -> Filter -> Scan
+            if let LogicalOp::Unary {
+                op: UnaryOp::Sort { .. },
+                input: sort_input,
+            } = *left
+            {
+                assert!(
+                    matches!(
+                        sort_input.as_ref(),
+                        LogicalOp::Unary {
+                            op: UnaryOp::Filter(_),
+                            ..
+                        }
+                    ),
+                    "Left branch should have Filter pushed down below Sort"
+                );
+            } else {
+                panic!("Expected Sort at top of left branch, got {:?}", left);
+            }
+        } else {
+            panic!("Root should be Binary op");
+        }
+    }
 }
