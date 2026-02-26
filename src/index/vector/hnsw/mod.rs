@@ -1,7 +1,63 @@
 //! HNSW (Hierarchical Navigable Small World) vector index implementation.
 //!
-//! This module provides a wrapper around the `usearch` library's HNSW index,
-//! implementing the `VectorIndex` trait for approximate k-nearest neighbor search.
+//! This module provides a thread-safe, high-performance implementation of the HNSW algorithm
+//! for approximate nearest neighbor (ANN) search, wrapping the [usearch](https://github.com/unum-cloud/usearch)
+//! library.
+//!
+//! # Overview
+//!
+//! HNSW is a graph-based index that enables fast similarity search in high-dimensional spaces.
+//! It works by building a multi-layer graph where:
+//! - Top layers have long-range links for fast traversal across the dataset.
+//! - Bottom layers have short-range links for fine-grained local search.
+//!
+//! This implementation adds:
+//! - **Concurrency**: Thread-safe operations with granular locking.
+//! - **Persistence**: Save/load support and memory-mapping.
+//! - **Mapping**: Automatic management of `NodeId` <-> `u64` mapping (since `usearch` uses `u64` keys).
+//! - **Filtering**: Support for predicate-based filtering during search.
+//!
+//! # Key Parameters
+//!
+//! - **`m`**: The number of connections per node. Higher `m` improves recall but increases memory usage and build time.
+//! - **`ef_construction`**: The size of the dynamic candidate list during index construction. Higher values improve index quality but slow down indexing.
+//! - **`ef_search`**: The size of the dynamic candidate list during search. Higher values improve recall but slow down queries.
+//!
+//! # Example
+//!
+//! ```rust
+//! # use aletheiadb::index::vector::hnsw::{HnswIndex, HnswConfig};
+//! # use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
+//! # use aletheiadb::core::id::NodeId;
+//! #
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // 1. Configure the index
+//!     let config = HnswConfig::new(3, DistanceMetric::Cosine) // 3 dimensions
+//!         .with_m(16)
+//!         .with_ef_construction(64);
+//!
+//!     // 2. Create the index
+//!     let index = HnswIndex::new(config)?;
+//!
+//!     // 3. Add vectors
+//!     let id1 = NodeId::new(1);
+//!     let vec1 = vec![1.0, 0.0, 0.0];
+//!     index.add(id1, &vec1)?;
+//!
+//!     let id2 = NodeId::new(2);
+//!     let vec2 = vec![0.0, 1.0, 0.0];
+//!     index.add(id2, &vec2)?;
+//!
+//!     // 4. Search
+//!     let query = vec![1.0, 0.1, 0.0];
+//!     let results = index.search(&query, 10)?;
+//!
+//!     assert_eq!(results[0].0, id1);
+//!     println!("Found nearest neighbor: {:?}", results[0]);
+//!
+//!     Ok(())
+//! }
+//! ```
 
 use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
@@ -141,6 +197,21 @@ where
 }
 
 /// HNSW vector index for approximate k-nearest neighbor search.
+///
+/// This struct wraps the `usearch` C++ library to provide a high-performance
+/// HNSW index. It manages the mapping between AletheiaDB's `NodeId` and
+/// `usearch`'s internal `u64` keys.
+///
+/// # Concurrency
+///
+/// `HnswIndex` is thread-safe (`Send + Sync`) and designed for high concurrency.
+/// - Read operations (`search`) are lock-free on the Rust side (relying on `usearch`'s internal locks).
+/// - Write operations (`add`, `remove`) use sharded locks to allow concurrent updates to different nodes.
+///
+/// # Persistence
+///
+/// The index supports persistence to disk via `save` and `load`. It can also be
+/// opened in memory-mapped mode (`open_mmap`) for large datasets that exceed RAM.
 pub struct HnswIndex {
     /// Underlying usearch index
     pub(crate) inner: Arc<RwLock<Index>>,
@@ -342,27 +413,41 @@ impl HnswIndex {
     }
 
     /// Creates a new in-memory HNSW index from a configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration parameters (dimensions, metric, M, etc.).
+    ///
+    /// # Returns
+    ///
+    /// A new `HnswIndex` instance.
     pub fn new(config: HnswConfig) -> Result<Self> {
         HnswIndexBuilder::from_config(&config).build()
     }
 
-    /// Set the ef_search parameter (query-time search quality).
+    /// Sets the `ef_search` parameter (query-time search quality).
+    ///
+    /// `ef_search` controls the size of the dynamic candidate list during search.
+    /// - Higher values increase recall (finding the true nearest neighbors) but slow down search.
+    /// - Lower values are faster but less accurate.
+    ///
+    /// This parameter can be adjusted dynamically at runtime.
     pub fn set_ef_search(&self, ef_search: usize) {
         let index = self.inner.read();
         index.change_expansion_search(ef_search);
     }
 
-    /// Get the current ef_search parameter.
+    /// Gets the current `ef_search` parameter.
     pub fn get_ef_search(&self) -> usize {
         self.inner.read().expansion_search()
     }
 
-    /// Get the configuration used to create this index.
+    /// Gets the configuration used to create this index.
     pub fn config(&self) -> HnswConfig {
         self.config.clone()
     }
 
-    /// Get the M parameter (connections per node).
+    /// Gets the M parameter (connections per node).
     pub fn m(&self) -> usize {
         self.config.m
     }
@@ -380,7 +465,24 @@ impl HnswIndex {
         self.next_key.fetch_max(usearch_key + 1, Ordering::SeqCst);
     }
 
-    /// Load an index from disk.
+    /// Loads an HNSW index from disk.
+    ///
+    /// This method loads both the vector index (managed by `usearch`) and the
+    /// ID mapping metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the index file (without extension). The method expects
+    ///            `path` and `path.usearch.mappings`.
+    /// * `config` - Configuration to validate against the loaded index. Dimensions
+    ///              and quantization must match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file does not exist or is corrupted.
+    /// - The stored index dimensions/quantization do not match the config.
+    /// - The ID mapping file is missing or corrupted.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
         if config.dimensions > MAX_VECTOR_DIMENSIONS {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -468,7 +570,15 @@ impl HnswIndex {
         })
     }
 
-    /// Open a memory-mapped index from disk (read-only).
+    /// Opens a memory-mapped HNSW index from disk (read-only).
+    ///
+    /// Memory mapping allows accessing indexes larger than available RAM by relying
+    /// on the OS page cache.
+    ///
+    /// # Limitations
+    ///
+    /// - The returned index is **read-only**. Calls to `add` or `remove` will fail.
+    /// - Performance depends on disk I/O and page cache warmth.
     pub fn open_mmap(path: &Path) -> Result<Self> {
         let index = Index::new(&IndexOptions::default()).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
@@ -687,6 +797,19 @@ impl HnswIndex {
 }
 
 impl VectorIndex for HnswIndex {
+    /// Adds a vector to the index.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The `NodeId` associated with the vector.
+    /// * `vector` - The vector data. Must match the configured dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The index is memory-mapped (read-only).
+    /// - The vector has incorrect dimensions.
+    /// - `IN_FILTER_CALLBACK` is active (to prevent deadlocks).
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
@@ -850,6 +973,17 @@ impl VectorIndex for HnswIndex {
         })
     }
 
+    /// Removes a vector from the index.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The `NodeId` of the vector to remove.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The index is memory-mapped.
+    /// - `IN_FILTER_CALLBACK` is active.
     fn remove(&self, id: NodeId) -> Result<()> {
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
@@ -881,6 +1015,22 @@ impl VectorIndex for HnswIndex {
         })
     }
 
+    /// Performs a k-Nearest Neighbors (k-NN) search.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query vector.
+    /// * `k` - The number of nearest neighbors to return.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `(NodeId, similarity)` pairs, sorted by similarity (descending).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The query vector dimensions do not match the index.
+    /// - `IN_FILTER_CALLBACK` is active.
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
@@ -919,6 +1069,22 @@ impl VectorIndex for HnswIndex {
         })
     }
 
+    /// Performs a k-NN search with a post-filter.
+    ///
+    /// This method searches for more than `k` candidates and then applies the
+    /// `predicate` filter to return exactly `k` results (if possible).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query vector.
+    /// * `k` - The number of results to return.
+    /// * `predicate` - A closure that returns `true` if a `NodeId` should be included.
+    ///
+    /// # Safety
+    ///
+    /// The `predicate` closure must **NOT** call methods on this index that take
+    /// locks (like `add`, `remove`, or recursive `search`), as this can lead to
+    /// deadlocks. The `IN_FILTER_CALLBACK` flag detects and prevents this.
     fn search_with_filter<F>(
         &self,
         query: &[f32],
@@ -1025,6 +1191,13 @@ impl VectorIndex for HnswIndex {
         Ok(())
     }
 
+    /// Saves the index to disk.
+    ///
+    /// This writes the HNSW graph and the ID mapping to the specified path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The destination path (without extension).
     fn save(&self, path: &Path) -> Result<()> {
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(

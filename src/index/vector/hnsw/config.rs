@@ -9,25 +9,56 @@ use std::sync::Arc;
 /// This struct encapsulates all parameters needed to configure an HNSW index
 /// for approximate nearest neighbor search. It provides sensible defaults
 /// optimized for a balance between accuracy, speed, and memory usage.
+///
+/// # Default Parameters
+///
+/// - `m` = 16
+/// - `ef_construction` = 128
+/// - `ef_search` = 64
+/// - `quantization` = F32
 #[derive(Debug, Clone)]
 pub struct HnswConfig {
-    /// Vector dimensionality (must be > 0)
+    /// Vector dimensionality (must be > 0).
     pub dimensions: usize,
-    /// Distance metric for similarity computation
+    /// Distance metric for similarity computation (e.g., Cosine, Euclidean).
     pub metric: DistanceMetric,
-    /// Maximum bidirectional connections per node (default: 16)
+    /// Maximum bidirectional connections per node.
+    ///
+    /// - **Default**: 16
+    /// - **Range**: [2, 64]
+    /// - **Impact**: Higher `m` improves recall (accuracy) for high-dimensional data
+    ///   but increases memory usage and indexing time.
     pub m: usize,
-    /// Build-time candidate list size (default: 128)
+    /// Build-time candidate list size.
+    ///
+    /// - **Default**: 128
+    /// - **Range**: [10, 4096]
+    /// - **Impact**: Higher values improve index quality (graph navigability) but
+    ///   significantly slow down indexing (adding vectors). This value does *not*
+    ///   affect search speed, only index construction.
     pub ef_construction: usize,
-    /// Query-time candidate list size (default: 64)
+    /// Query-time candidate list size.
+    ///
+    /// - **Default**: 64
+    /// - **Range**: [1, 4096]
+    /// - **Impact**: Higher values improve recall (finding the true nearest neighbors)
+    ///   but linearly increase search latency. This is a runtime trade-off.
     pub ef_search: usize,
-    /// Initial capacity for pre-allocation (default: 0)
+    /// Initial capacity for pre-allocation (default: 0).
+    ///
+    /// If the approximate number of vectors is known, setting this can reduce
+    /// re-allocation overhead.
     pub capacity: usize,
-    /// Quantization level (default: F32)
+    /// Quantization level (default: F32).
+    ///
+    /// Controls the precision of stored vectors:
+    /// - `F32`: 32-bit floating point (highest precision, largest size).
+    /// - `F16`: 16-bit floating point (half precision, half size).
+    /// - `I8`: 8-bit integer quantization (lowest precision, smallest size).
     pub quantization: Quantization,
-    /// Storage mode (default: InMemory)
+    /// Storage mode (default: InMemory).
     pub storage: StorageMode,
-    /// Custom distance metric (overrides `metric` if set)
+    /// Custom distance metric (overrides `metric` if set).
     pub custom_metric: Option<CustomMetric>,
 }
 
@@ -72,24 +103,33 @@ impl HnswConfig {
     }
 
     /// Sets the M parameter (connections per node).
+    ///
+    /// # Impact
+    /// Higher `m` improves recall but increases memory usage.
     pub fn with_m(mut self, m: usize) -> Self {
         self.m = m;
         self
     }
 
-    /// Sets ef_construction (build-time expansion).
+    /// Sets `ef_construction` (build-time expansion).
+    ///
+    /// # Impact
+    /// Higher values improve index quality but slow down `add` operations.
     pub fn with_ef_construction(mut self, ef_construction: usize) -> Self {
         self.ef_construction = ef_construction;
         self
     }
 
-    /// Sets ef_search (query-time expansion).
+    /// Sets `ef_search` (query-time expansion).
+    ///
+    /// # Impact
+    /// Higher values improve search accuracy but slow down `search` operations.
     pub fn with_ef_search(mut self, ef_search: usize) -> Self {
         self.ef_search = ef_search;
         self
     }
 
-    /// Sets initial capacity.
+    /// Sets initial capacity for pre-allocation.
     pub fn with_capacity(mut self, capacity: usize) -> Self {
         self.capacity = capacity;
         self
@@ -199,12 +239,34 @@ impl HnswConfig {
 }
 
 /// Builder for configuring and creating an `HnswIndex`.
+///
+/// This builder provides a fluent API for constructing an `HnswIndex` with custom
+/// configuration parameters.
+///
+/// # Example
+///
+/// ```rust
+/// use aletheiadb::index::vector::hnsw::HnswIndexBuilder;
+/// use aletheiadb::index::vector::DistanceMetric;
+///
+/// let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine)
+///     .m(32)
+///     .ef_construction(200)
+///     .ef_search(100)
+///     .build()
+///     .unwrap();
+/// ```
 pub struct HnswIndexBuilder {
     pub(crate) config: HnswConfig,
 }
 
 impl HnswIndexBuilder {
     /// Creates a new builder with the required parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `dimensions` - Dimensionality of vectors (e.g., 1536 for OpenAI).
+    /// * `metric` - Distance metric (e.g., Cosine).
     pub fn new(dimensions: usize, metric: DistanceMetric) -> Self {
         HnswIndexBuilder {
             config: HnswConfig {
@@ -223,18 +285,24 @@ impl HnswIndexBuilder {
     }
 
     /// Sets the M parameter (connections per node).
+    ///
+    /// Controls memory usage vs. recall trade-off.
     pub fn m(mut self, m: usize) -> Self {
         self.config.m = m;
         self
     }
 
-    /// Sets ef_construction (build-time expansion).
+    /// Sets `ef_construction` (build-time expansion).
+    ///
+    /// Controls index quality vs. build speed trade-off.
     pub fn ef_construction(mut self, ef_construction: usize) -> Self {
         self.config.ef_construction = ef_construction;
         self
     }
 
-    /// Sets ef_search (query-time expansion).
+    /// Sets `ef_search` (query-time expansion).
+    ///
+    /// Controls search accuracy vs. latency trade-off.
     pub fn ef_search(mut self, ef_search: usize) -> Self {
         self.config.ef_search = ef_search;
         self

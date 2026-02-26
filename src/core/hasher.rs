@@ -4,6 +4,14 @@
 //! unchanged. It is intended for use with `HashMap` and `HashSet` where the keys
 //! are already high-quality unique identifiers (like `NodeId`, `EdgeId`, or `InternedString`),
 //! avoiding the unnecessary overhead of hashing (SipHash).
+//!
+//! # Safety
+//!
+//! `IdentityHasher` assumes that the keys provided are already distributed well enough
+//! to minimize collisions. If you use it with keys that have poor entropy (e.g., sequential
+//! integers in a small range), you might experience more collisions than with a cryptographic
+//! hasher, although for typical `NodeId`s (which are sequential) this is usually acceptable
+//! for performance gains in high-throughput scenarios.
 
 use std::hash::Hasher;
 
@@ -12,8 +20,30 @@ const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 
 /// A hasher that passes through u32 and u64 values unchanged.
 ///
-/// Used for maps where keys are already unique integers or IDs.
-/// This avoids the overhead of hashing (SipHash) for lookups.
+/// This hasher is optimized for use cases where the key is already a unique integer ID
+/// (like `NodeId` or `EdgeId`). By skipping the hashing step (e.g., SipHash), it
+/// significantly reduces the CPU overhead of map lookups.
+///
+/// # Behavior
+///
+/// - For `u8`, `u16`, `u32`, `u64`, and `usize`, the value is returned as the hash directly.
+/// - For other types (like strings or byte slices), it falls back to a simple FNV-1a hash
+///   to ensure correctness (preventing collisions), though it is not the primary use case.
+///
+/// # Example
+///
+/// ```rust
+/// use std::collections::HashMap;
+/// use std::hash::BuildHasherDefault;
+/// use aletheiadb::core::hasher::IdentityHasher;
+///
+/// // Create a HashMap that uses IdentityHasher
+/// let mut map: HashMap<u64, String, BuildHasherDefault<IdentityHasher>> =
+///     HashMap::with_hasher(BuildHasherDefault::default());
+///
+/// map.insert(42, "Answer".to_string());
+/// assert_eq!(map.get(&42), Some(&"Answer".to_string()));
+/// ```
 #[derive(Default)]
 pub struct IdentityHasher(u64);
 
