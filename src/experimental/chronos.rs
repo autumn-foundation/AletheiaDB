@@ -25,6 +25,8 @@
 //! > ⚠️ **REQUIRES FEATURE 'NOVA'**
 //!
 //! ```rust
+//! # #[cfg(feature = "nova")]
+//! # {
 //! use aletheiadb::{AletheiaDB, properties, ReadOps, WriteOps, Error};
 //! use aletheiadb::core::temporal::time;
 //! use aletheiadb::experimental::chronos::Chronos;
@@ -72,6 +74,9 @@
 //! println!("🕵️ Chronos confirmed: The connection existed in the past!");
 //! # Ok(())
 //! # }
+//! # }
+//! # #[cfg(not(feature = "nova"))]
+//! # fn main() {}
 //! ```
 
 use crate::AletheiaDB;

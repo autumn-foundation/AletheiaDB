@@ -53,10 +53,12 @@
 //! > This feature is experimental and requires the `nova` feature flag.
 //! > Add `features = ["nova"]` to your `Cargo.toml`.
 //!
-//! ```rust,ignore
+//! ```rust
 //! // [dependencies]
 //! // aletheiadb = { version = "0.1", features = ["nova"] }
 //!
+//! # #[cfg(feature = "nova")]
+//! # {
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
 //! use aletheiadb::core::property::PropertyValue;
@@ -85,6 +87,9 @@
 //! }
 //! # Ok(())
 //! # }
+//! # }
+//! # #[cfg(not(feature = "nova"))]
+//! # fn main() {}
 //! ```
 
 #[cfg(feature = "nova")]
