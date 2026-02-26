@@ -4405,3 +4405,84 @@ fn test_edge_delta_creation_caches_properties() {
         assert_eq!(props.get("strength").unwrap().as_int().unwrap(), i as i64);
     }
 }
+
+#[test]
+fn test_sentry_find_node_version_at_time_cycle_detection() {
+    // 🛡️ Sentry Test: Verify infinite loop detection in find_node_version_at_time.
+    // Manually constructs a cycle (v1 -> v2 -> v1) and asserts the search terminates.
+
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("CycleTest").unwrap();
+
+        // Version 1: Initial
+        let v1_id = VersionId::new(1).unwrap();
+        let v1 = NodeVersion::new_anchor(
+            v1_id,
+            node_id,
+            BiTemporalInterval::current(1000.into()),
+            label,
+            PropertyMapBuilder::new().build(),
+        );
+        storage.insert_restored_node_version(v1).unwrap();
+
+        // Version 2: Delta pointing to v1
+        let v2_id = VersionId::new(2).unwrap();
+        let v2 = NodeVersion::new_delta(
+            v2_id,
+            node_id,
+            BiTemporalInterval::current(2000.into()),
+            label,
+            &PropertyMapBuilder::new().build(),
+            &PropertyMapBuilder::new().build(),
+            v1_id, // Points to v1
+        );
+        storage.insert_restored_node_version(v2).unwrap();
+
+        // MANUALLY CREATE CYCLE: Point v1 to v2 as previous version
+        // This is corruption/illegal state, but we must handle it without hanging.
+        if let Some(v1_mut) = storage.node_versions.get_mut(&v1_id) {
+            v1_mut.prev_version = Some(v2_id);
+        }
+
+        // Trigger linear scan (no temporal index)
+        // Search for a time that requires traversal.
+        // v1 starts at 1000, v2 starts at 2000.
+        // Searching for 500 should force it to walk back past both v2 and v1.
+        // With cycle v2 -> v1 -> v2, it should loop forever.
+        let result = storage.find_node_version_at_time(
+            node_id,
+            500.into(), // valid_time
+            500.into(), // tx_time
+        );
+
+        tx.send(result).unwrap();
+    });
+
+    // If it hangs, recv_timeout will fail.
+    // If it terminates (fixed), it should return within timeout.
+    let result = rx.recv_timeout(Duration::from_millis(500));
+
+    match result {
+        Ok(found) => {
+            // If fixed, it should probably return None because no version matches exactly
+            // (or maybe v2 if valid/tx time matches, but the point is it returns).
+            // Actually, with the cycle, it will never find "previous" if it keeps looking back.
+            // If we break the loop, we return None (not found).
+            assert!(
+                found.is_none(),
+                "Should return None on cycle detection/exhaustion"
+            );
+        }
+        Err(_) => {
+            panic!("find_node_version_at_time hung (infinite loop detected by timeout)");
+        }
+    }
+}

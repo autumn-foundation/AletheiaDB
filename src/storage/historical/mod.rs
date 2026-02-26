@@ -1796,6 +1796,9 @@ impl HistoricalStorage {
         // Fallback: Linear scan through version chain (O(n))
         // This is only used when temporal indexes are not configured
         let mut current_id = self.node_version_heads.get(&node_id).copied()?;
+        // Safety guard: prevent infinite loops from cyclic version chains (data corruption)
+        let max_iterations = self.node_versions.len() + 1;
+        let mut iterations = 0;
 
         loop {
             let version = self.node_versions.get(&current_id)?;
@@ -1807,6 +1810,17 @@ impl HistoricalStorage {
 
             // Move to previous version
             current_id = version.prev_version?;
+
+            iterations += 1;
+            if iterations > max_iterations {
+                #[cfg(feature = "observability")]
+                tracing::error!(
+                    node_id = %node_id,
+                    max_iterations = %max_iterations,
+                    "Infinite loop detected in node version chain"
+                );
+                return None;
+            }
         }
     }
 
@@ -1852,6 +1866,9 @@ impl HistoricalStorage {
         // Fallback: Linear scan through version chain (O(n))
         // This is only used when temporal indexes are not configured
         let mut current_id = self.edge_version_heads.get(&edge_id).copied()?;
+        // Safety guard: prevent infinite loops from cyclic version chains (data corruption)
+        let max_iterations = self.edge_versions.len() + 1;
+        let mut iterations = 0;
 
         loop {
             let version = self.edge_versions.get(&current_id)?;
@@ -1861,6 +1878,17 @@ impl HistoricalStorage {
             }
 
             current_id = version.prev_version?;
+
+            iterations += 1;
+            if iterations > max_iterations {
+                #[cfg(feature = "observability")]
+                tracing::error!(
+                    edge_id = %edge_id,
+                    max_iterations = %max_iterations,
+                    "Infinite loop detected in edge version chain"
+                );
+                return None;
+            }
         }
     }
 

@@ -28,6 +28,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Free Disk Space (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
