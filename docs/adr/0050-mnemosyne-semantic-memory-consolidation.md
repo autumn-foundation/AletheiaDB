@@ -4,7 +4,7 @@ Date: 2024-05-22
 
 ## Status
 
-Proposed
+Superseded by [ADR 0050: Semantic Memory Consolidation](0050-semantic-memory-consolidation.md)
 
 ## Context
 
