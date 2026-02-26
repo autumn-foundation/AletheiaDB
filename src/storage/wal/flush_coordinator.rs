@@ -31,7 +31,7 @@
 //! threads should not call `flush()` concurrently.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -609,13 +609,24 @@ impl FlushCoordinator {
             let mut batch_min_lsn = u64::MAX;
             let mut batch_max_lsn = 0u64;
 
-            // Write all entries
-            {
+            // Capture position before write for potential rollback
+            let pre_write_pos = {
                 let writer = writer_guard.as_mut().ok_or_else(|| {
                     Error::Storage(StorageError::WalError {
                         reason: "WAL writer not initialized".to_string(),
                     })
                 })?;
+                writer.stream_position().map_err(|e| {
+                    Error::Storage(StorageError::IoError(format!(
+                        "Failed to get WAL stream position: {}",
+                        e
+                    )))
+                })?
+            };
+
+            // Write all entries
+            {
+                let writer = writer_guard.as_mut().unwrap(); // Safe due to check above
 
                 for entry in &entries {
                     // Track LSN range
@@ -640,24 +651,48 @@ impl FlushCoordinator {
                 })?;
             }
 
+            // Sync to disk if requested
+            if sync && self.config.sync_on_flush {
+                let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(ref sync_file) = *sync_guard {
+                    if let Err(e) = sync_file.sync_data() {
+                        // CRITICAL: If sync fails, we must truncate the file to avoid
+                        // "Phantom Commits" where data exists on disk but system thinks it failed.
+                        let writer = writer_guard.as_mut().unwrap();
+
+                        // 1. Truncate file to pre-write position
+                        if let Err(trunc_err) = writer.get_mut().set_len(pre_write_pos) {
+                            return Err(Error::Storage(StorageError::IoError(format!(
+                                "CRITICAL: Sync failed ({}) AND Truncate failed ({}). WAL corruption possible.",
+                                e, trunc_err
+                            ))));
+                        }
+
+                        // 2. Reset writer position
+                        if let Err(seek_err) = writer.seek(SeekFrom::Start(pre_write_pos)) {
+                            return Err(Error::Storage(StorageError::IoError(format!(
+                                "CRITICAL: Sync failed ({}) AND Seek failed ({}). Writer state inconsistent.",
+                                e, seek_err
+                            ))));
+                        }
+
+                        return Err(Error::Storage(StorageError::IoError(format!(
+                            "Failed to sync WAL (truncated back to safety): {}",
+                            e
+                        ))));
+                    }
+                }
+            }
+
             // Update segment LSN tracking (ADR-0025)
             // Use fetch_min/fetch_max for atomic updates
+            // Only update metadata AFTER successful sync
             self.current_segment_min_lsn
                 .fetch_min(batch_min_lsn, Ordering::Relaxed);
             self.current_segment_max_lsn
                 .fetch_max(batch_max_lsn, Ordering::Relaxed);
             self.current_segment_entry_count
                 .fetch_add(entries.len() as u64, Ordering::Relaxed);
-
-            // Sync to disk if requested
-            if sync && self.config.sync_on_flush {
-                let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref sync_file) = *sync_guard {
-                    sync_file.sync_data().map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!("Failed to sync WAL: {}", e)))
-                    })?;
-                }
-            }
 
             // Update size
             self.current_segment_size
@@ -1440,6 +1475,14 @@ mod tests {
             "flush(false) should NOT sync, so it should succeed even if sync handle is broken"
         );
 
+        // Get size after successful flush (no sync)
+        let segment_path = coordinator.segment_path(coordinator.current_segment_id());
+        let size_after_success = std::fs::metadata(&segment_path).unwrap().len();
+        assert!(
+            size_after_success > WAL_HEADER_SIZE as u64,
+            "File should contain data"
+        );
+
         // 6. Test Case 2: sync=true.
         // Correct Logic: sync (true) && sync_on_flush (true) -> true. Sync -> Fail.
         // This confirms our test setup works (broken sync handle actually causes failure).
@@ -1455,6 +1498,17 @@ mod tests {
             err_msg.contains("Failed to sync WAL"),
             "Error should be about syncing, got: {}",
             err_msg
+        );
+
+        // 🛡️ Sentry: Verify "Phantom Commit" prevention.
+        // If sync failed, the file must be truncated back to its state before the write attempt.
+        // If this assertion fails, it means we wrote data to OS cache but failed to persist it,
+        // yet left it in the file where a restart would see it as valid (phantom commit).
+        let size_after_failure = std::fs::metadata(&segment_path).unwrap().len();
+        assert_eq!(
+            size_after_failure, size_after_success,
+            "File size should be unchanged (truncated) after failed sync. Expected {}, got {}",
+            size_after_success, size_after_failure
         );
     }
 
