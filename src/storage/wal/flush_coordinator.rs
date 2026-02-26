@@ -31,7 +31,7 @@
 //! threads should not call `flush()` concurrently.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -348,7 +348,8 @@ impl FlushCoordinator {
         let mut writer = BufWriter::with_capacity(self.config.write_buffer_size, file);
 
         // Write header for new segment
-        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 {
+        let current_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if current_len == 0 {
             writer.write_all(&WAL_MAGIC).map_err(|e| {
                 Error::Storage(StorageError::IoError(format!(
                     "Failed to write WAL header: {}",
@@ -363,6 +364,10 @@ impl FlushCoordinator {
             })?;
             self.current_segment_size
                 .store(WAL_HEADER_SIZE as u64, Ordering::Relaxed);
+        } else {
+            // For existing segments, we must initialize the size correctly
+            self.current_segment_size
+                .store(current_len, Ordering::Relaxed);
         }
 
         *writer_guard = Some(writer);
@@ -603,6 +608,9 @@ impl FlushCoordinator {
             // Ensure segment is open
             self.ensure_segment_open(&mut writer_guard)?;
 
+            // Capture start size for rollback on sync failure (Phantom Commit Prevention)
+            let start_size = self.current_segment_size.load(Ordering::Relaxed);
+
             let mut bytes_written = 0usize;
 
             // Track LSN range for this batch (ADR-0025)
@@ -653,9 +661,53 @@ impl FlushCoordinator {
             if sync && self.config.sync_on_flush {
                 let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref sync_file) = *sync_guard {
-                    sync_file.sync_data().map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!("Failed to sync WAL: {}", e)))
-                    })?;
+                    if let Err(e) = sync_file.sync_data() {
+                        // 🛡️ CRITICAL: If sync fails, we MUST truncate the file back to start_size.
+                        // Otherwise, the data we just wrote to the OS cache remains in the file
+                        // but we return an error to the client. If the system restarts, this "failed"
+                        // transaction would be replayed (Phantom Commit).
+                        //
+                        // We use the writer_guard to access the underlying file since it is still locked.
+                        if let Some(writer) = writer_guard.as_mut() {
+                            // writer.flush() was already called above, so data is in the file (OS cache).
+                            // We get the mutable reference to the inner File to truncate it.
+                            let file = writer.get_mut();
+
+                            // Attempt truncation. If this fails, we are in a very bad state (likely disk failure),
+                            // but we must try to rollback the phantom data.
+                            if let Err(trunc_err) = file.set_len(start_size) {
+                                // We can't do much if truncation fails, but we log it critically.
+                                eprintln!(
+                                    "CRITICAL: Failed to truncate WAL segment after sync failure. \
+                                     Data consistency may be compromised. Error: {}",
+                                    trunc_err
+                                );
+                            } else {
+                                // Truncation succeeded. We successfully prevented a phantom commit.
+                                // The file size is now restored to start_size.
+
+                                // 🛡️ CRITICAL: We must also reset the file cursor (seek) back to start_size.
+                                // set_len() truncates the file but leaves the cursor at the end of the failed write.
+                                // If we don't seek, the next write will start after the hole, creating a sparse file.
+                                if let Err(seek_err) = file.seek(SeekFrom::Start(start_size)) {
+                                    eprintln!(
+                                        "CRITICAL: Failed to seek WAL segment after sync failure. \
+                                         Data consistency may be compromised. Error: {}",
+                                        seek_err
+                                    );
+                                }
+
+                                // Reset in-memory size to match file state (defensive, though flush updates it later)
+                                self.current_segment_size
+                                    .store(start_size, Ordering::Relaxed);
+                            }
+                        }
+
+                        return Err(Error::Storage(StorageError::IoError(format!(
+                            "Failed to sync WAL: {}",
+                            e
+                        ))));
+                    }
                 }
             }
 
@@ -1399,6 +1451,56 @@ mod tests {
 
         // Should have at most segments_to_retain + 1 meta files
         assert!(meta_count <= 3);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_phantom_commit_prevention() {
+        // 🛡️ Sentry Test: Verify that if sync fails, the data flushed to OS cache is rolled back.
+        // This prevents "Phantom Commits" where a client gets an error but the data persists
+        // and reappears after restart/recovery.
+
+        use tempfile::tempdir;
+
+        // 1. Setup coordinator with sync_on_flush = true
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.sync_on_flush = true;
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 2. Write initial valid entry
+        let entry1 = create_test_entry(1, b"valid_data");
+        coordinator.flush(vec![entry1], true).unwrap();
+
+        // Get file size after valid write
+        let segment_path = coordinator.segment_path(coordinator.current_segment_id());
+        let valid_size = std::fs::metadata(&segment_path).unwrap().len();
+
+        // 3. Sabotage the sync handle (replace with /dev/null which fails fsync)
+        // The writer handle remains valid and points to the real file!
+        {
+            let dev_null = File::open("/dev/null").expect("Failed to open /dev/null");
+            let mut guard = coordinator.sync_handle.lock().unwrap();
+            *guard = Some(dev_null);
+        }
+
+        // 4. Attempt to write phantom entry
+        let entry2 = create_test_entry(2, b"phantom_data");
+        let result = coordinator.flush(vec![entry2], true);
+
+        // 5. Assertions
+        assert!(result.is_err(), "Flush should fail due to broken sync handle");
+
+        // CRITICAL CHECK: The file size must NOT have increased.
+        // If it increased, the phantom data is in the file (OS cache) and will persist.
+        let new_size = std::fs::metadata(&segment_path).unwrap().len();
+
+        assert_eq!(
+            new_size, valid_size,
+            "File size increased despite sync failure! Phantom commit detected. \
+             Expected {} bytes (valid only), got {} bytes (valid + phantom).",
+            valid_size, new_size
+        );
     }
 
     #[test]
