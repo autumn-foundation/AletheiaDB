@@ -475,3 +475,85 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{BinaryOp, ScanOp, SortKey};
+
+    #[test]
+    fn test_binary_op_partial_optimization() {
+        // 🎯 Target: LogicalOp::Binary optimization logic (|| vs &&)
+        // 💣 Risk: If changed logic uses &&, partial optimizations (one branch changed) would be lost.
+
+        let rule = PredicatePushdown;
+        let stats = Statistics::default();
+
+        // Left: Filter(Sort(Scan)) -> Should change to Sort(Filter(Scan))
+        let left = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("a", 1)),
+            LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: SortKey::Property("a".to_string()),
+                    descending: true,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+
+        // Right: Filter(Scan) -> Should NOT change
+        let right = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("b", 2)),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        );
+
+        // Binary Op: Union(Left, Right)
+        let root = LogicalOp::binary(BinaryOp::Union, left, right);
+
+        let plan = LogicalPlan::new(root);
+
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        // Must be Some (changed)
+        assert!(
+            result.is_some(),
+            "Partial optimization (left branch) should trigger change"
+        );
+
+        let new_plan = result.unwrap();
+        // Verify structure
+        if let LogicalOp::Binary { left, right, .. } = new_plan.root {
+            // Left should be Sort(Filter...)
+            if let LogicalOp::Unary {
+                op: UnaryOp::Sort { .. },
+                input,
+            } = *left
+            {
+                assert!(matches!(
+                    *input,
+                    LogicalOp::Unary {
+                        op: UnaryOp::Filter(_),
+                        ..
+                    }
+                ));
+            } else {
+                panic!("Left branch was not optimized");
+            }
+
+            // Right should still be Filter(Scan)
+            if let LogicalOp::Unary {
+                op: UnaryOp::Filter(_),
+                input,
+            } = *right
+            {
+                assert!(matches!(*input, LogicalOp::Scan(_)));
+            } else {
+                panic!("Right branch was unexpectedly modified or corrupted");
+            }
+        } else {
+            panic!("Root should be Binary");
+        }
+    }
+}
