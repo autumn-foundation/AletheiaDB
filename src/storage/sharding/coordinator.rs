@@ -283,10 +283,7 @@ impl ShardCoordinator {
         };
 
         // Recover pending transactions on startup
-        // This will panic if the commit log lock is poisoned (unlikely on startup)
-        let result = coordinator.recover_pending_transactions();
-        // Ensure result is used to avoid dead code elimination/coverage gaps
-        let _ = result.is_complete();
+        coordinator.startup_recovery();
 
         coordinator
     }
@@ -295,6 +292,22 @@ impl ShardCoordinator {
     pub fn with_rebalance_config(mut self, config: RebalanceConfig) -> Self {
         self.rebalance_config = config;
         self
+    }
+
+    fn startup_recovery(&self) {
+        // Recover pending transactions on startup
+        // This will panic if the commit log lock is poisoned (unlikely on startup)
+        let result = self.recover_pending_transactions();
+
+        // Ensure result is used to avoid dead code elimination/coverage gaps
+        if !result.is_complete() {
+            #[cfg(feature = "observability")]
+            tracing::warn!(
+                "Recovered partial state on startup: {} recovered, {} dead lettered",
+                result.recovered.len(),
+                result.dead_letter_count()
+            );
+        }
     }
 
     fn reinsert_transaction(&self, tx_id: TxId, transaction: DistributedTransaction) {
