@@ -9,16 +9,16 @@ fn test_repro_tx_id_reuse_on_recovery() {
     let dir = TempDir::new().unwrap();
     let wal_path = dir.path().join("coordinator.wal");
 
-    let config = ShardConfig::new(vec![
-        ShardDefinition::new(0, "shard0:9000", vec!["Person"]),
-    ])
-    .with_wal_path(wal_path.clone());
+    let config = ShardConfig::new(vec![ShardDefinition::new(0, "shard0:9000", vec!["Person"])])
+        .with_wal_path(wal_path.clone());
 
     // 1. Start coordinator and run a transaction
     {
         let coordinator = ShardCoordinator::new(config.clone());
         let tx_id = coordinator
-            .begin_distributed_transaction(vec![aletheiadb::storage::sharding::types::ShardId::new(0).unwrap()])
+            .begin_distributed_transaction(vec![
+                aletheiadb::storage::sharding::types::ShardId::new(0).unwrap(),
+            ])
             .unwrap();
 
         println!("First transaction ID: {}", tx_id);
@@ -36,7 +36,9 @@ fn test_repro_tx_id_reuse_on_recovery() {
 
         // 3. Start a new transaction
         let new_tx_id = coordinator
-            .begin_distributed_transaction(vec![aletheiadb::storage::sharding::types::ShardId::new(0).unwrap()])
+            .begin_distributed_transaction(vec![
+                aletheiadb::storage::sharding::types::ShardId::new(0).unwrap(),
+            ])
             .unwrap();
 
         println!("Second transaction ID (after restart): {}", new_tx_id);
@@ -45,7 +47,8 @@ fn test_repro_tx_id_reuse_on_recovery() {
         // If ID generation reset, new_tx_id will be 0, which duplicates the first transaction
         assert!(
             new_tx_id > TxId::new(0),
-            "Transaction ID reused after restart! Got {}, expected > 0", new_tx_id
+            "Transaction ID reused after restart! Got {}, expected > 0",
+            new_tx_id
         );
     }
 }
