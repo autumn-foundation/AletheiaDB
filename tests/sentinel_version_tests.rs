@@ -26,8 +26,11 @@ fn test_vector_delta_apply_dimension_mismatch_safe_fallback() {
     match result {
         Ok(applied) => {
             // If it didn't panic (Release mode), verify it didn't modify the vector
-            assert_eq!(applied, base, "Vector should be unchanged on dimension mismatch");
-        },
+            assert_eq!(
+                applied, base,
+                "Vector should be unchanged on dimension mismatch"
+            );
+        }
         Err(_) => {
             // If it panicked (Debug mode), that's also acceptable behavior (the check exists)
             // This confirms the check is present and active.
