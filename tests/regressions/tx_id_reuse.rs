@@ -1,7 +1,6 @@
 use aletheiadb::core::id::TxId;
 use aletheiadb::storage::sharding::config::{ShardConfig, ShardDefinition};
 use aletheiadb::storage::sharding::coordinator::ShardCoordinator;
-use std::sync::Arc;
 use tempfile::TempDir;
 
 #[test]
