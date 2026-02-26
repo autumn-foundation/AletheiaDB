@@ -106,17 +106,11 @@ impl AdjacencyIndex {
 
         // Zero-copy conversion: NodeId(u64) has same layout as u64
         // SAFETY: NodeId is #[repr(transparent)] wrapper around u64.
-        let node_ids_typed: Vec<NodeId> = unsafe {
-            let mut v = std::mem::ManuallyDrop::new(node_ids);
-            Vec::from_raw_parts(v.as_mut_ptr() as *mut NodeId, v.len(), v.capacity())
-        };
+        let node_ids_typed: Vec<NodeId> = unsafe { Self::transmute_vec(node_ids) };
 
         // Zero-copy conversion for offsets if pointer width is 64-bit (usize == u64)
         #[cfg(target_pointer_width = "64")]
-        let offsets_usize: Vec<usize> = unsafe {
-            let mut v = std::mem::ManuallyDrop::new(offsets);
-            Vec::from_raw_parts(v.as_mut_ptr() as *mut usize, v.len(), v.capacity())
-        };
+        let offsets_usize: Vec<usize> = unsafe { Self::transmute_vec(offsets) };
 
         #[cfg(not(target_pointer_width = "64"))]
         let offsets_usize: Vec<usize> = offsets.iter().map(|&x| x as usize).collect();
@@ -321,6 +315,19 @@ impl AdjacencyIndex {
         }
 
         Ok(())
+    }
+
+    /// Helper for zero-copy Vec conversion
+    ///
+    /// # Safety
+    /// T and U must have same layout, size, and alignment.
+    #[inline]
+    unsafe fn transmute_vec<T, U>(v: Vec<T>) -> Vec<U> {
+        let mut v = std::mem::ManuallyDrop::new(v);
+        // SAFETY: Caller ensures T and U layout compatibility.
+        // from_raw_parts is unsafe, but we are inside an unsafe function.
+        // In Rust 2024 (and newer editions), unsafe blocks are required inside unsafe functions.
+        unsafe { Vec::from_raw_parts(v.as_mut_ptr() as *mut U, v.len(), v.capacity()) }
     }
 }
 
