@@ -36,7 +36,7 @@ use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMapBuilder;
-use crate::experimental::wormhole::WormholeDetector;
+use std::collections::{HashSet, VecDeque};
 
 /// The Alchemist engine for graph transformation.
 pub struct Alchemist<'a> {
@@ -73,28 +73,87 @@ impl<'a> Alchemist<'a> {
             return Ok(0);
         }
 
-        let detector = WormholeDetector::new(self.db);
-        // Use k=10 neighbors as a reasonable default for semantic search
-        let wormholes = detector.find_wormholes(candidates, 10, max_hops)?;
+        // 1. Find wormholes (Read Phase)
+        // A wormhole is a pair (source, target) that is semantically similar but structurally distant.
+        let mut wormholes = Vec::new();
 
+        // Use k=10 neighbors as a reasonable default for semantic search
+        for &source in candidates {
+            let neighbors = self.db.find_similar(source, 10)?;
+            for (target, similarity) in neighbors {
+                if similarity >= similarity_threshold {
+                    // Check structural distance
+                    // If distance is None, it means no path within max_hops was found.
+                    if self.bfs_distance(source, target, max_hops)?.is_none() {
+                        wormholes.push((source, target, similarity));
+                    }
+                }
+            }
+        }
+
+        if wormholes.is_empty() {
+            return Ok(0);
+        }
+
+        // 2. Write Phase
         let created_count = self.db.write(|tx| {
             let mut count = 0;
-            for wormhole in wormholes {
-                if wormhole.similarity >= similarity_threshold {
-                    // Create edge with metadata
-                    let props = PropertyMapBuilder::new()
-                        .insert("similarity", wormhole.similarity as f64)
-                        .insert("crystallized", true)
-                        .build();
+            for (source, target, similarity) in wormholes {
+                // Create edge with metadata
+                let props = PropertyMapBuilder::new()
+                    .insert("similarity", similarity as f64)
+                    .insert("crystallized", true)
+                    .build();
 
-                    tx.create_edge(wormhole.source, wormhole.target, edge_label, props)?;
-                    count += 1;
-                }
+                tx.create_edge(source, target, edge_label, props)?;
+                count += 1;
             }
             Ok::<_, crate::core::error::Error>(count)
         })?;
 
         Ok(created_count)
+    }
+
+    /// Calculate shortest path distance using BFS up to max_depth.
+    ///
+    /// Returns:
+    /// - `Ok(Some(d))` if path found with length `d <= max_depth`.
+    /// - `Ok(None)` if no path found within `max_depth`.
+    fn bfs_distance(&self, start: NodeId, end: NodeId, max_depth: usize) -> Result<Option<usize>> {
+        if start == end {
+            return Ok(Some(0));
+        }
+
+        let mut queue = VecDeque::new();
+        queue.push_back((start, 0));
+
+        let mut visited = HashSet::new();
+        visited.insert(start);
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                // If we reached max depth and haven't found target,
+                // we stop this branch. If queue empties, we return None.
+                continue;
+            }
+
+            // Iterate over outgoing edges
+            let edges_iter = self.db.current.get_outgoing_edges_iter(current);
+            for edge_id in edges_iter {
+                // Resolve target node (zero-copy)
+                let target = self.db.current.get_edge_target(edge_id)?;
+
+                if target == end {
+                    return Ok(Some(depth + 1));
+                }
+
+                if visited.insert(target) {
+                    queue.push_back((target, depth + 1));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Merges highly similar nodes into a single node ("Semantic Fusion").
@@ -112,8 +171,6 @@ impl<'a> Alchemist<'a> {
     /// # Returns
     /// The number of nodes merged (deleted).
     pub fn fuse_synonyms(&self, candidates: &[NodeId], similarity_threshold: f32) -> Result<usize> {
-        use std::collections::HashSet;
-
         if candidates.len() < 2 {
             return Ok(0);
         }
@@ -370,5 +427,48 @@ mod tests {
             has_c_to_a_inherited,
             "Survivor A should inherit incoming edge from C"
         );
+    }
+
+    #[test]
+    fn test_bfs_distance_logic() {
+        let db = create_test_db();
+        let alchemist = Alchemist::new(&db);
+
+        // 1. Create Nodes
+        let props = PropertyMapBuilder::new().build();
+        let a = db.create_node("Node", props.clone()).unwrap();
+        let b = db.create_node("Node", props.clone()).unwrap();
+        let c = db.create_node("Node", props.clone()).unwrap();
+
+        // 2. Create Edges A -> B -> C
+        db.create_edge(a, b, "NEXT", props.clone()).unwrap();
+        db.create_edge(b, c, "NEXT", props.clone()).unwrap();
+
+        // A -> C distance is 2.
+
+        // Case 1: Max Hops = 1. Should return None.
+        let dist1 = alchemist.bfs_distance(a, c, 1).unwrap();
+        assert!(dist1.is_none(), "Should not find path within 1 hop");
+
+        // Case 2: Max Hops = 2. Should return Some(2).
+        let dist2 = alchemist.bfs_distance(a, c, 2).unwrap();
+        assert_eq!(dist2, Some(2), "Should find path of length 2");
+
+        // Case 3: Max Hops = 3. Should return Some(2).
+        let dist3 = alchemist.bfs_distance(a, c, 3).unwrap();
+        assert_eq!(dist3, Some(2), "Should find path of length 2");
+    }
+
+    #[test]
+    fn test_bfs_distance_disconnected() {
+        let db = create_test_db();
+        let alchemist = Alchemist::new(&db);
+
+        let props = PropertyMapBuilder::new().build();
+        let a = db.create_node("Node", props.clone()).unwrap();
+        let d = db.create_node("Node", props.clone()).unwrap();
+
+        let dist = alchemist.bfs_distance(a, d, 5).unwrap();
+        assert!(dist.is_none(), "Should be disconnected");
     }
 }

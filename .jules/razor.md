@@ -1,9 +1,4 @@
 ## [Reduction]
-**Bloat:** `FileColdStorage` (Redundant, inferior implementation of `ColdStorage` trait).
-**Cut:** Deleted `FileColdStorage` struct, implementation, and tests.
-**Saved:** ~200 lines of code + cognitive load of maintaining two cold storage backends.
-
-## [Reduction]
-**Bloat:** `ColdStorage` trait (Single-implementation abstraction used only by `RedbColdStorage`).
-**Cut:** Deleted the `ColdStorage` trait and `cold_storage.rs` module. Refactored all consumers to use the concrete `RedbColdStorage` struct directly.
-**Saved:** ~300 lines of boilerplate (trait definitions, mock implementations, duplicate imports) + removed dynamic dispatch overhead.
+**Bloat:** `WormholeDetector` struct and `Wormhole` data object in `src/experimental/wormhole.rs` used only by `Alchemist` in `src/experimental/alchemy.rs`.
+**Cut:** Inlined `bfs_distance` logic and vector search directly into `Alchemist::crystallize_wormholes`. Deleted `wormhole.rs`.
+**Saved:** 1 file, ~170 lines of code, 1 fewer abstraction layer.

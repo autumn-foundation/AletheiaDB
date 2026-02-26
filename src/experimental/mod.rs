@@ -174,10 +174,6 @@ pub mod thermos;
 pub mod sentinel;
 
 #[cfg(feature = "nova")]
-/// Wormhole: Detecting Semantic-Structural Gaps.
-pub mod wormhole;
-
-#[cfg(feature = "nova")]
 /// Gestalt: Semantic Subgraph Matching Engine.
 pub mod gestalt;
 
