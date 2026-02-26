@@ -55,8 +55,9 @@ pub use vector_builder::VectorIndexBuilder;
 /// - **Async**: Commits return immediately, background thread syncs. Fast but risk of data loss.
 /// - **GroupCommit**: Multiple commits share one fsync. ACID durability with high throughput.
 ///
-/// Use [`with_wal_config`](Self::with_wal_config) to configure the default mode,
-/// or [`write_with_options`](Self::write_with_options) for per-transaction overrides.
+/// Use [`with_unified_config`](Self::with_unified_config) to configure the database settings,
+/// including durability modes. You can also use [`write_with_options`](Self::write_with_options)
+/// for per-transaction overrides.
 ///
 /// # Examples
 ///

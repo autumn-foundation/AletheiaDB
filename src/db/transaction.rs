@@ -69,10 +69,18 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::api::ReadOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
     /// let tx = db.read_transaction()?;
     /// let node = tx.get_node(node_id)?;
     /// // No commit needed - transaction is read-only
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
         let tx_id = self.tx_id_gen.next();
@@ -103,11 +111,17 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::api::ReadOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
     /// // With AletheiaDB's error type (default)
-    /// let name = db.read(|tx| {
+    /// let name: Option<aletheiadb::PropertyValue> = db.read(|tx| {
     ///     let node = tx.get_node(node_id)?;
-    ///     Ok(node.get_property("name").cloned())
+    ///     Ok::<_, aletheiadb::Error>(node.get_property("name").cloned())
     /// })?;
     ///
     /// // With custom error type
@@ -126,8 +140,12 @@ impl AletheiaDB {
     /// let name: Result<String, RepositoryError> = db.read(|tx| {
     ///     let node = tx.get_node(node_id)?; // ? operator works!
     ///     node.get_property("name")
+    ///         .and_then(|v| v.as_str())
+    ///         .map(|s| s.to_string())
     ///         .ok_or(RepositoryError::NotFound)
     /// });
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn read<F, T, E>(&self, f: F) -> std::result::Result<T, E>
     where
@@ -152,11 +170,21 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::api::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let props = PropertyMapBuilder::new().build();
+    /// # let edge_props = PropertyMapBuilder::new().build();
+    /// # let other = NodeId::new(2)?;
     /// let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node("Person", props)?;
     /// tx.create_edge(node_id, other, "KNOWS", edge_props)?;
     /// tx.commit()?;  // or tx.rollback()
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
         let tx_id = self.tx_id_gen.next();
@@ -194,13 +222,31 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::api::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let props = PropertyMapBuilder::new().build();
+    /// # let edge_props = PropertyMapBuilder::new().build();
+    /// # let other = NodeId::new(2)?;
+    /// # fn validate_node(id: NodeId) -> bool { true }
     /// // With AletheiaDB's error type (default)
     /// let node_id = db.write(|tx| {
-    ///     let id = tx.create_node("Person", props)?;
-    ///     tx.create_edge(id, other, "KNOWS", edge_props)?;
-    ///     Ok(id)
+    ///     let id = tx.create_node("Person", props.clone())?;
+    ///     tx.create_edge(id, other, "KNOWS", edge_props.clone())?;
+    ///     Ok::<_, aletheiadb::Error>(id)
     /// })?;
+    ///
+    /// #[derive(Debug)]
+    /// enum RepositoryError {
+    ///     Database(aletheiadb::Error),
+    ///     ValidationFailed,
+    /// }
+    /// impl From<aletheiadb::Error> for RepositoryError {
+    ///     fn from(e: aletheiadb::Error) -> Self { RepositoryError::Database(e) }
+    /// }
     ///
     /// // With custom error type
     /// let node_id: Result<NodeId, RepositoryError> = db.write(|tx| {
@@ -210,6 +256,8 @@ impl AletheiaDB {
     ///     }
     ///     Ok(id)
     /// });
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn write<F, T, E>(&self, f: F) -> std::result::Result<T, E>
     where
@@ -252,14 +300,29 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # use aletheiadb::api::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let properties = PropertyMapBuilder::new().build();
     /// // With AletheiaDB's error type (default)
     /// let (node_id, commit_ts) = db.write_with_timestamp(|tx| {
-    ///     tx.create_node("Person", properties)
+    ///     tx.create_node("Person", properties.clone())
     /// })?;
     ///
     /// // Query at exact commit timestamp
     /// let node = db.get_node_at_time(node_id, commit_ts, commit_ts)?;
+    ///
+    /// #[derive(Debug)]
+    /// enum RepositoryError {
+    ///     Database(aletheiadb::Error),
+    /// }
+    /// impl From<aletheiadb::Error> for RepositoryError {
+    ///     fn from(e: aletheiadb::Error) -> Self { RepositoryError::Database(e) }
+    /// }
     ///
     /// // With custom error type
     /// let result: Result<(NodeId, Timestamp), RepositoryError> =
@@ -267,6 +330,8 @@ impl AletheiaDB {
     ///         let id = tx.create_node("Person", properties)?;
     ///         Ok(id)
     ///     });
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn write_with_timestamp<F, T, E>(&self, f: F) -> std::result::Result<(T, Timestamp), E>
     where
@@ -308,30 +373,42 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use aletheiadb::{AletheiaDB, WriteOptions, DurabilityMode};
-    ///
-    /// let db = AletheiaDB::new();
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, WriteOptions, DurabilityMode, PropertyMap};
+    /// # use aletheiadb::api::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let bulk_data = vec![PropertyMap::new()];
     ///
     /// // Use Async mode for bulk loading (faster but less durable)
     /// let mode = DurabilityMode::async_mode_validated(100)?;
     /// let options = WriteOptions::new().with_durability(mode);
     ///
     /// // With AletheiaDB's error type (default)
-    /// db.write_with_options(options, |tx| {
-    ///     for item in bulk_data {
-    ///         tx.create_node("Item", item.into())?;
+    /// db.write_with_options(options.clone(), |tx| {
+    ///     for item in &bulk_data {
+    ///         tx.create_node("Item", item.clone())?;
     ///     }
-    ///     Ok(())
+    ///     Ok::<_, aletheiadb::Error>(())
     /// })?;
+    ///
+    /// #[derive(Debug)]
+    /// enum RepositoryError {
+    ///     Database(aletheiadb::Error),
+    /// }
+    /// impl From<aletheiadb::Error> for RepositoryError {
+    ///     fn from(e: aletheiadb::Error) -> Self { RepositoryError::Database(e) }
+    /// }
     ///
     /// // With custom error type
     /// let result: Result<(), RepositoryError> = db.write_with_options(options, |tx| {
-    ///     for item in bulk_data {
-    ///         tx.create_node("Item", item.into())?; // ? operator works!
+    ///     for item in &bulk_data {
+    ///         tx.create_node("Item", item.clone())?; // ? operator works!
     ///     }
     ///     Ok(())
     /// });
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn write_with_options<F, T, E>(
         &self,
@@ -378,13 +455,20 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, WriteOptions, DurabilityMode, PropertyMapBuilder};
+    /// # use aletheiadb::api::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let props = PropertyMapBuilder::new().build();
     /// let options = WriteOptions::new()
     ///     .with_durability(DurabilityMode::Synchronous);
     ///
     /// let mut tx = db.write_transaction_with_options(options)?;
     /// tx.create_node("Critical", props)?;
     /// tx.commit()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn write_transaction_with_options(
         &self,

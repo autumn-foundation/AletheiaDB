@@ -19,11 +19,25 @@ use crate::core::temporal::{BiTemporalInterval, Timestamp};
 ///
 /// To access the timestamp when this version was recorded:
 /// ```rust
-/// # use aletheiadb::core::history::VersionInfo;
-/// # fn example(version: &VersionInfo) {
+/// use aletheiadb::core::history::VersionInfo;
+/// use aletheiadb::core::temporal::{BiTemporalInterval, time};
+/// use aletheiadb::core::{VersionId, PropertyMap};
+///
+/// // Create a dummy version info
+/// let now = time::now();
+/// let version = VersionInfo {
+///     version_number: 1,
+///     version_id: VersionId::new(1).unwrap(),
+///     temporal: BiTemporalInterval::current(now),
+///     properties: PropertyMap::new(),
+///     label: "Person".to_string(),
+/// };
+///
 /// let recorded_at = version.temporal.transaction_time().start();
 /// let valid_from = version.temporal.valid_time().start();
-/// # }
+///
+/// assert_eq!(recorded_at, now);
+/// assert_eq!(valid_from, now);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct VersionInfo {
@@ -46,9 +60,23 @@ pub struct VersionInfo {
 ///
 /// # Example
 ///
-/// ```rust,no_run
-/// # use aletheiadb::core::history::EntityHistory;
-/// # fn analyze_history(history: &EntityHistory) {
+/// ```rust
+/// use aletheiadb::core::history::{EntityHistory, VersionInfo};
+/// use aletheiadb::core::temporal::{BiTemporalInterval, time};
+/// use aletheiadb::core::{VersionId, PropertyMap};
+///
+/// // Construct a mock history
+/// let now = time::now();
+/// let v1 = VersionInfo {
+///     version_number: 1,
+///     version_id: VersionId::new(1).unwrap(),
+///     temporal: BiTemporalInterval::current(now),
+///     properties: PropertyMap::new(),
+///     label: "Person".to_string(),
+/// };
+///
+/// let history = EntityHistory { versions: vec![v1] };
+///
 /// println!("Entity has {} versions", history.version_count());
 ///
 /// for version in &history.versions {
@@ -57,7 +85,6 @@ pub struct VersionInfo {
 ///         version.temporal.valid_time().start()
 ///     );
 /// }
-/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct EntityHistory {
@@ -99,16 +126,35 @@ impl EntityHistory {
 ///
 /// # Example
 ///
-/// ```rust,no_run
-/// # use aletheiadb::core::history::VersionDiff;
-/// # fn check_changes(diff: &VersionDiff) {
+/// ```rust
+/// use aletheiadb::core::history::VersionDiff;
+/// use aletheiadb::core::{PropertyMapBuilder, VersionId};
+///
+/// // Define properties for two versions
+/// let v1_props = PropertyMapBuilder::new()
+///     .insert("name", "Alice")
+///     .build();
+///
+/// let v2_props = PropertyMapBuilder::new()
+///     .insert("name", "Alice")
+///     .insert("age", 30) // Added property
+///     .build();
+///
+/// // Compute diff
+/// let diff = VersionDiff::compute(
+///     &v1_props,
+///     &v2_props,
+///     VersionId::new(1).unwrap(),
+///     VersionId::new(2).unwrap()
+/// );
+///
 /// if diff.has_changes() {
 ///     println!("Changes detected:");
 ///     println!("  Added: {} properties", diff.added.len());
 ///     println!("  Removed: {} properties", diff.removed.len());
 ///     println!("  Modified: {} properties", diff.modified.len());
+///     assert_eq!(diff.added.len(), 1);
 /// }
-/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct VersionDiff {

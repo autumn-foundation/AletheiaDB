@@ -31,15 +31,17 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use aletheiadb::storage::sharding::{ShardConfig, ShardCoordinator, ShardDefinition};
 //!
+//! # fn main() {
 //! let config = ShardConfig::new(vec![
 //!     ShardDefinition::new(0, "shard0:9000", vec!["Person", "User"]),
 //!     ShardDefinition::new(1, "shard1:9000", vec!["Place", "Location"]),
 //! ]);
 //!
 //! let coordinator = ShardCoordinator::new(config);
+//! # }
 //! ```
 
 pub mod config;

@@ -25,11 +25,13 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use aletheiadb::storage::index_persistence::{
 //!     IndexPersistenceManager, PersistenceConfig, IndexManifest
 //! };
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Use a valid path
 //! let manager = IndexPersistenceManager::new("data");
 //! manager.ensure_directories()?;
 //!
@@ -44,6 +46,8 @@
 //!     // String interner is now restored
 //!     // Ready to load other indexes
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Format Details
