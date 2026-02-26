@@ -339,26 +339,74 @@ impl StringInterner {
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
     pub fn get_all_strings(&self) -> Vec<String> {
-        // Use next_id to estimate the required size. This avoids repeated resizing
-        // inside the loop, which can happen if iteration order doesn't match ID order.
-        // String::new() is non-allocating, so pre-filling the vector is cheap.
+        // Use next_id to estimate the required size.
         let max_id = self.next_id.load(Ordering::Relaxed) as usize;
-        let mut strings = vec![String::new(); max_id];
+        // Use Option<String> to distinguish between "not yet read" (None) and "read" (Some).
+        // This is crucial because iterating id_to_string might miss an item that was just
+        // assigned an ID (next_id incremented) but not yet inserted into the map.
+        let mut strings: Vec<Option<String>> = vec![None; max_id];
 
-        // Collect all (id, string) pairs
+        // Collect all currently visible (id, string) pairs
         for entry in self.id_to_string.iter() {
             let id = entry.key().as_u32() as usize;
 
             if id < strings.len() {
-                strings[id] = entry.value().to_string();
+                strings[id] = Some(entry.value().to_string());
             } else {
                 // Handle race condition where an ID was added after we read next_id
-                strings.resize(id + 1, String::new());
-                strings[id] = entry.value().to_string();
+                strings.resize(id + 1, None);
+                strings[id] = Some(entry.value().to_string());
             }
         }
 
+        // Fill in any holes caused by the race condition
+        let mut id = 0;
+        while id < strings.len() {
+            if strings[id].is_none() {
+                let interned_id = InternedString::from_raw(id as u32);
+                let mut backoff = 1;
+
+                loop {
+                    // Check if item appeared
+                    if let Some(entry) = self.id_to_string.get(&interned_id) {
+                        strings[id] = Some(entry.value().to_string());
+                        break;
+                    }
+
+                    // Check if this ID was rolled back (invalidated)
+                    // If the global next_id is now <= this id, it means the reservation was cancelled.
+                    let current_max = self.next_id.load(Ordering::Relaxed) as usize;
+                    if current_max <= id {
+                        // The ID we are waiting for is beyond the current next_id.
+                        // It must have been rolled back. Truncate and return what we have.
+                        strings.truncate(current_max);
+                        return strings.into_iter().flatten().collect();
+                    }
+
+                    // Backoff strategies
+                    if backoff > 100 {
+                        std::thread::yield_now();
+                    } else {
+                        std::hint::spin_loop();
+                    }
+
+                    backoff += 1;
+
+                    // Safety limit to prevent infinite hangs if a writer thread panicked
+                    // 100,000 iterations with yield should be plenty of time (seconds)
+                    // without blocking the system indefinitely.
+                    if backoff > 100_000 {
+                         panic!("Interner deadlock: ID {} was reserved but never populated (next_id={})", id, current_max);
+                    }
+                }
+            }
+            id += 1;
+        }
+
         strings
+            .into_iter()
+            .map(|opt| opt.expect("Hole should have been filled"))
+            .collect()
     }
 
     /// Pre-intern common strings at startup to avoid initial allocation overhead.
@@ -1243,5 +1291,67 @@ mod mutant_kill_tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0], "A");
         assert_eq!(all[1], "C");
+    }
+
+    #[test]
+    fn test_get_all_strings_race_consistency() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        // Use a large enough capacity to avoid capacity exceeded errors during the test
+        let interner = Arc::new(StringInterner::with_max_capacity(500_000));
+        let barrier = Arc::new(Barrier::new(2));
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        // Thread 1: Spams intern
+        let t1 = {
+            let interner = interner.clone();
+            let barrier = barrier.clone();
+            let running = running.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                let mut i = 0;
+                while running.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Intern new strings to increment next_id
+                    let _ = interner.intern(format!("s_{}", i));
+                    i += 1;
+                    if i > 400_000 {
+                         // Stop generating load if we approach capacity (500k) to avoid errors
+                         // but allow enough time for the reader thread to catch the race.
+                         break;
+                    }
+                }
+            })
+        };
+
+        // Thread 2: Calls get_all_strings and verifies no holes
+        let t2 = {
+            let interner = interner.clone();
+            let barrier = barrier.clone();
+            let running = running.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                // Check multiple times to increase chance of catching the race
+                for _ in 0..100 {
+                    if !running.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let snapshot = interner.get_all_strings();
+                    // We expect NO empty strings because we only intern "s_{i}" which is non-empty.
+                    // (Common strings are also non-empty).
+                    // Any empty string implies a "hole" where next_id was incremented but string not yet inserted.
+                    for (id, s) in snapshot.iter().enumerate() {
+                        if s.is_empty() {
+                            running.store(false, std::sync::atomic::Ordering::Relaxed);
+                            panic!("Found hole at ID {}: empty string returned in snapshot!", id);
+                        }
+                    }
+                }
+                running.store(false, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
+
+        t2.join().unwrap();
+        t1.join().unwrap();
     }
 }
