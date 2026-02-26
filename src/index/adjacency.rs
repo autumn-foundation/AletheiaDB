@@ -771,19 +771,16 @@ mod tests {
         let node_ids = vec![1, 2];
         let offsets = vec![0, 1, 2];
         let edge_ids = vec![10, 20];
-        let mut edges_map = std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::<
-            crate::core::hasher::IdentityHasher,
-        >::default());
+        let mut edges_map =
+            std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::<
+                crate::core::hasher::IdentityHasher,
+            >::default());
 
-        let label = crate::core::interning::GLOBAL_INTERNER.intern("TEST").unwrap();
-        edges_map.insert(
-            EdgeId::new(10).unwrap(),
-            (NodeId::new(2).unwrap(), label),
-        );
-        edges_map.insert(
-            EdgeId::new(20).unwrap(),
-            (NodeId::new(1).unwrap(), label),
-        );
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("TEST")
+            .unwrap();
+        edges_map.insert(EdgeId::new(10).unwrap(), (NodeId::new(2).unwrap(), label));
+        edges_map.insert(EdgeId::new(20).unwrap(), (NodeId::new(1).unwrap(), label));
 
         let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
         assert_eq!(index.node_count(), 2);
