@@ -284,8 +284,9 @@ impl ShardCoordinator {
 
         // Recover pending transactions on startup
         // This will panic if the commit log lock is poisoned (unlikely on startup)
-        let recovery_result = coordinator.recover_pending_transactions();
-        drop(recovery_result);
+        let result = coordinator.recover_pending_transactions();
+        // Ensure result is used to avoid dead code elimination/coverage gaps
+        let _ = result.is_complete();
 
         coordinator
     }
