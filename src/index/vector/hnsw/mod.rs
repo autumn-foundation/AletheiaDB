@@ -654,27 +654,75 @@ impl HnswIndex {
     }
 
     pub(crate) fn convert_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
-        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
+        self.convert_matches_internal(matches, usize::MAX, |_| true)
+    }
 
-        for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-            if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                let node_id = *node_id_ref.value();
-                let similarity = match self.config.metric {
-                    DistanceMetric::Cosine => {
+    fn convert_matches_internal<F>(
+        &self,
+        matches: Matches,
+        limit: usize,
+        predicate: F,
+    ) -> Vec<(NodeId, f32)>
+    where
+        F: Fn(NodeId) -> bool,
+    {
+        let count = matches.keys.len();
+        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(count.min(limit));
+
+        match self.config.metric {
+            DistanceMetric::Cosine => {
+                for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+                    let node_id = if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                        *node_id_ref.value()
+                    } else {
+                        continue;
+                    };
+
+                    if predicate(node_id) {
                         let sim = 1.0 - distance;
-                        if sim.is_nan() {
+                        let val = if sim.is_nan() {
                             0.0
                         } else {
                             sim.clamp(-1.0, 1.0)
+                        };
+                        results.push((node_id, val));
+                        if results.len() >= limit {
+                            break;
                         }
                     }
-                    DistanceMetric::Euclidean => -distance,
-                    DistanceMetric::DotProduct => 1.0 - distance,
-                    DistanceMetric::Haversine => -distance,
-                    DistanceMetric::Hamming => -distance,
-                    DistanceMetric::Tanimoto => 1.0 - distance,
-                };
-                results.push((node_id, similarity));
+                }
+            }
+            DistanceMetric::Euclidean | DistanceMetric::Haversine | DistanceMetric::Hamming => {
+                for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+                    let node_id = if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                        *node_id_ref.value()
+                    } else {
+                        continue;
+                    };
+
+                    if predicate(node_id) {
+                        results.push((node_id, -distance));
+                        if results.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+            DistanceMetric::DotProduct | DistanceMetric::Tanimoto => {
+                for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+                    let node_id = if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                        *node_id_ref.value()
+                    } else {
+                        continue;
+                    };
+
+                    if predicate(node_id) {
+                        results.push((node_id, 1.0 - distance));
+                        if results.len() >= limit {
+                            break;
+                        }
+                    }
+                }
             }
         }
         results
@@ -958,7 +1006,7 @@ impl VectorIndex for HnswIndex {
         self.maybe_block_in_place(|| {
             let mut candidate_k = k_capped.min(max_candidates);
             loop {
-                let candidates = {
+                let filtered = {
                     let matches = self.retry_usearch(
                         || {
                             let index = self.inner.read();
@@ -966,19 +1014,11 @@ impl VectorIndex for HnswIndex {
                         },
                         "Filtered search failed",
                     )?;
-                    self.convert_matches(matches)
+                    self.convert_matches_internal(matches, k_capped, |id| {
+                        let _guard = FilterCallbackGuard::new();
+                        predicate(&id)
+                    })
                 };
-
-                let mut filtered = Vec::with_capacity(k_capped.min(candidates.len()));
-                for (node_id, similarity) in candidates {
-                    let _guard = FilterCallbackGuard::new();
-                    if predicate(&node_id) {
-                        filtered.push((node_id, similarity));
-                        if filtered.len() == k_capped {
-                            break;
-                        }
-                    }
-                }
 
                 if filtered.len() >= k_capped || candidate_k == max_candidates {
                     self.stats
