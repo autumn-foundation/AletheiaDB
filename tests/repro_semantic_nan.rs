@@ -1,10 +1,9 @@
-
 #![cfg(feature = "nova")]
 
 use aletheiadb::AletheiaDB;
 use aletheiadb::core::property::PropertyMapBuilder;
-use aletheiadb::experimental::semantic_navigator::SemanticNavigator;
 use aletheiadb::core::vector::cosine_similarity;
+use aletheiadb::experimental::semantic_navigator::SemanticNavigator;
 
 #[test]
 fn test_semantic_navigator_nan_handling() {
@@ -41,7 +40,8 @@ fn test_semantic_navigator_nan_handling() {
     let a = db.create_node("Node", props_a).unwrap();
     let b = db.create_node("Node", props_b).unwrap();
 
-    db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+    db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build())
+        .unwrap();
 
     let nav = SemanticNavigator::new(&db);
 
@@ -58,5 +58,8 @@ fn test_semantic_navigator_nan_handling() {
 
     // If fix is applied, it should find path (cost 1.0).
     // If bug exists, it should fail.
-    assert!(path.is_ok(), "Should find path even with NaN vectors (treating as high cost)");
+    assert!(
+        path.is_ok(),
+        "Should find path even with NaN vectors (treating as high cost)"
+    );
 }

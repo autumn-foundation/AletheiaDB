@@ -141,11 +141,7 @@ impl<'a> SemanticNavigator<'a> {
                 let distance_cost = match (&current_vec, &neighbor_vec) {
                     (Some(a), Some(b)) => {
                         let sim = cosine_similarity(a, b)?;
-                        if sim.is_nan() {
-                            1.0
-                        } else {
-                            1.0 - sim
-                        }
+                        if sim.is_nan() { 1.0 } else { 1.0 - sim }
                     }
                     _ => 1.0, // Penalize missing vectors
                 };
@@ -160,11 +156,7 @@ impl<'a> SemanticNavigator<'a> {
                     let h_score = match &neighbor_vec {
                         Some(vec) => {
                             let sim = cosine_similarity(vec, &end_vec)?;
-                            if sim.is_nan() {
-                                1.0
-                            } else {
-                                1.0 - sim
-                            }
+                            if sim.is_nan() { 1.0 } else { 1.0 - sim }
                         }
                         None => 1.0, // High heuristic if missing vector
                     };

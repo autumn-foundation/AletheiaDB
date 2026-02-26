@@ -1,9 +1,7 @@
-
 use aletheiadb::core::hlc::HybridTimestamp;
 use aletheiadb::core::id::TxId;
 use aletheiadb::storage::sharding::{
-    ShardCoordinator, ShardConfig, ShardDefinition,
-    PersistentCommitLog, CommitLogConfig, ShardId
+    CommitLogConfig, PersistentCommitLog, ShardConfig, ShardCoordinator, ShardDefinition, ShardId,
 };
 use tempfile::tempdir;
 
@@ -19,10 +17,11 @@ fn test_shard_coordinator_durability_repro() {
 
     // 1. Inject a pending commit into the log (Simulating a crash state)
     {
-         let log = PersistentCommitLog::new(&wal_path, CommitLogConfig::default()).unwrap();
-         let commit_ts = HybridTimestamp::new(100, 0).unwrap();
-         log.log_commit(tx_id, shards.clone(), Some(commit_ts)).unwrap();
-         assert!(log.has_pending_decision(tx_id));
+        let log = PersistentCommitLog::new(&wal_path, CommitLogConfig::default()).unwrap();
+        let commit_ts = HybridTimestamp::new(100, 0).unwrap();
+        log.log_commit(tx_id, shards.clone(), Some(commit_ts))
+            .unwrap();
+        assert!(log.has_pending_decision(tx_id));
     }
 
     // 2. Restart Coordinator
@@ -44,14 +43,20 @@ fn test_shard_coordinator_durability_repro() {
         // from active memory.
 
         let tx = coordinator.get_transaction(tx_id);
-        assert!(tx.is_none(), "Transaction should be completed and removed from active list after successful recovery");
+        assert!(
+            tx.is_none(),
+            "Transaction should be completed and removed from active list after successful recovery"
+        );
     }
 
     // 4. Verify log state
     // If recovery ran successfully, it MUST have logged the completion to the persistent log.
     // This confirms that the pending transaction was indeed processed.
     {
-         let log = PersistentCommitLog::new(&wal_path, CommitLogConfig::default()).unwrap();
-         assert!(!log.has_pending_decision(tx_id), "Transaction should have been completed and removed from pending log during recovery");
+        let log = PersistentCommitLog::new(&wal_path, CommitLogConfig::default()).unwrap();
+        assert!(
+            !log.has_pending_decision(tx_id),
+            "Transaction should have been completed and removed from pending log during recovery"
+        );
     }
 }
