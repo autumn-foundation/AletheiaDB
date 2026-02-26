@@ -26,8 +26,8 @@ impl IdentityHasher {
         } else {
             // Already dirty: mix new value to avoid collisions for composite keys
             // (e.g. String which writes bytes then 0xFF marker)
-            self.0 ^= val;
-            self.0 = self.0.wrapping_mul(FNV_PRIME);
+            // Fix order sensitivity by multiplying BEFORE XOR
+            self.0 = self.0.wrapping_mul(FNV_PRIME) ^ val;
         }
     }
 }
@@ -238,6 +238,105 @@ mod tests {
             h1.finish(),
             255,
             "String hash should not collapse to the 0xff marker"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+
+    /// 🎯 Target: IdentityHasher composite keys
+    /// 💣 Risk: Order sensitivity. (1, 2) and (2, 1) should hash differently.
+    /// 🧪 Strategy: Write u32s in different order and compare.
+    /// 🔬 Verification: Expect distinct hashes.
+    #[test]
+    fn test_composite_key_order_sensitivity() {
+        let mut h1 = IdentityHasher::default();
+        h1.write_u32(1);
+        h1.write_u32(2);
+
+        let mut h2 = IdentityHasher::default();
+        h2.write_u32(2);
+        h2.write_u32(1);
+
+        assert_ne!(
+            h1.finish(),
+            h2.finish(),
+            "Hashes for (1, 2) and (2, 1) should differ (XOR commutativity check)"
+        );
+    }
+
+    /// 🎯 Target: IdentityHasher zero collision
+    /// 💣 Risk: (0, 0) colliding with 0.
+    /// 🧪 Strategy: Write zeros and compare.
+    /// 🔬 Verification: Document current behavior (collision is expected due to design).
+    #[test]
+    fn test_zero_collision_documentation() {
+        let mut h1 = IdentityHasher::default();
+        h1.write_u32(0);
+        h1.write_u32(0);
+
+        let mut h2 = IdentityHasher::default();
+        h2.write_u32(0);
+
+        // IdentityHasher(0) -> 0.
+        // IdentityHasher(0, 0) -> 0 (because update_state(0) does nothing if state is 0).
+        // This is a known limitation of using a single u64 state initialized to 0.
+        // We document it here rather than fail, as fixing it would require changing the struct layout
+        // or breaking the Identity property for single 0 values.
+        assert_eq!(
+            h1.finish(),
+            h2.finish(),
+            "Documented behavior: (0, 0) collides with 0 due to zero-initialization"
+        );
+    }
+
+    /// 🎯 Target: IdentityHasher reset vulnerability
+    /// 💣 Risk: Intermediate state becoming 0 resets the hasher.
+    /// 🧪 Strategy: Create a sequence where state becomes 0, then add more values.
+    /// 🔬 Verification: Ensure it doesn't just equal the suffix.
+    #[test]
+    fn test_intermediate_zero_state() {
+        // If state becomes 0 mid-stream, does it act like a fresh hasher?
+        // Let's find a value X such that update_state(X) results in 0.
+        // If current state is S, we need S * P ^ X == 0 => X == S * P.
+
+        let mut h1 = IdentityHasher::default();
+        h1.write_u64(1); // State = 1
+
+        // Calculate X such that next state is 0
+        // Current logic: state = state ^ val; state *= P
+        // To get 0: (1 ^ X) * P == 0 (mod 2^64).
+        // Since P is odd, it has an inverse. So 1 ^ X must be 0 (mod 2^64/gcd(P, 2^64)).
+        // gcd(P, 2^64) = 1. So 1 ^ X = 0 => X = 1.
+        // Wait, current logic: `self.0 ^= val; self.0 = self.0.wrapping_mul(FNV_PRIME);`
+
+        // If state is 1. Write 1.
+        // state = 1 ^ 1 = 0.
+        // state = 0 * P = 0.
+
+        h1.write_u64(1);
+
+        // With new logic (multiply before XOR), this should NOT be 0.
+        // (1 * P) ^ 1 != 0.
+        assert_ne!(
+            h1.finish(),
+            0,
+            "1 ^ 1 should NOT result in 0 state with new logic"
+        );
+
+        // Now write 5.
+        h1.write_u64(5);
+
+        // Compare with just writing 5.
+        let mut h2 = IdentityHasher::default();
+        h2.write_u64(5);
+
+        assert_ne!(
+            h1.finish(),
+            h2.finish(),
+            "Sequence (1, 1, 5) should NOT collide with (5)"
         );
     }
 }

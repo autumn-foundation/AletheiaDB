@@ -9,6 +9,7 @@
 //! - **Crystallize Wormholes**: Turns potential "wormholes" (semantic gaps) into real edges.
 //! - **Fuse Synonyms**: Merges nodes that are semantically identical.
 //!
+#![allow(clippy::collapsible_if)]
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
