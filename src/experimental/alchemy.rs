@@ -227,6 +227,7 @@ impl<'a> Alchemist<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::collapsible_if)]
 mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
