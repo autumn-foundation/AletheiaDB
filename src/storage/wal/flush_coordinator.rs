@@ -1561,7 +1561,10 @@ mod tests {
         // The first segment should be the one ending at 20.
         // There should be at least one segment (the active one) and one historical one.
         assert!(segments.len() >= 2);
-        let historical = segments.iter().find(|(_, m)| m.max_lsn == LSN(20)).expect("Historical segment should exist");
+        let historical = segments
+            .iter()
+            .find(|(_, m)| m.max_lsn == LSN(20))
+            .expect("Historical segment should exist");
 
         // 3. Truncate to LSN 20.
         // The segment ends at 20. It contains entry 20.
@@ -1589,19 +1592,27 @@ mod tests {
         let coordinator = FlushCoordinator::new(config).unwrap();
 
         // Create Segment 1: LSN 10-20
-        let entries1: Vec<_> = (10..=20).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        let entries1: Vec<_> = (10..=20)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
         coordinator.flush(entries1, true).unwrap();
 
         // Create Segment 2: LSN 30-40
-        let entries2: Vec<_> = (30..=40).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        let entries2: Vec<_> = (30..=40)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
         coordinator.flush(entries2, true).unwrap();
 
         // Create Segment 3: LSN 50-60
-        let entries3: Vec<_> = (50..=60).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        let entries3: Vec<_> = (50..=60)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
         coordinator.flush(entries3, true).unwrap();
 
         // Force rotation to ensure all previous segments have metadata written
-        coordinator.flush(vec![create_test_entry(100, &[100u8; 100])], true).unwrap();
+        coordinator
+            .flush(vec![create_test_entry(100, &[100u8; 100])], true)
+            .unwrap();
 
         // Check min LSN
         // We have segments starting at 10, 30, 50.
