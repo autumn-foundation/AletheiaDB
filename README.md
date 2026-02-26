@@ -545,10 +545,15 @@ for (node_id, drift_score) in drifted_nodes {
 
 ### Narrative Generation (Experimental)
 
-> ⚠️ **REQUIRES FEATURE 'NOVA'**
+> ⚠️ **IMPORTANT: REQUIRES FEATURE 'NOVA'**
 >
-> This feature is experimental and requires the `nova` feature flag.
-> Add `features = ["nova"]` to your `Cargo.toml`.
+> Experimental features like **Narrative Generation** require the `nova` feature flag.
+> **You MUST add this to your `Cargo.toml` or the code will not compile:**
+>
+> ```toml
+> [dependencies]
+> aletheiadb = { version = "0.1", features = ["nova"] }
+> ```
 >
 > Run the demo:
 > ```bash
@@ -556,33 +561,37 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
-// REQUIRES FEATURE: nova
+// ⚠️ REQUIRES FEATURE: nova
 // [dependencies]
 // aletheiadb = { version = "0.1", features = ["nova"] }
 
 use aletheiadb::prelude::*;
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
-// 1. Setup database and node (for self-contained example)
-let db = AletheiaDB::new().unwrap();
-let node_id = db.write(|tx| {
-    tx.create_node("Person", properties! {
-        "name" => "Alice"
-    })
-})?;
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // 1. Setup database and node (for self-contained example)
+    let db = AletheiaDB::new().unwrap();
+    let node_id = db.write(|tx| {
+        tx.create_node("Person", properties! {
+            "name" => "Alice"
+        })
+    })?;
 
-// 2. Generate natural language history of a node
-let generator = NarrativeGenerator::new(&db);
-let narrative = generator.generate_node_narrative(node_id)?;
+    // 2. Generate natural language history of a node
+    let generator = NarrativeGenerator::new(&db);
+    let narrative = generator.generate_node_narrative(node_id)?;
 
-for event in narrative {
-    println!("Version {}: {}", event.version_number, event.description);
-    // Output: "Version 1: Node created with label 'Person'."
+    for event in narrative {
+        println!("Version {}: {}", event.version_number, event.description);
+        // Output: "Version 1: Node created with label 'Person'."
 
-    for change in event.changes {
-        println!("  - {}", change);
-        // Output: "  - Initial property 'name': '"Alice"'"
+        for change in event.changes {
+            println!("  - {}", change);
+            // Output: "  - Initial property 'name': '"Alice"'"
+        }
     }
+
+    Ok(())
 }
 ```
 
