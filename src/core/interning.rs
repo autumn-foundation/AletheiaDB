@@ -805,6 +805,9 @@ mod tests {
         // Should still have exactly 10 strings
         assert_eq!(interner.len(), 10);
 
+        // The failed string should not be in the interner
+        assert!(!interner.contains("overflow"));
+
         Ok(())
     }
 
@@ -1210,5 +1213,35 @@ mod mutant_kill_tests {
         }
 
         writer.join().unwrap();
+    }
+
+    #[test]
+    fn test_intern_rollback_on_capacity_exceeded() {
+        // Capacity 1
+        let interner = StringInterner::with_max_capacity(1);
+
+        // 1. Intern "A" -> ID 0
+        let id_a = interner.intern("A").unwrap();
+        assert_eq!(id_a.as_u32(), 0);
+
+        // 2. Intern "B" -> Fail (CapacityExceeded)
+        let res = interner.intern("B");
+        assert!(res.is_err());
+
+        // 3. Intern "C" via unchecked (should get ID 1 if rollback worked, ID 2 if not)
+        let id_c = interner.intern_unchecked("C");
+
+        // Verify ID of C
+        assert_eq!(
+            id_c.as_u32(),
+            1,
+            "ID sequence should be continuous, failed attempt should rollback next_id"
+        );
+
+        // Verify get_all_strings has no gaps
+        let all = interner.get_all_strings();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0], "A");
+        assert_eq!(all[1], "C");
     }
 }
