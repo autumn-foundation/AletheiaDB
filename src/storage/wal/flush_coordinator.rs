@@ -654,6 +654,7 @@ impl FlushCoordinator {
             // Sync to disk if requested
             if sync && self.config.sync_on_flush {
                 let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
+                #[allow(clippy::collapsible_if)]
                 if let Some(ref sync_file) = *sync_guard {
                     if let Err(e) = sync_file.sync_data() {
                         // CRITICAL: If sync fails, we must truncate the file to avoid
