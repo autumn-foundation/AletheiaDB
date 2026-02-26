@@ -1513,6 +1513,111 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_catastrophic_sync_failure_with_truncate_error() {
+        use tempfile::tempdir;
+
+        // 1. Setup
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.sync_on_flush = true;
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 2. Open /dev/null which behaves badly for both sync (EINVAL) and set_len (EINVAL)
+        // Must open with write access, otherwise flush() fails with EBADF before we hit sync/truncate
+        {
+            let dev_null = OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .expect("Failed to open /dev/null");
+            let mut writer_guard = coordinator.writer.lock().unwrap();
+            *writer_guard = Some(BufWriter::new(dev_null));
+        }
+        {
+            let dev_null = OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .expect("Failed to open /dev/null");
+            let mut guard = coordinator.sync_handle.lock().unwrap();
+            *guard = Some(dev_null);
+        }
+
+        // 3. Attempt flush.
+        // - stream_position -> 0 (Success)
+        // - write -> Success
+        // - sync -> Fails (EINVAL)
+        // - truncate (set_len) -> Fails (EINVAL)
+        // - Result -> Err("CRITICAL: Sync failed ... AND Truncate failed ...")
+        let entry = create_test_entry(1, &[1, 2, 3]);
+        let result = coordinator.flush(vec![entry], true);
+
+        assert!(result.is_err(), "Should return error");
+        let err_msg = format!("{}", result.unwrap_err());
+
+        // This verifies we hit the catastrophic failure path (L665-666)
+        assert!(
+            err_msg.contains("CRITICAL: Sync failed"),
+            "Error should indicate critical sync failure, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("Truncate failed"),
+            "Error should indicate truncate failure, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stream_position_failure() {
+        use tempfile::tempdir;
+        use std::process::Command;
+
+        // 1. Setup
+        let dir = tempdir().unwrap();
+        let fifo_path = dir.path().join("test_fifo");
+
+        // Create FIFO
+        let status = Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .expect("Failed to execute mkfifo");
+        assert!(status.success(), "mkfifo failed");
+
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.sync_on_flush = true;
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 2. Open FIFO for Read/Write to avoid blocking
+        {
+            let fifo = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&fifo_path)
+                .expect("Failed to open FIFO");
+
+            let mut writer_guard = coordinator.writer.lock().unwrap();
+            *writer_guard = Some(BufWriter::new(fifo));
+        }
+
+        // 3. Attempt flush.
+        // - stream_position -> Fails (ESPIPE)
+        // - Result -> Err("Failed to get WAL stream position")
+        let entry = create_test_entry(1, &[1, 2, 3]);
+        let result = coordinator.flush(vec![entry], true);
+
+        assert!(result.is_err(), "Should return error");
+        let err_msg = format!("{}", result.unwrap_err());
+
+        // This verifies we hit the stream position failure path (L621-624)
+        assert!(
+            err_msg.contains("Failed to get WAL stream position"),
+            "Error should indicate seek failure, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
     fn test_truncate_safe_defaults_on_missing_metadata() {
         // 💣 Risk: If .meta file is missing, truncation logic should be conservative
         // and NOT delete the segment, to prevent accidental data loss.
