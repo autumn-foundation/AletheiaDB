@@ -40,11 +40,11 @@
 //!     let index = HnswIndex::new(config)?;
 //!
 //!     // 3. Add vectors
-//!     let id1 = NodeId::new(1);
+//!     let id1 = NodeId::new(1)?;
 //!     let vec1 = vec![1.0, 0.0, 0.0];
 //!     index.add(id1, &vec1)?;
 //!
-//!     let id2 = NodeId::new(2);
+//!     let id2 = NodeId::new(2)?;
 //!     let vec2 = vec![0.0, 1.0, 0.0];
 //!     index.add(id2, &vec2)?;
 //!
@@ -473,9 +473,9 @@ impl HnswIndex {
     /// # Arguments
     ///
     /// * `path` - Path to the index file (without extension). The method expects
-    ///            `path` and `path.usearch.mappings`.
+    ///   `path` and `path.usearch.mappings`.
     /// * `config` - Configuration to validate against the loaded index. Dimensions
-    ///              and quantization must match.
+    ///   and quantization must match.
     ///
     /// # Errors
     ///
