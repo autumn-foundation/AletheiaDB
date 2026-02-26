@@ -1532,4 +1532,82 @@ mod tests {
             "Segment log file should still exist"
         );
     }
+
+    #[test]
+    fn test_truncate_to_lsn_boundary_exact_match() {
+        // 🤖 Sentinel: This test kills the mutant where `max_lsn < truncate_lsn` is replaced with `max_lsn <= truncate_lsn`.
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 50; // Small size
+        config.segments_to_retain = 100; // Manual control
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 1. Create a segment with LSN range [10, 20]
+        // 20 bytes * 11 entries = 220 bytes.
+        let entries: Vec<_> = (10..=20)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
+        coordinator.flush(entries, true).unwrap();
+
+        // 2. Force rotation by flushing a new batch
+        let entries2: Vec<_> = (21..=30)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
+        coordinator.flush(entries2, true).unwrap();
+
+        // Verify we have the historical segment (LSN 10-20)
+        let segments = coordinator.list_segments_with_metadata();
+        // The first segment should be the one ending at 20.
+        // There should be at least one segment (the active one) and one historical one.
+        assert!(segments.len() >= 2);
+        let historical = segments.iter().find(|(_, m)| m.max_lsn == LSN(20)).expect("Historical segment should exist");
+
+        // 3. Truncate to LSN 20.
+        // The segment ends at 20. It contains entry 20.
+        // It should NOT be removed.
+        let removed = coordinator.truncate_to_lsn(LSN(20)).unwrap();
+
+        assert_eq!(
+            removed, 0,
+            "Should NOT remove segment ending at LSN 20 when truncating to 20"
+        );
+
+        // Verify it still exists
+        let segments_after = coordinator.list_segments_with_metadata();
+        assert!(segments_after.iter().any(|(id, _)| *id == historical.0));
+    }
+
+    #[test]
+    fn test_get_min_lsn_with_multiple_segments() {
+        // 🤖 Sentinel: This test kills the mutant where `.min()` is replaced with `.max()` in `get_min_lsn`.
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 30;
+        config.segments_to_retain = 100;
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Create Segment 1: LSN 10-20
+        let entries1: Vec<_> = (10..=20).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        coordinator.flush(entries1, true).unwrap();
+
+        // Create Segment 2: LSN 30-40
+        let entries2: Vec<_> = (30..=40).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        coordinator.flush(entries2, true).unwrap();
+
+        // Create Segment 3: LSN 50-60
+        let entries3: Vec<_> = (50..=60).map(|i| create_test_entry(i, &[i as u8; 20])).collect();
+        coordinator.flush(entries3, true).unwrap();
+
+        // Force rotation to ensure all previous segments have metadata written
+        coordinator.flush(vec![create_test_entry(100, &[100u8; 100])], true).unwrap();
+
+        // Check min LSN
+        // We have segments starting at 10, 30, 50.
+        // min() should be 10.
+        // max() would be 50.
+        let min_lsn = coordinator.get_min_lsn();
+        assert_eq!(min_lsn, Some(LSN(10)));
+    }
 }
