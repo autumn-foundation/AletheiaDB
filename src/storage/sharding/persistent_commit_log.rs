@@ -717,7 +717,10 @@ impl PersistentCommitLog {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 return Err(CommitLogError::CorruptedLog("File too short".into()));
             }
-            return Err(CommitLogError::IoError(format!("Failed to read header: {}", e)));
+            return Err(CommitLogError::IoError(format!(
+                "Failed to read header: {}",
+                e
+            )));
         }
 
         if header[0..4] != COMMIT_LOG_MAGIC {
@@ -748,7 +751,10 @@ impl PersistentCommitLog {
                     break;
                 }
                 Err(e) => {
-                    return Err(CommitLogError::IoError(format!("Failed to read entry: {}", e)));
+                    return Err(CommitLogError::IoError(format!(
+                        "Failed to read entry: {}",
+                        e
+                    )));
                 }
             }
 
@@ -773,7 +779,10 @@ impl PersistentCommitLog {
                     break;
                 }
                 Err(e) => {
-                    return Err(CommitLogError::IoError(format!("Failed to read entry: {}", e)));
+                    return Err(CommitLogError::IoError(format!(
+                        "Failed to read entry: {}",
+                        e
+                    )));
                 }
             }
 

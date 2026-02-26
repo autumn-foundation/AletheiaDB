@@ -1,6 +1,6 @@
-use aletheiadb::storage::sharding::persistent_commit_log::{PersistentCommitLog, CommitLogConfig};
-use aletheiadb::storage::sharding::types::ShardId;
 use aletheiadb::core::id::TxId;
+use aletheiadb::storage::sharding::persistent_commit_log::{CommitLogConfig, PersistentCommitLog};
+use aletheiadb::storage::sharding::types::ShardId;
 use std::fs::File;
 use std::io::Write;
 use tempfile::TempDir;
@@ -54,5 +54,8 @@ fn test_v1_compatibility_read() {
     assert_eq!(pending.len(), 1);
     let entry = &pending[0];
     assert_eq!(entry.tx_id, TxId::new(1));
-    assert!(entry.commit_timestamp.is_none(), "V1 entry should have no commit timestamp");
+    assert!(
+        entry.commit_timestamp.is_none(),
+        "V1 entry should have no commit timestamp"
+    );
 }
