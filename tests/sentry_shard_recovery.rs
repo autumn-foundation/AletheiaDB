@@ -1,6 +1,7 @@
 use aletheiadb::storage::sharding::config::{ShardConfig, ShardDefinition};
 use aletheiadb::storage::sharding::coordinator::ShardCoordinator;
 use aletheiadb::storage::sharding::types::ShardId;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -69,6 +70,25 @@ fn test_shard_recovery_data_loss_repro() {
         "Transaction should have been automatically recovered by ShardCoordinator::new()"
     );
     assert!(result.dead_lettered.is_empty());
+
+    // Verify that the transaction was actually committed (not just dropped) by checking shard metrics.
+    // The transaction involved shard0 and shard1.
+    // Each should have recorded 1 distributed write during recovery.
+    let metrics0 = coordinator_recovered
+        .get_metrics(ShardId::new(0).unwrap())
+        .expect("Shard 0 metrics should exist");
+    assert!(
+        metrics0.writes_total.load(Ordering::Relaxed) >= 1,
+        "Shard 0 should have recorded a write during recovery"
+    );
+
+    let metrics1 = coordinator_recovered
+        .get_metrics(ShardId::new(1).unwrap())
+        .expect("Shard 1 metrics should exist");
+    assert!(
+        metrics1.writes_total.load(Ordering::Relaxed) >= 1,
+        "Shard 1 should have recorded a write during recovery"
+    );
 
     // Cleanup
     // temp_dir drops automatically
