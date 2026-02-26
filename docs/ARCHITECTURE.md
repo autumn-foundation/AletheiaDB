@@ -1034,6 +1034,86 @@ sequenceDiagram
     Mnemosyne-->>User: List<MemoryFrame>
 ```
 
+**Semantic Graph Transformation (Alchemy)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Alchemist {
+            +crystallize_wormholes(candidates, threshold, hops, label)
+            +fuse_synonyms(candidates, threshold)
+        }
+        class WormholeDetector {
+            +find_wormholes(candidates, k, max_hops)
+        }
+        class Wormhole {
+            +source: NodeId
+            +target: NodeId
+            +similarity: f32
+        }
+    }
+    class AletheiaDB
+
+    Alchemist --> WormholeDetector : Uses
+    Alchemist --> AletheiaDB : Mutates
+    WormholeDetector --> AletheiaDB : Queries
+    WormholeDetector ..> Wormhole : Produces
+```
+
+**Sequence: Crystallize Wormholes**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Alchemist
+    participant Detector as WormholeDetector
+    participant DB as AletheiaDB
+
+    User->>Alchemist: crystallize_wormholes()
+    Alchemist->>Detector: find_wormholes()
+    Detector->>DB: find_similar()
+    DB-->>Detector: semantic_neighbors
+    loop Every Neighbor
+        Detector->>Detector: bfs_distance()
+        alt No Path Found
+            Detector->>Detector: Record Wormhole
+        end
+    end
+    Detector-->>Alchemist: List<Wormhole>
+
+    loop Every Wormhole
+        alt similarity > threshold
+            Alchemist->>DB: create_edge(source, target)
+        end
+    end
+```
+
+**Sequence: Fuse Synonyms (Semantic Fusion)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Alchemist
+    participant DB as AletheiaDB
+
+    User->>Alchemist: fuse_synonyms(candidates)
+    loop Find Pairs
+        Alchemist->>DB: find_similar(candidate)
+        DB-->>Alchemist: neighbors
+        Alchemist->>Alchemist: Identify {Survivor, Victim}
+    end
+
+    Alchemist->>DB: Begin Transaction
+    loop Every Pair
+        Alchemist->>DB: get_edges(victim)
+        loop Move Edges
+            Alchemist->>DB: create_edge(survivor, target)
+        end
+        Alchemist->>DB: delete_node_cascade(victim)
+    end
+    DB-->>Alchemist: Commit
+```
+
 ### Temporal Query Processing
 
 **Query Types:**
