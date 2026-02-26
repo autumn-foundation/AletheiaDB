@@ -374,6 +374,32 @@ impl fmt::Display for TimeRange {
 /// - "What did we know about X at time T?" (transaction time)
 /// - "What was true about X in reality at time T?" (valid time)
 /// - "When did we record that X was true at time T?" (both)
+///
+/// # Example
+///
+/// ```rust
+/// use aletheiadb::core::temporal::{BiTemporalInterval, time};
+///
+/// // Create a bi-temporal interval
+/// // - Valid from T=100 (in reality)
+/// // - Recorded at T=200 (in database)
+/// let valid_from = time::from_secs(100);
+/// let recorded_at = time::from_secs(200);
+/// let interval = BiTemporalInterval::with_valid_time(valid_from, recorded_at);
+///
+/// // Query at different times
+/// let t150 = time::from_secs(150);
+/// let t250 = time::from_secs(250);
+///
+/// // 1. Was it valid at T=150? YES.
+/// assert!(interval.is_valid_at(t150));
+///
+/// // 2. Did we KNOW it was valid at T=150? NO (recorded at 200).
+/// assert!(!interval.is_visible_at(t150, t150));
+///
+/// // 3. Do we KNOW it was valid at T=150 if we query at T=250? YES.
+/// assert!(interval.is_visible_at(t150, t250));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BiTemporalInterval {
     /// When the fact was true in the real world.
@@ -434,8 +460,11 @@ impl BiTemporalInterval {
     /// let today = HybridTimestamp::new(1706745600_000_000, 0).unwrap();
     ///
     /// let interval = BiTemporalInterval::with_valid_time(last_month, today);
-    /// // Alice's membership was valid since last month
-    /// // But we only recorded it today
+    ///
+    /// // Valid time starts last month
+    /// assert_eq!(interval.valid_time().start(), last_month);
+    /// // Transaction time starts today
+    /// assert_eq!(interval.transaction_time().start(), today);
     /// ```
     #[inline]
     pub fn with_valid_time(valid_from: Timestamp, tx_time: Timestamp) -> Self {

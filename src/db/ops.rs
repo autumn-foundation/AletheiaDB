@@ -27,6 +27,10 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # See Also
+    ///
+    /// * [`write`](Self::write) - For batched write operations.
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.write(|tx| tx.create_node(label, properties))
     }
@@ -53,6 +57,10 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # See Also
+    ///
+    /// * [`write`](Self::write) - For batched write operations.
     pub fn create_edge(
         &self,
         source: NodeId,
