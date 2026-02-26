@@ -1476,12 +1476,20 @@ mod tests {
         let segment_path = coordinator.segment_path(coordinator.current_segment_id());
         let valid_size = std::fs::metadata(&segment_path).unwrap().len();
 
-        // 3. Sabotage the sync handle (replace with /dev/null which fails fsync)
-        // The writer handle remains valid and points to the real file!
+        // 3. Sabotage the sync handle (replace with a File wrapping a UnixStream)
+        // fsync on a socket returns EINVAL on Linux, guaranteeing failure.
+        // We use IntoRawFd to transfer ownership to the File, preventing double-close.
         {
-            let dev_null = File::open("/dev/null").expect("Failed to open /dev/null");
+            use std::os::unix::io::{FromRawFd, IntoRawFd};
+            use std::os::unix::net::UnixStream;
+
+            let (s1, _s2) = UnixStream::pair().expect("Failed to create socket pair");
+            let fd = s1.into_raw_fd();
+            // SAFETY: We own the FD (transferred from UnixStream).
+            let bad_file = unsafe { File::from_raw_fd(fd) };
+
             let mut guard = coordinator.sync_handle.lock().unwrap();
-            *guard = Some(dev_null);
+            *guard = Some(bad_file);
         }
 
         // 4. Attempt to write phantom entry
@@ -1489,7 +1497,10 @@ mod tests {
         let result = coordinator.flush(vec![entry2], true);
 
         // 5. Assertions
-        assert!(result.is_err(), "Flush should fail due to broken sync handle");
+        assert!(
+            result.is_err(),
+            "Flush should fail due to broken sync handle"
+        );
 
         // CRITICAL CHECK: The file size must NOT have increased.
         // If it increased, the phantom data is in the file (OS cache) and will persist.
