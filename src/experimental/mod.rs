@@ -129,6 +129,9 @@ pub mod highlander;
 /// Hindsight: Counterfactual Graph Analysis Engine.
 pub mod hindsight;
 #[cfg(feature = "nova")]
+/// Holodeck: Counterfactual Simulation Engine.
+pub mod holodeck;
+#[cfg(feature = "nova")]
 /// Janus: Semantic Bridge Detector.
 pub mod janus;
 #[cfg(feature = "nova")]

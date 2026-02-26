@@ -268,13 +268,14 @@ mod tests {
                 let outgoing = tx.get_outgoing_edges(a);
                 let mut found_edge = false;
                 for eid in outgoing {
-                    if let Ok(edge) = tx.get_edge(eid) {
-                        if edge.target == b && edge.has_label_str("RELATED") {
-                            found_edge = true;
-                            // Verify metadata
-                            if let Some(sim) = edge.properties.get("similarity") {
-                                assert!(sim.as_float().unwrap() > 0.9);
-                            }
+                    if let Ok(edge) = tx.get_edge(eid)
+                        && edge.target == b
+                        && edge.has_label_str("RELATED")
+                    {
+                        found_edge = true;
+                        // Verify metadata
+                        if let Some(sim) = edge.properties.get("similarity") {
+                            assert!(sim.as_float().unwrap() > 0.9);
                         }
                     }
                 }
@@ -339,10 +340,11 @@ mod tests {
                 let edges = tx.get_outgoing_edges(a);
                 let mut found = false;
                 for eid in edges {
-                    if let Ok(edge) = tx.get_edge(eid) {
-                        if edge.target == d && edge.has_label_str("LINKS_FROM_B") {
-                            found = true;
-                        }
+                    if let Ok(edge) = tx.get_edge(eid)
+                        && edge.target == d
+                        && edge.has_label_str("LINKS_FROM_B")
+                    {
+                        found = true;
                     }
                 }
                 Ok::<_, crate::core::error::Error>(found)
@@ -357,10 +359,11 @@ mod tests {
                 let edges = tx.get_outgoing_edges(c);
                 let mut found = false;
                 for eid in edges {
-                    if let Ok(edge) = tx.get_edge(eid) {
-                        if edge.target == a && edge.has_label_str("LINKS_TO_B") {
-                            found = true;
-                        }
+                    if let Ok(edge) = tx.get_edge(eid)
+                        && edge.target == a
+                        && edge.has_label_str("LINKS_TO_B")
+                    {
+                        found = true;
                     }
                 }
                 Ok::<_, crate::core::error::Error>(found)
