@@ -10,10 +10,37 @@ use std::hash::Hasher;
 const FNV_PRIME: u64 = 0x100000001b3;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 
-/// A hasher that passes through u32 and u64 values unchanged.
+/// A highly optimized hasher for pre-hashed or unique integer keys.
 ///
-/// Used for maps where keys are already unique integers or IDs.
-/// This avoids the overhead of hashing (SipHash) for lookups.
+/// This hasher implements a "pass-through" strategy for `u64` and `u32` values,
+/// treating the input integer directly as the hash code. This eliminates the
+/// CPU overhead of cryptographic hash functions (like SipHash) when the keys
+/// are already high-quality random identifiers (e.g., `NodeId`, `EdgeId`, `InternedString`).
+///
+/// # Performance
+///
+/// - **Integers**: O(1), single instruction (move).
+/// - **Strings/Bytes**: Fallback to FNV-1a (slower, but provided for safety).
+///
+/// # Safety
+///
+/// This hasher is **not** resistant to HashDoS attacks. It should only be used
+/// with internal IDs or trusted input. Do not use this for `HashMap`s exposed
+/// to untrusted user input where keys could be crafted to cause collisions.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+/// use std::hash::BuildHasherDefault;
+/// use aletheiadb::core::hasher::IdentityHasher;
+///
+/// // Create a HashMap optimized for integer keys
+/// let mut map: HashMap<u64, String, BuildHasherDefault<IdentityHasher>> =
+///     HashMap::with_hasher(BuildHasherDefault::default());
+///
+/// map.insert(42, "meaning of life".to_string());
+/// ```
 #[derive(Default)]
 pub struct IdentityHasher(u64);
 

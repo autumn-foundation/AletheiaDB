@@ -141,26 +141,53 @@ where
 }
 
 /// HNSW vector index for approximate k-nearest neighbor search.
+///
+/// This struct wraps the `usearch` library's HNSW implementation, providing a thread-safe,
+/// persistent, and highly optimized vector index. It manages the mapping between
+/// AletheiaDB's `NodeId` and the internal integer keys used by HNSW.
+///
+/// # Concurrency
+///
+/// The index uses a hybrid locking strategy to maximize concurrency:
+/// - **Read path (`search`)**: Uses shared read locks (`RwLock::read`) on the inner index.
+///   Multiple threads can search concurrently.
+/// - **Write path (`add`, `remove`)**: Uses fine-grained sharded locks (`entry_locks`) to
+///   serialize updates to the same node, preventing race conditions. The inner index lock
+///   is upgraded to write only when necessary (e.g., resizing capacity).
+/// - **Persistence (`save`)**: Acquires a global `save_lock` to ensure a consistent snapshot
+///   of both the index structure and the ID mappings.
+///
+/// # Persistence
+///
+/// The index supports two persistence modes:
+/// 1. **In-Memory**: Fast, ephemeral updates. Can be saved to disk via `save()`.
+/// 2. **Memory-Mapped**: Zero-copy loading from disk for instant startup. Read-only.
 pub struct HnswIndex {
-    /// Underlying usearch index
+    /// Underlying usearch index (C++ wrapper).
+    /// Protected by RwLock for thread safety.
     pub(crate) inner: Arc<RwLock<Index>>,
-    /// Configuration used to create this index
+    /// Configuration used to create this index.
     pub(crate) config: HnswConfig,
-    /// ID mapping: NodeId -> usearch key (u64)
+    /// ID mapping: NodeId -> usearch key (u64).
+    /// DashMap allows concurrent lock-free reads and sharded writes.
     pub(crate) id_mapping: Arc<DashMap<NodeId, u64>>,
-    /// Reverse mapping: usearch key -> NodeId
+    /// Reverse mapping: usearch key -> NodeId.
+    /// Used to reconstruct NodeIds from search results.
     pub(crate) reverse_mapping: Arc<DashMap<u64, NodeId>>,
-    /// Next available key
+    /// Next available internal key.
+    /// Monotonically increasing counter for assigning unique keys to new vectors.
     pub(crate) next_key: AtomicU64,
-    /// Statistics
+    /// Runtime statistics (searches, adds, retries).
     pub(crate) stats: Arc<IndexStats>,
-    /// Maximum k for DoS protection
+    /// Maximum k allowed in search queries (DoS protection).
     max_k: usize,
-    /// Whether this index is memory-mapped (read-only)
+    /// Whether this index is memory-mapped (read-only).
     is_mmap: bool,
-    /// Lock to ensure consistency between index and mapping for saving.
+    /// Global lock to ensure consistency between index and mapping during save operations.
+    /// Acquired in WRITE mode during save, READ mode during add/remove.
     save_lock: Arc<RwLock<()>>,
     /// Sharded locks to serialize updates to the same key/node.
+    /// Prevents "lost update" races where two threads try to update the same vector simultaneously.
     entry_locks: Vec<Mutex<()>>,
 }
 
@@ -210,7 +237,20 @@ impl std::fmt::Debug for HnswIndex {
 }
 
 impl HnswIndex {
-    /// Internal constructor used by HnswIndexBuilder
+    /// Internal constructor used by `HnswIndexBuilder`.
+    ///
+    /// Validates configuration and initializes the underlying `usearch` index.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Validated HNSW configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Dimensions, M, or ef_construction are out of valid ranges.
+    /// - Custom metric is used with non-F32 quantization.
+    /// - Failed to initialize or reserve capacity in the underlying index.
     pub(crate) fn new_internal(config: HnswConfig) -> Result<Self> {
         // Validate dimensions
         if config.dimensions == 0 {
@@ -342,17 +382,36 @@ impl HnswIndex {
     }
 
     /// Creates a new in-memory HNSW index from a configuration.
+    ///
+    /// This is a convenience wrapper around `HnswIndexBuilder`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::index::vector::{HnswIndex, HnswConfig, DistanceMetric};
+    ///
+    /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// let index = HnswIndex::new(config).unwrap();
+    /// ```
     pub fn new(config: HnswConfig) -> Result<Self> {
         HnswIndexBuilder::from_config(&config).build()
     }
 
-    /// Set the ef_search parameter (query-time search quality).
+    /// Set the `ef_search` parameter (query-time search quality).
+    ///
+    /// Higher values increase recall (quality) but decrease search speed.
+    /// Typical values are between `M` and `ef_construction`.
+    ///
+    /// # Thread Safety
+    ///
+    /// This operation acquires a read lock on the inner index, so it can be called
+    /// concurrently with other searches, but acts as a dynamic configuration change.
     pub fn set_ef_search(&self, ef_search: usize) {
         let index = self.inner.read();
         index.change_expansion_search(ef_search);
     }
 
-    /// Get the current ef_search parameter.
+    /// Get the current `ef_search` parameter.
     pub fn get_ef_search(&self) -> usize {
         self.inner.read().expansion_search()
     }
@@ -362,7 +421,7 @@ impl HnswIndex {
         self.config.clone()
     }
 
-    /// Get the M parameter (connections per node).
+    /// Get the `M` parameter (max connections per node).
     pub fn m(&self) -> usize {
         self.config.m
     }
@@ -380,7 +439,22 @@ impl HnswIndex {
         self.next_key.fetch_max(usearch_key + 1, Ordering::SeqCst);
     }
 
-    /// Load an index from disk.
+    /// Load a persisted index from disk into memory.
+    ///
+    /// This loads the HNSW graph structure and vector data into RAM.
+    /// For large indexes where RAM is limited, consider `open_mmap` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the index file (e.g., `index.usearch`).
+    /// * `config` - Configuration must match the persisted index (dimensions, metric).
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - File does not exist or is corrupted.
+    /// - Dimensions in config do not match the file.
+    /// - Associated mapping file (`.usearch.mappings`) is missing or invalid.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
         if config.dimensions > MAX_VECTOR_DIMENSIONS {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -469,6 +543,25 @@ impl HnswIndex {
     }
 
     /// Open a memory-mapped index from disk (read-only).
+    ///
+    /// Memory mapping allows accessing indexes larger than available RAM by relying
+    /// on the OS page cache. This mode is read-only; attempts to add/remove vectors
+    /// will return an error.
+    ///
+    /// # Performance Note
+    ///
+    /// Cold queries may trigger disk I/O, causing latency spikes. Warm queries
+    /// are comparable to in-memory performance.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the index file.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - OS fails to map the file.
+    /// - Index metadata (header) is invalid.
     pub fn open_mmap(path: &Path) -> Result<Self> {
         let index = Index::new(&IndexOptions::default()).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
@@ -544,6 +637,9 @@ impl HnswIndex {
     }
 
     /// Helper to execute potentially blocking operations.
+    ///
+    /// If running within a Tokio multi-threaded runtime, this offloads the
+    /// operation to a blocking thread to avoid starving the async reactor.
     pub(crate) fn maybe_block_in_place<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
@@ -735,6 +831,21 @@ impl HnswIndex {
 }
 
 impl VectorIndex for HnswIndex {
+    /// Adds a vector to the index.
+    ///
+    /// # Concurrency
+    ///
+    /// This method is thread-safe and supports high concurrency.
+    /// - Uses sharded locking based on `id` to allow concurrent updates to different nodes.
+    /// - Only blocks other writers to the *same* node (or colliding lock shard).
+    /// - **Note**: Acquires a write lock on the underlying index, so it *will* block concurrent
+    ///   searches for the duration of the insertion (typically microseconds).
+    ///
+    /// # Errors
+    ///
+    /// - `DimensionMismatch` if vector length doesn't match index configuration.
+    /// - `IndexError` if called on a read-only memory-mapped index.
+    /// - `IndexError` if called recursively from within a `search_with_filter` callback (deadlock prevention).
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
@@ -898,6 +1009,16 @@ impl VectorIndex for HnswIndex {
         })
     }
 
+    /// Removes a vector from the index.
+    ///
+    /// # Concurrency
+    ///
+    /// Thread-safe. Uses the same sharded locking mechanism as `add`.
+    ///
+    /// # Errors
+    ///
+    /// - `IndexError` if called on a read-only memory-mapped index.
+    /// - `IndexError` if called recursively from within a `search_with_filter` callback.
     fn remove(&self, id: NodeId) -> Result<()> {
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
@@ -929,6 +1050,12 @@ impl VectorIndex for HnswIndex {
         })
     }
 
+    /// Searches for the k-nearest neighbors.
+    ///
+    /// # Concurrency
+    ///
+    /// Thread-safe and non-blocking. Multiple searches can proceed in parallel.
+    /// Takes a read lock on the index structure.
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
@@ -967,6 +1094,24 @@ impl VectorIndex for HnswIndex {
         })
     }
 
+    /// Searches for k-nearest neighbors that satisfy a predicate.
+    ///
+    /// # Implementation Details
+    ///
+    /// Uses an iterative expansion strategy:
+    /// 1. Searches for `k` candidates.
+    /// 2. Filters candidates using the predicate.
+    /// 3. If fewer than `k` results remain, doubles the search radius and retries.
+    /// 4. Repeats until `k` results are found or the index is exhausted.
+    ///
+    /// This ensures high recall even with restrictive filters, though performance
+    /// degrades if the filter selectivity is very low (e.g., < 1%).
+    ///
+    /// # Deadlock Prevention
+    ///
+    /// The predicate is executed while holding a lock on the index. To prevent deadlocks,
+    /// the predicate **must not** attempt to modify the index (add/remove) or perform
+    /// another search. This is enforced by a thread-local flag (`IN_FILTER_CALLBACK`).
     fn search_with_filter<F>(
         &self,
         query: &[f32],
@@ -1065,6 +1210,16 @@ impl VectorIndex for HnswIndex {
         Ok(())
     }
 
+    /// Persists the index to disk.
+    ///
+    /// Saves two files:
+    /// 1. `{path}`: The HNSW graph structure (handled by usearch).
+    /// 2. `{path}.usearch.mappings`: The NodeId <-> internal key mapping.
+    ///
+    /// # Consistency
+    ///
+    /// Acquires a global write lock (`save_lock`) to ensure the index and mappings
+    /// are saved in a consistent state. Blocks concurrent `add`/`remove` operations.
     fn save(&self, path: &Path) -> Result<()> {
         if IN_FILTER_CALLBACK.with(|flag| flag.get()) {
             return Err(Error::Vector(VectorError::IndexError(
