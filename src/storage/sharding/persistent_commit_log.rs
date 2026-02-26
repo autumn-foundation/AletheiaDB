@@ -33,7 +33,7 @@
 use super::types::ShardId;
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::TxId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +49,9 @@ const COMMIT_LOG_VERSION: u8 = 2;
 
 /// Header size in bytes.
 const HEADER_SIZE: usize = 16;
+
+/// Maximum entry size (64MB) to prevent OOM on corrupted logs.
+const MAX_ENTRY_SIZE: usize = 64 * 1024 * 1024;
 
 /// Entry type for commit decision.
 const ENTRY_TYPE_COMMIT: u8 = 1;
@@ -458,25 +461,7 @@ impl PersistentCommitLog {
 
         let (writer, lsn, pending) = if path.exists() {
             // Open existing file and recover state
-            let (entries, max_lsn) = Self::read_entries(&path)?;
-
-            // Build pending map (entries without completion)
-            let mut pending_map = HashMap::new();
-            let mut completed = std::collections::HashSet::new();
-
-            for entry in entries {
-                match entry.entry_type {
-                    EntryType::Commit | EntryType::Abort => {
-                        if !completed.contains(&entry.tx_id) {
-                            pending_map.insert(entry.tx_id, entry);
-                        }
-                    }
-                    EntryType::Complete => {
-                        pending_map.remove(&entry.tx_id);
-                        completed.insert(entry.tx_id);
-                    }
-                }
-            }
+            let (pending_map, max_lsn) = Self::recover_state(&path)?;
 
             // Open for appending
             let file = OpenOptions::new()
@@ -720,27 +705,26 @@ impl PersistentCommitLog {
         Ok(())
     }
 
-    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64)> {
+    fn recover_state(path: &Path) -> CommitLogResult<(HashMap<TxId, CommitLogEntry>, u64)> {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
         let mut reader = BufReader::new(file);
-        let mut buffer = Vec::new();
 
-        reader
-            .read_to_end(&mut buffer)
-            .map_err(|e| CommitLogError::IoError(format!("Failed to read log: {}", e)))?;
-
-        // Verify header
-        if buffer.len() < HEADER_SIZE {
-            return Err(CommitLogError::CorruptedLog("File too short".into()));
+        // Read and verify header
+        let mut header = [0u8; HEADER_SIZE];
+        if let Err(e) = reader.read_exact(&mut header) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Err(CommitLogError::CorruptedLog("File too short".into()));
+            }
+            return Err(CommitLogError::IoError(format!("Failed to read header: {}", e)));
         }
 
-        if buffer[0..4] != COMMIT_LOG_MAGIC {
+        if header[0..4] != COMMIT_LOG_MAGIC {
             return Err(CommitLogError::CorruptedLog("Invalid magic".into()));
         }
 
-        let version = buffer[4];
+        let version = header[4];
         if version > COMMIT_LOG_VERSION {
             return Err(CommitLogError::CorruptedLog(format!(
                 "Unsupported version: {}",
@@ -748,34 +732,69 @@ impl PersistentCommitLog {
             )));
         }
 
-        // Parse entries
-        let mut entries = Vec::new();
-        let mut offset = HEADER_SIZE;
+        // Parse entries via streaming
+        let mut pending_map = HashMap::new();
+        let mut completed_set = HashSet::new();
         let mut max_lsn = 0u64;
+        let mut entry_buffer = Vec::with_capacity(1024); // Reusable buffer
 
-        while offset < buffer.len() {
-            if offset + 4 > buffer.len() {
-                break; // Incomplete length prefix, truncated file
+        loop {
+            // Read length prefix (4 bytes)
+            let mut len_buf = [0u8; 4];
+            match reader.read_exact(&mut len_buf) {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Clean EOF
+                    break;
+                }
+                Err(e) => {
+                    return Err(CommitLogError::IoError(format!("Failed to read entry: {}", e)));
+                }
             }
 
-            let len = u32::from_le_bytes([
-                buffer[offset],
-                buffer[offset + 1],
-                buffer[offset + 2],
-                buffer[offset + 3],
-            ]) as usize;
+            let len = u32::from_le_bytes(len_buf) as usize;
 
-            if offset + 4 + len > buffer.len() {
-                break; // Incomplete entry, truncated file
+            if len > MAX_ENTRY_SIZE {
+                return Err(CommitLogError::CorruptedLog(format!(
+                    "Entry length {} exceeds maximum allowed {}",
+                    len, MAX_ENTRY_SIZE
+                )));
             }
 
-            match CommitLogEntry::deserialize(&buffer[offset..]) {
+            // Read entry data
+            entry_buffer.clear();
+            entry_buffer.extend_from_slice(&len_buf); // Prepend length for deserialize
+            entry_buffer.resize(4 + len, 0);
+
+            match reader.read_exact(&mut entry_buffer[4..]) {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Truncated entry at end of file - ignore
+                    break;
+                }
+                Err(e) => {
+                    return Err(CommitLogError::IoError(format!("Failed to read entry: {}", e)));
+                }
+            }
+
+            // Deserialize
+            match CommitLogEntry::deserialize(&entry_buffer) {
                 Ok(entry) => {
                     if entry.lsn > max_lsn {
                         max_lsn = entry.lsn;
                     }
-                    entries.push(entry);
-                    offset += 4 + len;
+
+                    match entry.entry_type {
+                        EntryType::Commit | EntryType::Abort => {
+                            if !completed_set.contains(&entry.tx_id) {
+                                pending_map.insert(entry.tx_id, entry);
+                            }
+                        }
+                        EntryType::Complete => {
+                            pending_map.remove(&entry.tx_id);
+                            completed_set.insert(entry.tx_id);
+                        }
+                    }
                 }
                 Err(_) => {
                     // Skip corrupted entry at end of file
@@ -784,7 +803,7 @@ impl PersistentCommitLog {
             }
         }
 
-        Ok((entries, max_lsn))
+        Ok((pending_map, max_lsn))
     }
 }
 
