@@ -126,6 +126,22 @@ mod tests {
     }
 
     #[test]
+    fn test_identity_hasher_composite_writes() {
+        let mut h = IdentityHasher::default();
+        h.write_u64(1);
+        h.write_u64(2);
+
+        // Should NOT be 2 (overwrite)
+        assert_ne!(h.finish(), 2, "Hasher should mix values, not overwrite");
+
+        // Expected: (1 ^ 2) * FNV_PRIME
+        // write(1): self.0 = 1.
+        // write(2): self.0 = (1 ^ 2) * FNV_PRIME = 3 * FNV_PRIME.
+        let expected = 3u64.wrapping_mul(FNV_PRIME);
+        assert_eq!(h.finish(), expected);
+    }
+
+    #[test]
     fn test_identity_hasher_u64() {
         let mut hasher = IdentityHasher::default();
         hasher.write_u64(u64::MAX);

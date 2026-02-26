@@ -2239,6 +2239,17 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_bool_non_canonical_true() {
+        // Rust boolean is strict (0 or 1), but serialized format allows loose "!= 0" check.
+        // This targets mutants that might enforce strict "== 1" check.
+        // If the implementation uses `!= 0`, then 2 should be true.
+        // If it uses `== 1` (mutant), then 2 would be false.
+        let bytes = vec![TAG_BOOL, 2];
+        let (val, _) = PropertyValue::deserialize(&bytes).unwrap();
+        assert_eq!(val, PropertyValue::Bool(true));
+    }
+
+    #[test]
     fn test_serialize_int() {
         let test_values = [0i64, 1, -1, i64::MAX, i64::MIN, 42, -12345];
         for &v in &test_values {
