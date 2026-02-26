@@ -338,27 +338,44 @@ impl StringInterner {
     /// Returns a vector of strings sorted by their InternedString IDs.
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
-    pub fn get_all_strings(&self) -> Vec<String> {
-        // Use next_id to estimate the required size. This avoids repeated resizing
-        // inside the loop, which can happen if iteration order doesn't match ID order.
-        // String::new() is non-allocating, so pre-filling the vector is cheap.
-        let max_id = self.next_id.load(Ordering::Relaxed) as usize;
-        let mut strings = vec![String::new(); max_id];
+    ///
+    /// # Errors
+    /// Returns `InternerSnapshotError` if a consistent snapshot cannot be taken
+    /// due to persistent gaps in the ID sequence (concurrent modifications).
+    pub fn get_all_strings(&self) -> crate::core::error::Result<Vec<String>> {
+        // Load max_id with SeqCst to ensure we see the latest reserved count
+        let max_id = self.next_id.load(Ordering::SeqCst) as usize;
+        let mut strings = Vec::with_capacity(max_id);
 
-        // Collect all (id, string) pairs
-        for entry in self.id_to_string.iter() {
-            let id = entry.key().as_u32() as usize;
+        for id in 0..max_id {
+            let key = InternedString(id as u32);
+            let mut val = self.id_to_string.get(&key);
 
-            if id < strings.len() {
-                strings[id] = entry.value().to_string();
-            } else {
-                // Handle race condition where an ID was added after we read next_id
-                strings.resize(id + 1, String::new());
-                strings[id] = entry.value().to_string();
+            if val.is_none() {
+                // Retry loop to handle concurrent ID reservation gap
+                // A thread may have incremented next_id but not yet inserted into the map.
+                // We wait briefly for it to complete.
+                let start = std::time::Instant::now();
+                while val.is_none() {
+                    if start.elapsed() > std::time::Duration::from_millis(100) {
+                        break;
+                    }
+                    std::thread::yield_now();
+                    val = self.id_to_string.get(&key);
+                }
+            }
+
+            match val {
+                Some(v) => strings.push(v.to_string()),
+                None => {
+                    return Err(crate::core::error::Error::Storage(
+                        crate::core::error::StorageError::InternerSnapshotError,
+                    ));
+                }
             }
         }
 
-        strings
+        Ok(strings)
     }
 
     /// Pre-intern common strings at startup to avoid initial allocation overhead.
@@ -1168,7 +1185,7 @@ mod mutant_kill_tests {
         assert_eq!(second.as_u32(), 1);
         assert_eq!(third.as_u32(), 2);
 
-        let all = interner.get_all_strings();
+        let all = interner.get_all_strings().unwrap();
         assert_eq!(all.len(), interner.len());
         assert_eq!(
             all,
@@ -1210,5 +1227,49 @@ mod mutant_kill_tests {
         }
 
         writer.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_get_all_strings_detects_gap() {
+        let interner = StringInterner::new();
+
+        // Manually create a gap: increment next_id but don't insert string
+        interner.next_id.fetch_add(1, Ordering::SeqCst);
+
+        // get_all_strings should retry and then fail
+        let result = interner.get_all_strings();
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::core::error::Error::Storage(crate::core::error::StorageError::InternerSnapshotError) => (),
+            e => panic!("Expected InternerSnapshotError, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_get_all_strings_waits_for_fill() {
+        let interner = Arc::new(StringInterner::new());
+        let interner_clone = Arc::clone(&interner);
+
+        // Manually increment next_id (simulate reservation)
+        interner.next_id.fetch_add(1, Ordering::SeqCst);
+        let id = InternedString(0);
+
+        // Spawn thread to fill the gap after delay
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            interner_clone.id_to_string.insert(id, Arc::from("filled"));
+        });
+
+        // get_all_strings should wait and succeed
+        let strings = interner.get_all_strings().unwrap();
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0], "filled");
     }
 }

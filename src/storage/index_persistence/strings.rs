@@ -9,7 +9,9 @@ use super::{INTERNER_MAGIC, MANIFEST_VERSION};
 
 /// Save the global string interner to disk with CRC32 checksum using atomic write.
 pub fn save_string_interner(path: &Path) -> Result<()> {
-    let strings = GLOBAL_INTERNER.get_all_strings();
+    let strings = GLOBAL_INTERNER.get_all_strings().map_err(|e| {
+        IndexPersistenceError::Serialization(format!("Failed to snapshot interner: {}", e))
+    })?;
 
     let data = StringInternerData {
         magic: INTERNER_MAGIC,

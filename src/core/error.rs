@@ -254,6 +254,9 @@ pub enum StorageError {
         /// The resource whose lock was poisoned
         resource: String,
     },
+    /// String interner snapshot failed due to concurrent modification.
+    #[error("Failed to snapshot string interner: concurrent ID reservation detected")]
+    InternerSnapshotError,
 }
 
 impl StorageError {
