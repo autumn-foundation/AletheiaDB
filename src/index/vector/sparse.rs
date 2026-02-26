@@ -527,6 +527,7 @@ impl SparseVectorIndex {
                     && mag > 0.0
                 {
                     *score /= query_magnitude * mag;
+                    *score = score.clamp(-1.0, 1.0);
                 }
             }
         }
