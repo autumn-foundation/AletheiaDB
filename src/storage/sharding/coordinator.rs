@@ -283,7 +283,9 @@ impl ShardCoordinator {
         };
 
         // Recover pending transactions on startup
-        coordinator.recover_pending_transactions().expect("Failed to recover pending transactions on startup");
+        coordinator
+            .recover_pending_transactions()
+            .expect("Failed to recover pending transactions on startup");
         coordinator
     }
 
