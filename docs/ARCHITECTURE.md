@@ -105,7 +105,7 @@ classDiagram
     QueryEngine --> AletheiaDB : Uses
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
-    %% Removed the circular dependency arrow
+    %% See ADR-0053 Decouple Storage from Core (Redux)
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
 ```
@@ -1159,7 +1159,7 @@ sequenceDiagram
 
     Note over User, Core: Write Path
     User->>Core: Write Transaction
-    Core->>Storage: Apply Changes (via Trait)
+    Core->>Storage: CurrentStorage::apply_changes()
     Storage->>WAL: Append Entry
     WAL-->>Storage: LSN
     Storage-->>Core: Success

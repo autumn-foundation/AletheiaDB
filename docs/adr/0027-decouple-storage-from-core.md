@@ -1,6 +1,6 @@
 # ADR-0027: Decouple Storage from Core
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0053](0053-decouple-storage-from-core-redux.md)
 **Date:** 2026-01-27
 **Deciders:** AletheiaDB Core Team
 **Categories:** architecture, storage, core, modularity
