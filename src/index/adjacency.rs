@@ -108,12 +108,9 @@ impl AdjacencyIndex {
         // SAFETY: NodeId is #[repr(transparent)] wrapper around u64.
         let node_ids_typed: Vec<NodeId> = unsafe { Self::transmute_vec(node_ids) };
 
-        // Zero-copy conversion for offsets if pointer width is 64-bit (usize == u64)
-        #[cfg(target_pointer_width = "64")]
-        let offsets_usize: Vec<usize> = unsafe { Self::transmute_vec(offsets) };
+        // Convert offsets (zero-copy on 64-bit, allocating on 32-bit)
+        let offsets_usize = Self::convert_offsets(offsets);
 
-        #[cfg(not(target_pointer_width = "64"))]
-        let offsets_usize: Vec<usize> = offsets.iter().map(|&x| x as usize).collect();
         let mut adjacency_entries = Vec::with_capacity(edge_ids.len());
 
         for &edge_id_u64 in &edge_ids {
@@ -317,11 +314,27 @@ impl AdjacencyIndex {
         Ok(())
     }
 
+    /// Convert offsets to usize vector.
+    ///
+    /// On 64-bit systems, this is a zero-copy operation because usize == u64.
+    /// On 32-bit systems, this allocates a new vector because usize == u32 != u64.
+    fn convert_offsets(offsets: Vec<u64>) -> Vec<usize> {
+        #[cfg(target_pointer_width = "64")]
+        {
+            // SAFETY: usize == u64 on 64-bit platforms, so layout is compatible.
+            unsafe { Self::transmute_vec(offsets) }
+        }
+
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            offsets.iter().map(|&x| x as usize).collect()
+        }
+    }
+
     /// Helper for zero-copy Vec conversion
     ///
     /// # Safety
     /// T and U must have same layout, size, and alignment.
-    #[inline]
     unsafe fn transmute_vec<T, U>(v: Vec<T>) -> Vec<U> {
         let mut v = std::mem::ManuallyDrop::new(v);
         // SAFETY: Caller ensures T and U layout compatibility.
@@ -730,6 +743,51 @@ mod tests {
             1000,
             "max_node_id should consider target nodes"
         );
+    }
+
+    #[test]
+    fn test_transmute_vec_correctness() {
+        let original = vec![1u64, 2, 3];
+        let ptr = original.as_ptr();
+        let cap = original.capacity();
+
+        // Use NodeId which is transparent wrapper around u64
+        // SAFETY: NodeId is repr(transparent) and same size/align as u64
+        let transmuted: Vec<NodeId> = unsafe { AdjacencyIndex::transmute_vec(original) };
+
+        assert_eq!(transmuted.len(), 3);
+        assert_eq!(transmuted.capacity(), cap);
+        assert_eq!(transmuted[0], NodeId::new(1).unwrap());
+        assert_eq!(transmuted[1], NodeId::new(2).unwrap());
+        assert_eq!(transmuted[2], NodeId::new(3).unwrap());
+
+        // Verify no copy happened (best effort check, pointers should match)
+        assert_eq!(transmuted.as_ptr() as *const u64, ptr);
+    }
+
+    #[test]
+    fn test_import_csr_integration() {
+        // This test ensures import_csr works in the standard test module scope
+        let node_ids = vec![1, 2];
+        let offsets = vec![0, 1, 2];
+        let edge_ids = vec![10, 20];
+        let mut edges_map = std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::<
+            crate::core::hasher::IdentityHasher,
+        >::default());
+
+        let label = crate::core::interning::GLOBAL_INTERNER.intern("TEST").unwrap();
+        edges_map.insert(
+            EdgeId::new(10).unwrap(),
+            (NodeId::new(2).unwrap(), label),
+        );
+        edges_map.insert(
+            EdgeId::new(20).unwrap(),
+            (NodeId::new(1).unwrap(), label),
+        );
+
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        assert_eq!(index.node_count(), 2);
+        assert_eq!(index.edge_count(), 2);
     }
 }
 
