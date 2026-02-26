@@ -19,6 +19,9 @@ use std::fmt;
 /// | [`Cosine`](DistanceMetric::Cosine) | Semantic similarity, text embeddings | [-1, 1] similarity, [0, 2] distance | Scale-invariant, most common for embeddings |
 /// | [`Euclidean`](DistanceMetric::Euclidean) | Spatial data, image features | [0, ∞) distance | Sensitive to vector magnitude |
 /// | [`DotProduct`](DistanceMetric::DotProduct) | Pre-normalized vectors, MaxIP search | (-∞, ∞) | Fastest; requires normalized vectors for cosine-like behavior |
+/// | [`Haversine`](DistanceMetric::Haversine) | Geographic coordinates | [0, ∞) distance | Great circle distance |
+/// | [`Hamming`](DistanceMetric::Hamming) | Binary vectors | [0, ∞) distance | Bit-level difference |
+/// | [`Tanimoto`](DistanceMetric::Tanimoto) | Chemical fingerprints | [0, 1] similarity | Bit-level Jaccard similarity |
 ///
 /// # Example
 ///
@@ -120,9 +123,101 @@ pub enum DistanceMetric {
     /// metric (doesn't satisfy triangle inequality). Use [`Cosine`](DistanceMetric::Cosine)
     /// for general similarity or ensure vectors are normalized first.
     DotProduct,
+
+    /// Haversine distance.
+    ///
+    /// Great circle distance for geographic coordinates.
+    ///
+    /// - **Distance**: Range [0, ∞)
+    /// - **Similarity**: Computed as `1 / (1 + distance)`
+    Haversine,
+
+    /// Hamming distance.
+    ///
+    /// Bit-level distance for binary vectors.
+    ///
+    /// - **Distance**: Range [0, ∞)
+    /// - **Similarity**: Computed as `1 / (1 + distance)`
+    Hamming,
+
+    /// Tanimoto similarity (Jaccard for bitsets).
+    ///
+    /// Bit-level similarity for chemical fingerprints or binary vectors.
+    ///
+    /// - **Similarity**: Range [0, 1]
+    /// - **Distance**: Computed as `1 - similarity`
+    Tanimoto,
 }
 
 impl DistanceMetric {
+    /// Encode distance metric as a byte for serialization.
+    ///
+    /// Encoding:
+    /// - 0 = Cosine
+    /// - 1 = Euclidean
+    /// - 2 = DotProduct
+    /// - 3 = Haversine
+    /// - 4 = Hamming
+    /// - 5 = Tanimoto
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use aletheiadb::core::vector::DistanceMetric;
+    ///
+    /// assert_eq!(DistanceMetric::Cosine.to_u8(), 0);
+    /// assert_eq!(DistanceMetric::Euclidean.to_u8(), 1);
+    /// assert_eq!(DistanceMetric::DotProduct.to_u8(), 2);
+    /// assert_eq!(DistanceMetric::Haversine.to_u8(), 3);
+    /// assert_eq!(DistanceMetric::Hamming.to_u8(), 4);
+    /// assert_eq!(DistanceMetric::Tanimoto.to_u8(), 5);
+    /// ```
+    pub fn to_u8(self) -> u8 {
+        match self {
+            DistanceMetric::Cosine => 0,
+            DistanceMetric::Euclidean => 1,
+            DistanceMetric::DotProduct => 2,
+            DistanceMetric::Haversine => 3,
+            DistanceMetric::Hamming => 4,
+            DistanceMetric::Tanimoto => 5,
+        }
+    }
+
+    /// Decode distance metric from a byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the byte value is not a valid metric encoding (>= 6).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use aletheiadb::core::vector::DistanceMetric;
+    ///
+    /// assert_eq!(DistanceMetric::from_u8(0).unwrap(), DistanceMetric::Cosine);
+    /// assert_eq!(DistanceMetric::from_u8(1).unwrap(), DistanceMetric::Euclidean);
+    /// assert_eq!(DistanceMetric::from_u8(2).unwrap(), DistanceMetric::DotProduct);
+    /// assert_eq!(DistanceMetric::from_u8(3).unwrap(), DistanceMetric::Haversine);
+    /// assert_eq!(DistanceMetric::from_u8(4).unwrap(), DistanceMetric::Hamming);
+    /// assert_eq!(DistanceMetric::from_u8(5).unwrap(), DistanceMetric::Tanimoto);
+    /// assert!(DistanceMetric::from_u8(6).is_err());
+    /// ```
+    pub fn from_u8(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(DistanceMetric::Cosine),
+            1 => Ok(DistanceMetric::Euclidean),
+            2 => Ok(DistanceMetric::DotProduct),
+            3 => Ok(DistanceMetric::Haversine),
+            4 => Ok(DistanceMetric::Hamming),
+            5 => Ok(DistanceMetric::Tanimoto),
+            _ => Err(crate::core::error::StorageError::CorruptedData(format!(
+                "Invalid distance metric encoding: {}",
+                value
+            ))
+            .into()),
+        }
+    }
+
     /// Computes the distance between two vectors using this metric.
     ///
     /// Lower values indicate more similar vectors.
@@ -132,10 +227,14 @@ impl DistanceMetric {
     /// - [`Cosine`](DistanceMetric::Cosine): `1 - cosine_similarity`, range [0, 2]
     /// - [`Euclidean`](DistanceMetric::Euclidean): L2 distance, range [0, ∞)
     /// - [`DotProduct`](DistanceMetric::DotProduct): `1 - dot_product` (meaningful only for normalized vectors)
+    /// - [`Haversine`](DistanceMetric::Haversine): Unimplemented (returns error)
+    /// - [`Hamming`](DistanceMetric::Hamming): Unimplemented (returns error)
+    /// - [`Tanimoto`](DistanceMetric::Tanimoto): Unimplemented (returns error)
     ///
     /// # Errors
     ///
     /// Returns an error if the vectors have different lengths.
+    /// Returns an error if the metric is not implemented for dense float vectors.
     ///
     /// # Example
     ///
@@ -155,6 +254,28 @@ impl DistanceMetric {
             DistanceMetric::Cosine => cosine_similarity(a, b).map(|sim| 1.0 - sim),
             DistanceMetric::Euclidean => euclidean_distance(a, b),
             DistanceMetric::DotProduct => dot_product(a, b).map(|dp| 1.0 - dp),
+            DistanceMetric::Haversine => {
+                // Placeholder for Haversine implementation
+                // Real implementation requires lat/lon pairs
+                Err(crate::core::error::Error::NotImplemented {
+                    feature: "Haversine distance for dense vectors".to_string(),
+                    reason: "Not yet implemented in core ops".to_string(),
+                })
+            }
+            DistanceMetric::Hamming => {
+                // Hamming usually requires binary inputs
+                Err(crate::core::error::Error::NotImplemented {
+                    feature: "Hamming distance for float vectors".to_string(),
+                    reason: "Requires binary quantization".to_string(),
+                })
+            }
+            DistanceMetric::Tanimoto => {
+                // Tanimoto usually requires binary inputs
+                Err(crate::core::error::Error::NotImplemented {
+                    feature: "Tanimoto distance for float vectors".to_string(),
+                    reason: "Requires binary quantization".to_string(),
+                })
+            }
         }
     }
 
@@ -167,10 +288,14 @@ impl DistanceMetric {
     /// - [`Cosine`](DistanceMetric::Cosine): Cosine similarity, range [-1, 1]
     /// - [`Euclidean`](DistanceMetric::Euclidean): `1 / (1 + distance)`, range (0, 1]
     /// - [`DotProduct`](DistanceMetric::DotProduct): Raw dot product, range (-∞, ∞)
+    /// - [`Haversine`](DistanceMetric::Haversine): Unimplemented (returns error)
+    /// - [`Hamming`](DistanceMetric::Hamming): Unimplemented (returns error)
+    /// - [`Tanimoto`](DistanceMetric::Tanimoto): Unimplemented (returns error)
     ///
     /// # Errors
     ///
     /// Returns an error if the vectors have different lengths.
+    /// Returns an error if the metric is not implemented for dense float vectors.
     ///
     /// # Example
     ///
@@ -190,6 +315,24 @@ impl DistanceMetric {
             DistanceMetric::Cosine => cosine_similarity(a, b),
             DistanceMetric::Euclidean => euclidean_distance(a, b).map(|dist| 1.0 / (1.0 + dist)),
             DistanceMetric::DotProduct => dot_product(a, b),
+            DistanceMetric::Haversine => {
+                Err(crate::core::error::Error::NotImplemented {
+                    feature: "Haversine similarity".to_string(),
+                    reason: "Not yet implemented in core ops".to_string(),
+                })
+            }
+            DistanceMetric::Hamming => {
+                Err(crate::core::error::Error::NotImplemented {
+                    feature: "Hamming similarity".to_string(),
+                    reason: "Requires binary quantization".to_string(),
+                })
+            }
+            DistanceMetric::Tanimoto => {
+                Err(crate::core::error::Error::NotImplemented {
+                    feature: "Tanimoto similarity".to_string(),
+                    reason: "Requires binary quantization".to_string(),
+                })
+            }
         }
     }
 
@@ -203,6 +346,9 @@ impl DistanceMetric {
     /// assert_eq!(DistanceMetric::Cosine.name(), "cosine");
     /// assert_eq!(DistanceMetric::Euclidean.name(), "euclidean");
     /// assert_eq!(DistanceMetric::DotProduct.name(), "dot_product");
+    /// assert_eq!(DistanceMetric::Haversine.name(), "haversine");
+    /// assert_eq!(DistanceMetric::Hamming.name(), "hamming");
+    /// assert_eq!(DistanceMetric::Tanimoto.name(), "tanimoto");
     /// ```
     #[inline]
     pub const fn name(&self) -> &'static str {
@@ -210,6 +356,9 @@ impl DistanceMetric {
             DistanceMetric::Cosine => "cosine",
             DistanceMetric::Euclidean => "euclidean",
             DistanceMetric::DotProduct => "dot_product",
+            DistanceMetric::Haversine => "haversine",
+            DistanceMetric::Hamming => "hamming",
+            DistanceMetric::Tanimoto => "tanimoto",
         }
     }
 
@@ -218,6 +367,9 @@ impl DistanceMetric {
     /// - [`Cosine`](DistanceMetric::Cosine): No (handles normalization internally)
     /// - [`Euclidean`](DistanceMetric::Euclidean): No (works with any vectors)
     /// - [`DotProduct`](DistanceMetric::DotProduct): Yes (otherwise not a proper similarity)
+    /// - [`Haversine`](DistanceMetric::Haversine): No
+    /// - [`Hamming`](DistanceMetric::Hamming): No
+    /// - [`Tanimoto`](DistanceMetric::Tanimoto): No
     ///
     /// # Example
     ///

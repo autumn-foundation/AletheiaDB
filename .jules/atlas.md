@@ -67,3 +67,13 @@
 1. Updated `storage/index_persistence/operations.rs` to import `TxId` from `core::id` instead of `api`.
 2. Moved `VectorIndexBuilder` from `api` to `db`, as it is a concrete helper for `AletheiaDB`.
 3. Moved `utils/error.rs` to `core/error.rs` and deleted `utils` module, consolidating core domain types.
+
+## 2026-06-01 - Consolidating DistanceMetric and Cleaning Core
+**Tangle:**
+1. **Inconsistent Types:** `DistanceMetric` was defined in both `core::vector::metric` and `index::vector::mod`, with slightly different variants and methods.
+2. **The Leak/Pollution:** `core::mod.rs` was re-exporting all contents of `vector` (e.g., `cosine_similarity`) directly into the `core` namespace, polluting the API and blurring boundaries.
+
+**Blueprint:**
+1. Consolidated `DistanceMetric` into `core::vector::metric`, merging all variants and helper methods (`to_u8`).
+2. Updated `index::vector` to use `core::vector::DistanceMetric` instead of defining its own.
+3. Removed `pub use vector::{...}` from `core::mod.rs`, enforcing explicit usage of the `vector` submodule (e.g., `core::vector::cosine_similarity`).

@@ -35,29 +35,4 @@ pub use interning::{
 };
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
-pub use vector::{
-    // Types and constants
-    DistanceMetric,
-    NORMALIZATION_TOLERANCE,
-    VectorDimension,
-    // Validation functions
-    check_dimensions_match,
-    // Similarity functions
-    cosine_similarity,
-    cosine_similarity_normalized,
-    // Inner product
-    dot_product,
-    // Distance functions
-    euclidean_distance,
-    // Normalization functions
-    is_normalized,
-    is_normalized_default,
-    magnitude,
-    normalize,
-    normalize_in_place,
-    squared_euclidean_distance,
-    squared_magnitude,
-    validate_vector,
-    validate_vector_with_bounds,
-};
 pub mod version;
