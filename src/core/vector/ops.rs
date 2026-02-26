@@ -1,6 +1,7 @@
 use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
 use super::simd::{
     dot_and_magnitudes, dot_product_sum, scale_and_copy, scale_in_place, squared_diff_sum,
+    squared_magnitude as squared_magnitude_simd,
 };
 use super::validation::check_dimensions_match;
 use crate::core::error::Result;
@@ -505,7 +506,7 @@ pub fn magnitude(v: &[f32]) -> f32 {
     if v.is_empty() {
         return 0.0;
     }
-    dot_product_sum(v, v).sqrt()
+    squared_magnitude_simd(v).sqrt()
 }
 
 /// Computes the squared magnitude of a vector.
@@ -535,7 +536,7 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
     if v.is_empty() {
         return 0.0;
     }
-    dot_product_sum(v, v)
+    squared_magnitude_simd(v)
 }
 
 /// Normalizes a vector to unit length (L2 normalization).
