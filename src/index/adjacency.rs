@@ -104,10 +104,21 @@ impl AdjacencyIndex {
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
-        let node_ids_typed: Vec<NodeId> = node_ids
-            .iter()
-            .map(|&id| NodeId::new_unchecked(id))
-            .collect();
+        // Zero-copy conversion: NodeId(u64) has same layout as u64
+        // SAFETY: NodeId is #[repr(transparent)] wrapper around u64.
+        let node_ids_typed: Vec<NodeId> = unsafe {
+            let mut v = std::mem::ManuallyDrop::new(node_ids);
+            Vec::from_raw_parts(v.as_mut_ptr() as *mut NodeId, v.len(), v.capacity())
+        };
+
+        // Zero-copy conversion for offsets if pointer width is 64-bit (usize == u64)
+        #[cfg(target_pointer_width = "64")]
+        let offsets_usize: Vec<usize> = unsafe {
+            let mut v = std::mem::ManuallyDrop::new(offsets);
+            Vec::from_raw_parts(v.as_mut_ptr() as *mut usize, v.len(), v.capacity())
+        };
+
+        #[cfg(not(target_pointer_width = "64"))]
         let offsets_usize: Vec<usize> = offsets.iter().map(|&x| x as usize).collect();
         let mut adjacency_entries = Vec::with_capacity(edge_ids.len());
 
