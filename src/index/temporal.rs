@@ -4117,4 +4117,91 @@ mod tests {
         assert!(results.contains(&v3));
         assert!(!results.contains(&v2));
     }
+
+    #[test]
+    fn test_reject_policy_collision_with_existing_sentinel() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+
+        // 1. Insert v1
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), 1000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
+            )
+            .unwrap();
+
+        // 2. Batch insert v1 again with Reject policy
+        let batch = vec![(
+            v1,
+            BiTemporalInterval::new(
+                TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                TimeRange::from(0.into()),
+            ),
+        )];
+
+        let result = indexes.insert_node_versions_batch_with_policy(
+            node_id,
+            batch,
+            DeduplicationPolicy::Reject,
+        );
+
+        assert!(
+            result.is_err(),
+            "Should reject duplicate version ID when it already exists in index"
+        );
+    }
+
+    #[test]
+    fn test_batch_insert_exact_capacity_sentinel() {
+        let config = TemporalIndexConfig {
+            max_versions_per_entity: 10,
+        };
+        let indexes = TemporalIndexes::with_config(config);
+        let node_id = NodeId::new(1).unwrap();
+
+        // Insert 8 versions
+        for i in 0..8 {
+            indexes
+                .insert_node_version(
+                    node_id,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::new(
+                        TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into())
+                            .unwrap(),
+                        TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                    ),
+                )
+                .unwrap();
+        }
+
+        // Insert batch of 2 (Total 10 == Limit)
+        let batch = vec![
+            (
+                VersionId::new(8).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new(800.into(), 900.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            ),
+            (
+                VersionId::new(9).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new(900.into(), 1000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            ),
+        ];
+
+        let result = indexes.insert_node_versions_batch(node_id, batch);
+        assert!(
+            result.is_ok(),
+            "Should accept batch that fits exactly into capacity"
+        );
+    }
 }
