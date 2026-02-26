@@ -45,6 +45,7 @@
 //! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
 //! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
 //! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
+//! | [`spectre`] | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -203,3 +204,7 @@ pub mod muse;
 #[cfg(feature = "nova")]
 /// Oracle: Probabilistic Graph Reasoning.
 pub mod oracle;
+
+#[cfg(feature = "nova")]
+/// Spectre: Semantic Perspective Engine.
+pub mod spectre;
