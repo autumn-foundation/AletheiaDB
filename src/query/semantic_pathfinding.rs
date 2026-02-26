@@ -251,11 +251,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
                             .get(&self.vector_property)
                             .and_then(|v| v.as_vector());
 
-                        let semantic_cost = if let Some(emb) = target_embedding {
-                            1.0 - cosine_similarity(emb, query_embedding)?
-                        } else {
-                            1.0 // High cost if no embedding
-                        };
+                        let semantic_cost =
+                            self.compute_semantic_cost(target_embedding, query_embedding)?;
 
                         let new_cost = cost + semantic_cost + 0.1;
 
@@ -280,21 +277,41 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
     /// Returns 1.0 (max cost) if node has no embedding.
     fn calculate_semantic_cost(&self, node_id: NodeId, query: &[f32]) -> Result<f32> {
         let node = self.db.get_node(node_id)?;
+        let embedding = node
+            .properties
+            .get(&self.vector_property)
+            .and_then(|v| v.as_vector());
 
-        #[allow(clippy::collapsible_if)]
-        if let Some(prop) = node.properties.get(&self.vector_property) {
-            if let Some(vec) = prop.as_vector() {
-                let sim = cosine_similarity(vec, query)?;
-                // Clamp to [0, 2] (cosine sim is [-1, 1])
-                // We want high similarity -> low cost
-                // 1.0 - 1.0 = 0.0 (perfect match)
-                // 1.0 - (-1.0) = 2.0 (opposite)
-                return Ok(1.0 - sim);
+        self.compute_semantic_cost(embedding, query)
+    }
+
+    /// Helper to compute semantic cost from an embedding slice.
+    ///
+    /// Handles dimension mismatches gracefully by returning infinite cost.
+    fn compute_semantic_cost(&self, embedding: Option<&[f32]>, query: &[f32]) -> Result<f32> {
+        if let Some(emb) = embedding {
+            match cosine_similarity(emb, query) {
+                Ok(sim) => {
+                    // Clamp to [0, 2] (cosine sim is [-1, 1])
+                    // We want high similarity -> low cost
+                    // 1.0 - 1.0 = 0.0 (perfect match)
+                    // 1.0 - (-1.0) = 2.0 (opposite)
+                    Ok(1.0 - sim)
+                }
+                Err(crate::core::error::Error::Vector(
+                    crate::core::error::VectorError::DimensionMismatch { .. },
+                )) => {
+                    // Sentry 🛡️: Dimension mismatch implies incompatibility.
+                    // Return infinite cost to strictly avoid this node unless no other path exists.
+                    // This prevents the entire search from failing due to one malformed node.
+                    Ok(f32::INFINITY)
+                }
+                Err(e) => Err(e),
             }
+        } else {
+            // Penalize nodes without embeddings
+            Ok(1.0)
         }
-
-        // Penalize nodes without embeddings
-        Ok(1.0)
     }
 
     fn reconstruct_path(&self, came_from: HashMap<NodeId, NodeId>, current: NodeId) -> Vec<NodeId> {
@@ -636,19 +653,137 @@ mod tests {
             let query = vec![0.0; 4];
             let pathfinder = SemanticPathfinder::new(&db, "embedding");
 
-            // Should propagate error from cosine_similarity
+            // Sentry 🛡️: Should handle dimension mismatch gracefully by treating the node as incompatible
+            // (infinite cost), effectively blocking the path.
+            // Since A->B is the only path, and B is incompatible, it should return Ok(None).
             let result = pathfinder.find_path(a, b, &query, 10, false);
-            assert!(result.is_err());
-
-            let err_msg = result.unwrap_err().to_string();
-            // Error message depends on implementation of cosine_similarity
-            // Likely "Dimension mismatch" or similar
+            assert!(result.is_ok());
             assert!(
-                err_msg.to_lowercase().contains("dimension")
-                    || err_msg.to_lowercase().contains("mismatch"),
-                "Error should be dimension mismatch, got: {}",
-                err_msg
+                result.unwrap().is_none(),
+                "Path should be blocked due to dimension mismatch"
             );
+        }
+    }
+
+    mod sentry_robustness_tests {
+        use super::*;
+        use crate::api::transaction::WriteOps;
+        use crate::core::property::PropertyMapBuilder;
+        use crate::db::AletheiaDB;
+        use crate::index::vector::{DistanceMetric, HnswConfig}; // Import WriteOps to get create_node/update_node
+
+        fn create_test_db() -> AletheiaDB {
+            let db = AletheiaDB::new().unwrap();
+            // Enable vector index
+            db.vector_index("embedding")
+                .hnsw(HnswConfig::new(3, DistanceMetric::Cosine))
+                .enable()
+                .unwrap();
+            db
+        }
+
+        #[test]
+        fn test_pathfinding_skips_incompatible_dimensions() {
+            // 🛡️ Sentry Test: Mixed dimensions should not crash pathfinding.
+            // Setup:
+            // Start (3D) -> Broken (4D) -> End (3D)
+            //            -> Valid (3D)  -> End (3D)
+            //
+            // Pathfinding should navigate around Broken and use Valid.
+
+            let db = create_test_db();
+
+            // Nodes
+            let start = db
+                .create_node(
+                    "Start",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[1.0, 0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+
+            let end = db
+                .create_node(
+                    "End",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.0, 0.0, 1.0])
+                        .build(),
+                )
+                .unwrap();
+
+            // Create nodes with different property name for "broken" 4D vector
+            // to bypass potential index validation during creation.
+            // We will tell pathfinder to use "embedding_mixed".
+
+            let broken = db
+                .create_node(
+                    "Broken",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding_mixed", &[0.5, 0.5, 0.5, 0.5])
+                        .build(),
+                )
+                .unwrap();
+
+            let valid = db
+                .create_node(
+                    "Valid",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding_mixed", &[0.5, 0.5, 0.0])
+                        .build(),
+                )
+                .unwrap();
+
+            // Update Start and End to also use "embedding_mixed" using explicit transaction
+            db.write(|tx| {
+                tx.update_node(
+                    start,
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding_mixed", &[1.0, 0.0, 0.0])
+                        .build(),
+                )
+            })
+            .unwrap();
+            db.write(|tx| {
+                tx.update_node(
+                    end,
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding_mixed", &[0.0, 0.0, 1.0])
+                        .build(),
+                )
+            })
+            .unwrap();
+
+            // Connect
+            db.create_edge(start, broken, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+            db.create_edge(broken, end, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            db.create_edge(start, valid, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+            db.create_edge(valid, end, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            // Pathfinding
+            let query = vec![1.0, 0.0, 0.0];
+            let pathfinder = SemanticPathfinder::new(&db, "embedding_mixed");
+
+            let result = pathfinder.find_path(start, end, &query, 10, false);
+
+            match result {
+                Ok(Some(p)) => {
+                    // If it succeeds, verify it took the valid path
+                    assert_eq!(p, vec![start, valid, end], "Should take valid path");
+                }
+                Ok(None) => panic!("Should find a path (returned None)"),
+                Err(e) => {
+                    panic!(
+                        "Regression: Dimension mismatch error was not suppressed. Expected successful pathfinding skipping invalid node. Error: {}",
+                        e
+                    );
+                }
+            }
         }
     }
 }
