@@ -1532,4 +1532,55 @@ mod tests {
             "Segment log file should still exist"
         );
     }
+    #[test]
+    #[cfg(unix)]
+    fn test_havoc_durability_lie() {
+        use std::os::unix::io::FromRawFd;
+        use std::os::unix::net::UnixStream;
+
+        // 👹 HAVOC: The "Durability Lie"
+        // If sync_on_flush is false in config, flush(true) should still sync if requested!
+        // But the code says: `if sync && self.config.sync_on_flush`
+        // So it SILENTLY ignores the sync request.
+
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.sync_on_flush = false; // Disable global sync
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 1. Open segment to get sync handle initialized
+        {
+            let mut writer_guard = coordinator.writer.lock().unwrap();
+            coordinator.ensure_segment_open(&mut writer_guard).unwrap();
+        }
+
+        // 2. Replace sync_handle with a socket (UnixStream pair)
+        // fsync on a socket returns EINVAL (invalid argument), guaranteeing failure.
+        {
+            let (s1, _s2) = UnixStream::pair().expect("Failed to create socket pair");
+            // Clone fd to avoid double close issues when File drops vs Socket drops?
+            // File takes ownership of fd. UnixStream also owns fd.
+            // We need to release ownership from UnixStream.
+            use std::os::unix::io::IntoRawFd;
+            let fd = s1.into_raw_fd();
+            let socket_file = unsafe { File::from_raw_fd(fd) };
+
+            let mut guard = coordinator.sync_handle.lock().unwrap();
+            *guard = Some(socket_file);
+        }
+
+        // 3. Create dummy entry
+        let entry = create_test_entry(1, &[1, 2, 3]);
+
+        // 4. Call flush(true).
+        // If the code respected `sync=true`, it would try to fsync the socket and fail.
+        // If the code ignores `sync=true` (because config says false), it will succeed (return Ok).
+        let result = coordinator.flush(vec![entry], true);
+
+        // We assert that it returns Ok, proving the bug exists.
+        assert!(
+            result.is_ok(),
+            "HA! flush(true) returned Ok, meaning it silently ignored the sync request! Durability is a lie!"
+        );
+    }
 }
