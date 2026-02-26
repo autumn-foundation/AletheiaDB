@@ -700,6 +700,45 @@ sequenceDiagram
     Chameleon-->>User: List<NodeId>
 ```
 
+**Hybrid Entity Synthesis (Chimera)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class ChimeraEngine {
+            +synthesize(node_a, node_b, config)
+        }
+        class SynthesisConfig {
+            +alpha: f32
+            +strategies: Map
+        }
+    }
+    class AletheiaDB
+
+    ChimeraEngine --> AletheiaDB : Uses
+    ChimeraEngine ..> SynthesisConfig : Consumes
+```
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Chimera
+    participant DB as AletheiaDB
+
+    User->>Chimera: synthesize(A, B, config)
+    Chimera->>DB: get_node(A)
+    Chimera->>DB: get_node(B)
+    loop Every Property
+        Chimera->>Chimera: merge_value(val_A, val_B, strategy)
+    end
+    Chimera->>DB: create_node(new_props)
+    DB-->>Chimera: new_id
+    loop Every Edge
+        Chimera->>DB: duplicate_edge(original, new_id)
+    end
+    Chimera-->>User: new_id
+```
+
 ### Semantic Physics & Pattern Matching
 
 **Semantic Stress (Dissonance)**
