@@ -113,7 +113,10 @@ impl CurrentIndexes {
         if let Some((scheduler, handle)) = self.outgoing_compaction.take() {
             scheduler.shutdown();
             if let Err(e) = handle.join() {
-                eprintln!("Outgoing compaction thread panicked during shutdown: {:?}", e);
+                eprintln!(
+                    "Outgoing compaction thread panicked during shutdown: {:?}",
+                    e
+                );
                 if result.is_ok() {
                     result = Err("Outgoing compaction thread panicked".to_string());
                 }
@@ -123,7 +126,10 @@ impl CurrentIndexes {
         if let Some((scheduler, handle)) = self.incoming_compaction.take() {
             scheduler.shutdown();
             if let Err(e) = handle.join() {
-                eprintln!("Incoming compaction thread panicked during shutdown: {:?}", e);
+                eprintln!(
+                    "Incoming compaction thread panicked during shutdown: {:?}",
+                    e
+                );
                 if result.is_ok() {
                     result = Err("Incoming compaction thread panicked".to_string());
                 }
@@ -820,7 +826,8 @@ impl CurrentIndexes {
             outgoing_offsets.clone(),
             outgoing_edge_ids.clone(),
             &edges_map,
-        ).map_err(|e| format!("Outgoing CSR import failed: {}", e))?;
+        )
+        .map_err(|e| format!("Outgoing CSR import failed: {}", e))?;
         self.outgoing.import_frozen_csr(Arc::new(outgoing_csr));
 
         // Rebuild edges map for incoming (maps edge_id to source, not target)
@@ -836,7 +843,8 @@ impl CurrentIndexes {
             incoming_offsets,
             incoming_edge_ids.clone(),
             &edges_map,
-        ).map_err(|e| format!("Incoming CSR import failed: {}", e))?;
+        )
+        .map_err(|e| format!("Incoming CSR import failed: {}", e))?;
         self.incoming.import_frozen_csr(Arc::new(incoming_csr));
 
         // ===== Phase 7: Reconstruct Delta Buffer =====
