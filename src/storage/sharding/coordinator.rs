@@ -283,9 +283,9 @@ impl ShardCoordinator {
         };
 
         // Recover pending transactions on startup
-        if let Err(e) = coordinator.recover_pending_transactions() {
-            panic!("Failed to recover pending transactions on startup: {}", e);
-        }
+        coordinator
+            .recover_pending_transactions()
+            .expect("Failed to recover pending transactions on startup");
 
         coordinator
     }
