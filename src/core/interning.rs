@@ -338,27 +338,79 @@ impl StringInterner {
     /// Returns a vector of strings sorted by their InternedString IDs.
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
+    ///
+    /// # Consistency
+    /// This method makes a best-effort attempt to return a consistent snapshot
+    /// by retrying if it detects gaps in the ID sequence caused by concurrent insertions.
     pub fn get_all_strings(&self) -> Vec<String> {
-        // Use next_id to estimate the required size. This avoids repeated resizing
-        // inside the loop, which can happen if iteration order doesn't match ID order.
-        // String::new() is non-allocating, so pre-filling the vector is cheap.
-        let max_id = self.next_id.load(Ordering::Relaxed) as usize;
-        let mut strings = vec![String::new(); max_id];
+        const MAX_RETRIES: usize = 50;
+        let mut retries = 0;
 
-        // Collect all (id, string) pairs
-        for entry in self.id_to_string.iter() {
-            let id = entry.key().as_u32() as usize;
+        loop {
+            // Use next_id to estimate the required size.
+            let max_id = self.next_id.load(Ordering::Relaxed) as usize;
 
-            if id < strings.len() {
-                strings[id] = entry.value().to_string();
-            } else {
-                // Handle race condition where an ID was added after we read next_id
-                strings.resize(id + 1, String::new());
-                strings[id] = entry.value().to_string();
+            // Use Option to detect missing entries (holes)
+            // Initialize with None to distinguish "not yet inserted" from "empty string"
+            let mut strings = vec![None; max_id];
+
+            // Track the maximum ID we actually find in the map
+            let mut max_seen_id = 0;
+
+            // Collect all (id, string) pairs
+            for entry in self.id_to_string.iter() {
+                let id = entry.key().as_u32() as usize;
+
+                if id >= strings.len() {
+                    // Handle race condition where an ID was added after we read next_id
+                    strings.resize(id + 1, None);
+                }
+
+                strings[id] = Some(entry.value().to_string());
+                if id > max_seen_id {
+                    max_seen_id = id;
+                }
             }
-        }
 
-        strings
+            // Check for holes up to the maximum seen ID.
+            // We ignore holes at the very end beyond max_seen_id because those might be
+            // reservations that haven't even started insertion, and they don't affect consistency
+            // of the *visible* data. However, any hole *before* a visible ID is a consistency risk.
+            let mut has_holes = false;
+            for i in 0..=max_seen_id {
+                // If max_seen_id is 0 and map is empty, loop runs once for index 0.
+                // If strings is empty, loop doesn't run.
+                if i < strings.len() && strings[i].is_none() {
+                    has_holes = true;
+                    break;
+                }
+            }
+
+            if !has_holes {
+                // No holes found up to the last visible item.
+                // We can safely return the snapshot.
+                // Note: We might have pending reservations at the end (None), which map to empty strings.
+                // This is acceptable as those IDs haven't been exposed to callers yet.
+                return strings
+                    .into_iter()
+                    .map(|opt| opt.unwrap_or_default())
+                    .collect();
+            }
+
+            retries += 1;
+            if retries >= MAX_RETRIES {
+                // We tried our best. Return what we have to avoid infinite loops.
+                // In a real system, we might want to log a warning here.
+                return strings
+                    .into_iter()
+                    .map(|opt| opt.unwrap_or_default())
+                    .collect();
+            }
+
+            // Exponential backoff
+            let sleep_micros = 10 * (1 << (retries.min(10)));
+            std::thread::sleep(std::time::Duration::from_micros(sleep_micros));
+        }
     }
 
     /// Pre-intern common strings at startup to avoid initial allocation overhead.
@@ -1210,5 +1262,78 @@ mod mutant_kill_tests {
         }
 
         writer.join().unwrap();
+    }
+
+    #[test]
+    fn test_get_all_strings_race_consistency() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::Duration;
+
+        let interner = Arc::new(StringInterner::new());
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Thread 1: Interns strings continuously
+        let t1 = {
+            let interner = interner.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                for i in 0..5000 {
+                    let s = format!("s_{}", i);
+                    let _ = interner.intern(&s).unwrap();
+                    if i % 50 == 0 {
+                        thread::yield_now();
+                    }
+                }
+            })
+        };
+
+        // Thread 2: Continuously calls get_all_strings and validates consistency
+        let t2 = {
+            let interner = interner.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..50 {
+                    let snapshot = interner.get_all_strings();
+                    let len = snapshot.len();
+
+                    // Validation:
+                    // If we find an empty string at index i, but a non-empty string at index j > i,
+                    // that's a consistency violation (hole).
+                    // We also generally expect no empty strings in this test because we don't intern "".
+                    // However, get_all_strings might return empty strings at the *end* if they are reserved
+                    // but not yet visible. This is acceptable.
+                    // But an empty string *followed by* a non-empty string is a hole.
+
+                    let mut found_hole = false;
+                    for (i, s) in snapshot.iter().enumerate() {
+                        if s.is_empty() {
+                            // Found potential hole. Check if anything follows it.
+                            for j in (i + 1)..len {
+                                if !snapshot[j].is_empty() {
+                                    found_hole = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if found_hole {
+                            return Some(format!(
+                                "Found hole at index {} in snapshot of size {}",
+                                i, len
+                            ));
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                None
+            })
+        };
+
+        t1.join().unwrap();
+        if let Some(error) = t2.join().unwrap() {
+            panic!("Consistency check failed: {}", error);
+        }
     }
 }
