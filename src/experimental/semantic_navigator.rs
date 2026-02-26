@@ -96,7 +96,12 @@ impl<'a> SemanticNavigator<'a> {
         let mut f_score: HashMap<NodeId, f32> = HashMap::new();
         // h(start) = 1.0 - sim(start, end)
         // We know start has a vector.
-        let h_start = 1.0 - cosine_similarity(&_start_vec, &end_vec)?;
+        let sim_start = cosine_similarity(&_start_vec, &end_vec)?;
+        let h_start = if sim_start.is_nan() {
+            1.0
+        } else {
+            1.0 - sim_start
+        };
         f_score.insert(start, h_start);
 
         while let Some(State {
@@ -134,7 +139,14 @@ impl<'a> SemanticNavigator<'a> {
 
                 // Cost(current, neighbor)
                 let distance_cost = match (&current_vec, &neighbor_vec) {
-                    (Some(a), Some(b)) => 1.0 - cosine_similarity(a, b)?,
+                    (Some(a), Some(b)) => {
+                        let sim = cosine_similarity(a, b)?;
+                        if sim.is_nan() {
+                            1.0
+                        } else {
+                            1.0 - sim
+                        }
+                    }
                     _ => 1.0, // Penalize missing vectors
                 };
 
@@ -146,7 +158,14 @@ impl<'a> SemanticNavigator<'a> {
 
                     // h(neighbor) = 1.0 - sim(neighbor, goal)
                     let h_score = match &neighbor_vec {
-                        Some(vec) => 1.0 - cosine_similarity(vec, &end_vec)?,
+                        Some(vec) => {
+                            let sim = cosine_similarity(vec, &end_vec)?;
+                            if sim.is_nan() {
+                                1.0
+                            } else {
+                                1.0 - sim
+                            }
+                        }
                         None => 1.0, // High heuristic if missing vector
                     };
 

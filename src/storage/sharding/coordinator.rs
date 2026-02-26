@@ -242,7 +242,17 @@ impl ShardCoordinator {
     ///
     /// Initializes connections to all defined shards, sets up the router, and
     /// prepares the transaction ID generator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if pending transactions cannot be recovered from the WAL.
+    /// Use `try_new` for a non-panicking version.
     pub fn new(config: ShardConfig) -> Self {
+        Self::try_new(config).expect("ShardCoordinator failed to recover pending transactions")
+    }
+
+    /// Create a new shard coordinator, returning Result.
+    pub fn try_new(config: ShardConfig) -> Result<Self, DistributedTxError> {
         let mut connections = HashMap::new();
         let mut shard_states = HashMap::new();
         let mut metrics = HashMap::new();
@@ -267,7 +277,7 @@ impl ShardCoordinator {
 
         let router = ShardRouter::new(config);
 
-        Self {
+        let coordinator = Self {
             router,
             connections: RwLock::new(connections),
             shard_states: RwLock::new(shard_states),
@@ -280,7 +290,13 @@ impl ShardCoordinator {
             rebalance_config: RebalanceConfig::default(),
             transaction_timeout,
             dead_letter_queue: RwLock::new(HashMap::new()),
-        }
+        };
+
+        // Ensure we replay any pending transactions from the WAL.
+        // This is critical for durability - if we crashed during commit, we must finish the job.
+        coordinator.recover_pending_transactions()?;
+
+        Ok(coordinator)
     }
 
     /// Create a coordinator with custom rebalance config.
