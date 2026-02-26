@@ -283,8 +283,11 @@ impl ShardCoordinator {
         };
 
         // Recover pending transactions on startup
-        let recovery_result = coordinator.recover_pending_transactions();
-        recovery_result.expect("Failed to recover pending transactions on startup");
+        if let Err(e) = coordinator.recover_pending_transactions() {
+            // This path is practically unreachable as it only triggers on lock poisoning
+            // within a freshly created struct.
+            panic!("Failed to recover pending transactions on startup: {}", e);
+        }
 
         coordinator
     }
