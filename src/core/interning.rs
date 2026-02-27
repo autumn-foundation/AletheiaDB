@@ -116,11 +116,20 @@ impl StringInterner {
 
     /// Create a new string interner with a custom maximum capacity.
     pub fn with_max_capacity(max_capacity: usize) -> Self {
+        // Clamp max_capacity to u32::MAX to prevent overflow issues when casting
+        // on 64-bit platforms (where usize is u64).
+        // InternedString IDs are u32, so we can't support more than u32::MAX strings anyway.
+        let effective_capacity = if max_capacity > u32::MAX as usize {
+            u32::MAX as usize
+        } else {
+            max_capacity
+        };
+
         StringInterner {
             string_to_id: DashMap::new(),
             id_to_string: DashMap::with_hasher(BuildHasherDefault::default()),
             next_id: AtomicU32::new(0),
-            max_capacity,
+            max_capacity: effective_capacity,
         }
     }
 
