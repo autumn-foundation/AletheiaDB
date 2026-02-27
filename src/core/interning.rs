@@ -15,9 +15,14 @@ use std::fmt;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+use thiserror::Error;
 
 /// Default maximum number of interned strings (DoS protection)
 pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
+
+/// Timeout for snapshot retries when holes are detected.
+const SNAPSHOT_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Common strings that are pre-interned at startup for optimal performance.
 ///
@@ -36,6 +41,19 @@ pub const COMMON_STRINGS: &[&str] = &[
     "tx_from",
     "tx_to",
 ];
+
+/// Error type for interner snapshot operations.
+#[derive(Debug, Error)]
+pub enum InternerSnapshotError {
+    /// Failed to acquire a consistent snapshot within the timeout.
+    #[error("Failed to acquire consistent interner snapshot: detected {holes} holes after {attempts} attempts")]
+    ConsistencyFailure {
+        /// Number of holes found in the last attempt
+        holes: usize,
+        /// Number of retry attempts made
+        attempts: usize,
+    },
+}
 
 /// A small, copyable handle to an interned string.
 ///
@@ -338,27 +356,90 @@ impl StringInterner {
     /// Returns a vector of strings sorted by their InternedString IDs.
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
-    pub fn get_all_strings(&self) -> Vec<String> {
-        // Use next_id to estimate the required size. This avoids repeated resizing
-        // inside the loop, which can happen if iteration order doesn't match ID order.
-        // String::new() is non-allocating, so pre-filling the vector is cheap.
-        let max_id = self.next_id.load(Ordering::Relaxed) as usize;
-        let mut strings = vec![String::new(); max_id];
+    ///
+    /// # Consistency Note
+    ///
+    /// This method implements a retry mechanism to handle race conditions where an ID
+    /// is reserved (via `fetch_add`) but the string is not yet inserted into the map.
+    /// Such "holes" are detected and waited upon. If a consistent snapshot cannot be
+    /// acquired within `SNAPSHOT_RETRY_TIMEOUT`, an error is returned.
+    pub fn get_all_strings(&self) -> Result<Vec<String>, InternerSnapshotError> {
+        let start_time = Instant::now();
+        let mut attempts = 0;
 
-        // Collect all (id, string) pairs
-        for entry in self.id_to_string.iter() {
-            let id = entry.key().as_u32() as usize;
+        loop {
+            attempts += 1;
 
-            if id < strings.len() {
-                strings[id] = entry.value().to_string();
-            } else {
-                // Handle race condition where an ID was added after we read next_id
-                strings.resize(id + 1, String::new());
-                strings[id] = entry.value().to_string();
+            // Use next_id to estimate the required size. This avoids repeated resizing
+            // inside the loop, which can happen if iteration order doesn't match ID order.
+            // String::new() is non-allocating, so pre-filling the vector is cheap.
+            let max_id = self.next_id.load(Ordering::Relaxed) as usize;
+            let mut strings = vec![String::new(); max_id];
+
+            // Track the maximum index we actually filled.
+            // We need this because we might resize strings if we encounter an ID >= max_id,
+            // but we only care about holes up to the ORIGINAL max_id (or the NEW max ID if we expand).
+            // Actually, the simplest approach is:
+            // 1. Iterate map. Place strings in vector. Resize if needed.
+            // 2. After iteration, check holes up to `strings.len()`.
+            // Wait, if next_id was 10, but we only found ID 5, then 0-4 and 6-9 are holes.
+            // But if next_id increases during iteration, say to 15, and we see ID 14, we resize.
+            // But if we miss ID 12 (because it's being inserted), that's a hole.
+
+            // To be strictly consistent with "snapshot at time T":
+            // We can capture max_id. We expect [0..max_id) to be filled.
+            // If we see ID >= max_id, we can ignore it (it's from a future transaction).
+            // This guarantees we don't chase a moving target.
+
+            let target_limit = max_id;
+
+            // Collect all (id, string) pairs
+            for entry in self.id_to_string.iter() {
+                let id = entry.key().as_u32() as usize;
+
+                if id < target_limit {
+                    strings[id] = entry.value().to_string();
+                }
+                // Ignore IDs >= target_limit to ensure we converge on a fixed snapshot size
             }
-        }
 
-        strings
+            // Now check for holes in [0, target_limit).
+            let mut holes_found = 0;
+            let empty_interned = self.contains("");
+
+            for i in 0..target_limit {
+                if strings[i].is_empty() {
+                     let is_valid_empty = empty_interned && {
+                        // Check if this ID actually maps to empty string
+                        self.resolve_with(InternedString(i as u32), |val| val.is_empty()).unwrap_or(false)
+                    };
+
+                    if !is_valid_empty {
+                        holes_found += 1;
+                    }
+                }
+            }
+
+            if holes_found == 0 {
+                return Ok(strings);
+            }
+
+            // Retry logic
+            if start_time.elapsed() > SNAPSHOT_RETRY_TIMEOUT {
+                return Err(InternerSnapshotError::ConsistencyFailure {
+                    holes: holes_found,
+                    attempts,
+                });
+            }
+
+            // Exponential backoff
+            let sleep_time = std::cmp::min(
+                Duration::from_millis(100),
+                Duration::from_millis(1 * 2u64.pow((attempts % 10) as u32))
+            );
+            std::thread::yield_now();
+            std::thread::sleep(sleep_time);
+        }
     }
 
     /// Pre-intern common strings at startup to avoid initial allocation overhead.
@@ -401,31 +482,6 @@ impl StringInterner {
     }
 }
 
-impl Default for StringInterner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Global string interner instance.
-///
-/// This can be used throughout the application for interning labels,
-/// property keys, and other frequently repeated strings.
-///
-/// # Example
-///
-/// ```ignore
-/// use aletheiadb::core::interning::GLOBAL_INTERNER;
-///
-/// let id1 = GLOBAL_INTERNER.intern("Person").unwrap();
-/// let id2 = GLOBAL_INTERNER.intern("Person").unwrap();
-/// assert_eq!(id1, id2); // Same string gets same ID
-///
-/// let string = GLOBAL_INTERNER.resolve(id1).unwrap();
-/// assert_eq!(string.as_ref(), "Person");
-/// ```
-use std::sync::LazyLock;
-
 /// Environment variable to configure the maximum number of interned strings.
 ///
 /// Set `GALLIFREYDB_MAX_INTERNED_STRINGS` to override the default limit of 100,000.
@@ -447,7 +503,7 @@ pub const MAX_INTERNED_STRINGS_ENV: &str = "GALLIFREYDB_MAX_INTERNED_STRINGS";
 ///
 /// The maximum capacity can be configured via the `GALLIFREYDB_MAX_INTERNED_STRINGS`
 /// environment variable. If not set, defaults to 100,000.
-pub static GLOBAL_INTERNER: LazyLock<StringInterner> = LazyLock::new(|| {
+pub static GLOBAL_INTERNER: std::sync::LazyLock<StringInterner> = std::sync::LazyLock::new(|| {
     let max_capacity = std::env::var(MAX_INTERNED_STRINGS_ENV)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -1089,15 +1145,9 @@ mod tests {
         let id = InternedString::from_raw(raw_id);
         assert_eq!(format!("{}", id), format!("Interned({})", raw_id));
     }
-}
-
-#[cfg(test)]
-mod mutant_kill_tests {
-    use super::*;
-    use std::sync::Arc;
 
     #[test]
-    fn test_with_max_capacity_completes_and_honors_limit_via_subprocess() {
+    fn test_mutant_kill_with_max_capacity_completes_and_honors_limit_via_subprocess() {
         use std::process::Command;
         use std::time::{Duration, Instant};
 
@@ -1171,7 +1221,7 @@ mod mutant_kill_tests {
         assert_eq!(second.as_u32(), 1);
         assert_eq!(third.as_u32(), 2);
 
-        let all = interner.get_all_strings();
+        let all = interner.get_all_strings().unwrap();
         assert_eq!(all.len(), interner.len());
         assert_eq!(
             all,
@@ -1182,6 +1232,7 @@ mod mutant_kill_tests {
             ]
         );
     }
+
     #[test]
     fn test_get_all_strings_no_panic_under_concurrent_inserts() {
         let interner = Arc::new(StringInterner::with_max_capacity(200_000));
@@ -1239,7 +1290,7 @@ mod mutant_kill_tests {
         );
 
         // Verify get_all_strings has no gaps
-        let all = interner.get_all_strings();
+        let all = interner.get_all_strings().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0], "A");
         assert_eq!(all[1], "C");

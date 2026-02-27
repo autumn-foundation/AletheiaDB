@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use thiserror::Error;
+use crate::core::interning::InternerSnapshotError;
 
 /// Errors that can occur during index persistence operations.
 #[derive(Debug, Error)]
@@ -66,6 +67,10 @@ pub enum IndexPersistenceError {
     /// Bitcode serialization/deserialization error
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    /// Interner snapshot consistency error
+    #[error("Interner snapshot error: {0}")]
+    SnapshotError(#[from] InternerSnapshotError),
 }
 
 impl From<bitcode::Error> for IndexPersistenceError {
