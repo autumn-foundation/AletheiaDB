@@ -338,27 +338,77 @@ impl StringInterner {
     /// Returns a vector of strings sorted by their InternedString IDs.
     /// This is useful for persistence where we need to save and restore
     /// the interner state.
+    ///
+    /// This method is thread-safe and consistent. It waits for any concurrent
+    /// interning operations to complete to ensure there are no "holes" in the
+    /// returned sequence.
     pub fn get_all_strings(&self) -> Vec<String> {
-        // Use next_id to estimate the required size. This avoids repeated resizing
-        // inside the loop, which can happen if iteration order doesn't match ID order.
-        // String::new() is non-allocating, so pre-filling the vector is cheap.
+        // Use next_id to estimate the required size.
         let max_id = self.next_id.load(Ordering::Relaxed) as usize;
-        let mut strings = vec![String::new(); max_id];
 
-        // Collect all (id, string) pairs
+        // Use Option<String> to track which IDs we've actually found.
+        // Initialize with None to distinguish "not found" from "empty string".
+        let mut strings: Vec<Option<String>> = vec![None; max_id];
+
+        // First pass: collect all (id, string) pairs currently in the map
         for entry in self.id_to_string.iter() {
             let id = entry.key().as_u32() as usize;
 
             if id < strings.len() {
-                strings[id] = entry.value().to_string();
+                strings[id] = Some(entry.value().to_string());
             } else {
                 // Handle race condition where an ID was added after we read next_id
-                strings.resize(id + 1, String::new());
-                strings[id] = entry.value().to_string();
+                strings.resize(id + 1, None);
+                strings[id] = Some(entry.value().to_string());
             }
         }
 
-        strings
+        // Second pass: Check for holes and resolve them.
+        // Holes occur because intern() increments next_id BEFORE inserting into the map.
+        // If we see a hole at index i < strings.len(), it means an insert is in progress.
+        // We must wait for it to complete to return a consistent snapshot.
+        for (id, val) in strings.iter_mut().enumerate() {
+            if val.is_none() {
+                // Spin-wait for the missing ID to appear.
+                // In practice this is very short (just the time for a DashMap insert).
+                let mut spins = 0;
+                loop {
+                    // Check if ID is still within valid range. If next_id has been rolled back
+                    // (e.g. due to capacity exceeded), we should stop waiting.
+                    // Note: We use relaxed ordering as we are in a spin loop.
+                    let current_max_id = self.next_id.load(Ordering::Relaxed) as usize;
+                    if id >= current_max_id {
+                        // The ID was rolled back or invalid, stop waiting.
+                        break;
+                    }
+
+                    if let Some(entry) = self.id_to_string.get(&InternedString::from_raw(id as u32))
+                    {
+                        *val = Some(entry.value().to_string());
+                        break;
+                    }
+
+                    // Yield to allow the writer thread to proceed
+                    std::thread::yield_now();
+                    spins += 1;
+
+                    // Safety valve: don't spin forever if something is truly broken
+                    if spins > 100_000 {
+                        // This should technically be unreachable given the intern() logic,
+                        // but we panic to be safe rather than returning a corrupted snapshot.
+                        panic!(
+                            "Deadlock detected in get_all_strings: ID {} never appeared after 100k spins. \
+                             This indicates a bug in the interner logic (e.g. rolled back ID not properly handled).",
+                            id
+                        );
+                    }
+                }
+            }
+        }
+
+        // Return only the strings that were successfully resolved.
+        // This implicitly handles rolled-back IDs by filtering out the Nones.
+        strings.into_iter().flatten().collect()
     }
 
     /// Pre-intern common strings at startup to avoid initial allocation overhead.
