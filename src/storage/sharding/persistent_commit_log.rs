@@ -460,7 +460,7 @@ impl PersistentCommitLog {
 
         let (writer, lsn, pending, max_tx_id) = if path.exists() {
             // Open existing file and recover state
-            let (entries, max_lsn, max_tx_id) = Self::read_entries(&path)?;
+            let (entries, max_lsn, max_tx_id, valid_len) = Self::read_entries(&path)?;
 
             // Build pending map (entries without completion)
             let mut pending_map = HashMap::new();
@@ -480,12 +480,24 @@ impl PersistentCommitLog {
                 }
             }
 
-            // Open for appending
+            // Open for appending and truncation
             let file = OpenOptions::new()
                 .create(true)
+                .write(true)
                 .append(true)
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
+
+            // Truncate any garbage/partial writes at the end
+            let current_len = file
+                .metadata()
+                .map_err(|e| CommitLogError::IoError(format!("Failed to get metadata: {}", e)))?
+                .len();
+
+            if valid_len < current_len {
+                file.set_len(valid_len)
+                    .map_err(|e| CommitLogError::IoError(format!("Failed to truncate log: {}", e)))?;
+            }
 
             (
                 Some(BufWriter::new(file)),
@@ -740,7 +752,7 @@ impl PersistentCommitLog {
         Ok(())
     }
 
-    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64)> {
+    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64, u64)> {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
@@ -809,7 +821,8 @@ impl PersistentCommitLog {
             }
         }
 
-        Ok((entries, max_lsn, max_tx_id))
+        let valid_len = offset as u64;
+        Ok((entries, max_lsn, max_tx_id, valid_len))
     }
 }
 
