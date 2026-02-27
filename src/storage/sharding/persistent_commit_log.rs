@@ -486,6 +486,7 @@ impl PersistentCommitLog {
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(false) // Explicitly disable truncate on open, as we handle it manually below
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
