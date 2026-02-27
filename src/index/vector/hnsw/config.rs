@@ -102,7 +102,7 @@ impl HnswConfig {
         }
     }
 
-    /// Sets the M parameter (connections per node).
+    /// Sets the `m` parameter (connections per node).
     ///
     /// # Impact
     /// Higher `m` improves recall but increases memory usage.
