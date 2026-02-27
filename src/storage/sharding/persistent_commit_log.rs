@@ -483,16 +483,38 @@ impl PersistentCommitLog {
             // Open for appending, making sure to truncate any garbage at the end
             // On Windows, opening with append=true and then setting length can fail with Access Denied.
             // So we use a separate handle to truncate first if needed.
+            if std::fs::metadata(&path)
+                .map(|m| m.len() > valid_len)
+                .unwrap_or(false)
             {
-                let file = OpenOptions::new()
-                    .write(true)
-                    .open(&path)
-                    .map_err(|e| {
-                        CommitLogError::IoError(format!("Failed to open log for truncation: {}", e))
-                    })?;
-                file.set_len(valid_len).map_err(|e| {
-                    CommitLogError::IoError(format!("Failed to truncate corrupted log tail: {}", e))
-                })?;
+                // Retry loop for truncation to handle transient file locking on Windows
+                let mut retries = 3;
+                while retries > 0 {
+                    let result = (|| -> CommitLogResult<()> {
+                        let file = OpenOptions::new().write(true).open(&path).map_err(|e| {
+                            CommitLogError::IoError(format!(
+                                "Failed to open log for truncation: {}",
+                                e
+                            ))
+                        })?;
+                        file.set_len(valid_len).map_err(|e| {
+                            CommitLogError::IoError(format!(
+                                "Failed to truncate corrupted log tail: {}",
+                                e
+                            ))
+                        })?;
+                        Ok(())
+                    })();
+
+                    match result {
+                        Ok(_) => break,
+                        Err(_) if retries > 1 => {
+                            retries -= 1;
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
             }
 
             let file = OpenOptions::new()
@@ -1194,7 +1216,9 @@ mod sentry_tests {
         // 4. Reopen again and verify BOTH entries exist
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            let pending = log.pending_decisions();
+            let mut pending = log.pending_decisions();
+            // Sort by TxId to ensure deterministic order for assertion (DashMap/HashMap iteration is non-deterministic)
+            pending.sort_by_key(|e| e.tx_id.as_u64());
 
             // If the file wasn't truncated, the reader will stop at the garbage
             // and never see Entry 2, so count will be 1 instead of 2.
