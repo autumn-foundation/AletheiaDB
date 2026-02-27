@@ -481,17 +481,25 @@ impl PersistentCommitLog {
             }
 
             // Open for appending, making sure to truncate any garbage at the end
+            // On Windows, opening with append=true and then setting length can fail with Access Denied.
+            // So we use a separate handle to truncate first if needed.
+            {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .map_err(|e| {
+                        CommitLogError::IoError(format!("Failed to open log for truncation: {}", e))
+                    })?;
+                file.set_len(valid_len).map_err(|e| {
+                    CommitLogError::IoError(format!("Failed to truncate corrupted log tail: {}", e))
+                })?;
+            }
+
             let file = OpenOptions::new()
                 .create(true)
-                .write(true) // Need write access to truncate
                 .append(true)
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
-
-            // Truncate to the valid length to remove any corrupted tail data
-            file.set_len(valid_len).map_err(|e| {
-                CommitLogError::IoError(format!("Failed to truncate corrupted log tail: {}", e))
-            })?;
 
             (
                 Some(BufWriter::new(file)),
@@ -1139,9 +1147,9 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use tempfile::TempDir;
-    use std::io::Write;
     use std::fs::OpenOptions;
+    use std::io::Write;
+    use tempfile::TempDir;
 
     fn make_shard_id(id: u16) -> ShardId {
         ShardId::new(id).unwrap()
@@ -1155,7 +1163,8 @@ mod sentry_tests {
         // 1. Create log and write Entry 1
         {
             let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
-            log.log_commit(TxId::new(1), vec![make_shard_id(0)], None).unwrap();
+            log.log_commit(TxId::new(1), vec![make_shard_id(0)], None)
+                .unwrap();
             log.close().unwrap();
         }
 
@@ -1177,7 +1186,8 @@ mod sentry_tests {
             assert_eq!(pending[0].tx_id, TxId::new(1));
 
             // Write Entry 2
-            log.log_commit(TxId::new(2), vec![make_shard_id(0)], None).unwrap();
+            log.log_commit(TxId::new(2), vec![make_shard_id(0)], None)
+                .unwrap();
             log.close().unwrap();
         }
 
