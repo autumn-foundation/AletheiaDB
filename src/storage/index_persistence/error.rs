@@ -1,8 +1,8 @@
 //! Error types for index persistence operations.
 
+use crate::core::interning::InternerSnapshotError;
 use std::path::PathBuf;
 use thiserror::Error;
-use crate::core::interning::InternerSnapshotError;
 
 /// Errors that can occur during index persistence operations.
 #[derive(Debug, Error)]

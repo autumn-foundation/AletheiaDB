@@ -47,7 +47,10 @@ fn test_havoc_interner_holes() {
                     // Check for empty strings (holes)
                     for (id, s) in snapshot.iter().enumerate() {
                         if s.is_empty() {
-                            panic!("HOLE FOUND at ID {}! The snapshot returned Ok but contains an empty string.", id);
+                            panic!(
+                                "HOLE FOUND at ID {}! The snapshot returned Ok but contains an empty string.",
+                                id
+                            );
                         }
                     }
                 }
@@ -59,7 +62,10 @@ fn test_havoc_interner_holes() {
                 }
             }
         }
-        println!("Reader finished: {} snapshots taken, {} failures", snapshots_taken, failures);
+        println!(
+            "Reader finished: {} snapshots taken, {} failures",
+            snapshots_taken, failures
+        );
     });
     handles.push(reader);
 

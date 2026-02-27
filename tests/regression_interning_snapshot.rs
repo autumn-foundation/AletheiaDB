@@ -63,11 +63,11 @@ fn test_havoc_interner_snapshot_consistency() {
                     }
                 }
             } else {
-                 // It failed to get a consistent snapshot. This is possible under extreme contention
-                 // if the timeout is reached. We shouldn't panic, but maybe log it.
-                 // In a real regression test, we might want to ensure it succeeds eventually,
-                 // but for this chaos-style test, just ensuring it doesn't return corrupted data is key.
-                 eprintln!("Failed to get consistent snapshot (timeout)");
+                // It failed to get a consistent snapshot. This is possible under extreme contention
+                // if the timeout is reached. We shouldn't panic, but maybe log it.
+                // In a real regression test, we might want to ensure it succeeds eventually,
+                // but for this chaos-style test, just ensuring it doesn't return corrupted data is key.
+                eprintln!("Failed to get consistent snapshot (timeout)");
             }
         }
     });

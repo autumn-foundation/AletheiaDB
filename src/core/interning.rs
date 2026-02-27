@@ -46,7 +46,9 @@ pub const COMMON_STRINGS: &[&str] = &[
 #[derive(Debug, Error)]
 pub enum InternerSnapshotError {
     /// Failed to acquire a consistent snapshot within the timeout.
-    #[error("Failed to acquire consistent interner snapshot: detected {holes} holes after {attempts} attempts")]
+    #[error(
+        "Failed to acquire consistent interner snapshot: detected {holes} holes after {attempts} attempts"
+    )]
     ConsistencyFailure {
         /// Number of holes found in the last attempt
         holes: usize,
@@ -409,9 +411,10 @@ impl StringInterner {
 
             for i in 0..target_limit {
                 if strings[i].is_empty() {
-                     let is_valid_empty = empty_interned && {
+                    let is_valid_empty = empty_interned && {
                         // Check if this ID actually maps to empty string
-                        self.resolve_with(InternedString(i as u32), |val| val.is_empty()).unwrap_or(false)
+                        self.resolve_with(InternedString(i as u32), |val| val.is_empty())
+                            .unwrap_or(false)
                     };
 
                     if !is_valid_empty {
@@ -435,7 +438,7 @@ impl StringInterner {
             // Exponential backoff
             let sleep_time = std::cmp::min(
                 Duration::from_millis(100),
-                Duration::from_millis(1 * 2u64.pow((attempts % 10) as u32))
+                Duration::from_millis(1 * 2u64.pow((attempts % 10) as u32)),
             );
             std::thread::yield_now();
             std::thread::sleep(sleep_time);
