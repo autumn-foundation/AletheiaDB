@@ -386,30 +386,26 @@ impl StringInterner {
                 }
             }
 
-            if !has_holes {
-                // No holes found up to the last visible item.
-                // We can safely return the snapshot.
-                // Note: We might have pending reservations at the end (None), which map to empty strings.
-                // This is acceptable as those IDs haven't been exposed to callers yet.
-                return strings
-                    .into_iter()
-                    .map(|opt| opt.unwrap_or_default())
-                    .collect();
-            }
-
-            retries += 1;
-            if retries >= MAX_RETRIES {
-                // We tried our best. Return what we have to avoid infinite loops.
+            if has_holes {
+                retries += 1;
+                if retries < MAX_RETRIES {
+                    // Exponential backoff
+                    let sleep_micros = 10 * (1 << (retries.min(10)));
+                    std::thread::sleep(std::time::Duration::from_micros(sleep_micros));
+                    continue;
+                }
+                // If we exhausted retries, fall through to return what we have (best effort)
                 // In a real system, we might want to log a warning here.
-                return strings
-                    .into_iter()
-                    .map(|opt| opt.unwrap_or_default())
-                    .collect();
             }
 
-            // Exponential backoff
-            let sleep_micros = 10 * (1 << (retries.min(10)));
-            std::thread::sleep(std::time::Duration::from_micros(sleep_micros));
+            // No holes found, or we've exhausted retries.
+            // We can safely return the snapshot.
+            // Note: We might have pending reservations at the end (None), which map to empty strings.
+            // This is acceptable as those IDs haven't been exposed to callers yet.
+            return strings
+                .into_iter()
+                .map(|opt| opt.unwrap_or_default())
+                .collect();
         }
     }
 
@@ -1307,21 +1303,15 @@ mod mutant_kill_tests {
                     // but not yet visible. This is acceptable.
                     // But an empty string *followed by* a non-empty string is a hole.
 
-                    let mut found_hole = false;
-                    for (i, s) in snapshot.iter().enumerate() {
-                        if s.is_empty() {
-                            // Found potential hole. Check if anything follows it.
-                            for s in snapshot.iter().skip(i + 1) {
-                                if !s.is_empty() {
-                                    found_hole = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if found_hole {
+                    if let Some(last_non_empty_idx) = snapshot.iter().rposition(|s| !s.is_empty()) {
+                        // Check for any empty strings ("holes") before the last valid item.
+                        // This is an O(n) check, which is more efficient than the original O(n^2) check.
+                        if let Some(hole_idx) =
+                            snapshot[..last_non_empty_idx].iter().position(|s| s.is_empty())
+                        {
                             return Some(format!(
-                                "Found hole at index {} in snapshot of size {}",
-                                i, len
+                                "Found hole at index {} in snapshot of size {} (last non-empty is at index {})",
+                                hole_idx, len, last_non_empty_idx
                             ));
                         }
                     }
