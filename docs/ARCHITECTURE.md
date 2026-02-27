@@ -83,11 +83,14 @@ classDiagram
             +handle_tool_call()
         }
     }
-    namespace Core {
+    namespace DB {
         class AletheiaDB
+    }
+    namespace Core {
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+        class StorageEngine
     }
     namespace Storage {
         class CurrentStorage
@@ -101,10 +104,11 @@ classDiagram
         }
     }
 
-    MCPServer --> QueryEngine : Uses
-    QueryEngine --> AletheiaDB : Uses
-    AletheiaDB --> CurrentStorage : "Owns (Arc)"
-    AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
+    MCPServer --> DB : Uses
+    DB --> Core : "Uses"
+    DB --> Storage : "Owns (Arc/RwLock)"
+    Core ..> StorageEngine : Defines
+    Storage ..|> StorageEngine : Implements
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
