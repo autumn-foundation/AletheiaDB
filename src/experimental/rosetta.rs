@@ -200,11 +200,7 @@ impl<'a> Rosetta<'a> {
         }
 
         let sim = cosine_similarity(&s_vec, &t_vec)?;
-        let offset: Vec<f32> = t_vec
-            .iter()
-            .zip(s_vec.iter())
-            .map(|(t, s)| t - s)
-            .collect();
+        let offset: Vec<f32> = t_vec.iter().zip(s_vec.iter()).map(|(t, s)| t - s).collect();
 
         let mut best_label = None;
         let mut min_error = f32::MAX;
@@ -284,11 +280,8 @@ impl<'a> Rosetta<'a> {
                     let sim_z = (sim - profile.mean_similarity).abs() / profile.std_dev_similarity;
 
                     // Check Offset Deviation
-                    let offset: Vec<f32> = t_vec
-                        .iter()
-                        .zip(s_vec.iter())
-                        .map(|(t, s)| t - s)
-                        .collect();
+                    let offset: Vec<f32> =
+                        t_vec.iter().zip(s_vec.iter()).map(|(t, s)| t - s).collect();
 
                     let mut offset_dist = 0.0;
                     for i in 0..offset.len() {
@@ -480,8 +473,7 @@ mod tests {
                         .build(),
                 )
                 .unwrap();
-            db.create_edge(s, t, "SYNONYM", Default::default())
-                .unwrap();
+            db.create_edge(s, t, "SYNONYM", Default::default()).unwrap();
         }
 
         let rosetta = Rosetta::new(&db);
