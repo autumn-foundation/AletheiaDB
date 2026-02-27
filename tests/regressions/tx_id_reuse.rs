@@ -26,7 +26,9 @@ fn test_repro_tx_id_reuse_on_recovery() {
         coordinator.prepare_distributed_transaction(tx_id).unwrap();
         coordinator.commit_distributed_transaction(tx_id).unwrap();
 
-        assert_eq!(tx_id, TxId::new(0)); // IdGenerator starts at 0
+        // IdGenerator normally starts at 0, but PersistentCommitLog forces a reset to at least 1
+        // to avoid ambiguity with "empty log" state.
+        assert_eq!(tx_id, TxId::new(1));
     }
 
     // 2. Restart coordinator

@@ -269,7 +269,17 @@ impl ShardCoordinator {
 
         let tx_id_generator = IdGenerator::new();
         if let Some(max_id) = commit_log.max_seen_tx_id() {
-            tx_id_generator.reset_to(max_id.as_u64() + 1);
+            let next_val = max_id.as_u64().saturating_add(1);
+            if next_val > crate::core::id::MAX_VALID_ID {
+                // Should we panic? If the log has invalid IDs, the DB might be corrupt or tampered.
+                // However, IdGenerator::next() checks MAX_VALID_ID and returns error.
+                // reset_to just sets the atomic. If we set it to MAX_VALID_ID + 1, the next call to next() will fail.
+                // This seems safe behavior (fail-safe).
+                // But let's log a warning if we are near the limit.
+                #[cfg(feature = "observability")]
+                tracing::warn!("Recovered transaction ID generator is near limit: {}", next_val);
+            }
+            tx_id_generator.reset_to(next_val);
         }
 
         Self {

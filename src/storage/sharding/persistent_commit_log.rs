@@ -465,12 +465,12 @@ impl PersistentCommitLog {
             // Build pending map (entries without completion)
             let mut pending_map = HashMap::new();
             let mut completed = std::collections::HashSet::new();
-            let mut max_seen = u64::MAX;
+            let mut max_seen = 0;
 
             for entry in entries {
                 // Track max seen TxId
                 let tx_id_val = entry.tx_id.as_u64();
-                if max_seen == u64::MAX || tx_id_val > max_seen {
+                if tx_id_val > max_seen {
                     max_seen = tx_id_val;
                 }
 
@@ -512,7 +512,7 @@ impl PersistentCommitLog {
             let mut writer = BufWriter::new(file);
             Self::write_header(&mut writer)?;
 
-            (Some(writer), 1, HashMap::new(), u64::MAX)
+            (Some(writer), 1, HashMap::new(), 0)
         };
 
         Ok(Self {
@@ -653,11 +653,10 @@ impl PersistentCommitLog {
     /// Get the maximum transaction ID seen in the log.
     pub fn max_seen_tx_id(&self) -> Option<TxId> {
         let max = self.max_seen_tx_id.load(Ordering::Relaxed);
-        if max == u64::MAX {
-            None
-        } else {
-            Some(TxId::new(max))
-        }
+        // We initialize max to 0. If we return Some(0), ShardCoordinator resets to 1.
+        // This effectively skips TxId(0) for persistent logs, which is a safe default
+        // that avoids ambiguity between "empty log" and "log with TxId(0)".
+        Some(TxId::new(max))
     }
 
     /// Get statistics.
@@ -702,7 +701,7 @@ impl PersistentCommitLog {
         let val = tx_id.as_u64();
         let mut current = self.max_seen_tx_id.load(Ordering::Relaxed);
         loop {
-            if current != u64::MAX && val <= current {
+            if val <= current {
                 break;
             }
             match self.max_seen_tx_id.compare_exchange_weak(
