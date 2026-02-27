@@ -1,4 +1,22 @@
 //! Index manifest persistence.
+//!
+//! The [`IndexManifest`] acts as the "root of trust" for a database checkpoint. It catalogs
+//! all other persisted components (vector indexes, string interner, etc.) and tracks metadata
+//! like the Last Sequence Number (LSN) and creation timestamps.
+//!
+//! # Format
+//!
+//! The manifest is serialized using Bitcode and protected by a CRC32 checksum.
+//!
+//! ```text
+//! [ Bitcode Encoded Manifest ] [ CRC32 (4 bytes) ]
+//! ```
+//!
+//! # Atomic Persistence
+//!
+//! The manifest is saved using a "write-temp-then-rename" strategy. This ensures that the
+//! `manifest.idx` file is updated atomically. If a crash occurs during writing, the original
+//! manifest remains untouched, preventing database corruption.
 
 use std::fs;
 use std::path::Path;
@@ -12,6 +30,18 @@ use super::{MANIFEST_MAGIC, MANIFEST_VERSION};
 
 impl IndexManifest {
     /// Create a new empty manifest.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::index_persistence::formats::IndexManifest;
+    ///
+    /// let lsn = 12345;
+    /// let manifest = IndexManifest::new(lsn);
+    ///
+    /// assert_eq!(manifest.lsn, lsn);
+    /// assert!(manifest.vector_indexes.is_empty());
+    /// ```
     pub fn new(lsn: u64) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -52,6 +82,27 @@ impl IndexManifest {
 /// Format: `[bitcode_data][crc32_checksum_4_bytes]`
 ///
 /// Uses write-temp-then-rename to prevent corruption on crash.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::index_persistence::manifest::save_manifest;
+/// use aletheiadb::storage::index_persistence::formats::IndexManifest;
+/// use tempfile::tempdir;
+///
+/// let dir = tempdir().unwrap();
+/// let path = dir.path().join("manifest.idx");
+/// let manifest = IndexManifest::new(100);
+///
+/// save_manifest(&manifest, &path).unwrap();
+/// assert!(path.exists());
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file cannot be written (e.g., permission denied, disk full).
+/// - The atomic rename operation fails.
 pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
     let encoded = bitcode::encode(manifest);
 
@@ -69,6 +120,31 @@ pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
 }
 
 /// Load manifest from disk and validate CRC32 checksum.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::index_persistence::manifest::{save_manifest, load_manifest};
+/// use aletheiadb::storage::index_persistence::formats::IndexManifest;
+/// use tempfile::tempdir;
+///
+/// let dir = tempdir().unwrap();
+/// let path = dir.path().join("manifest.idx");
+/// let original = IndexManifest::new(100);
+///
+/// save_manifest(&original, &path).unwrap();
+///
+/// let loaded = load_manifest(&path).unwrap();
+/// assert_eq!(loaded.lsn, 100);
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file does not exist or cannot be read.
+/// - The file size exceeds `MAX_MANIFEST_FILE_SIZE`.
+/// - The CRC32 checksum verification fails (indicating corruption).
+/// - The file has invalid magic bytes or an unsupported version.
 pub fn load_manifest(path: &Path) -> Result<IndexManifest> {
     let metadata = fs::metadata(path)?;
     if metadata.len() > super::MAX_MANIFEST_FILE_SIZE {

@@ -1,4 +1,24 @@
 //! String interner persistence.
+//!
+//! This module handles the serialization and deserialization of the [`GLOBAL_INTERNER`](crate::core::GLOBAL_INTERNER).
+//! The interner is critical for the database's operation as it maps all string labels and property keys to
+//! compact integer IDs.
+//!
+//! # Format
+//!
+//! The interner is saved as a Bitcode-encoded [`StringInternerData`](super::formats::StringInternerData) struct,
+//! followed by a 4-byte CRC32 checksum.
+//!
+//! ```text
+//! [ Bitcode Encoded Data ] [ CRC32 (4 bytes) ]
+//! ```
+//!
+//! # Safety
+//!
+//! Restoring the string interner **must** be the first step during database recovery. All other
+//! persistence files (like vector indexes or adjacency lists) refer to strings by their interned IDs.
+//! If the interner is not restored to the exact same state, these IDs will map to incorrect strings,
+//! causing data corruption.
 
 use crate::core::GLOBAL_INTERNER;
 use std::path::Path;
@@ -8,6 +28,25 @@ use super::formats::StringInternerData;
 use super::{INTERNER_MAGIC, MANIFEST_VERSION};
 
 /// Save the global string interner to disk with CRC32 checksum using atomic write.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::index_persistence::strings::save_string_interner;
+/// use tempfile::tempdir;
+///
+/// let dir = tempdir().unwrap();
+/// let path = dir.path().join("interner.idx");
+///
+/// save_string_interner(&path).unwrap();
+/// assert!(path.exists());
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file cannot be created or written to.
+/// - The temporary file cannot be renamed to the target path.
 pub fn save_string_interner(path: &Path) -> Result<()> {
     let strings = GLOBAL_INTERNER.get_all_strings();
 
@@ -22,6 +61,30 @@ pub fn save_string_interner(path: &Path) -> Result<()> {
 }
 
 /// Load the string interner from disk and validate CRC32 checksum.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::index_persistence::strings::{save_string_interner, load_string_interner};
+/// use tempfile::tempdir;
+///
+/// let dir = tempdir().unwrap();
+/// let path = dir.path().join("interner.idx");
+///
+/// save_string_interner(&path).unwrap();
+///
+/// let data = load_string_interner(&path).unwrap();
+/// assert_eq!(data.version, 1);
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file does not exist or cannot be read.
+/// - The file size exceeds `MAX_STRING_INTERNER_FILE_SIZE`.
+/// - The CRC32 checksum does not match the data.
+/// - The magic bytes or version are invalid.
+/// - The string count or length exceeds maximum limits (DoS protection).
 pub fn load_string_interner(path: &Path) -> Result<StringInternerData> {
     let data: StringInternerData = super::common::load_encoded_with_crc(
         path,
@@ -77,6 +140,31 @@ pub fn load_string_interner(path: &Path) -> Result<StringInternerData> {
 ///
 /// This must be called before loading any other indexes since they
 /// reference string indices.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::index_persistence::strings::{save_string_interner, load_string_interner, restore_string_interner};
+/// use tempfile::tempdir;
+///
+/// let dir = tempdir().unwrap();
+/// let path = dir.path().join("interner.idx");
+///
+/// // Save current state
+/// save_string_interner(&path).unwrap();
+///
+/// // Load data
+/// let data = load_string_interner(&path).unwrap();
+///
+/// // Restore (re-interns all strings)
+/// restore_string_interner(&data).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - A string cannot be interned.
+/// - The restored ID does not match the persisted ID (data corruption or mismatch).
 pub fn restore_string_interner(data: &StringInternerData) -> Result<()> {
     for (idx, s) in data.strings.iter().enumerate() {
         let interned_id = GLOBAL_INTERNER.intern(s).map_err(|e| {
