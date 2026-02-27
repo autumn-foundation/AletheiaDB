@@ -100,8 +100,9 @@ impl<'a, R: ReadOps> Alchemist<'a, R> {
                 // We handle potential error from get_node gracefully (skip if not found)
                 if let Ok(neighbor_node) = self.graph.get_node(neighbor_id) {
                     let neighbor_props = &neighbor_node.properties;
-                    if let Some(neighbor_vec) =
-                        neighbor_props.get(embedding_key).and_then(|v| v.as_vector())
+                    if let Some(neighbor_vec) = neighbor_props
+                        .get(embedding_key)
+                        .and_then(|v| v.as_vector())
                     {
                         // Compute similarity
                         let similarity = cosine_similarity(start_vec, neighbor_vec)?;
