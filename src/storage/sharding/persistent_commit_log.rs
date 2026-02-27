@@ -460,7 +460,35 @@ impl PersistentCommitLog {
 
         let (writer, lsn, pending, max_tx_id) = if path.exists() {
             // Open existing file and recover state
-            let (entries, max_lsn, max_tx_id) = Self::read_entries(&path)?;
+            let (entries, max_lsn, max_tx_id, valid_offset) = Self::read_entries(&path)?;
+
+            // Check if truncation is needed (file size > valid_offset)
+            let metadata = std::fs::metadata(&path).map_err(|e| {
+                CommitLogError::IoError(format!("Failed to get file metadata: {}", e))
+            })?;
+            let file_len = metadata.len();
+
+            if valid_offset < file_len {
+                // Truncate corrupted tail
+                #[cfg(feature = "observability")]
+                tracing::warn!(
+                    "Truncating corrupted commit log tail from {} to {} bytes",
+                    file_len,
+                    valid_offset
+                );
+
+                let file = OpenOptions::new().write(true).open(&path).map_err(|e| {
+                    CommitLogError::IoError(format!("Failed to open log for truncation: {}", e))
+                })?;
+
+                file.set_len(valid_offset).map_err(|e| {
+                    CommitLogError::IoError(format!("Failed to truncate log: {}", e))
+                })?;
+
+                file.sync_all().map_err(|e| {
+                    CommitLogError::IoError(format!("Failed to sync log after truncation: {}", e))
+                })?;
+            }
 
             // Build pending map (entries without completion)
             let mut pending_map = HashMap::new();
@@ -740,7 +768,7 @@ impl PersistentCommitLog {
         Ok(())
     }
 
-    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64)> {
+    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64, u64)> {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
@@ -809,7 +837,7 @@ impl PersistentCommitLog {
             }
         }
 
-        Ok((entries, max_lsn, max_tx_id))
+        Ok((entries, max_lsn, max_tx_id, offset as u64))
     }
 }
 
