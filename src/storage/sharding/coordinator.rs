@@ -302,9 +302,15 @@ impl ShardCoordinator {
         // Ensure result is used to avoid dead code elimination/coverage gaps
         if !result.is_complete() {
             #[cfg(feature = "observability")]
-            tracing::warn!(
+            tracing::error!(
                 "Recovered partial state on startup: {} recovered, {} dead lettered",
                 result.recovered.len(),
+                result.dead_letter_count()
+            );
+
+            // Fail fast on startup if we cannot guarantee consistency
+            panic!(
+                "Failed to recover all pending transactions on startup. {} transactions are dead-lettered. Manual intervention required.",
                 result.dead_letter_count()
             );
         }
