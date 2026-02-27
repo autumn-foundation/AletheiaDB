@@ -207,6 +207,7 @@ impl<'a> Omen<'a> {
 
         for v in &history.versions {
             let vt_start = v.temporal.valid_time().start().wallclock();
+            #[allow(clippy::collapsible_if)]
             if vt_start <= time.wallclock() {
                 if vt_start >= best_time {
                     if let Some(val) = v.properties.get(property) {

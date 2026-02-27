@@ -117,6 +117,9 @@ pub mod concept_algebra;
 /// Dissonance: Semantic Stress Detector.
 pub mod dissonance;
 #[cfg(feature = "nova")]
+/// Doppelganger: Structural Twins with Semantic Opposition.
+pub mod doppelganger;
+#[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
