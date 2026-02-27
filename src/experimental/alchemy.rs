@@ -23,7 +23,8 @@
 //!     &vec![], // candidates (empty = none)
 //!     0.9,     // similarity threshold
 //!     2,       // max hops (must be disconnected or > 2 hops)
-//!     "RELATED"
+//!     "RELATED",
+//!     10       // k (number of semantic neighbors to check)
 //! )?;
 //! println!("Created {} new edges.", count);
 //! # Ok(())
@@ -59,6 +60,7 @@ impl<'a> Alchemist<'a> {
     /// * `similarity_threshold` - Minimum cosine similarity (0.0 to 1.0) to justify an edge.
     /// * `max_hops` - Max structural distance to consider "disconnected" (e.g. 2).
     /// * `edge_label` - The label for the new edges (e.g. "RELATED").
+    /// * `k` - Number of nearest semantic neighbors to consider.
     ///
     /// # Returns
     /// The number of edges created.
@@ -68,18 +70,24 @@ impl<'a> Alchemist<'a> {
         similarity_threshold: f32,
         max_hops: usize,
         edge_label: &str,
+        k: usize,
     ) -> Result<usize> {
         if candidates.is_empty() {
             return Ok(0);
+        }
+
+        if candidates.len() > 1000 {
+            return Err(crate::core::error::Error::other(
+                "Too many candidates for wormhole crystallization (max 1000)",
+            ));
         }
 
         // 1. Find wormholes (Read Phase)
         // A wormhole is a pair (source, target) that is semantically similar but structurally distant.
         let mut wormholes = Vec::new();
 
-        // Use k=10 neighbors as a reasonable default for semantic search
         for &source in candidates {
-            let neighbors = self.db.find_similar(source, 10)?;
+            let neighbors = self.db.find_similar(source, k)?;
             for (target, similarity) in neighbors {
                 if similarity >= similarity_threshold {
                     // Check structural distance
@@ -120,6 +128,12 @@ impl<'a> Alchemist<'a> {
     /// - `Ok(Some(d))` if path found with length `d <= max_depth`.
     /// - `Ok(None)` if no path found within `max_depth`.
     fn bfs_distance(&self, start: NodeId, end: NodeId, max_depth: usize) -> Result<Option<usize>> {
+        if max_depth > 10 {
+            return Err(crate::core::error::Error::other(
+                "max_depth cannot exceed 10",
+            ));
+        }
+
         if start == end {
             return Ok(Some(0));
         }
@@ -311,7 +325,7 @@ mod tests {
         // 2. Run Crystallize
         let candidates = vec![a, b];
         let count = alchemist
-            .crystallize_wormholes(&candidates, 0.9, 2, "RELATED")
+            .crystallize_wormholes(&candidates, 0.9, 2, "RELATED", 10)
             .unwrap();
 
         assert!(
