@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Default maximum number of interned strings (DoS protection)
 pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
 
+/// Timeout for retrying snapshots when concurrent modifications create gaps.
+const SNAPSHOT_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Common strings that are pre-interned at startup for optimal performance.
 ///
 /// These strings represent frequently used property keys and labels across
@@ -357,7 +360,7 @@ impl StringInterner {
                 // We wait briefly for it to complete.
                 let start = std::time::Instant::now();
                 while val.is_none() {
-                    if start.elapsed() > std::time::Duration::from_millis(100) {
+                    if start.elapsed() > SNAPSHOT_RETRY_TIMEOUT {
                         break;
                     }
                     std::thread::yield_now();
