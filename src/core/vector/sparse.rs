@@ -422,6 +422,68 @@ impl SparseVec {
                 .zip(other.values.iter())
                 .all(|(a, b)| (a - b).abs() < epsilon)
     }
+
+    /// Normalizes this sparse vector to unit length (L2 normalization).
+    ///
+    /// Returns a new `SparseVec` with the same direction but magnitude 1.0.
+    ///
+    /// # Handling Zero Vectors
+    ///
+    /// If the vector is a zero vector (magnitude < threshold), returns an empty
+    /// sparse vector (representing a zero vector) to avoid division by zero.
+    ///
+    /// # Underflow Handling
+    ///
+    /// If scaling causes any values to underflow to zero, they are filtered out
+    /// to maintain the invariant that sparse vectors only contain non-zero values.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use aletheiadb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![0, 2], vec![3.0, 4.0], 5).unwrap();
+    /// let normalized = sparse.normalize();
+    ///
+    /// assert_eq!(normalized.indices(), &[0, 2]);
+    /// assert!((normalized.magnitude() - 1.0).abs() < 1e-6);
+    /// assert!((normalized.values()[0] - 0.6).abs() < 1e-6);
+    /// assert!((normalized.values()[1] - 0.8).abs() < 1e-6);
+    /// ```
+    pub fn normalize(&self) -> SparseVec {
+        let sq_mag = self.squared_magnitude();
+
+        // Check for zero vector
+        if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {
+            // Return empty sparse vector (representing zero vector)
+            return SparseVec {
+                indices: Vec::new(),
+                values: Vec::new(),
+                dimension: self.dimension,
+            };
+        }
+
+        let inv_mag = 1.0 / sq_mag.sqrt();
+
+        // Pre-allocate assuming no underflow (most common case)
+        let mut new_indices = Vec::with_capacity(self.indices.len());
+        let mut new_values = Vec::with_capacity(self.values.len());
+
+        for (&idx, &val) in self.indices.iter().zip(self.values.iter()) {
+            let new_val = val * inv_mag;
+            // Filter out values that underflow to zero or become subnormal
+            if new_val.abs() >= std::f32::MIN_POSITIVE {
+                new_indices.push(idx);
+                new_values.push(new_val);
+            }
+        }
+
+        SparseVec {
+            indices: new_indices,
+            values: new_values,
+            dimension: self.dimension,
+        }
+    }
 }
 
 // ============================================================================
