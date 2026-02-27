@@ -35,7 +35,7 @@ use crate::core::hlc::HybridTimestamp;
 use crate::core::id::TxId;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -481,10 +481,11 @@ impl PersistentCommitLog {
             }
 
             // Open for appending and truncation
-            let file = OpenOptions::new()
+            // Note: We deliberately do NOT use `.append(true)` here because it interferes with truncation
+            // on some platforms (e.g., Windows). Instead, we open with write access and manually seek to the end.
+            let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
-                .append(true)
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
@@ -495,9 +496,14 @@ impl PersistentCommitLog {
                 .len();
 
             if valid_len < current_len {
-                file.set_len(valid_len)
-                    .map_err(|e| CommitLogError::IoError(format!("Failed to truncate log: {}", e)))?;
+                file.set_len(valid_len).map_err(|e| {
+                    CommitLogError::IoError(format!("Failed to truncate log: {}", e))
+                })?;
             }
+
+            // Seek to the end (which is now valid_len) to prepare for appending new entries
+            file.seek(SeekFrom::End(0))
+                .map_err(|e| CommitLogError::IoError(format!("Failed to seek to end: {}", e)))?;
 
             (
                 Some(BufWriter::new(file)),
