@@ -831,9 +831,12 @@ mod sentry_tests {
 
         // 4. Non-monotonic offsets
         let invalid_offsets_monotonic = vec![2, 1, 2];
-        let err_monotonic =
-            AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_monotonic, &edge_ids)
-                .unwrap_err();
+        let err_monotonic = AdjacencyIndex::validate_csr_invariants(
+            &node_ids,
+            &invalid_offsets_monotonic,
+            &edge_ids,
+        )
+        .unwrap_err();
         assert!(err_monotonic.contains("CSR offsets must be monotonically increasing"));
     }
 

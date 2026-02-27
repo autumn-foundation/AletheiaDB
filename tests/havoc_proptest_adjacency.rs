@@ -1,8 +1,8 @@
-use proptest::prelude::*;
+use aletheiadb::core::hasher::IdentityHasher;
 use aletheiadb::index::adjacency::AdjacencyIndex;
+use proptest::prelude::*;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
-use aletheiadb::core::hasher::IdentityHasher;
 
 proptest! {
     #[test]
