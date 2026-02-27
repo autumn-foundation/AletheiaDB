@@ -998,7 +998,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_warm_common_strings_concurrent() {
         use std::sync::Arc;
