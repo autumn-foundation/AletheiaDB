@@ -13,12 +13,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::api::transaction::ReadOps;
 use crate::core::error::{Error, Result};
-use crate::core::graph::Graph;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::vector::cosine_similarity;
-use crate::storage::Storage;
 
 /// Configuration for Alchemy operations.
 #[derive(Debug, Clone)]
@@ -42,13 +41,13 @@ impl Default for AlchemyConfig {
 }
 
 /// The Alchemist performs graph transformations.
-pub struct Alchemist<'a, S: Storage> {
-    graph: &'a Graph<S>,
+pub struct Alchemist<'a, R: ReadOps> {
+    graph: &'a R,
     config: AlchemyConfig,
 }
 
-impl<'a, S: Storage> Alchemist<'a, S> {
-    pub fn new(graph: &'a Graph<S>, config: AlchemyConfig) -> Self {
+impl<'a, R: ReadOps> Alchemist<'a, R> {
+    pub fn new(graph: &'a R, config: AlchemyConfig) -> Self {
         Self { graph, config }
     }
 
@@ -64,7 +63,9 @@ impl<'a, S: Storage> Alchemist<'a, S> {
     /// # Returns
     /// Number of wormholes created (or found, if dry_run)
     pub fn crystallize_wormholes(&self, start_node: NodeId, embedding_key: &str) -> Result<usize> {
-        let start_props = self.graph.get_node_properties(start_node)?;
+        let start_node_obj = self.graph.get_node(start_node)?;
+        let start_props = &start_node_obj.properties;
+
         let start_vec = match start_props.get(embedding_key).and_then(|v| v.as_vector()) {
             Some(v) => v,
             None => return Ok(0), // No embedding, no wormholes
@@ -84,8 +85,8 @@ impl<'a, S: Storage> Alchemist<'a, S> {
             }
 
             // Get neighbors
-            // Note: In a real implementation, we would use the storage/index directly
-            // For now, this is a placeholder logic
+            // In a real implementation, we would traverse edges.
+            // Using placeholder logic for now as this is experimental.
             let neighbors = self.get_neighbors_placeholder(current_id)?;
 
             for neighbor_id in neighbors {
@@ -96,20 +97,23 @@ impl<'a, S: Storage> Alchemist<'a, S> {
                 queue.push_back((neighbor_id, depth + 1));
 
                 // Check similarity
-                let neighbor_props = self.graph.get_node_properties(neighbor_id)?;
-                if let Some(neighbor_vec) =
-                    neighbor_props.get(embedding_key).and_then(|v| v.as_vector())
-                {
-                    // Compute similarity
-                    let similarity = cosine_similarity(start_vec, neighbor_vec)?;
+                // We handle potential error from get_node gracefully (skip if not found)
+                if let Ok(neighbor_node) = self.graph.get_node(neighbor_id) {
+                    let neighbor_props = &neighbor_node.properties;
+                    if let Some(neighbor_vec) =
+                        neighbor_props.get(embedding_key).and_then(|v| v.as_vector())
+                    {
+                        // Compute similarity
+                        let similarity = cosine_similarity(start_vec, neighbor_vec)?;
 
-                    if similarity >= self.config.similarity_threshold {
-                        // Found a potential wormhole!
-                        wormholes_found += 1;
+                        if similarity >= self.config.similarity_threshold {
+                            // Found a potential wormhole!
+                            wormholes_found += 1;
 
-                        if !self.config.dry_run {
-                            // Create edge (placeholder)
-                            // self.graph.create_edge(start_node, neighbor_id, "WORMHOLE", ...)?;
+                            if !self.config.dry_run {
+                                // Create edge (placeholder)
+                                // self.graph.create_edge(start_node, neighbor_id, "WORMHOLE", ...)?;
+                            }
                         }
                     }
                 }
@@ -119,10 +123,16 @@ impl<'a, S: Storage> Alchemist<'a, S> {
         Ok(wormholes_found)
     }
 
-    /// Placeholder helper for traversing neighbors (since Graph trait might vary)
-    fn get_neighbors_placeholder(&self, _node: NodeId) -> Result<Vec<NodeId>> {
-        // In a real implementation, this queries the storage
-        Ok(vec![])
+    /// Placeholder helper for traversing neighbors (since ReadOps only gives edge IDs)
+    fn get_neighbors_placeholder(&self, node_id: NodeId) -> Result<Vec<NodeId>> {
+        let edge_ids = self.graph.get_outgoing_edges(node_id);
+        let mut neighbors = Vec::new();
+        for edge_id in edge_ids {
+            if let Ok(edge) = self.graph.get_edge(edge_id) {
+                neighbors.push(edge.target);
+            }
+        }
+        Ok(neighbors)
     }
 
     /// "Fuse Synonyms": Merge nodes that represent the same entity.
@@ -139,9 +149,6 @@ impl<'a, S: Storage> Alchemist<'a, S> {
 mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
-
-    // Mock storage for testing
-    // ... (mock implementation omitted for brevity)
 
     #[test]
     fn test_alchemy_config_defaults() {
