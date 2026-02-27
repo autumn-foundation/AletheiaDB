@@ -1,5 +1,5 @@
 use aletheiadb::core::property::{
-    PropertyValue, TAG_ARRAY, TAG_STRING, TAG_VECTOR, MAX_VECTOR_DIMENSIONS,
+    MAX_VECTOR_DIMENSIONS, PropertyValue, TAG_ARRAY, TAG_STRING, TAG_VECTOR,
 };
 
 #[test]
@@ -20,7 +20,10 @@ fn test_serialize_oversized_vector_no_panic() {
     // Let's verify PropertyValue::try_vector rejection first.
     let oversized = vec![0.0f32; MAX_VECTOR_DIMENSIONS + 1];
     let result = PropertyValue::try_vector(oversized);
-    assert!(result.is_err(), "Should reject oversized vector at construction");
+    assert!(
+        result.is_err(),
+        "Should reject oversized vector at construction"
+    );
 }
 
 #[test]
@@ -40,7 +43,11 @@ fn test_deserialize_array_dos_amplification() {
     let msg = err.to_string();
 
     // We expect "Insufficient buffer size" check to fire BEFORE allocation
-    assert!(msg.contains("Insufficient buffer size"), "Should fail on buffer size check, got: {}", msg);
+    assert!(
+        msg.contains("Insufficient buffer size"),
+        "Should fail on buffer size check, got: {}",
+        msg
+    );
 }
 
 #[test]
@@ -57,7 +64,11 @@ fn test_deserialize_string_dos_amplification() {
     let err = result.unwrap_err();
     let msg = err.to_string();
 
-    assert!(msg.contains("Buffer too short"), "Should fail on buffer size check, got: {}", msg);
+    assert!(
+        msg.contains("Buffer too short"),
+        "Should fail on buffer size check, got: {}",
+        msg
+    );
 }
 
 #[test]
@@ -75,5 +86,9 @@ fn test_deserialize_vector_dos_amplification() {
     let err = result.unwrap_err();
     let msg = err.to_string();
 
-    assert!(msg.contains("Buffer too short"), "Should fail on buffer size check, got: {}", msg);
+    assert!(
+        msg.contains("Buffer too short"),
+        "Should fail on buffer size check, got: {}",
+        msg
+    );
 }
