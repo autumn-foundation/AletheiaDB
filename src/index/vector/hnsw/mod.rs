@@ -447,7 +447,7 @@ impl HnswIndex {
         self.config.clone()
     }
 
-    /// Gets the M parameter (connections per node).
+    /// Gets the `m` parameter (connections per node).
     pub fn m(&self) -> usize {
         self.config.m
     }
