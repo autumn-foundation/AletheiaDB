@@ -1,4 +1,3 @@
-
 use aletheiadb::core::interning::StringInterner;
 
 #[test]
@@ -12,5 +11,9 @@ fn test_interner_large_capacity_overflow() {
     // With the fix, effective capacity should be u32::MAX, so this should succeed.
     let result = interner.intern("test_string");
 
-    assert!(result.is_ok(), "Expected intern to succeed with large capacity, but got error: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Expected intern to succeed with large capacity, but got error: {:?}",
+        result.err()
+    );
 }
