@@ -118,6 +118,72 @@ fn test_graph_persist_keeps_interner_consistent_with_graph_string_ids() {
 }
 
 #[test]
+fn test_load_indexes_with_corrupted_adjacency_falls_back_to_rebuild() {
+    use crate::core::graph::Edge;
+    use crate::core::id::IdGenerator;
+    use crate::storage::index_persistence::graph::{load_graph_index, save_graph_index};
+
+    // This test simulates loading a corrupted adjacency.idx file and verifies
+    // that the loading logic catches the error and falls back to a full rebuild.
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+    let current = Arc::new(CurrentStorage::new());
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    let node_id_gen = Arc::new(IdGenerator::new());
+    let edge_id_gen = Arc::new(IdGenerator::new());
+    let version_id_gen = Arc::new(IdGenerator::new());
+
+    // 1. Create a valid graph with one edge
+    let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    let edge = Edge::new(
+        EdgeId::new(1).unwrap(),
+        knows,
+        NodeId::new(0).unwrap(),
+        NodeId::new(1).unwrap(),
+        PropertyMapBuilder::new().build(),
+        VersionId::new(1).unwrap(),
+    );
+    current.insert_edge_direct(edge.clone()).unwrap();
+    current.compact_adjacency(); // Build CSR
+
+    // 2. Persist it
+    persist_graph_index(&current, &manager, None, 0).unwrap();
+
+    // 3. Corrupt the saved file
+    let graph_path = manager.graph_path().join("adjacency.idx");
+    let mut graph_data = load_graph_index(&graph_path).unwrap();
+
+    // Corrupt offsets: make them non-monotonic
+    // Ensure we have enough space (should have offsets for node 0 and end)
+    if graph_data.outgoing_offsets.len() >= 2 {
+        graph_data.outgoing_offsets[1] = 9999; // Corrupt it
+        // Ensure invalid state: 9999 > num_edges (1)
+    }
+
+    save_graph_index(&graph_data, &graph_path).unwrap();
+
+    // 4. Create NEW storage and load
+    let new_current = Arc::new(CurrentStorage::new());
+
+    // 5. Load
+    load_indexes_startup(
+        &manager,
+        &new_current,
+        &historical,
+        &node_id_gen,
+        &edge_id_gen,
+        &version_id_gen,
+    );
+
+    // 6. Verify fallback worked
+    // Adjacency should be valid despite corrupted file, because it rebuilt from edges
+    let guard = new_current.get_outgoing_edges(NodeId::new(0).unwrap());
+    assert_eq!(guard.len(), 1);
+    assert_eq!(guard[0], EdgeId::new(1).unwrap());
+}
+
+#[test]
 fn test_persist_all_indexes_creates_manifest() {
     let temp_dir = tempfile::tempdir().unwrap();
     let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));

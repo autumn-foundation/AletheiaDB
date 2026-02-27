@@ -817,6 +817,25 @@ mod tests {
         assert_eq!(index.node_count(), 2);
         assert_eq!(index.edge_count(), 2);
     }
+
+    #[test]
+    fn test_import_csr_empty_nodes_non_empty_edges() {
+        // Test edge case where node_ids is empty but edges exist (offset logic corner case)
+        // This hits the unwrap_or(0) path for max_node_id.
+        let node_ids: Vec<u64> = vec![];
+        let offsets = vec![5];
+        let edge_ids = vec![1, 2, 3, 4, 5];
+        let edges_map = std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::<
+            crate::core::hasher::IdentityHasher,
+        >::default());
+
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        assert!(index.is_ok());
+        let idx = index.unwrap();
+        assert_eq!(idx.edge_count(), 5);
+        assert_eq!(idx.node_count(), 0);
+        assert_eq!(idx.max_node_id(), 0);
+    }
 }
 
 #[cfg(test)]

@@ -52,6 +52,10 @@ pub struct IncrementalAdjacencyIndex {
     /// Test-only: Force panic during next compaction (hidden from public API)
     #[doc(hidden)]
     test_panic_on_compact: AtomicBool,
+
+    /// Test-only: Force panic during next threshold check (hidden from public API)
+    #[doc(hidden)]
+    test_panic_on_check: AtomicBool,
 }
 
 /// Tombstone record for deleted edges with temporal metadata.
@@ -148,6 +152,7 @@ impl IncrementalAdjacencyIndex {
             },
             config,
             test_panic_on_compact: AtomicBool::new(false),
+            test_panic_on_check: AtomicBool::new(false),
         }
     }
 
@@ -161,6 +166,12 @@ impl IncrementalAdjacencyIndex {
     #[doc(hidden)]
     pub fn test_inject_panic_on_compact(&self) {
         self.test_panic_on_compact.store(true, Ordering::Relaxed);
+    }
+
+    /// Test-only: Enable panic injection during next threshold check.
+    #[doc(hidden)]
+    pub fn test_inject_panic_on_check(&self) {
+        self.test_panic_on_check.store(true, Ordering::Relaxed);
     }
 
     /// Get frozen edge count.
@@ -325,6 +336,10 @@ impl IncrementalAdjacencyIndex {
     /// - Delta edges exceed or equal `frozen_edges * compaction_ratio` (ratio threshold)
     /// - Tombstones exceed or equal `max_tombstones`
     pub fn should_compact(&self) -> bool {
+        if self.test_panic_on_check.swap(false, Ordering::Relaxed) {
+            panic!("Test-injected panic during should_compact check");
+        }
+
         let delta = self.stats.delta_edge_count.load(Ordering::Relaxed);
         let frozen = self.stats.frozen_edge_count.load(Ordering::Acquire);
         let tombstones = self.stats.tombstone_count.load(Ordering::Relaxed);

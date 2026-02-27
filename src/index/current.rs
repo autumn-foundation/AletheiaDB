@@ -144,6 +144,12 @@ impl CurrentIndexes {
         self.outgoing.frozen_edge_count()
     }
 
+    /// Inject panic into outgoing index for testing shutdown error handling.
+    #[cfg(test)]
+    pub fn test_inject_panic_on_check(&self) {
+        self.outgoing.test_inject_panic_on_check();
+    }
+
     /// Get the number of edges in the delta buffer.
     ///
     /// This represents edges that have been inserted but not yet compacted into frozen.
@@ -2044,5 +2050,49 @@ mod zero_copy_access_tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&EdgeId::new(1).unwrap()));
         assert!(ids.contains(&EdgeId::new(2).unwrap()));
+    }
+
+    #[test]
+    fn test_shutdown_reports_panic() {
+        use std::thread;
+        use std::time::Duration;
+
+        let mut indexes = CurrentIndexes::new_with_background_compaction();
+
+        // Inject panic into the background thread's check loop
+        indexes.test_inject_panic_on_check();
+
+        // Wait for the thread to wake up and panic.
+        // Default interval is 1s, so we wait 1.2s to be safe.
+        thread::sleep(Duration::from_millis(1200));
+
+        // Shutdown should return Err because the thread panicked
+        let result = indexes.shutdown_background_compaction();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("panicked"));
+    }
+
+    #[test]
+    fn test_import_csr_fails_with_tombstones() {
+        let indexes = CurrentIndexes::new();
+
+        // Insert edge
+        indexes.insert_edge(create_test_edge(1, 0, 1, "KNOWS"));
+
+        // Delete edge (creates tombstone)
+        indexes.remove_edge(EdgeId::new(1).unwrap());
+
+        // Try import
+        let result = indexes.import_csr(
+            vec![],
+            vec![0],
+            vec![], // Empty outgoing
+            vec![],
+            vec![0],
+            vec![], // Empty incoming
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("uncommitted tombstones"));
     }
 }
