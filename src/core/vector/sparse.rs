@@ -472,7 +472,7 @@ impl SparseVec {
         for (&idx, &val) in self.indices.iter().zip(self.values.iter()) {
             let new_val = val * inv_mag;
             // Filter out values that underflow to zero or become subnormal
-            if new_val.abs() >= std::f32::MIN_POSITIVE {
+            if new_val.abs() >= f32::MIN_POSITIVE {
                 new_indices.push(idx);
                 new_values.push(new_val);
             }
