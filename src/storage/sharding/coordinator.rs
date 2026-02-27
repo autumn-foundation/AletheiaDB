@@ -268,7 +268,7 @@ impl ShardCoordinator {
         let max_tx_id = commit_log.max_seen_tx_id();
         let router = ShardRouter::new(config);
 
-        Self {
+        let coordinator = Self {
             router,
             connections: RwLock::new(connections),
             shard_states: RwLock::new(shard_states),
@@ -281,13 +281,40 @@ impl ShardCoordinator {
             rebalance_config: RebalanceConfig::default(),
             transaction_timeout,
             dead_letter_queue: RwLock::new(HashMap::new()),
-        }
+        };
+
+        // Recover pending transactions on startup
+        coordinator.startup_recovery();
+
+        coordinator
     }
 
     /// Create a coordinator with custom rebalance config.
     pub fn with_rebalance_config(mut self, config: RebalanceConfig) -> Self {
         self.rebalance_config = config;
         self
+    }
+
+    fn startup_recovery(&self) {
+        // Recover pending transactions on startup
+        // This will panic if the commit log lock is poisoned (unlikely on startup)
+        let result = self.recover_pending_transactions();
+
+        // Ensure result is used to avoid dead code elimination/coverage gaps
+        if !result.is_complete() {
+            #[cfg(feature = "observability")]
+            tracing::error!(
+                "Recovered partial state on startup: {} recovered, {} dead lettered",
+                result.recovered.len(),
+                result.dead_letter_count()
+            );
+
+            // Fail fast on startup if we cannot guarantee consistency
+            panic!(
+                "Failed to recover all pending transactions on startup. {} transactions are dead-lettered. Manual intervention required.",
+                result.dead_letter_count()
+            );
+        }
     }
 
     fn reinsert_transaction(&self, tx_id: TxId, transaction: DistributedTransaction) {
@@ -847,14 +874,9 @@ impl ShardCoordinator {
     /// A `RecoveryResult` containing:
     /// *   `recovered`: List of `TxId`s that were successfully completed.
     /// *   `dead_lettered`: List of transactions that failed after max retries and require manual intervention.
-    pub fn recover_pending_transactions(&self) -> Result<RecoveryResult, DistributedTxError> {
+    pub fn recover_pending_transactions(&self) -> RecoveryResult {
         let decisions = {
-            let log = self
-                .commit_log
-                .read()
-                .map_err(|_| DistributedTxError::Aborted {
-                    reason: "Lock poisoned".to_string(),
-                })?;
+            let log = self.commit_log.read().expect("Commit log lock poisoned");
             log.pending_commits()
                 .into_iter()
                 .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
@@ -938,10 +960,10 @@ impl ShardCoordinator {
             }
         }
 
-        Ok(RecoveryResult {
+        RecoveryResult {
             recovered,
             dead_lettered,
-        })
+        }
     }
 
     /// Get transactions in the dead letter queue.
