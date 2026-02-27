@@ -45,6 +45,7 @@
 //! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
 //! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
 //! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
+//! | [`rosetta`] | **Rosetta** | Semantic Relationship Profiling. "What does 'Parent Of' look like in vector space?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -147,6 +148,9 @@ pub mod prophet;
 #[cfg(feature = "nova")]
 /// Ripple: Semantic Causality Detector.
 pub mod ripple;
+#[cfg(feature = "nova")]
+/// Rosetta: Semantic Relationship Profiling.
+pub mod rosetta;
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
