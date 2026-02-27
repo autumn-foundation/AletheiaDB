@@ -50,9 +50,6 @@ const COMMIT_LOG_VERSION: u8 = 2;
 /// Header size in bytes.
 const HEADER_SIZE: usize = 16;
 
-/// Maximum entry size (64MB) to prevent OOM on corrupted logs.
-const MAX_ENTRY_SIZE: usize = 64 * 1024 * 1024;
-
 /// Entry type for commit decision.
 const ENTRY_TYPE_COMMIT: u8 = 1;
 
@@ -430,6 +427,8 @@ pub struct CommitLogConfig {
     pub sync_on_write: bool,
     /// Maximum file size before rotation (bytes).
     pub max_file_size: u64,
+    /// Maximum size of a single entry (bytes) to prevent OOM on corrupted logs.
+    pub max_entry_size: usize,
     /// Number of old log files to retain.
     pub files_to_retain: usize,
 }
@@ -439,6 +438,7 @@ impl Default for CommitLogConfig {
         Self {
             sync_on_write: true,
             max_file_size: 64 * 1024 * 1024, // 64 MB
+            max_entry_size: 64 * 1024 * 1024, // 64 MB
             files_to_retain: 3,
         }
     }
@@ -461,7 +461,7 @@ impl PersistentCommitLog {
 
         let (writer, lsn, pending) = if path.exists() {
             // Open existing file and recover state
-            let (pending_map, max_lsn) = Self::recover_state(&path)?;
+            let (pending_map, max_lsn) = Self::recover_state(&path, &config)?;
 
             // Open for appending
             let file = OpenOptions::new()
@@ -705,7 +705,10 @@ impl PersistentCommitLog {
         Ok(())
     }
 
-    fn recover_state(path: &Path) -> CommitLogResult<(HashMap<TxId, CommitLogEntry>, u64)> {
+    fn recover_state(
+        path: &Path,
+        config: &CommitLogConfig,
+    ) -> CommitLogResult<(HashMap<TxId, CommitLogEntry>, u64)> {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
@@ -760,10 +763,10 @@ impl PersistentCommitLog {
 
             let len = u32::from_le_bytes(len_buf) as usize;
 
-            if len > MAX_ENTRY_SIZE {
+            if len > config.max_entry_size {
                 return Err(CommitLogError::CorruptedLog(format!(
                     "Entry length {} exceeds maximum allowed {}",
-                    len, MAX_ENTRY_SIZE
+                    len, config.max_entry_size
                 )));
             }
 
