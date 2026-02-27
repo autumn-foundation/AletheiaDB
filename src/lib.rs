@@ -62,8 +62,6 @@ pub mod db;
 pub mod index;
 pub mod query;
 pub mod storage;
-// Experimental features ("Nova")
-pub mod experimental;
 // Optional embedding generation module
 #[cfg(feature = "embeddings")]
 pub mod embeddings;

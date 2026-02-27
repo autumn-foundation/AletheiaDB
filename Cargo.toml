@@ -96,9 +96,6 @@ loom = { version = "0.7.2", features = ["checkpoint"] }
 rand = "0.8"
 
 [features]
-# Nova experimental features
-nova = []
-
 # Enable Tracy profiling (use with: cargo build --release --features tracy)
 tracy = ["tracy-client/enable"]
 
@@ -382,7 +379,3 @@ harness = false
 path = "benches/graph_label_checks.rs"
 required-features = []
 
-# Experimental features
-[[example]]
-name = "story_demo"
-required-features = ["nova"]
