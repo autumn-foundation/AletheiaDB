@@ -284,7 +284,7 @@ impl HnswIndexBuilder {
         }
     }
 
-    /// Sets the M parameter (connections per node).
+    /// Sets the `m` parameter (connections per node).
     ///
     /// Controls memory usage vs. recall trade-off.
     pub fn m(mut self, m: usize) -> Self {
