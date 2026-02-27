@@ -8,10 +8,10 @@
 //! "Nova" is AletheiaDB's R&D playground. It's where we test radical new ideas like
 //! semantic physics, narrative generation, and counterfactual graph analysis.
 //!
-//! **These features are:**
-//! - 🧪 **Experimental**: APIs may change or break without warning.
-//! - 🚀 **Innovative**: Cutting-edge features for AI/LLM integration.
-//! - 🚩 **Opt-in**: You must explicitly enable them.
+//! **Feature Status:**
+//! - 🟢 **Core Candidate**: High utility, stable, aligned with core. Likely to graduate.
+//! - 🟡 **Incubating**: Active experiment.
+//! - 🔴 **Deprecated**: Candidate for removal.
 //!
 //! # Enabling Nova
 //!
@@ -24,68 +24,41 @@
 //!
 //! # Module Inventory
 //!
-//! | Module | Code Name | Description |
-//! |--------|-----------|-------------|
-//! | [`sherlock`] | **Sherlock** | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
-//! | [`dreamer`] | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
-//! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
-//! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
-//! | [`janus`] | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
-//! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
-//! | [`chronos`] | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
-//! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
-//! | [`echo`] | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
-//! | [`kaleidoscope`] | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
-//! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
-//! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
-//! | [`synapse`] | **Synapse** | Adaptive Graph Hebbian Learning. "Cells that fire together, wire together." |
-//! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
-//! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
-//! | [`gestalt`] | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
-//! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
-//! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
-//! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
-//!
-//! # Example: Detecting Suspicious Patterns with Sherlock
-//!
-//! > ⚠️ **REQUIRES FEATURE 'NOVA'**
-//! >
-//! > This feature is experimental and requires the `nova` feature flag.
-//! > Add `features = ["nova"]` to your `Cargo.toml`.
-//!
-//! ```rust,ignore
-//! // [dependencies]
-//! // aletheiadb = { version = "0.1", features = ["nova"] }
-//!
-//! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
-//! use aletheiadb::core::property::PropertyValue;
-//! use std::time::Duration;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = AletheiaDB::new()?;
-//! # let node_id = db.create_node("User", Default::default())?;
-//!
-//! // Define a mystery: User logs in, then deletes file within 1 second
-//! let mystery = Mystery::new(Duration::from_secs(1))
-//!     .add_clue(Clue::PropertyState {
-//!         key: "status".to_string(),
-//!         value: Some(PropertyValue::from("LoggedIn")),
-//!     })
-//!     .add_clue(Clue::PropertyState {
-//!         key: "action".to_string(),
-//!         value: Some(PropertyValue::from("DeleteFile")),
-//!     });
-//!
-//! let sherlock = Sherlock::new(&db);
-//! let detections = sherlock.investigate(node_id, &mystery)?;
-//!
-//! if !detections.is_empty() {
-//!     println!("🕵️ Sherlock found {} suspicious sequences!", detections.len());
-//! }
-//! # Ok(())
-//! # }
-//! ```
+//! | Module | Status | Description |
+//! |--------|--------|-------------|
+//! | [`sherlock`] | 🟢 | Temporal Pattern Matching. |
+//! | [`chronos`] | 🟢 | Temporal Pathfinding. |
+//! | [`fishing`] | 🟢 | Associative Retrieval (Hybrid Search). |
+//! | [`gestalt`] | 🟢 | Semantic Subgraph Matching. |
+//! | [`highlander`] | 🟢 | Entity Resolution. |
+//! | [`kairos`] | 🟢 | Semantic Event Detection. |
+//! | [`mnemosyne`] | 🟢 | Memory Consolidation. |
+//! | [`prophet`] | 🟢 | Link Prediction. |
+//! | [`semantic_navigator`] | 🟢 | A* Vector Pathfinding. |
+//! | [`sentinel`] | 🟢 | Semantic Validation. |
+//! | [`temporal_diff`] | 🟢 | Graph State Diffing. |
+//! | [`alchemy`] | 🟡 | Semantic Graph Transformation. |
+//! | [`ariadne`] | 🟡 | Narrative Thread Weaving. |
+//! | [`cartographer`] | 🟡 | Semantic Clustering. |
+//! | [`chameleon`] | 🟡 | Faceted Search. |
+//! | [`chimera`] | 🟡 | Entity Synthesis. |
+//! | [`dreamer`] | 🟡 | Trajectory Extrapolation. |
+//! | [`hindsight`] | 🟡 | Counterfactual Simulation. |
+//! | [`janus`] | 🟡 | Bridge Detection. |
+//! | [`metaphor`] | 🟡 | Graph Alignment. |
+//! | [`muse`] | 🟡 | Semantic Ideation. |
+//! | [`oracle`] | 🟡 | Probabilistic Reasoning. |
+//! | [`prism`] | 🟡 | Vector Decomposition. |
+//! | [`ripple`] | 🟡 | Causal Detection. |
+//! | [`synapse`] | 🟡 | Adaptive Pathfinding. |
+//! | [`telepathy`] | 🟡 | Spreading Activation. |
+//! | [`temporal_narrative`] | 🟡 | Narrative Generation. |
+//! | [`thermos`] | 🟡 | Volatility Gauge. |
+//! | [`wormhole`] | 🟡 | Shortcut Detection. |
+//! | [`echo`] | 🔴 | Temporal Resonance (Deprecated). |
+//! | [`gravity`] | 🔴 | Semantic Influence (Deprecated). |
+//! | [`kaleidoscope`] | 🔴 | Force-Directed Layout (Deprecated). |
+//! | [`sybil`] | 🔴 | Memetic Propagation (Deprecated). |
 
 #[cfg(feature = "nova")]
 /// Alchemy: Semantic Graph Transformation Engine.
@@ -115,6 +88,7 @@ pub mod dissonance;
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
 #[cfg(feature = "nova")]
+#[deprecated(note = "Echo is deprecated and will be removed in a future version.")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
 #[cfg(feature = "nova")]
@@ -136,6 +110,7 @@ pub mod janus;
 /// Kairos: Semantic Event Detection & History Summarization.
 pub mod kairos;
 #[cfg(feature = "nova")]
+#[deprecated(note = "Kaleidoscope is deprecated. Use client-side visualization tools instead.")]
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
 #[cfg(feature = "nova")]
@@ -154,6 +129,7 @@ pub mod semantic_navigator;
 /// Sherlock: Temporal Pattern Matching Engine.
 pub mod sherlock;
 #[cfg(feature = "nova")]
+#[deprecated(note = "Sybil is deprecated and will be removed in a future version.")]
 /// Sybil: Memetic Propagation Engine.
 pub mod sybil;
 #[cfg(feature = "nova")]
@@ -185,6 +161,7 @@ pub mod wormhole;
 pub mod gestalt;
 
 #[cfg(feature = "nova")]
+#[deprecated(note = "Gravity is deprecated and will be removed in a future version.")]
 /// Gravity: Semantic Mass and Orbit Analysis.
 pub mod gravity;
 
