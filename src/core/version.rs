@@ -392,6 +392,12 @@ impl PropertyDelta {
     /// 3. Uses sparse vector deltas when beneficial (Issue #215)
     /// 4. PropertyKey is InternedString (O(1) copy) - Issue #202
     pub fn from_diff(old: &PropertyMap, new: &PropertyMap) -> Self {
+        // Fast path: if the maps are identical (Arc pointer equality), the delta is empty.
+        // This is a O(1) check that avoids iterating over the map content.
+        if old == new {
+            return PropertyDelta::new();
+        }
+
         // Start with default capacity - in from_diff, we don't know upfront how many
         // properties will change, so pre-allocation could waste memory. HashMap will
         // grow as needed during iteration.
@@ -400,10 +406,13 @@ impl PropertyDelta {
         // Find added and modified properties
         for (key, new_value) in new.iter() {
             match old.get_by_interned_key(key) {
-                Some(old_value) if old_value.semantically_equal(new_value) => {
-                    // Unchanged, skip
-                }
                 Some(old_value) => {
+                    // Optimization: check semantic equality first to skip unchanged
+                    // This handles NaN equality and Arc pointer equality internally
+                    if old_value.semantically_equal(new_value) {
+                        continue;
+                    }
+
                     // Modified - check if both are vectors for sparse delta optimization
                     match (old_value.as_vector(), new_value.as_vector()) {
                         (Some(old_vec), Some(new_vec)) => {
@@ -470,6 +479,12 @@ impl PropertyDelta {
     /// or partial data recovery). It prevents the entire view from failing due to a single
     /// corrupted property history.
     pub fn apply(&self, base: &PropertyMap) -> PropertyMap {
+        // Fast path: if delta is empty, return the base map (Arc clone).
+        // This is a O(1) operation that avoids allocation and copying.
+        if self.is_empty() {
+            return base.clone();
+        }
+
         // Calculate capacity for the new map to avoid reallocation
         // Properties from base (minus removed) plus potentially new properties from changes
         let estimated_capacity = base

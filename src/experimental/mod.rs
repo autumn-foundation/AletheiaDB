@@ -45,6 +45,7 @@
 //! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
 //! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
 //! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
+//! | [`spectre`] | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -53,10 +54,12 @@
 //! > This feature is experimental and requires the `nova` feature flag.
 //! > Add `features = ["nova"]` to your `Cargo.toml`.
 //!
-//! ```rust,ignore
+//! ```rust
 //! // [dependencies]
 //! // aletheiadb = { version = "0.1", features = ["nova"] }
 //!
+//! # #[cfg(feature = "nova")]
+//! # {
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
 //! use aletheiadb::core::property::PropertyValue;
@@ -85,6 +88,9 @@
 //! }
 //! # Ok(())
 //! # }
+//! # }
+//! # #[cfg(not(feature = "nova"))]
+//! # fn main() {}
 //! ```
 
 #[cfg(feature = "nova")]
@@ -102,7 +108,6 @@ pub mod chameleon;
 #[cfg(feature = "nova")]
 /// Chimera: Hybrid Entity Synthesis Engine.
 pub mod chimera;
-#[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
 #[cfg(feature = "nova")]
@@ -114,7 +119,6 @@ pub mod dissonance;
 #[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
-#[cfg(feature = "nova")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
 #[cfg(feature = "nova")]
@@ -150,7 +154,6 @@ pub mod ripple;
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
-#[cfg(feature = "nova")]
 /// Sherlock: Temporal Pattern Matching Engine.
 pub mod sherlock;
 #[cfg(feature = "nova")]
@@ -203,3 +206,7 @@ pub mod muse;
 #[cfg(feature = "nova")]
 /// Oracle: Probabilistic Graph Reasoning.
 pub mod oracle;
+
+#[cfg(feature = "nova")]
+/// Spectre: Semantic Perspective Engine.
+pub mod spectre;

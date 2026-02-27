@@ -35,6 +35,7 @@ pub enum Clue {
     // Future: Edge addition/removal, etc.
 }
 
+#[cfg(feature = "nova")]
 /// A Mystery defines the pattern to search for.
 #[derive(Debug, Clone)]
 pub struct Mystery {
@@ -44,6 +45,16 @@ pub struct Mystery {
     pub time_window: Duration,
 }
 
+#[cfg(not(feature = "nova"))]
+/// A Mystery defines the pattern to search for.
+#[deprecated(
+    note = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+)]
+pub struct Mystery {
+    _marker: std::marker::PhantomData<Duration>,
+}
+
+#[cfg(feature = "nova")]
 impl Mystery {
     /// Create a new Mystery builder.
     pub fn new(time_window: Duration) -> Self {
@@ -60,6 +71,36 @@ impl Mystery {
     }
 }
 
+#[cfg(not(feature = "nova"))]
+#[allow(deprecated)]
+impl Mystery {
+    /// Create a new Mystery builder.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn new(time_window: Duration) -> Self {
+        panic!(
+            "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Add a clue to the sequence.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn add_clue(self, clue: Clue) -> Self {
+        panic!(
+            "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+}
+
 /// A Deduction represents a successful match.
 #[derive(Debug, Clone)]
 pub struct Deduction {
@@ -69,12 +110,23 @@ pub struct Deduction {
     pub event_times: Vec<Timestamp>,
 }
 
+#[cfg(feature = "nova")]
 /// The Sherlock Engine.
 pub struct Sherlock<'a> {
     #[allow(dead_code)]
     db: &'a AletheiaDB,
 }
 
+#[cfg(not(feature = "nova"))]
+/// The Sherlock Engine.
+#[deprecated(
+    note = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+)]
+pub struct Sherlock<'a> {
+    _marker: std::marker::PhantomData<&'a AletheiaDB>,
+}
+
+#[cfg(feature = "nova")]
 impl<'a> Sherlock<'a> {
     /// Create a new Sherlock instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -189,7 +241,37 @@ impl<'a> Sherlock<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "nova"))]
+#[allow(deprecated)]
+impl<'a> Sherlock<'a> {
+    /// Create a new Sherlock instance.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn new(db: &'a AletheiaDB) -> Self {
+        panic!(
+            "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Investigate a specific node for the given Mystery.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn investigate(&self, node_id: NodeId, mystery: &Mystery) -> Result<Vec<Deduction>> {
+        panic!(
+            "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+}
+
+#[cfg(all(test, feature = "nova"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -307,5 +389,55 @@ mod tests {
         assert_eq!(results_pass.len(), 1, "Should match within 500ms");
         assert_eq!(results_pass[0].node_id, node_id);
         assert_eq!(results_pass[0].event_times, vec![t0, t1]);
+    }
+}
+
+#[cfg(all(test, not(feature = "nova")))]
+#[allow(deprecated)]
+mod stub_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_new() {
+        let db = AletheiaDB::new().unwrap();
+        let _ = Sherlock::new(&db);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_mystery() {
+        let _ = Mystery::new(Duration::from_secs(1));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_add_clue() {
+        // Safety: Mystery is a ZST in stub mode.
+        let mystery: Mystery = unsafe { std::mem::transmute(()) };
+        let clue = Clue::PropertyState {
+            key: "test".to_string(),
+            value: None,
+        };
+        let _ = mystery.add_clue(clue);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_investigate() {
+        // Safety: Unsafe transmute to get a Sherlock instance since new() panics.
+        // This is valid because Sherlock is a ZST with PhantomData in the stub implementation.
+        let sherlock: Sherlock<'_> = unsafe { std::mem::transmute(()) };
+        // We also need a fake Mystery to pass in. Mystery is also ZST in stub mode.
+        let mystery: Mystery = unsafe { std::mem::transmute(()) };
+        let _ = sherlock.investigate(NodeId::new(0).unwrap(), &mystery);
     }
 }

@@ -124,12 +124,23 @@ impl Resonator for ActivityDensityResonator {
     }
 }
 
+#[cfg(feature = "nova")]
 /// The Echo Chamber finds resonant nodes.
 pub struct EchoChamber<'a> {
     db: &'a AletheiaDB,
     resonator: Box<dyn Resonator>,
 }
 
+#[cfg(not(feature = "nova"))]
+/// The Echo Chamber finds resonant nodes.
+#[deprecated(
+    note = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+)]
+pub struct EchoChamber<'a> {
+    _marker: std::marker::PhantomData<&'a AletheiaDB>,
+}
+
+#[cfg(feature = "nova")]
 impl<'a> EchoChamber<'a> {
     /// Create a new EchoChamber with default settings.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -179,7 +190,50 @@ impl<'a> EchoChamber<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "nova"))]
+#[allow(deprecated)]
+impl<'a> EchoChamber<'a> {
+    /// Create a new EchoChamber with default settings.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn new(db: &'a AletheiaDB) -> Self {
+        panic!(
+            "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Configure the EchoChamber with a custom resonator.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn with_resonator<R: Resonator + 'static>(self, resonator: R) -> Self {
+        panic!(
+            "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Find nodes that resonate with the target node.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn find_echoes(&self, target: NodeId, candidates: &[NodeId]) -> Result<Vec<(NodeId, f32)>> {
+        panic!(
+            "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+}
+
+#[cfg(all(test, feature = "nova"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -297,5 +351,43 @@ mod tests {
                 score
             );
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "nova")))]
+#[allow(deprecated)]
+mod stub_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_new() {
+        let db = AletheiaDB::new().unwrap();
+        let _ = EchoChamber::new(&db);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_with_resonator() {
+        let chamber: EchoChamber<'_> = unsafe { std::mem::transmute(()) };
+        // We need a dummy resonator. Since Resonator trait is public but ActivityDensityResonator is only stubbed out...
+        // Actually ActivityDensityResonator is not gated?
+        // Let's check the code above. ActivityDensityResonator struct definition is NOT gated.
+        // So we can use it.
+        let resonator = ActivityDensityResonator::default();
+        let _ = chamber.with_resonator(resonator);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_find_echoes() {
+        let chamber: EchoChamber<'_> = unsafe { std::mem::transmute(()) };
+        let _ = chamber.find_echoes(NodeId::new(0).unwrap(), &[]);
     }
 }

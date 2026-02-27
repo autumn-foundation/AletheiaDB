@@ -1,6 +1,8 @@
-use aletheiadb::core::error::TemporalError;
+use aletheiadb::core::error::{StorageError, TemporalError};
 use aletheiadb::core::id::{NodeId, VersionId};
-use aletheiadb::core::temporal::{BiTemporalInterval, MAX_VALID_TIMESTAMP, TimeRange};
+use aletheiadb::core::temporal::{
+    BiTemporalInterval, MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange,
+};
 use aletheiadb::index::temporal::{DeduplicationPolicy, TemporalIndexes};
 
 // Test to verify that intersection of large sets (> 16 items) works correctly.
@@ -237,4 +239,67 @@ fn test_sentinel_timerange_duration_overflow_check() {
     // So it should return i64::MAX.
 
     assert_eq!(extreme_range.duration_micros(), Some(i64::MAX));
+}
+
+#[test]
+fn test_timerange_close_at_boundary_checks() {
+    // 🛡️ Sentinel Test: Verify close_at handles boundary conditions correctly.
+    // This targets mutants that might weaken the validation logic in close_at.
+
+    let start = 100.into();
+    let range = TimeRange::from(start);
+
+    // Case 1: Close exactly at start time (valid, empty range)
+    let closed_at_start = range.close_at(start).unwrap();
+    assert_eq!(closed_at_start.end(), start);
+    assert!(closed_at_start.is_empty());
+
+    // Case 2: Close before start time (invalid)
+    let before_start = 99.into();
+    let err = range.close_at(before_start);
+    assert!(err.is_err());
+    assert!(matches!(
+        err.unwrap_err(),
+        TemporalError::InvalidTimeRange { .. }
+    ));
+
+    // Case 3: Close at TIMESTAMP_MAX (valid, effectively redundant but allowed by logic)
+    // The logic allows end <= TIMESTAMP_MAX implicitly if checked against MAX_VALID_TIMESTAMP
+    // but the implementation specifically handles TIMESTAMP_MAX as a sentinel or checks < MAX_VALID.
+    // The code says: if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX { Error }
+    // So TIMESTAMP_MAX is explicitly allowed.
+    let closed_at_max = range.close_at(TIMESTAMP_MAX).unwrap();
+    assert_eq!(closed_at_max.end(), TIMESTAMP_MAX);
+    assert!(closed_at_max.is_current());
+}
+
+#[test]
+fn test_timerange_deserialize_malformed_inputs() {
+    // 🛡️ Sentinel Test: Verify deserialize handles malformed inputs robustly.
+    // This targets buffer length checks and value validation.
+
+    // Case 1: Buffer too short
+    let short_bytes = vec![0u8; 23];
+    let err = TimeRange::deserialize(&short_bytes);
+    assert!(err.is_err());
+    assert!(matches!(err.unwrap_err(), StorageError::CorruptedData(_)));
+
+    // Case 2: Inverted range (start > end)
+    // Start = 200, End = 100
+    let mut inverted_bytes = Vec::new();
+    inverted_bytes.extend_from_slice(&200i64.to_le_bytes()); // start.wallclock
+    inverted_bytes.extend_from_slice(&0u32.to_le_bytes()); // start.logical
+    inverted_bytes.extend_from_slice(&100i64.to_le_bytes()); // end.wallclock
+    inverted_bytes.extend_from_slice(&0u32.to_le_bytes()); // end.logical
+
+    let err_inverted = TimeRange::deserialize(&inverted_bytes);
+    assert!(err_inverted.is_err());
+    // Error message should indicate invalid range
+    if let Err(e) = err_inverted {
+        // HybridTimestamp Display format is "wallclock.logical"
+        // So we expect "200.0" and "100.0"
+        assert!(format!("{}", e).contains("start 200.0 > end 100.0"));
+    } else {
+        panic!("Expected error for inverted range");
+    }
 }
