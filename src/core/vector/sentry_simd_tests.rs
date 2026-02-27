@@ -18,7 +18,11 @@ use crate::core::vector::simd::{
 ///
 /// Compares Scalar vs SSE2 (if available) vs AVX2 (if available).
 fn verify_simd_consistency(a: &[f32], b: &[f32], context: &str) {
-    assert_eq!(a.len(), b.len(), "Vectors must be same length for test helper");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Vectors must be same length for test helper"
+    );
 
     // 1. Reference Scalar Results
     let scalar_dot = dot_product_scalar(a, b);
@@ -110,7 +114,13 @@ fn verify_simd_consistency(a: &[f32], b: &[f32], context: &str) {
 /// Robust floating point equality check that handles NaN and Infinity.
 fn assert_float_eq(a: f32, b: f32, metric: &str, context: &str) {
     if a.is_nan() {
-        assert!(b.is_nan(), "{}: Expected NaN, got {:?} ({})", metric, b, context);
+        assert!(
+            b.is_nan(),
+            "{}: Expected NaN, got {:?} ({})",
+            metric,
+            b,
+            context
+        );
         return;
     }
     if b.is_nan() {
