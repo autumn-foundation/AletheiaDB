@@ -99,25 +99,13 @@ impl<'a> Omen<'a> {
 
         // 2. Physics Math
         // Relative Position P = Pb - Pa (at t=0, which is window.end)
-        let rel_pos: Vec<f32> = pos_b
-            .iter()
-            .zip(pos_a.iter())
-            .map(|(b, a)| b - a)
-            .collect();
+        let rel_pos: Vec<f32> = pos_b.iter().zip(pos_a.iter()).map(|(b, a)| b - a).collect();
 
         // Relative Velocity V = Vb - Va
-        let rel_vel: Vec<f32> = vel_b
-            .iter()
-            .zip(vel_a.iter())
-            .map(|(b, a)| b - a)
-            .collect();
+        let rel_vel: Vec<f32> = vel_b.iter().zip(vel_a.iter()).map(|(b, a)| b - a).collect();
 
         // Calculate dot products
-        let p_dot_v: f32 = rel_pos
-            .iter()
-            .zip(rel_vel.iter())
-            .map(|(p, v)| p * v)
-            .sum();
+        let p_dot_v: f32 = rel_pos.iter().zip(rel_vel.iter()).map(|(p, v)| p * v).sum();
 
         let v_dot_v: f32 = rel_vel.iter().map(|v| v * v).sum();
 
