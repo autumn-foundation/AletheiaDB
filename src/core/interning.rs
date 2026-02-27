@@ -128,6 +128,12 @@ pub struct StringInterner {
     max_capacity: usize,
 }
 
+impl Default for StringInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StringInterner {
     /// Create a new empty string interner with default capacity limit.
     pub fn new() -> Self {
@@ -409,8 +415,8 @@ impl StringInterner {
             let mut holes_found = 0;
             let empty_interned = self.contains("");
 
-            for i in 0..target_limit {
-                if strings[i].is_empty() {
+            for (i, s) in strings.iter().enumerate().take(target_limit) {
+                if s.is_empty() {
                     let is_valid_empty = empty_interned && {
                         // Check if this ID actually maps to empty string
                         self.resolve_with(InternedString(i as u32), |val| val.is_empty())
@@ -438,7 +444,7 @@ impl StringInterner {
             // Exponential backoff
             let sleep_time = std::cmp::min(
                 Duration::from_millis(100),
-                Duration::from_millis(1 * 2u64.pow((attempts % 10) as u32)),
+                Duration::from_millis(2u64.pow((attempts % 10) as u32)),
             );
             std::thread::yield_now();
             std::thread::sleep(sleep_time);

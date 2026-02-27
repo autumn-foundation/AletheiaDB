@@ -43,7 +43,7 @@ fn test_havoc_interner_snapshot_consistency() {
                 let len = snapshot.len();
                 if len > 0 {
                     // Verify that we have at least some content
-                    let content_count = snapshot.iter().filter(|s| !s.is_empty()).count();
+                    let _content_count = snapshot.iter().filter(|s| !s.is_empty()).count();
 
                     // Since we are writing non-empty strings, if we have a successful snapshot,
                     // we shouldn't have holes if we trust get_all_strings implementation.
