@@ -460,7 +460,7 @@ impl PersistentCommitLog {
 
         let (writer, lsn, pending, max_tx_id) = if path.exists() {
             // Open existing file and recover state
-            let (entries, max_lsn, max_tx_id) = Self::read_entries(&path)?;
+            let (entries, max_lsn, max_tx_id, valid_len) = Self::read_entries(&path)?;
 
             // Build pending map (entries without completion)
             let mut pending_map = HashMap::new();
@@ -480,12 +480,18 @@ impl PersistentCommitLog {
                 }
             }
 
-            // Open for appending
+            // Open for appending, making sure to truncate any garbage at the end
             let file = OpenOptions::new()
                 .create(true)
+                .write(true) // Need write access to truncate
                 .append(true)
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
+
+            // Truncate to the valid length to remove any corrupted tail data
+            file.set_len(valid_len).map_err(|e| {
+                CommitLogError::IoError(format!("Failed to truncate corrupted log tail: {}", e))
+            })?;
 
             (
                 Some(BufWriter::new(file)),
@@ -740,7 +746,7 @@ impl PersistentCommitLog {
         Ok(())
     }
 
-    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64)> {
+    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64, u64)> {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
@@ -809,7 +815,7 @@ impl PersistentCommitLog {
             }
         }
 
-        Ok((entries, max_lsn, max_tx_id))
+        Ok((entries, max_lsn, max_tx_id, offset as u64))
     }
 }
 
@@ -1127,5 +1133,64 @@ mod tests {
             actual: 200,
         };
         assert!(format!("{}", err).contains("Checksum"));
+    }
+}
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use tempfile::TempDir;
+    use std::io::Write;
+    use std::fs::OpenOptions;
+
+    fn make_shard_id(id: u16) -> ShardId {
+        ShardId::new(id).unwrap()
+    }
+
+    #[test]
+    fn test_persistent_log_truncation_on_recovery() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("commit.log");
+
+        // 1. Create log and write Entry 1
+        {
+            let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
+            log.log_commit(TxId::new(1), vec![make_shard_id(0)], None).unwrap();
+            log.close().unwrap();
+        }
+
+        // 2. Corrupt the log by appending garbage
+        {
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(b"GARBAGE_DATA_12345").unwrap();
+            file.sync_all().unwrap();
+        }
+
+        // 3. Reopen log (should recover Entry 1 and ignore garbage) and write Entry 2
+        {
+            // This currently fails/panics or writes Entry 2 AFTER the garbage
+            let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
+
+            // Verify we see Entry 1
+            let pending = log.pending_decisions();
+            assert_eq!(pending.len(), 1, "Should have recovered Entry 1");
+            assert_eq!(pending[0].tx_id, TxId::new(1));
+
+            // Write Entry 2
+            log.log_commit(TxId::new(2), vec![make_shard_id(0)], None).unwrap();
+            log.close().unwrap();
+        }
+
+        // 4. Reopen again and verify BOTH entries exist
+        {
+            let log = PersistentCommitLog::new(&path, CommitLogConfig::default()).unwrap();
+            let pending = log.pending_decisions();
+
+            // If the file wasn't truncated, the reader will stop at the garbage
+            // and never see Entry 2, so count will be 1 instead of 2.
+            assert_eq!(pending.len(), 2, "Should have recovered both entries");
+            assert_eq!(pending[0].tx_id, TxId::new(1));
+            assert_eq!(pending[1].tx_id, TxId::new(2));
+        }
     }
 }
