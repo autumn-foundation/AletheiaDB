@@ -1608,6 +1608,14 @@ impl PropertyMapBuilder {
         }
     }
 
+    /// Create a new builder with the specified capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        PropertyMapBuilder {
+            map: HashMap::with_capacity_and_hasher(capacity, BuildHasherDefault::default()),
+            current_size: 4, // Count field
+        }
+    }
+
     /// Create a builder from an existing PropertyMap.
     ///
     /// This will clone the underlying HashMap if the Arc has multiple references,

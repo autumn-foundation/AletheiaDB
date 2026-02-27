@@ -13,7 +13,9 @@ use crate::core::error::Result;
 use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
 use crate::core::interning::InternedString;
-use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
+use crate::core::property::{
+    MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue,
+};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
@@ -477,50 +479,55 @@ impl PropertyDelta {
             .saturating_sub(self.removed.len())
             .max(self.changed.len() + self.vector_deltas.len());
 
-        // Use standard HashMap for construction, PropertyMap::from_iter will handle internal structure
-        // PropertyMap uses IdentityHasher internally too
-        let mut result: FastHashMap<PropertyKey, PropertyValue> =
-            FastHashMap::with_capacity_and_hasher(
-                estimated_capacity,
-                BuildHasherDefault::<IdentityHasher>::default(),
-            );
+        // Use PropertyMapBuilder to construct the map directly, avoiding intermediate HashMap.
+        // This reduces allocations and avoids PropertyMap::from_iter overhead which rebuilds size.
+        // We use try_insert_by_key to propagate errors if any, but unwrap for now as per API contract.
+        let mut builder = PropertyMapBuilder::with_capacity(estimated_capacity);
 
-        // Copy all base properties except removed ones (single lookup per property)
-        // This is optimal when changes << base (typical case: ~1-10% change rate)
+        // Copy base properties efficiently
+        // Only insert if not removed and not about to be overwritten by changed or vector_deltas
+        // This minimizes map operations and resizes
         for (key, value) in base.iter() {
-            if !self.removed.contains(key) {
-                // Arc clone - O(1) refcount increment, shares underlying data
-                result.insert(*key, value.clone());
+            if !self.removed.contains(key)
+                && !self.changed.contains_key(key)
+                && !self.vector_deltas.contains_key(key)
+            {
+                // O(1) Arc clone
+                // Using insert_by_key is efficient as we already have interned keys
+                builder = builder.insert_by_key(*key, value.clone());
             }
         }
 
-        // Apply regular changes (overwrites existing entries for modified properties)
+        // Apply regular changes
         for (key, value) in &self.changed {
-            // Arc clone - O(1) refcount increment
-            result.insert(*key, value.clone());
+            builder = builder.insert_by_key(*key, value.clone());
         }
 
-        // Apply vector deltas (overwrites existing entries)
+        // Apply vector deltas
         for (key, vec_delta) in &self.vector_deltas {
             match vec_delta {
-                // Full replacement does not depend on base type/presence.
                 VectorDelta::Full(vec) => {
-                    result.insert(*key, PropertyValue::Vector(vec.clone()));
+                    builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
                 }
-                // Sparse delta requires vector base value.
                 VectorDelta::Sparse { .. } => {
                     if let Some(base_value) = base.get_by_interned_key(key)
                         && let Some(base_vec) = base_value.as_vector()
                     {
                         let new_vec = vec_delta.apply(base_vec);
-                        result.insert(*key, PropertyValue::vector(&new_vec));
+                        builder = builder.insert_by_key(*key, PropertyValue::vector(&new_vec));
+                    } else if !self.removed.contains(key) {
+                        // Fail-open: If sparse delta cannot be applied (missing base or wrong type),
+                        // and the property was not explicitly removed, we must preserve the original
+                        // base value (which we skipped in the first loop).
+                        if let Some(base_value) = base.get_by_interned_key(key) {
+                            builder = builder.insert_by_key(*key, base_value.clone());
+                        }
                     }
                 }
             }
         }
 
-        // Convert HashMap to PropertyMap using FromIterator
-        result.into_iter().collect()
+        builder.build()
     }
 
     /// Returns true if this delta has no changes.
