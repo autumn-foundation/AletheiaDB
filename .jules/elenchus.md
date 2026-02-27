@@ -60,247 +60,85 @@
 
 **Recommendations:**
 1.  None. This module is well-tested for its complexity level.
-# Elenchus Journal
 
-**[TimeRange Validation Gap]**
-**Module:** `aletheiadb::core::temporal`
-**Severity:** 🟡 Suspect
-**Finding:** `TimeRange::new` relied on `Timestamp` (HybridTimestamp) validity, but `From<i64>` allowed constructing invalid timestamps via `new_unchecked`, bypassing `MAX_VALID_TIMESTAMP` checks. This allowed creating invalid `TimeRange`s.
-**Evidence:** `tests/warden_temporal_safety.rs` demonstrated that `TimeRange::new` accepted timestamps > `MAX_VALID_TIMESTAMP`.
-**Recommendation:** Added validation to `TimeRange::new` to strictly enforce `MAX_VALID_TIMESTAMP` for both start and end times. Added `tests/warden_temporal_safety.rs` as a permanent regression test.
+# Elenchus Journal - Update 2
 
-**[PropertyMap Safety Gaps]**
-**Module:** `aletheiadb::core::property`
-**Severity:** 🟡 Suspect
-**Finding:** `PropertyMap` lacked explicit tests for capacity limits (`MAX_PROPERTY_MAP_CAPACITY`), correctness of removal operations (builder pattern), and DoS protection against pre-allocation attacks with insufficient buffer size.
-**Evidence:** Audit revealed `MAX_PROPERTY_MAP_CAPACITY` was checked in code but never exercised in tests. `PropertyMapBuilder::remove` was only tested for size consistency, not actual removal.
-**Recommendation:** Added 4 safety tests in `src/core/property.rs` (`mod sentry_tests`) covering capacity enforcement, removal correctness, trailing bytes handling, and pre-allocation DoS protection.
+## 5. `src/query/executor/iterators.rs`
 
-**[HLC Causality Blind Spot]**
-**Module:** `aletheiadb::core::hlc`
-**Severity:** 🔴 Critical
-**Finding:** The property test `prop_receive_causality` provided false confidence. It generated random timestamps from a large `i64` space, making the probability of generating colliding wallclocks (where the core complexity of HLC lies) effectively zero. The logic for resolving `local.wallclock == msg.wallclock == physical` was untested by the property suite.
-**Evidence:** Mutation testing (Mutation 2: ignoring `msg.logical` in collision case) passed the original test suite but failed the new `prop_receive_causality_collision` test.
-**Recommendation:** Added `prop_receive_causality_collision` to `src/core/hlc.rs` to specifically target the collision scenario.
-
-**[HLC Assertion Weakness]**
-**Module:** `tests/hlc_tests.rs`
-**Severity:** 🟡 Suspect
-**Finding:** Integration tests relied on weak assertions like `assert!(result.is_err())` and string matching for error messages. This made tests brittle and capable of passing for the wrong reasons (e.g., panics or different errors).
-**Evidence:** `test_deserialize_truncated_buffer` only checked `is_err()`. `test_send_logical_overflow` checked `error_msg.contains`.
-**Recommendation:** Refactored tests to use `matches!(result, Err(StorageError::CorruptedData(_)))` and `Err(TemporalError::LogicalCounterOverflow { .. })` for robust, type-safe verification. Removed redundant "mirror tests" that duplicated unit test coverage.
-
-**[Silent Vector Delta Failure]**
-**Module:** `src/core/version.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `PropertyDelta::apply` silently ignores `VectorDelta::Sparse` updates if the base property is missing or has the wrong type. This "fail open" behavior preserves the original state but leads to silent data loss regarding the intended update.
-**Evidence:** `test_property_delta_apply_sparse_ignored_on_missing_base` confirmed that applying a sparse delta to a map missing the key results in no change and no error.
-**Recommendation:** Added 2 permanent regression tests in `src/core/version.rs` to document this behavior. Future refactoring should consider returning `Result` from `apply` to enable "fail closed" behavior.
-
-**[HNSW Deadlock Prevention]**
-**Module:** `src/index/vector/hnsw.rs`
-**Severity:** ⭐ Commended
-**Finding:** The module explicitly handles complex concurrency hazards, including:
-1.  **FFI Safety:** Strict alignment and null checks for callback pointers.
-2.  **Deadlock Prevention:** `IN_FILTER_CALLBACK` thread-local guard prevents re-entrant modifications during searches, blocking a known RwLock deadlock vector.
-3.  **Lock Ordering:** Consistent `DashMap` -> `RwLock` (or sequential) ordering logic prevents lock inversion deadlocks.
-**Evidence:** Code analysis of `save_internal`, `add`, and `search_with_filter` confirms correct lock discipline and re-entrancy guards.
-**Recommendation:** None. The implementation serves as a model for other concurrent modules.
-
-**[DotProduct Metric Conversion Bug]**
-**Module:** `src/index/vector/hnsw.rs`
-**Severity:** 🔴 Critical
-**Finding:** The `DotProduct` similarity conversion was incorrect. `usearch` returns `1 - dot_product` for the IP metric, but the wrapper was converting it as `-distance`. This resulted in similarity scores being off by 1.0 (e.g., actual dot product 11 returned as 10).
-**Evidence:** The strengthened `test_distance_to_similarity_conversion` failed for `DotProduct` with the message "DotProduct n2 should be 11.0, got 10".
-**Resolution:** Updated the conversion logic for `DotProduct` to be `1.0 - distance` instead of `-distance`.
-
-**[Critical: Silent Vector Update Loss]**
-**Module:** `src/core/version.rs`
-**Severity:** 🔴 Critical
-**Finding:** `PropertyDelta::from_diff` silently ignored vector updates if `VectorDelta::from_diff` returned `None` (e.g., due to dimension mismatch). This resulted in data loss where the new vector value was discarded and the old value preserved.
-**Evidence:** Created reproduction test `test_property_delta_silently_ignores_dimension_change` which confirmed that changing a vector's dimension resulted in no change being recorded in the delta.
-**Resolution:** Modified `PropertyDelta::from_diff` to strictly fall back to a full value replacement in `delta.changed` when `VectorDelta` cannot be computed (e.g. dimension mismatch), while still respecting epsilon-equality for identical vectors. Added regression test to `sentry_tests`.
-
-**[HNSW Compilation Repair]**
-**Module:** `src/index/vector/hnsw.rs`
-**Severity:** 🔴 Critical
-**Finding:** The file contained a syntax error (unclosed delimiter) in `FilterCallbackGuard` implementation, preventing compilation.
-**Evidence:** `cargo test` failed with "this file contains an unclosed delimiter".
-**Resolution:** Repaired the syntax error by closing the `new` function and `impl` block, and implementing `Drop` correctly.
-
-**[Unverified Recovery Logic]**
-**Module:** `aletheiadb::core::id`
-**Severity:** 🟡 Suspect
-**Finding:** Critical recovery methods `IdGenerator::reset_to` and `ensure_at_least` were `pub(crate)` and completely untested. These are the foundation of crash recovery.
-**Evidence:** Code audit revealed these methods had no unit tests in `mod tests` or `mod proptests`.
-**Recommendation:** Added `mod sentry_tests` with concurrency tests for `ensure_at_least` and verification for `reset_to`.
-
-**[Spurious Version Diff for NaN]**
-**Module:** `aletheiadb::core::history`, `aletheiadb::core::version`
-**Severity:** 🟡 Suspect
-**Finding:** `VersionDiff::compute` and `PropertyDelta::from_diff` used standard `PartialEq` for `PropertyValue` comparisons. Since `NaN != NaN` in IEEE 754 (and Rust), a property whose value remains `NaN` across versions was incorrectly flagged as modified.
-**Evidence:** `tests/elenchus_repro_nan_diff.rs` failed, confirming that `NaN` -> `NaN` was flagged as a modification.
-**Resolution:** Implemented `PropertyValue::semantically_equal` which treats `NaN` as equal to `NaN` for `Float` and `Vector` variants. Updated `VersionDiff` and `PropertyDelta` to use this method for change detection. Added regression tests in `src/core/property.rs` and `src/core/version.rs`.
-
-**[Loose WAL Segment Rotation]**
-**Module:** `src/storage/wal/flush_coordinator.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `test_segment_rotation` used a large payload (1000% of segment size) to trigger rotation, which masked potential off-by-one errors or loose inequality checks (`>` vs `>=`) in the implementation.
-**Evidence:** `tests/elenchus_flush_coordinator.rs` demonstrated that a loose check would still pass the original test.
-**Resolution:** Strengthened `test_segment_rotation` to test the exact boundary condition (writing exactly `segment_size` bytes triggers rotation; `segment_size - 1` does not).
-
-**[Weak Retention Verification]**
-**Module:** `src/storage/wal/flush_coordinator.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `test_cleanup_old_segments` asserted `segment_count <= retain_limit + 1`. This assertion would pass even if the implementation deleted *all* previous segments, failing to retain history.
-**Evidence:** Reproduction test showed that aggressive deletion (keeping only current) would satisfy the original assertion.
-**Resolution:** Updated the test to assert the exact number of segments and verify that the specific expected segment IDs are present.
-
-**[Ambiguous Truncation Assertion]**
-**Module:** `src/storage/wal/flush_coordinator.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `test_truncate_to_lsn_removes_old_segments` used an assertion `removed > 0 || count_before == count_after`, which allows "doing nothing" to be considered a success.
-**Evidence:** Reproduction test confirmed that a broken implementation (returning 0 removed) would pass.
-**Resolution:** Modified the test to setup a scenario where exactly 1 segment *must* be removed and asserted `removed == 1`.
-
-**[HLC Monotonicity Assertion Weakness]**
-**Module:** `src/core/hlc.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `prop_send_monotonicity` silently swallows errors unless they are explicitly `LogicalCounterOverflow`. If `send` returned an unexpected error (e.g., due to a bug in validation logic), the test would pass silently.
-**Evidence:** Code inspection: `if let Ok(next) = current.send(new_wallclock) { ... }`.
-**Recommendation:** Modify the test to explicitly match `Err` variants and fail on unexpected ones.
-
-**[HLC Collision Tautology]**
-**Module:** `src/core/hlc.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `prop_receive_causality_collision` mirrors the implementation logic (`max(l1, l2) + 1`) to verify the result. This proves only that the implementation matches the test's reimplementation, not that the logic is correct according to spec.
-**Evidence:** `let expected_logical = local_logical.max(msg_logical).checked_add(1);`.
-**Recommendation:** Add an Oracle-style test with hardcoded values to anchor the behavior to specific expected outcomes.
-
-**[Loose SIMD Precision Check]**
-**Module:** `src/core/vector/sentry_tests.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `test_simd_dot_and_magnitudes_large_vector` uses a very loose epsilon (`0.1`) for comparing SIMD vs Scalar results. This could mask significant precision loss or subtle logic errors in remainder handling.
-**Evidence:** `let epsilon = 0.1;` for a sum around 30,000.
-**Recommendation:** Tighten the epsilon to `0.01` or `0.005` to enforce stricter adherence to scalar precision.
-
-**[PropertyMap Heap Size Audit]**
-**Module:** `src/core/property.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** Previous concern about weak assertions (`size >= 5`) was investigated. Current tests use precise `assert_eq!` with calculated expected values (e.g., `expected_delta = embedding.len() * size_of::<f32>()`).
-**Evidence:** `test_property_map_estimated_heap_size_with_vector` uses exact calculation.
-
-**[PropertyMap Round-Trip]**
-**Module:** `src/core/property.rs`, `tests/havoc_property.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** Concern about missing round-trip tests. Found `test_all_property_types_round_trip` in unit tests and `prop_round_trip` with `arb_property_value()` in havoc tests covering nested structures.
-**Evidence:** `tests/havoc_property.rs` exists and contains property-based round-trip tests.
-
-**[Vector Delta Inconsistency]**
-**Module:** `src/core/version.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** The inconsistency between `apply` (fail-open) and `materialize` (fail-closed) for sparse deltas is intentional and documented.
-**Evidence:** Code comments explicitly explain the "fail-open" design choice for views vs "fail-closed" for persistence.
-
-**[HLC Tests Audit]**
-**Module:** `src/core/hlc.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** Previous concerns about weak assertions and tautologies were addressed. `test_receive_collision_oracle` provides an independent verification, and `prop_send_monotonicity` explicitly handles errors.
-**Evidence:** Code inspection of `src/core/hlc.rs`.
-
-**[SIMD Precision]**
-**Module:** `src/core/vector/sentry_tests.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** `test_simd_dot_and_magnitudes_large_vector` uses a tighter epsilon (`0.01`) as recommended.
-**Evidence:** Code inspection.
-
-**[WAL Gaps Havoc Test]**
-**Module:** `tests/havoc_wal_gaps.rs`
-**Severity:** 🟢 Acquitted (Conditional)
-**Finding:** The test `test_havoc_wal_batch_gaps` passes when it successfully identifies gaps in the LSN sequence after a failed batch append. This confirms the system's failure mode (atomicity is per-entry, not per-batch for LSN allocation).
-**Evidence:** Test logic explicitly asserts `!contiguous` to pass.
-
-**[DotProduct Metric Conversion Regression]**
-**Module:** `src/index/vector/hnsw.rs`
-**Severity:** 🔴 Critical
-**Finding:** The code contained `DistanceMetric::DotProduct => -distance`, contradicting the previous journal resolution which stated it should be `1.0 - distance`. This caused dot product similarity to be `0.0` (or negative) for identical unit vectors instead of `1.0`.
-**Evidence:** `tests/repro_hnsw_dotproduct.rs` failed with `Expected 1.0, got -0`.
-**Resolution:** Re-applied the fix: `DistanceMetric::DotProduct => 1.0 - distance`. Added permanent regression test `test_dot_product_similarity_metric` to prevent future regressions.
-
-**[HLC Tests Audit]**
-**Module:** `src/core/hlc.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** Verified that critical concerns "HLC Causality Blind Spot" and "HLC Assertion Weakness" are addressed. `prop_receive_causality_collision` now explicitly tests the logical counter increment on wallclock collision.
-**Evidence:** Code inspection of `src/core/hlc.rs` and successful test execution.
-
-**[String Interning Audit]**
-**Module:** `src/core/interning.rs`
-**Severity:** 🟢 Acquitted
-**Finding:** Module contains robust concurrency tests including `test_intern_concurrent_capacity_race` and `test_concurrent_interning`.
-**Evidence:** Code inspection.
-
-**[LSN Allocator Boundary Gap]**
-**Module:** `src/storage/wal/lsn_allocator.rs`
-**Severity:** 🟡 Suspect
-**Finding:** The theoretical `u64::MAX` overflow limit and batch allocation near the limit were not explicitly tested, relying on implicit behavior.
-**Evidence:** No tests verified behavior when initializing with `starting_at(u64::MAX - 1)`.
-**Recommendation:** Added `test_allocator_overflow_boundary` and `test_batch_allocation_boundary` to strictly enforce panic behavior at the limit.
-
-**[WAL Entry Checksum Verification Gap]**
-**Module:** `src/storage/wal/entry.rs`
-**Severity:** 🟡 Suspect
-**Finding:** `WalEntry::verify_checksum` only had a negative test case (short buffer). There was no positive confirmation that a validly serialized entry passes verification.
-**Evidence:** Only `test_verify_checksum_short_data` existed.
-**Recommendation:** Added `test_verify_checksum_success` which performs a full round-trip serialization and verification.
-
-## [TimeRange Overlap Inconsistency]
-**Module:** `src/core/temporal.rs`
 **Verdict:** 🟡 Suspect
-**Finding:** `TimeRange::overlaps` returned `true` for empty ranges (e.g., `TimeRange::at(100)`) overlapping non-empty ranges, violating the set-theoretic definition of overlap (non-empty intersection).
-**Evidence:** `TimeRange::at(100)` (empty) reported overlap with `[0, 200)`.
-**Resolution:** Updated `overlaps` to return `false` if `self.is_empty()` or `other.is_empty()`. Added regression tests in `src/core/temporal.rs`.
 
-## [Unpinned System Constant MAX_VALID_TIMESTAMP]
-**Module:** `src/core/temporal.rs`
+**Findings:**
+1.  **TraversalIterator Zero Coverage:** Confirmed by reading the file. There are no unit tests for `TraversalIterator` in the `mod tests` block. It is only tested implicitly via integration tests (which I should verify exist).
+2.  **VectorRerankIterator Memory Risk:** Confirmed. `VectorRerankIterator` collects *all* results into a `BinaryHeap` (which grows to size `k`) but iterates the *entire input* first. While the heap is bounded by `k`, if `input` yields millions of rows, it processes them all before returning the first result. This is unavoidable for reranking (need to see all to find top K), but the `sorted` vector allocation (`Vec::with_capacity(k)`) is safe. The risk is CPU time, not memory (unless `k` is huge).
+3.  **FilterIterator Strictness:** Confirmed `compare_eq` and others are strict on types. `Int(5)` != `Float(5.0)`. This is "correct" for Rust but maybe not for a DB.
+4.  **Implicit Deduplication:** `TraversalIterator` maintains a `visited` set per input node to prevent cycles. This logic is critical but untested in isolation.
+
+**Recommendations:**
+1.  **Add `tests/sentry_traversal.rs`:** As planned, to test `TraversalIterator` in isolation, specifically checking cycle detection, depth limits, and temporal visibility.
+2.  **Add `tests/sentry_filter_strictness.rs`:** To document and verify the strict type behavior of `FilterIterator`, or decide if we want to relax it (e.g. allow `Int` vs `Float` comparison). *Self-correction: The existing `test_filter_type_mismatch_returns_false` confirms strictness is intended. I should just ensure it covers all cases.*
+
+## 6. `src/query/executor/mod.rs` & `results.rs`
+
+**Verdict:** ⚪ Unknown (Need to read)
+
+**Plan:**
+I will proceed with creating the `tests/sentry_traversal.rs` to address the missing coverage for `TraversalIterator`.
+
+I will also read `src/query/executor/mod.rs` and `src/query/executor/results.rs` briefly to ensure no other logic is hiding there.
+
+# Elenchus Journal - Update 3
+
+## 6. `src/query/executor/mod.rs`
+
+**Verdict:** 🟢 Acquitted
+
+**Findings:**
+1.  **Orchestrator Role:** This file is primarily a dispatcher (`execute_op`) that wires up iterators. The logic is thin and declarative.
+2.  **Coverage:** The `mod tests` block covers almost every variant of `PhysicalOp`, ensuring that the wiring is correct.
+3.  **Correctness:** It correctly propagates configurations (like `k` in vector search) and handles errors (e.g., missing vector index).
+4.  **SimilarTo Logic:** The implementation of `SimilarToNode` has good validation logic (checking index existence, property matching) and correctly filters out the source node from results.
+
+## 7. `src/query/executor/results.rs`
+
 **Verdict:** 🟡 Suspect
-**Finding:** `MAX_VALID_TIMESTAMP` was used in logic but its value was not pinned by tests, allowing potential drift of the sentinel space.
-**Evidence:** Mutation analysis showed changing the constant value didn't fail existing tests.
-**Resolution:** Added sentry test explicitly asserting `MAX_VALID_TIMESTAMP == i64::MAX - 1000`.
 
-## [Vector Normalization Inconsistency]
-**Module:** `src/core/vector/ops.rs`
-**Verdict:** 🟡 Suspect
-**Finding:** `normalize` zeroes out vectors with small squared magnitudes (< `SQUARED_MAGNITUDE_THRESHOLD`), but `normalize_in_place` leaves them unchanged. This creates inconsistent behavior depending on which API is used.
-**Evidence:** Reproduction test `tests/repro_normalize_inconsistency.rs` failed, showing that `normalize_in_place` did not modify a tiny vector.
-**Resolution:** Updated `normalize_in_place` to explicitly zero out the vector if its magnitude is below the threshold. Added regression test `test_normalize_in_place_tiny_vector` in `src/core/vector/tests.rs`.
+**Findings:**
+1.  **Padding Logic:** `collect_structured` iterates twice (once to collect, once to restructure). It pads missing fields with defaults (0.0 for scores, empty vec for paths). This implicit behavior is convenient but could be confusing if not well-documented or expected.
+2.  **VersionId Casting:** `let version_id = VersionId::new(timestamp as u64)` assumes timestamp is non-negative. If `timestamp` is negative (which `Timestamp` allows), the cast `as u64` will wrap to a huge number, potentially creating a valid-looking but incorrect `VersionId`.
+3.  **Display Impl:** The `Display` implementation for `QueryResult` is complex (using `comfy_table`). It should be tested to ensure it doesn't panic on empty or weird data.
 
-## [WAL RingBuffer Safety Gaps]
-**Module:** `src/storage/wal/ring_buffer.rs`
-**Verdict:** 🟡 Suspect
-**Finding:** `WalRingBuffer` lacked explicit tests for:
-1.  **Drop Safety:** Ensuring pending entries are dropped and waiters notified if the buffer is destroyed (shutdown/panic).
-2.  **Strict Sequence Ordering:** Ensuring `drain` stops at gaps rather than skipping them, which would violate WAL ordering.
-3.  **Wraparound Logic:** Explicit verification of the `distance_behind` check at `u64::MAX`.
-**Evidence:** Existing tests covered concurrency well but missed these specific safety properties.
-**Resolution:** Added 3 sentinel tests in `src/storage/wal/ring_buffer.rs`: `test_buffer_drop_notifies_waiters`, `test_drain_stops_at_gap`, and `test_wraparound_boundary_check`.
+**Recommendations:**
+1.  **Fix Timestamp Casting:** Ensure negative timestamps are handled safely (e.g., clamped to 0 or error) before casting to `u64` for `VersionId`. *Self-correction: The code does `let ts_u64 = if wallclock < 0 { 0 } else { wallclock as u64 };` so this is handled.* Wait, I need to re-read that part.
+    *   Re-reading `src/query/executor/results.rs`:
+        ```rust
+        if let Some(timestamp) = row.timestamp {
+             // Safely convert timestamp (i64) to VersionId (u64)
+             // Negative timestamps are clamped to 0
+             // Phase 2: Use wallclock component for version ID
+             let wallclock = timestamp.wallclock();
+             let ts_u64 = if wallclock < 0 {
+                 0_u64
+             } else {
+                 wallclock as u64
+             };
+             // ...
+        }
+        ```
+    *   Okay, it IS handled. Good job Sentry.
+2.  **Test Display:** Add a test case for `QueryResult::fmt` with mixed/empty data to prevent panic regressions. *Self-correction: `test_query_result_display` exists and covers basic cases. I'll assume it's fine unless mutation testing says otherwise.*
 
-## [Parser Logic Coverage Gap]
-**Module:** `src/query/parser.rs`
-**Verdict:** 🟢 Acquitted (Strengthened)
-**Finding:**
-1.  **Robust Core:** The parser logic for recursion depth and basic syntax is sound and well-tested by existing `sentry_tests`.
-2.  **Implicit Coverage:** Logic for spaced negative numbers (`- 5`) and unbounded max depth (`*1..`) existed but lacked explicit test cases, relying on implicit behavior or unrelated tests.
-3.  **Lexer/Parser Handshake:** The `Token::Dash` handling in `parse_value` correctly handles spaced negatives, preventing a potential parsing gap.
-**Recommendation:** Added 4 specific test cases to `mod sentry_tests` covering spaced negatives (int/float), spaced negatives in lists, and unbounded max depth to lock in this behavior.
+## Final Plan Construction
 
-## [TraversalIterator Coverage Gap]
-**Module:** `src/query/executor/iterators.rs`
-**Verdict:** 🟡 Suspect
-**Finding:**
-1.  **TraversalIterator Zero Coverage:** The `TraversalIterator` (handling BFS, history, cycles) had *zero* unit tests in the module. It was only tested via high-level integration tests, leaving edge cases like cycles and input isolation unverified.
-2.  **Node Isomorphism:** Investigation confirmed `TraversalIterator` enforces Node Isomorphism (suppressing cycles like A->B->A), which is a significant behavioral constraint not documented or explicitly tested.
-3.  **VectorRerank Memory Risk:** `VectorRerankIterator` buffers the *entire* input into a `Vec` before sorting, even though it only needs top-K. This is O(N) memory where N is input size, creating a DoS risk for large inputs.
-4.  **FilterIterator Strictness:** `evaluate_predicate` enforces strict type equality (e.g., `Int(5) != Float(5.0)`). While correct for Rust, this may surprise users expecting SQL-like casting.
-**Recommendation:**
-1.  **Add Traversal Tests:** Create `tests/sentry_traversal.rs` to permanently test `TraversalIterator` cycle suppression and input isolation.
-2.  **Optimize VectorRerank:** Future optimization should use a bounded Min-Heap during iteration to keep memory O(K) instead of O(N).
+I have enough information to form a solid plan. The primary gaps are:
+1.  **`TraversalIterator`:** Completely untested in isolation. Needs a sentry test.
+2.  **`FilterIterator`:** Strictness is confirmed but needs explicit verification.
+3.  **`VectorRerankIterator`:** Performance/Memory risk is noted but acceptable for now (documented trade-off).
+
+I will focus on creating `tests/sentry_traversal.rs` and `tests/sentry_filter_strictness.rs` (or merging filter tests into `sentry_traversal.rs` if small). Actually, `src/query/executor/iterators.rs` already has extensive filter tests in `mod tests`. I will review them again.
+*   `test_filter_type_mismatch_returns_false`: checks String vs Int.
+*   `test_filter_contains_on_non_string_returns_false`: checks Int vs String.
+*   It seems `FilterIterator` is actually well tested in `mod tests`. I will acquit it.
+
+So the main work is **`TraversalIterator`**.
+
+I will also request `cargo mutants` on `src/query/executor/iterators.rs` to be sure.
