@@ -488,4 +488,52 @@ mod stub_tests {
         let db = AletheiaDB::new().unwrap();
         let _ = Chronos::new(&db);
     }
+
+    #[test]
+    #[should_panic(
+        expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_find_path_at_time() {
+        // Safety: Unsafe transmute to get a Chronos instance since new() panics.
+        // This is valid because Chronos is a ZST with PhantomData in the stub implementation.
+        let chronos: Chronos<'_> = unsafe { std::mem::transmute(()) };
+        let _ = chronos.find_path_at_time(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            crate::core::temporal::time::now(),
+            crate::core::temporal::time::now(),
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_node_volatility() {
+        let chronos: Chronos<'_> = unsafe { std::mem::transmute(()) };
+        let _ = chronos.node_volatility(
+            NodeId::new(0).unwrap(),
+            TimeRange::new(
+                crate::core::temporal::time::now(),
+                crate::core::temporal::time::now(),
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_path_stability() {
+        let chronos: Chronos<'_> = unsafe { std::mem::transmute(()) };
+        let _ = chronos.path_stability(
+            &[],
+            TimeRange::new(
+                crate::core::temporal::time::now(),
+                crate::core::temporal::time::now(),
+            )
+            .unwrap(),
+        );
+    }
 }

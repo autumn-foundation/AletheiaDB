@@ -367,4 +367,27 @@ mod stub_tests {
         let db = AletheiaDB::new().unwrap();
         let _ = EchoChamber::new(&db);
     }
+
+    #[test]
+    #[should_panic(
+        expected = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_with_resonator() {
+        let chamber: EchoChamber<'_> = unsafe { std::mem::transmute(()) };
+        // We need a dummy resonator. Since Resonator trait is public but ActivityDensityResonator is only stubbed out...
+        // Actually ActivityDensityResonator is not gated?
+        // Let's check the code above. ActivityDensityResonator struct definition is NOT gated.
+        // So we can use it.
+        let resonator = ActivityDensityResonator::default();
+        let _ = chamber.with_resonator(resonator);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_find_echoes() {
+        let chamber: EchoChamber<'_> = unsafe { std::mem::transmute(()) };
+        let _ = chamber.find_echoes(NodeId::new(0).unwrap(), &[]);
+    }
 }
