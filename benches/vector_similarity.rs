@@ -14,7 +14,7 @@
 mod common;
 
 use aletheiadb::core::vector::{
-    cosine_similarity, cosine_similarity_normalized, dot_product, euclidean_distance,
+    SparseVec, cosine_similarity, cosine_similarity_normalized, dot_product, euclidean_distance,
     squared_euclidean_distance,
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -94,6 +94,54 @@ fn bench_cosine_similarity_dimensions(c: &mut Criterion) {
         // Naive 3-pass scalar - measures combined SIMD + cache efficiency benefit
         group.bench_with_input(BenchmarkId::new("naive_3pass", dim), &dim, |bencher, _| {
             bencher.iter(|| cosine_similarity_naive_3pass(black_box(&a), black_box(&b)));
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark sparse vector creation.
+/// Compares performance of creating SparseVec from sorted vs unsorted inputs.
+fn bench_sparse_vector_creation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sparse_vector_creation");
+
+    // Dimensions: number of non-zero elements
+    let nnz_counts = [100, 1000, 10000];
+    let total_dim = 100_000;
+
+    for nnz in nnz_counts {
+        // Generate sorted inputs
+        let indices_sorted: Vec<u32> = (0..nnz as u32).map(|i| i * 2).collect();
+        let values: Vec<f32> = (0..nnz).map(|i| (i + 1) as f32).collect();
+
+        // Generate unsorted inputs (reverse sorted)
+        let mut indices_unsorted = indices_sorted.clone();
+        indices_unsorted.reverse();
+
+        group.throughput(Throughput::Elements(nnz as u64));
+
+        // Benchmark sorted input (potential fast path)
+        group.bench_with_input(BenchmarkId::new("sorted", nnz), &nnz, |bencher, _| {
+            bencher.iter(|| {
+                SparseVec::new(
+                    black_box(indices_sorted.clone()),
+                    black_box(values.clone()),
+                    black_box(total_dim),
+                )
+                .unwrap()
+            });
+        });
+
+        // Benchmark unsorted input (fallback slow path)
+        group.bench_with_input(BenchmarkId::new("unsorted", nnz), &nnz, |bencher, _| {
+            bencher.iter(|| {
+                SparseVec::new(
+                    black_box(indices_unsorted.clone()),
+                    black_box(values.clone()),
+                    black_box(total_dim),
+                )
+                .unwrap()
+            });
         });
     }
 
@@ -458,6 +506,7 @@ criterion_group!(
     bench_dot_product_self,
     bench_dot_product_batch,
     bench_normalize,
+    bench_sparse_vector_creation,
 );
 
 criterion_main!(benches);

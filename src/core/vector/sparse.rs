@@ -141,27 +141,71 @@ impl SparseVec {
 
         // Validate and normalize data
         if !indices.is_empty() {
-            // Sort by indices (if not already sorted)
+            // OPTIMIZATION: Try to validate in-place first to avoid allocation/sorting
+            // if the input is already sorted (common case).
+            // This fast path is O(N) and zero-allocation.
+            let mut is_sorted = true;
+
+            // Check first element
+            if indices[0] >= dimension {
+                return Err(Error::Vector(VectorError::InvalidSparseVector {
+                    reason: format!(
+                        "Index {} is out of bounds for dimension {}",
+                        indices[0], dimension
+                    ),
+                }));
+            }
+            Self::validate_value(values[0])?;
+
+            for i in 1..indices.len() {
+                let prev = indices[i - 1];
+                let curr = indices[i];
+
+                if curr <= prev {
+                    if curr == prev {
+                        return Err(Error::Vector(VectorError::InvalidSparseVector {
+                            reason: format!("Duplicate index {} found", curr),
+                        }));
+                    }
+                    // Unsorted
+                    is_sorted = false;
+                    break;
+                }
+
+                if curr >= dimension {
+                    return Err(Error::Vector(VectorError::InvalidSparseVector {
+                        reason: format!(
+                            "Index {} is out of bounds for dimension {}",
+                            curr, dimension
+                        ),
+                    }));
+                }
+
+                Self::validate_value(values[i])?;
+            }
+
+            if is_sorted {
+                return Ok(Self {
+                    indices,
+                    values,
+                    dimension,
+                });
+            }
+
+            // Fallback to slow path: sort and re-validate
+            // Note: We re-validate values, which is redundant but safe.
+            // Since we moved `indices` and `values` by reference in the loop above,
+            // we can still consume them here.
+
+            // Sort by indices
             let mut index_value_pairs: Vec<(u32, f32)> = indices.into_iter().zip(values).collect();
             index_value_pairs.sort_by_key(|(idx, _)| *idx);
 
             // Check for duplicates and out-of-bounds indices
             let mut prev_idx = None;
             for (idx, val) in &index_value_pairs {
-                // Check NaN
-                if val.is_nan() {
-                    return Err(VectorError::ContainsNaN { count: 1 }.into());
-                }
-                // Check Infinity
-                if val.is_infinite() {
-                    return Err(VectorError::ContainsInfinity { count: 1 }.into());
-                }
-                // Check for zero values (sparse vectors should not store zeros)
-                if *val == 0.0 {
-                    return Err(Error::Vector(VectorError::InvalidSparseVector {
-                        reason: "Sparse vector contains zero value".to_string(),
-                    }));
-                }
+                Self::validate_value(*val)?;
+
                 // Check index bounds
                 if *idx >= dimension {
                     return Err(Error::Vector(VectorError::InvalidSparseVector {
@@ -194,6 +238,22 @@ impl SparseVec {
             values,
             dimension,
         })
+    }
+
+    #[inline(always)]
+    fn validate_value(val: f32) -> Result<()> {
+        if val.is_nan() {
+            return Err(VectorError::ContainsNaN { count: 1 }.into());
+        }
+        if val.is_infinite() {
+            return Err(VectorError::ContainsInfinity { count: 1 }.into());
+        }
+        if val == 0.0 {
+            return Err(Error::Vector(VectorError::InvalidSparseVector {
+                reason: "Sparse vector contains zero value".to_string(),
+            }));
+        }
+        Ok(())
     }
 
     /// Returns the number of non-zero elements.
