@@ -25,7 +25,7 @@ pub struct HnswConfig {
     /// Maximum bidirectional connections per node.
     ///
     /// - **Default**: 16
-    /// - **Range**: [2, 64]
+    /// - **Range**: [1, 64]
     /// - **Impact**: Higher `m` improves recall (accuracy) for high-dimensional data
     ///   but increases memory usage and indexing time.
     pub m: usize,
