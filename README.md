@@ -447,8 +447,6 @@ let similar = db.find_similar(doc_id, 10)?;
 ### Hybrid Queries (Graph + Vector + Temporal)
 
 ```rust
-use aletheiadb::query::ir::Predicate;
-
 // Setup query parameters
 let query_embedding = vec![0.1f32; 384];
 let valid_time = aletheiadb::time::now();
@@ -481,7 +479,7 @@ for row in results {
 }
 
 // Property-specific vector queries
-let results = db.query()
+let _results = db.query()
     .find_similar_builder(&query_embedding, 10)
     .property("embedding")  // Query specific property
     .metric(DistanceMetric::Cosine)
