@@ -367,8 +367,8 @@ impl StringInterner {
         // Holes occur because intern() increments next_id BEFORE inserting into the map.
         // If we see a hole at index i < strings.len(), it means an insert is in progress.
         // We must wait for it to complete to return a consistent snapshot.
-        for id in 0..strings.len() {
-            if strings[id].is_none() {
+        for (id, val) in strings.iter_mut().enumerate() {
+            if val.is_none() {
                 // Spin-wait for the missing ID to appear.
                 // In practice this is very short (just the time for a DashMap insert).
                 let mut spins = 0;
@@ -384,7 +384,7 @@ impl StringInterner {
 
                     if let Some(entry) = self.id_to_string.get(&InternedString::from_raw(id as u32))
                     {
-                        strings[id] = Some(entry.value().to_string());
+                        *val = Some(entry.value().to_string());
                         break;
                     }
 

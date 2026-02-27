@@ -26,6 +26,7 @@ fn test_interner_snapshot_consistency() {
                 let s = format!("s-{}", i);
                 let _ = interner.intern(&s);
                 i = i.wrapping_add(1);
+                #[allow(clippy::manual_is_multiple_of)]
                 if i % 100 == 0 {
                     thread::yield_now();
                 }
