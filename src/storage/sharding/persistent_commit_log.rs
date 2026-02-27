@@ -35,7 +35,7 @@ use crate::core::hlc::HybridTimestamp;
 use crate::core::id::TxId;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -460,7 +460,7 @@ impl PersistentCommitLog {
 
         let (writer, lsn, pending, max_tx_id) = if path.exists() {
             // Open existing file and recover state
-            let (entries, max_lsn, max_tx_id) = Self::read_entries(&path)?;
+            let (entries, max_lsn, max_tx_id, valid_len) = Self::read_entries(&path)?;
 
             // Build pending map (entries without completion)
             let mut pending_map = HashMap::new();
@@ -480,12 +480,31 @@ impl PersistentCommitLog {
                 }
             }
 
-            // Open for appending
-            let file = OpenOptions::new()
+            // Open for appending and truncation
+            // Note: We deliberately do NOT use `.append(true)` here because it interferes with truncation
+            // on some platforms (e.g., Windows). Instead, we open with write access and manually seek to the end.
+            let mut file = OpenOptions::new()
                 .create(true)
-                .append(true)
+                .write(true)
+                .truncate(false) // Explicitly disable truncate on open, as we handle it manually below
                 .open(&path)
                 .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
+
+            // Truncate any garbage/partial writes at the end
+            let current_len = file
+                .metadata()
+                .map_err(|e| CommitLogError::IoError(format!("Failed to get metadata: {}", e)))?
+                .len();
+
+            if valid_len < current_len {
+                file.set_len(valid_len).map_err(|e| {
+                    CommitLogError::IoError(format!("Failed to truncate log: {}", e))
+                })?;
+            }
+
+            // Seek to the end (which is now valid_len) to prepare for appending new entries
+            file.seek(SeekFrom::End(0))
+                .map_err(|e| CommitLogError::IoError(format!("Failed to seek to end: {}", e)))?;
 
             (
                 Some(BufWriter::new(file)),
@@ -740,7 +759,7 @@ impl PersistentCommitLog {
         Ok(())
     }
 
-    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64)> {
+    fn read_entries(path: &Path) -> CommitLogResult<(Vec<CommitLogEntry>, u64, u64, u64)> {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
@@ -809,7 +828,8 @@ impl PersistentCommitLog {
             }
         }
 
-        Ok((entries, max_lsn, max_tx_id))
+        let valid_len = offset as u64;
+        Ok((entries, max_lsn, max_tx_id, valid_len))
     }
 }
 
