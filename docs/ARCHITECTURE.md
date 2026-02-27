@@ -1114,6 +1114,81 @@ sequenceDiagram
     DB-->>Alchemist: Commit
 ```
 
+### Cognitive Dynamics
+
+**Ripple (Semantic Causality)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Ripple as RippleDetector
+    participant DB as AletheiaDB
+
+    User->>Ripple: detect_causality(source, target)
+    Ripple->>DB: get_node_history(source)
+    Ripple->>DB: get_node_history(target)
+    Ripple->>Ripple: compute_flux(source_history)
+    Ripple->>Ripple: compute_flux(target_history)
+    Ripple->>Ripple: cross_correlate(source_flux, target_flux)
+    Ripple-->>User: RippleEffect(lag, correlation)
+```
+
+**Oracle (Probabilistic Reasoning)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Oracle {
+            +personalized_page_rank(seed, alpha, walks)
+            +reachability_probability(start, end, sims)
+        }
+    }
+    class AletheiaDB
+
+    Oracle --> AletheiaDB : Uses (Monte Carlo Simulation)
+```
+
+```mermaid
+flowchart TD
+    Start([Start Walk]) --> CheckTerm{Termination?}
+    CheckTerm -- Yes --> RecordVisit[Record Visit]
+    CheckTerm -- No --> PickEdge[Pick Random Neighbor]
+    PickEdge --> Move[Move to Neighbor]
+    Move --> CheckTerm
+```
+
+**Kairos (Semantic Event Detection)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Kairos
+    participant DB as AletheiaDB
+
+    User->>Kairos: extract_timeline(node, thresh)
+    Kairos->>DB: get_node_history(node)
+    loop Every Version
+        Kairos->>Kairos: Check Vector Drift
+        alt drift > threshold OR structural_change
+            Kairos->>Kairos: Record TimelineEvent
+            Kairos->>Kairos: Update Baseline
+        end
+    end
+    Kairos-->>User: Timeline
+```
+
+**Synapse (Adaptive Learning)**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Unweighted
+    Unweighted --> Reinforced : Observe(Traversal)
+    Reinforced --> Reinforced : Observe(Traversal)
+    Reinforced --> Decayed : Decay(Time)
+    Decayed --> Reinforced : Observe(Traversal)
+    Decayed --> Unweighted : Decay(Time)
+```
+
 ### Temporal Query Processing
 
 **Query Types:**
