@@ -204,6 +204,8 @@ pub mod mnemosyne;
 pub mod muse;
 
 #[cfg(feature = "nova")]
+pub mod omen;
+#[cfg(feature = "nova")]
 /// Oracle: Probabilistic Graph Reasoning.
 pub mod oracle;
 
