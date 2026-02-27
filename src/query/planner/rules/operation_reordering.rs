@@ -1,10 +1,35 @@
 //! Operation Reordering Optimization
 //!
 //! Reorders operations based on estimated costs and selectivity to minimize
-//! overall query execution cost. This includes:
-//! - Reordering filters by selectivity (most selective first)
-//! - Reordering join operands (smaller relation as build side)
-//! - Choosing optimal operation order based on cardinality estimates
+//! overall query execution cost.
+//!
+//! # Optimization Strategy
+//!
+//! This rule applies three main optimizations:
+//!
+//! 1. **Filter Reordering**: Push more selective filters deeper into the plan (closer to the data source).
+//!    This reduces the number of rows that subsequent operations need to process.
+//! 2. **Join Reordering**: Ensure the smaller relation is on the left side of a hash join (build side).
+//!    This minimizes the memory footprint of the hash table.
+//! 3. **Cost-Based Ordering**: Use cardinality estimates to choose the cheapest operation sequence.
+//!
+//! # Example: Join Optimization
+//!
+//! ```text
+//! BEFORE: Large Table (Left) JOIN Small Table (Right)
+//!         (Requires building hash table on Large Table)
+//!
+//!         Join
+//!        /    \
+//!   Large      Small
+//!
+//! AFTER:  Small Table (Left) JOIN Large Table (Right)
+//!         (Builds hash table on Small Table - faster & less memory)
+//!
+//!         Join
+//!        /    \
+//!   Small      Large
+//! ```
 
 use crate::core::error::Result;
 use crate::query::ir::Predicate;
@@ -14,24 +39,40 @@ use super::{OptimizationRule, Statistics};
 
 // Selectivity estimates for different predicate types
 // (0.0 = filters everything, 1.0 = filters nothing)
-const NULL_CHECK_SELECTIVITY: f64 = 0.1; // Null checks are typically selective
-const EXISTENCE_CHECK_SELECTIVITY: f64 = 0.1; // Property existence checks
-const IN_PREDICATE_SELECTIVITY: f64 = 0.15; // IN predicates (depends on list size)
-const STRING_PREDICATE_SELECTIVITY: f64 = 0.2; // Contains/StartsWith/EndsWith
-const RANGE_PREDICATE_SELECTIVITY: f64 = 0.3; // Gt/Lt/Gte/Lte
-const NOT_EQUALS_SELECTIVITY: f64 = 0.9; // Not-equals (typically less selective)
-const TRUE_SELECTIVITY: f64 = 1.0; // Filters nothing
-const FALSE_SELECTIVITY: f64 = 0.0; // Filters everything
+/// Selectivity for `IS NULL` checks (0.1). Assumes nulls are relatively rare.
+const NULL_CHECK_SELECTIVITY: f64 = 0.1;
+/// Selectivity for existence checks (0.1). Assumes checking for a specific property filters well.
+const EXISTENCE_CHECK_SELECTIVITY: f64 = 0.1;
+/// Selectivity for `IN` predicates (0.15).
+const IN_PREDICATE_SELECTIVITY: f64 = 0.15;
+/// Selectivity for string matching (Contains/StartsWith/EndsWith) (0.2).
+const STRING_PREDICATE_SELECTIVITY: f64 = 0.2;
+/// Selectivity for range predicates (Gt/Lt/Gte/Lte) (0.3).
+const RANGE_PREDICATE_SELECTIVITY: f64 = 0.3;
+/// Selectivity for not-equals (!=) (0.9). These typically filter very little.
+const NOT_EQUALS_SELECTIVITY: f64 = 0.9;
+/// Selectivity for `TRUE` (1.0). Filters nothing.
+const TRUE_SELECTIVITY: f64 = 1.0;
+/// Selectivity for `FALSE` (0.0). Filters everything.
+const FALSE_SELECTIVITY: f64 = 0.0;
 // Note: AND/OR/NOT selectivity is computed dynamically based on child predicates
 
 /// Operation reordering optimization rule.
 ///
 /// This rule reorders operations based on cost estimates to minimize
-/// total execution time. Key optimizations:
+/// total execution time.
 ///
-/// 1. **Filter reordering**: Apply more selective filters first
-/// 2. **Join reordering**: Use smaller relation as hash join build side
-/// 3. **Cost-based operation ordering**: Choose cheapest operation order
+/// # Examples
+///
+/// ```text
+/// Input Plan:
+/// Filter(B) -> Filter(A) -> Scan
+/// (Where Filter A is very selective, and Filter B is not)
+///
+/// Optimized Plan:
+/// Filter(A) -> Filter(B) -> Scan
+/// (Filter A is applied first, reducing rows for Filter B)
+/// ```
 pub struct OperationReordering;
 
 impl OptimizationRule for OperationReordering {
@@ -203,6 +244,16 @@ impl OperationReordering {
     }
 
     /// Estimate filter selectivity (0.0 = filters everything, 1.0 = filters nothing).
+    ///
+    /// # Heuristics
+    ///
+    /// - **Equality**: Uses statistical histograms if available.
+    /// - **Range**: Assumes 30% selectivity (`RANGE_PREDICATE_SELECTIVITY`).
+    /// - **String**: Assumes 20% selectivity (`STRING_PREDICATE_SELECTIVITY`).
+    /// - **Logic**:
+    ///   - `AND`: Product of probabilities (intersection).
+    ///   - `OR`: 1 - Product of complement probabilities (union).
+    ///   - `NOT`: 1 - Probability (complement).
     fn estimate_filter_selectivity(&self, predicate: &Predicate, stats: &Statistics) -> f64 {
         match predicate {
             Predicate::Eq { key, value } => {
