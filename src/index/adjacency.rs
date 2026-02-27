@@ -311,6 +311,19 @@ impl AdjacencyIndex {
             }
         }
 
+        // Validate monotonicity of offsets
+        for i in 0..offsets.len().saturating_sub(1) {
+            if offsets[i] > offsets[i + 1] {
+                return Err(format!(
+                    "CSR offsets must be monotonically increasing: offsets[{}] = {}, offsets[{}] = {}",
+                    i,
+                    offsets[i],
+                    i + 1,
+                    offsets[i + 1]
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -815,6 +828,24 @@ mod sentry_tests {
             AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_val, &edge_ids)
                 .unwrap_err();
         assert!(err_val.contains("CSR last offset mismatch"));
+
+        // 4. Non-monotonic offsets
+        let invalid_offsets_monotonic = vec![2, 1, 2];
+        let err_monotonic =
+            AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_monotonic, &edge_ids)
+                .unwrap_err();
+        assert!(err_monotonic.contains("CSR offsets must be monotonically increasing"));
+    }
+
+    #[test]
+    #[should_panic(expected = "CSR offsets must be monotonically increasing")]
+    fn test_import_csr_panics_on_non_monotonic() {
+        // Integration check: ensure import_csr panics cleanly rather than out-of-bounds
+        let node_ids = vec![10, 20];
+        let offsets = vec![100, 50, 100]; // invalid monotonicity
+        let edge_ids = vec![0; 100]; // Length matches offsets.last()
+        let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
 
     #[test]
