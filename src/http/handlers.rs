@@ -210,6 +210,10 @@ pub enum QueryRequest {
     },
 }
 
+/// Maximum number of results returned by ExecuteQuery.
+/// This prevents memory exhaustion from unbounded result sets.
+const MAX_QUERY_RESULTS: usize = 1000;
+
 /// Standardized API response structure.
 ///
 /// All API responses follow this wrapper format.
@@ -530,6 +534,14 @@ pub async fn handle_query(
                         // 3. Serialize results
                         let mut json_results = Vec::new();
                         for row_result in results {
+                            // Enforce result set limit
+                            if json_results.len() >= MAX_QUERY_RESULTS {
+                                return Err(format!(
+                                    "Query result limit exceeded (max {}). Please use LIMIT clause.",
+                                    MAX_QUERY_RESULTS
+                                ));
+                            }
+
                             match row_result {
                                 Ok(row) => match query_row_to_json(row) {
                                     Ok(json) => json_results.push(json),
@@ -555,7 +567,11 @@ pub async fn handle_query(
                     // For now, mapping everything to Internal Error to be safe/consistent with previous behavior
                     // (though previous behavior had explicit BadRequest for parse errors).
                     // Let's improve this:
-                    if e.to_lowercase().contains("syntax") || e.to_lowercase().contains("parse") {
+                    // Return BadRequest for parse errors or limit exceeded errors
+                    if e.to_lowercase().contains("syntax")
+                        || e.to_lowercase().contains("parse")
+                        || e.contains("limit exceeded")
+                    {
                         HttpResponse::BadRequest().json(ApiResponse::error(e))
                     } else {
                         HttpResponse::InternalServerError().json(ApiResponse::error(e))
@@ -859,5 +875,50 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_client_error()); // 400 Bad Request
+    }
+
+    #[actix_rt::test]
+    async fn test_warden_execute_query_result_limit() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+
+        // Insert 2000 nodes (exceeding limit of 1000)
+        for i in 0..2000 {
+            let props = crate::core::PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .build();
+            db.create_node("LimitTest", props).unwrap();
+        }
+
+        let state = web::Data::new(AppState::new(db));
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
+
+        let payload = json!({
+            "operation": "execute_query",
+            "query": "MATCH (n:LimitTest) RETURN n"
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+
+        // SECURE: Should return 400 Bad Request due to limit exceeded
+        // VULNERABLE: Returns 200 OK with 2000 items
+        assert!(
+            resp.status().is_client_error(),
+            "Should reject query with too many results. Status: {:?}", resp.status()
+        );
+
+        let body = test::read_body(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let error = json["error"].as_str().unwrap();
+        assert!(error.contains("limit exceeded"), "Error should mention limit: {}", error);
     }
 }

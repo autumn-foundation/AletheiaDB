@@ -311,6 +311,7 @@ mod tests {
     async fn test_create_app_with_cors() {
         let app = test::init_service(create_app()).await;
 
+        // Standard CORS preflight request
         let req = test::TestRequest::default()
             .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
             .method(actix_web::http::Method::OPTIONS)
@@ -321,8 +322,45 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
 
-        // CORS preflight should succeed
-        assert!(resp.status().is_success() || resp.status().as_u16() == 204);
+        // CORS preflight should succeed with 200 OK (default for permissive)
+        // Some configurations might return 204, but permissive usually returns 200
+        assert!(resp.status().is_success());
+    }
+
+    #[actix_rt::test]
+    async fn test_cors_headers_present() {
+        // Use a restrictive config for this test to force specific behavior
+        // (though permissive is default in create_app, explicit is safer for testing headers)
+        let cors_config = CorsConfig::restrictive().allow_origin("http://example.com");
+
+        let app = test::init_service(
+            App::new()
+                // Must add rate limiting because create_app adds it by default,
+                // and if we don't mock it, we might get errors if other middleware depends on it
+                // BUT we specifically want to test CORS in isolation here.
+                // However, actix-governor requires peer IP.
+                //
+                // SOLUTION: Provide a peer IP in the request.
+                .wrap(build_cors(&cors_config))
+                .configure(configure_app)
+        ).await;
+
+        // CORS headers are only added if the request includes an Origin header
+        let req = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/status")
+            .insert_header(("Origin", "http://example.com"))
+            .insert_header(("Access-Control-Request-Method", "GET"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert!(resp.status().is_success());
+        let headers = resp.headers();
+        assert!(headers.contains_key("access-control-allow-origin"));
+        assert_eq!(
+            headers.get("access-control-allow-origin").unwrap(),
+            "http://example.com"
+        );
     }
 
     #[actix_rt::test]
