@@ -54,7 +54,8 @@ fn test_interner_snapshot_consistency() {
                         panic!(
                             "Consistency violation! ID {} exists in snapshot (len {}) but string is empty. \
                              Race condition detected: ID reserved but string not yet visible.",
-                            id, snapshot.len()
+                            id,
+                            snapshot.len()
                         );
                     }
                 }
