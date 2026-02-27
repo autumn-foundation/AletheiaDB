@@ -1,17 +1,22 @@
 // tests/sentry_version.rs
 
-use aletheiadb::core::version::{PropertyDelta, VersionData, NodeVersion, EdgeVersion, EntityVersion};
-use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
 use aletheiadb::core::interning::GLOBAL_INTERNER;
+use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::core::temporal::BiTemporalInterval;
-use aletheiadb::core::id::{VersionId, NodeId, EdgeId};
+use aletheiadb::core::version::{
+    EdgeVersion, EntityVersion, NodeVersion, PropertyDelta, VersionData,
+};
 
 #[test]
 fn test_property_delta_from_diff_not_default() {
     let old = PropertyMapBuilder::new().insert("a", 1).build();
     let new = PropertyMapBuilder::new().insert("a", 2).build();
     let delta = PropertyDelta::from_diff(&old, &new);
-    assert!(!delta.is_empty(), "PropertyDelta::from_diff should not return default (empty) delta for changes");
+    assert!(
+        !delta.is_empty(),
+        "PropertyDelta::from_diff should not return default (empty) delta for changes"
+    );
 }
 
 #[test]
@@ -22,7 +27,10 @@ fn test_property_delta_semantically_equal_guard() {
 
     // If replaced with false, it would treat identical values as changed
     let delta = PropertyDelta::from_diff(&old, &new);
-    assert!(delta.is_empty(), "Identical values should not produce a delta");
+    assert!(
+        delta.is_empty(),
+        "Identical values should not produce a delta"
+    );
 
     let old = PropertyMapBuilder::new().insert("a", 1).build();
     let new = PropertyMapBuilder::new().insert("a", 2).build();
@@ -46,7 +54,10 @@ fn test_vector_delta_match_arm_removal() {
 
     // If the vector optimization arm is removed, it falls back to full replacement in `changed`
     // We want to ensure we are using the optimized path (in `vector_deltas`)
-    assert!(delta.changed.is_empty(), "Should use sparse optimization, not full replacement");
+    assert!(
+        delta.changed.is_empty(),
+        "Should use sparse optimization, not full replacement"
+    );
     assert!(!delta.vector_deltas.is_empty(), "Should have vector delta");
 }
 
@@ -62,8 +73,14 @@ fn test_property_delta_dimension_mismatch_logic() {
     let delta = PropertyDelta::from_diff(&old, &new);
 
     // Should be in `changed` as a full replacement because dimensions differ
-    assert!(!delta.changed.is_empty(), "Dimension mismatch should cause full update");
-    assert!(delta.vector_deltas.is_empty(), "Dimension mismatch should not be a vector delta");
+    assert!(
+        !delta.changed.is_empty(),
+        "Dimension mismatch should cause full update"
+    );
+    assert!(
+        delta.vector_deltas.is_empty(),
+        "Dimension mismatch should not be a vector delta"
+    );
 }
 
 #[test]
@@ -73,13 +90,19 @@ fn test_property_delta_removed_logic() {
     let new = PropertyMapBuilder::new().build(); // "a" removed
 
     let delta = PropertyDelta::from_diff(&old, &new);
-    assert!(!delta.removed.is_empty(), "Removed property must be tracked");
+    assert!(
+        !delta.removed.is_empty(),
+        "Removed property must be tracked"
+    );
 
     let old = PropertyMapBuilder::new().insert("a", 1).build();
     let new = PropertyMapBuilder::new().insert("a", 1).build(); // "a" present
 
     let delta = PropertyDelta::from_diff(&old, &new);
-    assert!(delta.removed.is_empty(), "Present property must not be tracked as removed");
+    assert!(
+        delta.removed.is_empty(),
+        "Present property must not be tracked as removed"
+    );
 }
 
 #[test]
@@ -90,15 +113,30 @@ fn test_version_data_get_vector_snapshot_id_mutants() {
     // Case 1: Anchor with ID
     let mut anchor = VersionData::anchor(PropertyMapBuilder::new().build());
     anchor.set_vector_snapshot_id(42);
-    assert_eq!(anchor.get_vector_snapshot_id(), Some(42), "Must return set ID");
+    assert_eq!(
+        anchor.get_vector_snapshot_id(),
+        Some(42),
+        "Must return set ID"
+    );
 
     // Case 2: Anchor without ID
     let anchor_none = VersionData::anchor(PropertyMapBuilder::new().build());
-    assert_eq!(anchor_none.get_vector_snapshot_id(), None, "Must return None if not set");
+    assert_eq!(
+        anchor_none.get_vector_snapshot_id(),
+        None,
+        "Must return None if not set"
+    );
 
     // Case 3: Delta (always None)
-    let delta = VersionData::delta_from_diff(&PropertyMapBuilder::new().build(), &PropertyMapBuilder::new().build());
-    assert_eq!(delta.get_vector_snapshot_id(), None, "Delta must return None");
+    let delta = VersionData::delta_from_diff(
+        &PropertyMapBuilder::new().build(),
+        &PropertyMapBuilder::new().build(),
+    );
+    assert_eq!(
+        delta.get_vector_snapshot_id(),
+        None,
+        "Delta must return None"
+    );
 }
 
 #[test]
@@ -110,7 +148,7 @@ fn test_entity_version_methods_not_default() {
         NodeId::new(100).unwrap(),
         BiTemporalInterval::current(1000.into()),
         GLOBAL_INTERNER.intern("Node").unwrap(),
-        PropertyMapBuilder::new().build()
+        PropertyMapBuilder::new().build(),
     );
 
     assert_eq!(node.version_id(), VersionId::new(10).unwrap());
@@ -124,7 +162,7 @@ fn test_entity_version_methods_not_default() {
         GLOBAL_INTERNER.intern("Edge").unwrap(),
         NodeId::new(1).unwrap(),
         NodeId::new(2).unwrap(),
-        PropertyMapBuilder::new().build()
+        PropertyMapBuilder::new().build(),
     );
 
     assert_eq!(edge.version_id(), VersionId::new(20).unwrap());
