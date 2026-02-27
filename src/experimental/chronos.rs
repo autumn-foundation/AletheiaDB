@@ -494,9 +494,9 @@ mod stub_tests {
         expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_find_path_at_time() {
-        // Safety: Unsafe transmute to get a Chronos instance since new() panics.
-        // This is valid because Chronos is a ZST with PhantomData in the stub implementation.
-        let chronos: Chronos<'_> = unsafe { std::mem::transmute(()) };
+        let chronos = Chronos {
+            _marker: std::marker::PhantomData,
+        };
         let _ = chronos.find_path_at_time(
             NodeId::new(0).unwrap(),
             NodeId::new(1).unwrap(),
@@ -510,7 +510,9 @@ mod stub_tests {
         expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_node_volatility() {
-        let chronos: Chronos<'_> = unsafe { std::mem::transmute(()) };
+        let chronos = Chronos {
+            _marker: std::marker::PhantomData,
+        };
         let _ = chronos.node_volatility(
             NodeId::new(0).unwrap(),
             TimeRange::new(
@@ -526,7 +528,9 @@ mod stub_tests {
         expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_path_stability() {
-        let chronos: Chronos<'_> = unsafe { std::mem::transmute(()) };
+        let chronos = Chronos {
+            _marker: std::marker::PhantomData,
+        };
         let _ = chronos.path_stability(
             &[],
             TimeRange::new(

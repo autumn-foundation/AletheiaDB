@@ -419,8 +419,9 @@ mod stub_tests {
         expected = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_add_clue() {
-        // Safety: Mystery is a ZST in stub mode.
-        let mystery: Mystery = unsafe { std::mem::transmute(()) };
+        let mystery = Mystery {
+            _marker: std::marker::PhantomData,
+        };
         let clue = Clue::PropertyState {
             key: "test".to_string(),
             value: None,
@@ -433,11 +434,12 @@ mod stub_tests {
         expected = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_investigate() {
-        // Safety: Unsafe transmute to get a Sherlock instance since new() panics.
-        // This is valid because Sherlock is a ZST with PhantomData in the stub implementation.
-        let sherlock: Sherlock<'_> = unsafe { std::mem::transmute(()) };
-        // We also need a fake Mystery to pass in. Mystery is also ZST in stub mode.
-        let mystery: Mystery = unsafe { std::mem::transmute(()) };
+        let sherlock = Sherlock {
+            _marker: std::marker::PhantomData,
+        };
+        let mystery = Mystery {
+            _marker: std::marker::PhantomData,
+        };
         let _ = sherlock.investigate(NodeId::new(0).unwrap(), &mystery);
     }
 }

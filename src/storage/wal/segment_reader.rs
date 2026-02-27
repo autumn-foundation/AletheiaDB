@@ -724,16 +724,13 @@ pub(crate) fn parse_entry_at(
 /// Helper to deserialize and validate a NodeId from WAL buffer
 #[inline]
 fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<NodeId> {
-    let raw_id = u64::from_le_bytes([
-        buffer[offset],
-        buffer[offset + 1],
-        buffer[offset + 2],
-        buffer[offset + 3],
-        buffer[offset + 4],
-        buffer[offset + 5],
-        buffer[offset + 6],
-        buffer[offset + 7],
-    ]);
+    let bytes = buffer.get(offset..offset + 8).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(format!(
+            "Insufficient buffer size for NodeId in {}",
+            context
+        )))
+    })?;
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
     NodeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid node ID in WAL {}: {}",
@@ -745,16 +742,13 @@ fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<No
 /// Helper to deserialize and validate an EdgeId from WAL buffer
 #[inline]
 fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<EdgeId> {
-    let raw_id = u64::from_le_bytes([
-        buffer[offset],
-        buffer[offset + 1],
-        buffer[offset + 2],
-        buffer[offset + 3],
-        buffer[offset + 4],
-        buffer[offset + 5],
-        buffer[offset + 6],
-        buffer[offset + 7],
-    ]);
+    let bytes = buffer.get(offset..offset + 8).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(format!(
+            "Insufficient buffer size for EdgeId in {}",
+            context
+        )))
+    })?;
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
     EdgeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid edge ID in WAL {}: {}",
@@ -766,16 +760,13 @@ fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<Ed
 /// Helper to deserialize and validate a VersionId from WAL buffer
 #[inline]
 fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result<VersionId> {
-    let raw_id = u64::from_le_bytes([
-        buffer[offset],
-        buffer[offset + 1],
-        buffer[offset + 2],
-        buffer[offset + 3],
-        buffer[offset + 4],
-        buffer[offset + 5],
-        buffer[offset + 6],
-        buffer[offset + 7],
-    ]);
+    let bytes = buffer.get(offset..offset + 8).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(format!(
+            "Insufficient buffer size for VersionId in {}",
+            context
+        )))
+    })?;
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
     VersionId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid version ID in WAL {}: {}",
