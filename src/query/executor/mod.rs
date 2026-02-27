@@ -20,8 +20,10 @@ use super::planner::physical::{PhysicalOp, PhysicalPlan};
 pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
 pub use iterators::TemporalNodeScanIterator;
+// Added NodeLookupIterator and TraversalIterator to public exports for testing
 pub use iterators::{
-    FilterIterator, LimitIterator, ProjectIterator, ProvenanceFilterIterator, VectorRerankIterator,
+    FilterIterator, LimitIterator, NodeLookupIterator, ProjectIterator, ProvenanceFilterIterator,
+    TraversalIterator, VectorRerankIterator,
 };
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 

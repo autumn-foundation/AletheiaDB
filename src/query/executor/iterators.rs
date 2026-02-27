@@ -54,6 +54,7 @@ pub struct NodeLookupIterator {
 }
 
 impl NodeLookupIterator {
+    /// Create a new NodeLookupIterator.
     pub fn new(node_ids: Vec<NodeId>, current: Arc<CurrentStorage>) -> Self {
         NodeLookupIterator {
             node_ids: node_ids.into_iter(),
@@ -620,6 +621,7 @@ pub struct TraversalIterator {
 }
 
 impl TraversalIterator {
+    /// Create a new TraversalIterator.
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,

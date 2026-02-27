@@ -107,7 +107,7 @@ fn test_traversal_cycle_detection() {
 #[test]
 fn test_traversal_depth_limit() {
     let (current, historical) = create_test_env();
-    let (a, b, c, d, e) = setup_graph(&current);
+    let (a, _b, c, _d, e) = setup_graph(&current);
 
     // A -> B -> C
     // A -> D -> E -> B
