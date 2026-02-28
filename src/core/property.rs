@@ -2191,6 +2191,55 @@ mod tests {
     }
 
     #[test]
+    fn test_property_value_partial_eq_distinct_allocations() {
+        // String
+        let s1 = PropertyValue::String(Arc::from("hello".to_string()));
+        let s2 = PropertyValue::String(Arc::from("hello".to_string()));
+        if let (PropertyValue::String(a), PropertyValue::String(b)) = (&s1, &s2) {
+            assert!(!Arc::ptr_eq(a, b), "Arcs must be distinct");
+        }
+        assert_eq!(s1, s2, "Strings with distinct allocations should be equal");
+
+        // Bytes
+        let b1 = PropertyValue::Bytes(Arc::from(vec![1, 2, 3]));
+        let b2 = PropertyValue::Bytes(Arc::from(vec![1, 2, 3]));
+        if let (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) = (&b1, &b2) {
+            assert!(!Arc::ptr_eq(a, b), "Arcs must be distinct");
+        }
+        assert_eq!(b1, b2, "Bytes with distinct allocations should be equal");
+
+        // Array
+        let a1 = PropertyValue::Array(Arc::new(vec![PropertyValue::Int(42)]));
+        let a2 = PropertyValue::Array(Arc::new(vec![PropertyValue::Int(42)]));
+        if let (PropertyValue::Array(a), PropertyValue::Array(b)) = (&a1, &a2) {
+            assert!(!Arc::ptr_eq(a, b), "Arcs must be distinct");
+        }
+        assert_eq!(a1, a2, "Arrays with distinct allocations should be equal");
+
+        // Vector
+        let v1 = PropertyValue::Vector(Arc::from(vec![1.0f32, 2.0, 3.0]));
+        let v2 = PropertyValue::Vector(Arc::from(vec![1.0f32, 2.0, 3.0]));
+        if let (PropertyValue::Vector(a), PropertyValue::Vector(b)) = (&v1, &v2) {
+            assert!(!Arc::ptr_eq(a, b), "Arcs must be distinct");
+        }
+        assert_eq!(v1, v2, "Vectors with distinct allocations should be equal");
+
+        // SparseVector
+        use crate::core::vector::SparseVec;
+        let sv1 =
+            PropertyValue::SparseVector(Arc::new(SparseVec::new(vec![0], vec![1.0], 5).unwrap()));
+        let sv2 =
+            PropertyValue::SparseVector(Arc::new(SparseVec::new(vec![0], vec![1.0], 5).unwrap()));
+        if let (PropertyValue::SparseVector(a), PropertyValue::SparseVector(b)) = (&sv1, &sv2) {
+            assert!(!Arc::ptr_eq(a, b), "Arcs must be distinct");
+        }
+        assert_eq!(
+            sv1, sv2,
+            "SparseVectors with distinct allocations should be equal"
+        );
+    }
+
+    #[test]
     fn test_vector_in_property_map() {
         let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
         let map = PropertyMapBuilder::new()

@@ -27,3 +27,9 @@
 **Summary:** Default implementations (returning `None` or `false`) for `EntityVersion` methods like `is_anchor`, `prev_version`, etc., survived. This suggests generic tests for this trait are missing or not exercising concrete implementations.
 **Diagnosis:** WEAK_TEST - No test iterates through the version chain using the trait methods on `NodeVersion` / `EdgeVersion`.
 **Kill Shot:** Added `test_entity_version_trait_round_trip_links_for_node_and_edge` to verify trait methods correctly proxy to struct fields.
+
+**[Weak Test Coverage in PropertyValue Equality]**
+**Module:** src/core/property.rs
+**Summary:** The mutants replacing `||` with `&&` in `PartialEq::eq` for `PropertyValue` survived. This affected `String`, `Bytes`, `Array`, `Vector`, and `SparseVector` variants which compare values using `Arc::ptr_eq(a, b) || a == b`. If this could be mutated to `&&` without tests failing, it indicates a lack of testing for equal values that use distinct heap allocations (different `Arc` addresses).
+**Diagnosis:** WEAK_TEST - No negative test cases explicitly vary only the heap allocation (i.e. having identical values inside different `Arc` references). The equality short-circuit mechanism wasn't completely tested.
+**Kill Shot:** Added `test_property_value_partial_eq_distinct_allocations` which manually instantiates pairs of each variant type with equal content but distinct `Arc` pointers.
