@@ -4045,4 +4045,168 @@ mod sentry_tests {
             "Distinct arrays containing NaN should be semantically equal"
         );
     }
+
+    #[test]
+    fn test_deserialize_recursion_exact_boundary() {
+        // Test exactly AT the limit (should succeed)
+        // [TAG_ARRAY, 1, TAG_ARRAY, 1, ..., TAG_NULL]
+        // Depth 0: Array(1 element) -> Depth 1
+        // ...
+        // Depth 99: Array(1 element) -> Depth 100
+        // Depth 100: Null
+        // Total depth = 100 (allowed)
+
+        let mut bytes = Vec::new();
+        let depth = MAX_RECURSION_DEPTH;
+
+        for _ in 0..depth {
+            bytes.push(TAG_ARRAY);
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+        }
+        bytes.push(TAG_NULL);
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(
+            result.is_ok(),
+            "Should succeed at exactly MAX_RECURSION_DEPTH ({})",
+            MAX_RECURSION_DEPTH
+        );
+
+        // Test exactly ONE OVER the limit (should fail)
+        let mut bytes_over = Vec::new();
+        let depth_over = MAX_RECURSION_DEPTH + 1;
+
+        for _ in 0..depth_over {
+            bytes_over.push(TAG_ARRAY);
+            bytes_over.extend_from_slice(&1u32.to_le_bytes());
+        }
+        bytes_over.push(TAG_NULL);
+
+        let result_over = PropertyValue::deserialize(&bytes_over);
+        assert!(
+            result_over.is_err(),
+            "Should fail at MAX_RECURSION_DEPTH + 1"
+        );
+        let err = result_over.unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth limit exceeded"),
+            "Error should be specific: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_deserialize_buffer_boundary_conditions() {
+        // Bool: Needs 2 bytes [TAG, VAL]
+        assert!(PropertyValue::deserialize(&[TAG_BOOL]).is_err());
+        assert!(PropertyValue::deserialize(&[TAG_BOOL, 0]).is_ok());
+
+        // Int: Needs 9 bytes [TAG, 8 bytes]
+        let mut int_bytes = vec![TAG_INT];
+        int_bytes.extend_from_slice(&[0u8; 7]); // 8 bytes total
+        assert!(PropertyValue::deserialize(&int_bytes).is_err());
+        int_bytes.push(0); // 9 bytes total
+        assert!(PropertyValue::deserialize(&int_bytes).is_ok());
+
+        // Float: Needs 9 bytes
+        let mut float_bytes = vec![TAG_FLOAT];
+        float_bytes.extend_from_slice(&[0u8; 7]);
+        assert!(PropertyValue::deserialize(&float_bytes).is_err());
+        float_bytes.push(0);
+        assert!(PropertyValue::deserialize(&float_bytes).is_ok());
+
+        // String: Needs 5 bytes min [TAG, LEN(4)]
+        let mut str_bytes = vec![TAG_STRING];
+        str_bytes.extend_from_slice(&[0u8; 3]);
+        assert!(PropertyValue::deserialize(&str_bytes).is_err()); // 4 bytes
+        str_bytes.push(0); // 5 bytes (len=0)
+        assert!(PropertyValue::deserialize(&str_bytes).is_ok());
+
+        // String with data: [TAG, LEN=1, DATA] -> 6 bytes
+        let mut str_data_bytes = vec![TAG_STRING];
+        str_data_bytes.extend_from_slice(&1u32.to_le_bytes());
+        assert!(PropertyValue::deserialize(&str_data_bytes).is_err()); // 5 bytes, need 6
+        str_data_bytes.push(b'a');
+        assert!(PropertyValue::deserialize(&str_data_bytes).is_ok());
+
+        // Bytes: Needs 5 bytes min
+        let mut b_bytes = vec![TAG_BYTES];
+        b_bytes.extend_from_slice(&[0u8; 3]);
+        assert!(PropertyValue::deserialize(&b_bytes).is_err());
+        b_bytes.push(0); // len=0
+        assert!(PropertyValue::deserialize(&b_bytes).is_ok());
+
+        // Array: Needs 5 bytes min
+        let mut arr_bytes = vec![TAG_ARRAY];
+        arr_bytes.extend_from_slice(&[0u8; 3]);
+        assert!(PropertyValue::deserialize(&arr_bytes).is_err());
+        arr_bytes.push(0); // count=0
+        assert!(PropertyValue::deserialize(&arr_bytes).is_ok());
+
+        // Vector: Needs 5 bytes (TAG + DIM) + data
+        // Empty vector (dim=0): 5 bytes
+        let mut vec_bytes = vec![TAG_VECTOR];
+        vec_bytes.extend_from_slice(&[0u8; 3]);
+        assert!(PropertyValue::deserialize(&vec_bytes).is_err());
+        vec_bytes.push(0); // dim=0
+        assert!(PropertyValue::deserialize(&vec_bytes).is_ok());
+
+        // Vector with dim=1: 5 + 4 = 9 bytes
+        let mut vec_1_bytes = vec![TAG_VECTOR];
+        vec_1_bytes.extend_from_slice(&1u32.to_le_bytes()); // dim=1
+        vec_1_bytes.extend_from_slice(&[0u8; 3]); // 3 bytes data
+        assert!(PropertyValue::deserialize(&vec_1_bytes).is_err()); // 8 bytes
+        vec_1_bytes.push(0); // 4 bytes data
+        assert!(PropertyValue::deserialize(&vec_1_bytes).is_ok());
+    }
+
+    #[test]
+    fn test_property_map_duplicate_key_rejection() {
+        // Construct a buffer with duplicate keys manually
+        // [count: 2][key: "a"][val: 1][key: "a"][val: 2]
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&2u32.to_le_bytes()); // Count: 2
+
+        // Entry 1: "a" -> 1
+        let key = "a";
+        buffer.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(key.as_bytes());
+        PropertyValue::Int(1).serialize_into(&mut buffer).unwrap();
+
+        // Entry 2: "a" -> 2 (Duplicate!)
+        buffer.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(key.as_bytes());
+        PropertyValue::Int(2).serialize_into(&mut buffer).unwrap();
+
+        // Deserialization MUST fail
+        let result = PropertyMap::deserialize(&buffer);
+        assert!(
+            result.is_err(),
+            "Deserialization must fail on duplicate keys to prevent data corruption/ambiguity"
+        );
+        match result {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("Duplicate property key"),
+                    "Error should mention duplicate key"
+                );
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_property_value_partial_eq_nan_semantics() {
+        // Ensure PartialEq behaves as expected (IEEE 754: NaN != NaN)
+        // This is crucial because some mutants might try to relax this.
+        let f1 = PropertyValue::Float(f64::NAN);
+        let f2 = PropertyValue::Float(f64::NAN);
+        assert_ne!(f1, f2, "PartialEq must respect IEEE 754 NaN != NaN");
+
+        // But semantic equality treats them as equal
+        assert!(
+            f1.semantically_equal(&f2),
+            "semantically_equal should treat NaN as equal"
+        );
+    }
 }

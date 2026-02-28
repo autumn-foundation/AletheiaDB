@@ -98,6 +98,9 @@ pub mod serialization;
 mod sentry_tests;
 
 #[cfg(test)]
+mod sentry_simd_tests;
+
+#[cfg(test)]
 mod sentry_safety_tests;
 
 #[cfg(test)]
