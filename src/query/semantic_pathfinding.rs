@@ -3,9 +3,25 @@
 //! This module implements pathfinding algorithms that consider semantic similarity
 //! (vector embeddings) as part of the cost function.
 //!
+//! # The Story of Semantic Pathfinding
+//!
+//! Traditional graph pathfinding algorithms like Dijkstra's or A* are brilliant at finding the *shortest*
+//! physical path between two nodes. But in a knowledge graph, the "shortest" path isn't always the
+//! most *relevant* one.
+//!
+//! Imagine searching for a path between `Node(Alice)` and `Node(Machine Learning)`. A traditional algorithm
+//! might route you through `Node(Bob)` simply because Alice knows Bob, and Bob read a book on Machine Learning.
+//! But what if Alice has a deep connection to `Node(Data Science)`, which then links to `Node(Machine Learning)`?
+//!
+//! Semantic Pathfinding solves this by combining structural graph traversal with vector similarity.
+//! By treating the semantic distance (e.g., cosine distance) between a node's embedding and a *target concept*
+//! as an edge weight penalty, the algorithm naturally "steers" the traversal through nodes that are
+//! conceptually related to what you are looking for. It's like asking the algorithm to "stay on topic"
+//! while it searches the graph.
+//!
 //! # Features
 //! - **Semantic A***: Finds paths where nodes are semantically similar to a query concept.
-//! - **Time-Travel Pathfinding**: Finds paths that were valid at a specific point in time.
+//! - **Time-Travel Pathfinding**: Finds paths that were valid at a specific point in time using the bi-temporal model.
 
 use crate::core::error::Result;
 use crate::core::id::NodeId;
@@ -48,14 +64,43 @@ impl PartialOrd for State {
     }
 }
 
-/// A pathfinder that uses semantic similarity as a heuristic/cost.
+/// A pathfinder that uses semantic similarity as a traversal cost.
+///
+/// This engine wraps a standard `GraphView` and uses Dijkstra's algorithm augmented with vector distance
+/// to bias paths toward a specific semantic concept.
+///
+/// ## Examples
+///
+/// ```rust,no_run
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::query::semantic_pathfinding::SemanticPathfinder;
+/// use aletheiadb::core::id::NodeId;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+/// let start_node = NodeId::new(1).unwrap();
+/// let target_node = NodeId::new(100).unwrap();
+/// let query_concept = vec![0.1, 0.5, 0.9]; // e.g., an embedding for "AI"
+///
+/// let pathfinder = SemanticPathfinder::new(&db, "embedding");
+///
+/// // Find a path up to 5 hops deep that stays semantically close to "AI"
+/// if let Some(path) = pathfinder.find_path(start_node, target_node, &query_concept, 5, false)? {
+///     println!("Found semantic path: {:?}", path);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct SemanticPathfinder<'a, G: GraphView + ?Sized> {
     db: &'a G,
     vector_property: String,
 }
 
 impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
-    /// Create a new SemanticPathfinder.
+    /// Creates a new `SemanticPathfinder`.
+    ///
+    /// The `vector_property` tells the pathfinder which property key to inspect when retrieving a node's
+    /// embedding to compute its semantic cost against the query vector.
     ///
     /// # Arguments
     /// * `db` - Reference to the graph view (e.g., database instance).
@@ -107,11 +152,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             }
 
             // Optimization: Skip if we found a better path already
-            #[allow(clippy::collapsible_if)]
-            if let Some(&d) = dist.get(&node) {
-                if cost > d {
-                    continue;
-                }
+            if dist.get(&node).is_some_and(|&d| cost > d) {
+                continue;
             }
 
             // Check depth limit
@@ -206,11 +248,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
                 return Ok(Some(self.reconstruct_path(came_from, end)));
             }
 
-            #[allow(clippy::collapsible_if)]
-            if let Some(&d) = dist.get(&node) {
-                if cost > d {
-                    continue;
-                }
+            if dist.get(&node).is_some_and(|&d| cost > d) {
+                continue;
             }
 
             // Check depth limit to prevent infinite loops
