@@ -212,3 +212,7 @@ pub mod oracle;
 #[cfg(feature = "nova")]
 /// Spectre: Semantic Perspective Engine.
 pub mod spectre;
+
+#[cfg(feature = "nova")]
+/// Polaris: Semantic Compass & Dimensionality Reduction.
+pub mod polaris;
