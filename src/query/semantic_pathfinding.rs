@@ -580,6 +580,66 @@ mod tests {
         use super::*;
 
         #[test]
+        fn test_pathfinding_suboptimal_path_skipped() {
+            // This test ensures we hit the `continue` when a suboptimal path is popped from PQ.
+            // Setup a diamond graph: Start -> A -> End, Start -> B -> End.
+            // B has very bad semantic cost, so Start->A is explored first.
+            // Actually, we need Start -> A -> Target, and Start -> Target directly.
+            // The direct path is slightly worse than going through A, so A is explored first,
+            // Target is added to PQ via A, then Target is added to PQ via Start.
+            // Wait, Dijkstra always pops minimum cost first.
+            // So if Target is added to PQ with cost 10 (via Start) and cost 5 (via A).
+            // Cost 5 is popped first, Target is found and RETURNED immediately since it's the end.
+            // If Target is the end, it returns immediately.
+            // So to pop a suboptimal state *without* returning, the node must NOT be the end node.
+
+            // Graph: Start -> A -> Middle -> End
+            //        Start -> B -> Middle
+            // A has semantic cost 0.1
+            // B has semantic cost 1.0
+            // Start -> A (cost 0.1) -> Middle (cost 0.1 + 0.1 = 0.2)
+            // Start -> B (cost 1.0) -> Middle (cost 1.0 + 0.1 = 1.1)
+            // PQ will have: (0.0, Start)
+            // Pop Start. Push A(cost 0.1+structural), Push B(cost 1.0+structural).
+            // Pop A. Push Middle(cost 0.2+structural).
+            // Pop Middle. Push End.
+            // But wait, if we pop Middle, we push End, then pop End and return. B is never popped!
+
+            // To make B be popped and push Middle (cost 1.1), but Middle was ALREADY visited via A:
+            // We need B's cost to be SMALLER than End's cost, so B is popped BEFORE End is reached.
+            // Let End be very far away or have high cost.
+
+            let db = create_test_db();
+
+            let start = db.create_node("Start", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0, 0.0]).build()).unwrap();
+            let a = db.create_node("A", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0, 0.0]).build()).unwrap();
+            let b = db.create_node("B", PropertyMapBuilder::new().insert_vector("embedding", &[0.5, 0.5, 0.0]).build()).unwrap();
+            let middle = db.create_node("Middle", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0, 0.0]).build()).unwrap();
+
+            // End has a very bad semantic cost, so it's pushed with high cost
+            let end = db.create_node("End", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 1.0, 0.0]).build()).unwrap();
+
+            db.create_edge(start, a, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+            db.create_edge(start, b, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+
+            db.create_edge(a, middle, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+            db.create_edge(b, middle, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+
+            db.create_edge(middle, end, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+
+            let query = vec![1.0, 0.0, 0.0];
+            let pathfinder = SemanticPathfinder::new(&db, "embedding");
+
+            let path = pathfinder.find_path(start, end, &query, 10, false).unwrap();
+            assert!(path.is_some());
+            assert_eq!(path.unwrap(), vec![start, a, middle, end]);
+
+            // Also hit `find_path_at_time`
+            let path_temporal = pathfinder.find_path_at_time(start, end, &query, crate::core::temporal::time::now(), 10, false).unwrap();
+            assert!(path_temporal.is_some());
+        }
+
+        #[test]
         fn test_pathfinding_zero_max_depth() {
             let db = create_test_db();
             // Create a minimal graph A -> B
