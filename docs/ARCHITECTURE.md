@@ -71,6 +71,36 @@ C4Context
   Rel(aletheiadb, filesystem, "Persists", "mmap / fsync")
 ```
 
+### Module Dependencies
+
+```mermaid
+classDiagram
+    namespace API {
+        class api
+    }
+    namespace Index {
+        class index
+    }
+    namespace Storage {
+        class storage
+    }
+    namespace Core {
+        class core
+        class StorageObserver
+        class VersionMetadata
+        class TxId
+    }
+
+    api --> storage : Uses
+    index --> storage : Uses
+    storage --> core : Uses
+    index --> core : Uses
+
+    %% Removed storage <-> index cycle (StorageObserver moved to Core)
+    %% Removed core <-> storage cycle (VersionMetadata moved to Core)
+    %% Removed storage -> api dependency (TxId moved to Core)
+```
+
 ## Design Patterns
 
 ### Hybrid Storage Architecture
