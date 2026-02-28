@@ -611,21 +611,61 @@ mod tests {
 
             let db = create_test_db();
 
-            let start = db.create_node("Start", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0, 0.0]).build()).unwrap();
-            let a = db.create_node("A", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0, 0.0]).build()).unwrap();
-            let b = db.create_node("B", PropertyMapBuilder::new().insert_vector("embedding", &[0.5, 0.5, 0.0]).build()).unwrap();
-            let middle = db.create_node("Middle", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0, 0.0]).build()).unwrap();
+            let start = db
+                .create_node(
+                    "Start",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[1.0, 0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            let a = db
+                .create_node(
+                    "A",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[1.0, 0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            let b = db
+                .create_node(
+                    "B",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.5, 0.5, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            let middle = db
+                .create_node(
+                    "Middle",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[1.0, 0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
 
             // End has a very bad semantic cost, so it's pushed with high cost
-            let end = db.create_node("End", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 1.0, 0.0]).build()).unwrap();
+            let end = db
+                .create_node(
+                    "End",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.0, 1.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
 
-            db.create_edge(start, a, "NEXT", PropertyMapBuilder::new().build()).unwrap();
-            db.create_edge(start, b, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+            db.create_edge(start, a, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+            db.create_edge(start, b, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
 
-            db.create_edge(a, middle, "NEXT", PropertyMapBuilder::new().build()).unwrap();
-            db.create_edge(b, middle, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+            db.create_edge(a, middle, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
+            db.create_edge(b, middle, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
 
-            db.create_edge(middle, end, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+            db.create_edge(middle, end, "NEXT", PropertyMapBuilder::new().build())
+                .unwrap();
 
             let query = vec![1.0, 0.0, 0.0];
             let pathfinder = SemanticPathfinder::new(&db, "embedding");
@@ -635,7 +675,16 @@ mod tests {
             assert_eq!(path.unwrap(), vec![start, a, middle, end]);
 
             // Also hit `find_path_at_time`
-            let path_temporal = pathfinder.find_path_at_time(start, end, &query, crate::core::temporal::time::now(), 10, false).unwrap();
+            let path_temporal = pathfinder
+                .find_path_at_time(
+                    start,
+                    end,
+                    &query,
+                    crate::core::temporal::time::now(),
+                    10,
+                    false,
+                )
+                .unwrap();
             assert!(path_temporal.is_some());
         }
 
