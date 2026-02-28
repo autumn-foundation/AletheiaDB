@@ -168,33 +168,37 @@ impl QueryResults {
     }
 
     /// Collect all nodes from results
-    pub fn collect_nodes(self) -> Result<Vec<Node>> {
-        let rows = self.collect_all()?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                if let EntityResult::Node(n) = row.entity {
-                    Some(n)
-                } else {
-                    None
-                }
-            })
-            .collect())
+    ///
+    /// # Performance
+    ///
+    /// ⚡ This avoids allocating an intermediate `Vec<QueryRow>` by extracting
+    /// nodes directly from the iterator, reducing memory allocations.
+    pub fn collect_nodes(mut self) -> Result<Vec<Node>> {
+        let mut nodes = Vec::new();
+        while let Some(row_result) = self.iterator.next() {
+            let row = row_result?;
+            if let EntityResult::Node(n) = row.entity {
+                nodes.push(n);
+            }
+        }
+        Ok(nodes)
     }
 
     /// Collect nodes with their scores
-    pub fn collect_nodes_with_scores(self) -> Result<Vec<(Node, f32)>> {
-        let rows = self.collect_all()?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
-                    Some((n, score))
-                } else {
-                    None
-                }
-            })
-            .collect())
+    ///
+    /// # Performance
+    ///
+    /// ⚡ This avoids allocating an intermediate `Vec<QueryRow>` by extracting
+    /// nodes and scores directly from the iterator, reducing memory allocations.
+    pub fn collect_nodes_with_scores(mut self) -> Result<Vec<(Node, f32)>> {
+        let mut results = Vec::new();
+        while let Some(row_result) = self.iterator.next() {
+            let row = row_result?;
+            if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
+                results.push((n, score));
+            }
+        }
+        Ok(results)
     }
 
     /// Take at most n results
