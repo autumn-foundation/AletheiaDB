@@ -1,12 +1,12 @@
 //! String interner persistence.
 //!
-//! This module handles the serialization and deserialization of the [`GLOBAL_INTERNER`](crate::core::GLOBAL_INTERNER).
+//! This module handles the serialization and deserialization of the [`GLOBAL_INTERNER`].
 //! The interner is critical for the database's operation as it maps all string labels and property keys to
 //! compact integer IDs.
 //!
 //! # Format
 //!
-//! The interner is saved as a Bitcode-encoded [`StringInternerData`](super::formats::StringInternerData) struct,
+//! The interner is saved as a Bitcode-encoded [`StringInternerData`] struct,
 //! followed by a 4-byte CRC32 checksum.
 //!
 //! ```text

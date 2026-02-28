@@ -1,8 +1,31 @@
 //! Filter-Scan Fusion Optimization
 //!
-//! When a `Filter(Eq { key, value })` sits directly above a `Scan(NodeScan { label: Some(l) })`,
-//! fuse them into a single `Scan(PropertyScan { label, key, value })`. This avoids the full
-//! scan + per-node predicate evaluation by delegating to `CurrentStorage::find_nodes_by_property`.
+//! The "Filter-Scan Fusion" is an essential query planner rule that dramatically accelerates
+//! query execution. When a logical plan requires finding a node by a specific label and a
+//! specific property value, the naïve approach is to scan *all* nodes of that label, and
+//! apply a filter to each one in memory.
+//!
+//! Instead, this rule intercepts a `Filter(Eq { key, value })` operation sitting directly
+//! above a `Scan(NodeScan { label: Some(l) })` and fuses them into a single, highly-optimized
+//! `Scan(PropertyScan { label, key, value })` operation.
+//!
+//! By delegating this combined operation to the storage layer
+//! (`CurrentStorage::find_nodes_by_property`), AletheiaDB can utilize internal property
+//! indices or optimized storage layouts, turning an $O(N)$ full table scan into an $O(1)$
+//! or $O(\log N)$ targeted lookup.
+//!
+//! # Example Transformation
+//!
+//! **Before (Naïve Plan)**:
+//! ```text
+//! Filter(Eq { key: "name", value: "Alice" })
+//!   └─ NodeScan { label: Some("Person") }
+//! ```
+//!
+//! **After (Optimized Plan)**:
+//! ```text
+//! PropertyScan { label: "Person", key: "name", value: "Alice" }
+//! ```
 
 use crate::core::error::Result;
 use crate::query::ir::Predicate;
@@ -10,22 +33,50 @@ use crate::query::plan::{LogicalOp, LogicalPlan, ScanOp, UnaryOp};
 
 use super::{OptimizationRule, Statistics};
 
-/// Fuses `Filter(Eq)` + `NodeScan(label)` into a single `PropertyScan`.
+/// Fuses a `Filter(Eq)` operation and a `NodeScan(label)` operation into a single `PropertyScan`.
 ///
-/// # Example Transformation
+/// This optimizer rule traverses the logical query plan tree looking for opportunities to
+/// push down equality predicates directly into the storage scan phase.
 ///
-/// **Before**:
-/// ```text
-/// Filter(Eq { key: "name", value: "Alice" })
-///   NodeScan { label: Some("Person") }
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::plan::{LogicalPlan, LogicalOp, ScanOp, UnaryOp};
+/// use aletheiadb::query::ir::Predicate;
+/// use aletheiadb::query::planner::rules::{OptimizationRule, FilterScanFusion, Statistics};
+///
+/// // Create a naïve query plan: "Scan all Persons, then filter for name = Alice"
+/// let naive_plan = LogicalPlan::new(LogicalOp::unary(
+///     UnaryOp::Filter(Predicate::eq("name", "Alice")),
+///     LogicalOp::Scan(ScanOp::NodeScan {
+///         label: Some("Person".to_string()),
+///         estimated_rows: None,
+///     }),
+/// ));
+///
+/// // Apply the FilterScanFusion rule
+/// let rule = FilterScanFusion;
+/// let stats = Statistics::default();
+/// let optimized_plan = rule.apply(&naive_plan, &stats).unwrap().unwrap();
+///
+/// // The plan is now fused into a single PropertyScan
+/// match &optimized_plan.root {
+///     LogicalOp::Scan(ScanOp::PropertyScan { label, key, .. }) => {
+///         assert_eq!(label, "Person");
+///         assert_eq!(key, "name");
+///     }
+///     _ => panic!("Plan was not fused!"),
+/// }
 /// ```
 ///
-/// **After**:
-/// ```text
-/// PropertyScan { label: "Person", key: "name", value: "Alice" }
-/// ```
+/// ## Panics
+/// This rule itself does not panic under normal execution.
 ///
-/// Non-Eq predicates and scans without a label are left unchanged.
+/// ## Limits & Exclusions
+/// - Non-Eq predicates (e.g., `Gt`, `Lt`, `Like`) are not currently fused and are left unchanged.
+/// - Scans without a label (e.g., scan all nodes in the database) are not fused, as property
+///   scans require a label context for optimal performance.
+/// - Internal system keys (starting with `_`, like `_label`) are ignored.
 pub struct FilterScanFusion;
 
 impl OptimizationRule for FilterScanFusion {

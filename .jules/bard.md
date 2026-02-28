@@ -51,3 +51,7 @@
 ## 2026-02-25 - The Case of the Sequential Scatter
 **Confusion:** The architecture documentation described a "Scatter-Gather" query executor and "Distributed Transactions", implying high-concurrency parallelism. However, the implementation actually processes shards sequentially (one by one), meaning latency scales linearly ((N)$) rather than remaining constant.
 **Clarification:** Updated `src/storage/sharding/executor.rs`, `coordinator.rs`, and `network.rs` to explicitly document the sequential, blocking nature of the current implementation. Added performance warnings to the `README.md` to set correct expectations for Phase 1 sharding.
+
+## 2026-10-27 - The Filter-Scan Fusion Mystery
+**Confusion:** The purpose and performance impact of the `FilterScanFusion` optimization rule in `src/query/planner/rules/filter_scan_fusion.rs` were not fully explained. It was unclear why a standalone `NodeScan` combined with a `Filter` operation could be heavily unoptimized.
+**Clarification:** Added a detailed module-level narrative and an executable doc-test in `src/query/planner/rules/filter_scan_fusion.rs` to explain how delegating this query to `CurrentStorage::find_nodes_by_property` turns an O(N) full table scan into an O(1) or O(log N) lookup.
