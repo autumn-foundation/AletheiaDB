@@ -169,32 +169,25 @@ impl QueryResults {
 
     /// Collect all nodes from results
     pub fn collect_nodes(self) -> Result<Vec<Node>> {
-        let rows = self.collect_all()?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                if let EntityResult::Node(n) = row.entity {
-                    Some(n)
-                } else {
-                    None
-                }
-            })
-            .collect())
+        let mut nodes = Vec::new();
+        for row in self {
+            if let EntityResult::Node(n) = row?.entity {
+                nodes.push(n);
+            }
+        }
+        Ok(nodes)
     }
 
     /// Collect nodes with their scores
     pub fn collect_nodes_with_scores(self) -> Result<Vec<(Node, f32)>> {
-        let rows = self.collect_all()?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
-                    Some((n, score))
-                } else {
-                    None
-                }
-            })
-            .collect())
+        let mut nodes = Vec::new();
+        for row in self {
+            let row = row?;
+            if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
+                nodes.push((n, score));
+            }
+        }
+        Ok(nodes)
     }
 
     /// Take at most n results
