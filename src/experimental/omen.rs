@@ -98,6 +98,10 @@ impl<'a> Omen<'a> {
         };
 
         // 2. Physics Math
+        if pos_a.len() != pos_b.len() {
+            return Ok(None);
+        }
+
         // Relative Position P = Pb - Pa (at t=0, which is window.end)
         let rel_pos: Vec<f32> = pos_b.iter().zip(pos_a.iter()).map(|(b, a)| b - a).collect();
 
@@ -412,6 +416,63 @@ mod tests {
 
         assert!(!encounter.is_past);
         assert!(encounter.predicted_distance < 0.01);
+    }
+
+    #[test]
+    fn test_omen_dimension_mismatch() {
+        let db = AletheiaDB::new().unwrap();
+
+        // Node A: 2D vector
+        let a = db
+            .create_node(
+                "A",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        // Node B: 3D vector
+        let b = db
+            .create_node(
+                "B",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(10));
+        let t_start = time::now();
+        std::thread::sleep(Duration::from_millis(50));
+
+        db.write(|tx| {
+            tx.update_node(
+                a,
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 0.0])
+                    .build(),
+            )
+        })
+        .unwrap();
+
+        db.write(|tx| {
+            tx.update_node(
+                b,
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 1.0, 1.0])
+                    .build(),
+            )
+        })
+        .unwrap();
+
+        let t_end = time::now();
+        let omen = Omen::new(&db);
+        let window = TimeRange::new(t_start, t_end).unwrap();
+
+        let encounter = omen.predict_encounter(a, b, window, "vec").unwrap();
+
+        // Should return None due to dimension mismatch
+        assert!(encounter.is_none());
     }
 
     #[test]
