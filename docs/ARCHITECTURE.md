@@ -73,6 +73,34 @@ C4Context
 
 ## Design Patterns
 
+### Module Dependencies
+
+```mermaid
+classDiagram
+    namespace DB {
+        class AletheiaDB
+        class VectorIndexBuilder
+    }
+    namespace API {
+        class WriteTransaction
+        class ReadTransaction
+    }
+    namespace Storage {
+        class CurrentStorage
+        class HistoricalStorage
+    }
+    namespace Core {
+        class id
+        class version
+        class error
+    }
+
+    DB --> API : Uses Transactions
+    API --> Storage : Applies Changes
+    Storage --> Core : Uses Domain Primitives (TxId)
+    DB --> Core : Uses Domain Primitives
+```
+
 ### Hybrid Storage Architecture
 
 ```mermaid
