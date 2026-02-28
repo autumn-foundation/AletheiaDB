@@ -207,7 +207,11 @@ impl<'a> Omen<'a> {
 
         for v in &history.versions {
             let vt_start = v.temporal.valid_time().start().wallclock();
+            // Since we aren't using #![feature(let_chains)], we suppress the
+            // `collapsible_if` lint here to avoid build failures with stable Rust.
+            #[allow(clippy::collapsible_if)]
             if vt_start <= time.wallclock() && vt_start >= best_time {
+                #[allow(clippy::collapsible_if)]
                 if let Some(val) = v.properties.get(property) {
                     if let Some(vec) = val.as_vector() {
                         best_vec = Some(vec.to_vec());

@@ -43,7 +43,8 @@ use super::{OptimizationRule, Statistics};
 /// ```rust
 /// use aletheiadb::query::plan::{LogicalPlan, LogicalOp, ScanOp, UnaryOp};
 /// use aletheiadb::query::ir::Predicate;
-/// use aletheiadb::query::planner::rules::{OptimizationRule, FilterScanFusion, Statistics};
+/// use aletheiadb::query::planner::rules::{OptimizationRule, FilterScanFusion};
+/// use aletheiadb::query::planner::stats::Statistics;
 ///
 /// // Create a naïve query plan: "Scan all Persons, then filter for name = Alice"
 /// let naive_plan = LogicalPlan::new(LogicalOp::unary(
