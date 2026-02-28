@@ -96,6 +96,60 @@ pub enum BufferedWrite {
     },
 }
 
+impl BufferedWrite {
+    /// Return the node ID if this operation applies to a node
+    pub fn node_id(&self) -> Option<NodeId> {
+        match self {
+            Self::CreateNode { node_id, .. } => Some(*node_id),
+            Self::UpdateNode { node_id, .. } => Some(*node_id),
+            Self::DeleteNode { node_id, .. } => Some(*node_id),
+            _ => None,
+        }
+    }
+
+    /// Return the edge ID if this operation applies to an edge
+    pub fn edge_id(&self) -> Option<EdgeId> {
+        match self {
+            Self::CreateEdge { edge_id, .. } => Some(*edge_id),
+            Self::UpdateEdge { edge_id, .. } => Some(*edge_id),
+            Self::DeleteEdge { edge_id, .. } => Some(*edge_id),
+            _ => None,
+        }
+    }
+
+    /// Return a reference to the properties map if the operation has one
+    pub fn properties(&self) -> Option<&PropertyMap> {
+        match self {
+            Self::CreateNode { properties, .. } => Some(properties),
+            Self::UpdateNode { properties, .. } => Some(properties),
+            Self::CreateEdge { properties, .. } => Some(properties),
+            Self::UpdateEdge { properties, .. } => Some(properties),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a node operation
+    pub fn is_node_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateNode { .. } | Self::UpdateNode { .. } | Self::DeleteNode { .. }
+        )
+    }
+
+    /// Check if this is an edge operation
+    pub fn is_edge_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateEdge { .. } | Self::UpdateEdge { .. } | Self::DeleteEdge { .. }
+        )
+    }
+
+    /// Check if this operation modifies edge structure
+    pub fn is_edge_structure_modification(&self) -> bool {
+        matches!(self, Self::CreateEdge { .. } | Self::DeleteEdge { .. })
+    }
+}
+
 /// Default maximum number of operations per transaction (DoS protection)
 ///
 /// Set to 50,000 to accommodate realistic batch operations (imports, migrations)
@@ -185,55 +239,20 @@ impl WriteBuffer {
         let index = self.operations.len();
 
         // Track which entities are modified for conflict detection
-        // and check for vector properties
-        match &write {
-            BufferedWrite::CreateNode {
-                node_id,
-                properties,
-                ..
-            }
-            | BufferedWrite::UpdateNode {
-                node_id,
-                properties,
-                ..
-            } => {
-                self.modified_nodes.insert(*node_id, index);
-                // Check if this operation contains vector properties
-                self.has_vector_operations =
-                    self.has_vector_operations || properties.contains_vector();
-            }
-            BufferedWrite::DeleteNode { node_id, .. } => {
-                self.modified_nodes.insert(*node_id, index);
-            }
-            BufferedWrite::CreateEdge {
-                edge_id,
-                properties,
-                ..
-            } => {
-                self.modified_edges.insert(*edge_id, index);
-                // Mark that edge structure was modified (create changes topology)
-                self.has_edge_operations = true;
-                // Check if this operation contains vector properties
-                self.has_vector_operations =
-                    self.has_vector_operations || properties.contains_vector();
-            }
-            BufferedWrite::UpdateEdge {
-                edge_id,
-                properties,
-                ..
-            } => {
-                self.modified_edges.insert(*edge_id, index);
-                // UpdateEdge only modifies properties, not topology (source/target/label)
-                // so it doesn't require adjacency rebuild
-                // Check if this operation contains vector properties
-                self.has_vector_operations =
-                    self.has_vector_operations || properties.contains_vector();
-            }
-            BufferedWrite::DeleteEdge { edge_id, .. } => {
-                self.modified_edges.insert(*edge_id, index);
-                // Mark that edge structure was modified (delete changes topology)
-                self.has_edge_operations = true;
-            }
+        if let Some(node_id) = write.node_id() {
+            self.modified_nodes.insert(node_id, index);
+        } else if let Some(edge_id) = write.edge_id() {
+            self.modified_edges.insert(edge_id, index);
+        }
+
+        // Check if this operation contains vector properties
+        if let Some(properties) = write.properties() {
+            self.has_vector_operations |= properties.contains_vector();
+        }
+
+        // Check if edge structure was modified
+        if write.is_edge_structure_modification() {
+            self.has_edge_operations = true;
         }
 
         self.operations.push(write);
