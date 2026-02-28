@@ -77,6 +77,7 @@ async fn test_cors_headers_present() {
         .uri("/status")
         .insert_header(("Origin", "http://example.com"))
         .insert_header(("Access-Control-Request-Method", "GET"))
+        .peer_addr("127.0.0.1:8080".parse().unwrap())
         .to_request();
 
     let resp = test::call_service(&app, req).await;

@@ -31,7 +31,8 @@
 //! let omen = Omen::new(&db);
 //!
 //! // Analyze last hour
-//! let window = TimeRange::new(time::now() - 3600 * 1_000_000, time::now())?;
+//! let start = time::now().wallclock() - 3600 * 1_000_000;
+//! let window = TimeRange::new(aletheiadb::core::hlc::HybridTimestamp::from_micros(start), time::now())?;
 //!
 //! if let Some(encounter) = omen.predict_encounter(node_a, node_b, window, "embedding")? {
 //!     println!("Predicted encounter in {:.2} seconds.", encounter.time_to_encounter.as_secs_f32());
@@ -207,14 +208,11 @@ impl<'a> Omen<'a> {
 
         for v in &history.versions {
             let vt_start = v.temporal.valid_time().start().wallclock();
-            if vt_start <= time.wallclock() {
-                if vt_start >= best_time {
-                    if let Some(val) = v.properties.get(property) {
-                        if let Some(vec) = val.as_vector() {
-                            best_vec = Some(vec.to_vec());
-                            best_time = vt_start;
-                        }
-                    }
+            if vt_start <= time.wallclock() && vt_start >= best_time {
+                let vec_opt = v.properties.get(property).and_then(|val| val.as_vector());
+                if let Some(vec) = vec_opt {
+                    best_vec = Some(vec.to_vec());
+                    best_time = vt_start;
                 }
             }
         }
