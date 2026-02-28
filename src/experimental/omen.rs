@@ -207,14 +207,13 @@ impl<'a> Omen<'a> {
 
         for v in &history.versions {
             let vt_start = v.temporal.valid_time().start().wallclock();
-            if vt_start <= time.wallclock() {
-                if vt_start >= best_time {
-                    if let Some(val) = v.properties.get(property) {
-                        if let Some(vec) = val.as_vector() {
-                            best_vec = Some(vec.to_vec());
-                            best_time = vt_start;
-                        }
-                    }
+            let is_valid_time = vt_start <= time.wallclock() && vt_start >= best_time;
+
+            if is_valid_time {
+                let maybe_vec = v.properties.get(property).and_then(|val| val.as_vector());
+                if let Some(vec) = maybe_vec {
+                    best_vec = Some(vec.to_vec());
+                    best_time = vt_start;
                 }
             }
         }
