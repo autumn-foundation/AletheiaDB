@@ -10,9 +10,11 @@
 //! - **Crystallize Wormholes**: Turns potential "wormholes" (semantic gaps) into real edges.
 //! - **Fuse Synonyms**: Merges nodes that are semantically identical.
 //!
+
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
+
 //! use aletheiadb::experimental::alchemy::Alchemist;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
