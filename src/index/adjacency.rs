@@ -94,7 +94,7 @@ impl AdjacencyIndex {
             (NodeId, InternedString),
             BuildHasherDefault<IdentityHasher>,
         >,
-    ) -> Result<Self, String> {
+    ) -> crate::core::error::Result<Self> {
         if offsets.is_empty() || edge_ids.is_empty() {
             return Ok(Self::new());
         }
@@ -291,23 +291,23 @@ impl AdjacencyIndex {
         node_ids: &[u64],
         offsets: &[u64],
         edge_ids: &[u64],
-    ) -> Result<(), String> {
+    ) -> crate::core::error::Result<()> {
         if offsets.len() != node_ids.len() + 1 {
-            return Err(format!(
+            return Err(crate::core::error::StorageError::CorruptedData(format!(
                 "CSR offsets length mismatch: expected {}, got {}",
                 node_ids.len() + 1,
                 offsets.len()
-            ));
+            )).into());
         }
 
         #[allow(clippy::collapsible_if)]
         if let Some(&last_offset) = offsets.last() {
             if last_offset != edge_ids.len() as u64 {
-                return Err(format!(
+                return Err(crate::core::error::StorageError::CorruptedData(format!(
                     "CSR last offset mismatch: expected {}, got {}",
                     edge_ids.len(),
                     last_offset
-                ));
+                )).into());
             }
         }
 
@@ -810,14 +810,16 @@ mod sentry_tests {
         let invalid_offsets_len = vec![0, 1]; // too short
         let err_len =
             AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_len, &edge_ids)
-                .unwrap_err();
+                .unwrap_err()
+                .to_string();
         assert!(err_len.contains("CSR offsets length mismatch"));
 
         // 3. Invalid last offset
         let invalid_offsets_val = vec![0, 1, 5]; // last is 5, but edges len is 2
         let err_val =
             AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_val, &edge_ids)
-                .unwrap_err();
+                .unwrap_err()
+                .to_string();
         assert!(err_val.contains("CSR last offset mismatch"));
     }
 
@@ -830,7 +832,7 @@ mod sentry_tests {
         let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         let result = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("CSR offsets length mismatch"));
+        assert!(result.unwrap_err().to_string().contains("CSR offsets length mismatch"));
     }
 
     #[test]

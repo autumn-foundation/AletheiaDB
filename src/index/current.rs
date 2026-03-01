@@ -106,7 +106,7 @@ impl CurrentIndexes {
     ///
     /// - `Ok(())` if shutdown was successful or no scheduler was running
     /// - `Err(String)` if the background thread panicked during shutdown
-    pub fn shutdown_background_compaction(&mut self) -> Result<(), String> {
+    pub fn shutdown_background_compaction(&mut self) -> std::result::Result<(), String> {
         // Shutdown outgoing compaction
         if let Some((scheduler, handle)) = self.outgoing_compaction.take() {
             scheduler.shutdown();
@@ -781,7 +781,7 @@ impl CurrentIndexes {
         incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
-    ) -> Result<(), String> {
+    ) -> crate::core::error::Result<()> {
         use crate::core::hasher::IdentityHasher;
         use std::collections::{HashMap, HashSet};
         use std::hash::BuildHasherDefault;
@@ -791,12 +791,12 @@ impl CurrentIndexes {
         let outgoing_tombstones = self.outgoing.tombstone_count();
         let incoming_tombstones = self.incoming.tombstone_count();
         if outgoing_tombstones != 0 || incoming_tombstones != 0 {
-            return Err(format!(
+            return Err(crate::core::error::StorageError::CorruptedData(format!(
                 "Cannot import CSR with uncommitted tombstones: {} outgoing, {} incoming. \
                  Deleted edges would reappear! Call compact() first or ensure import is \
                  only called on a fresh index during startup.",
                 outgoing_tombstones, incoming_tombstones
-            ));
+            )).into());
         }
 
         // Build edges map for CSR reconstruction
@@ -2058,6 +2058,7 @@ mod test_import_csr {
         assert!(
             result
                 .unwrap_err()
+                .to_string()
                 .contains("Cannot import CSR with uncommitted tombstones")
         );
     }
@@ -2075,6 +2076,6 @@ mod test_import_csr {
             vec![],
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("CSR offsets length mismatch"));
+        assert!(result.unwrap_err().to_string().contains("CSR offsets length mismatch"));
     }
 }

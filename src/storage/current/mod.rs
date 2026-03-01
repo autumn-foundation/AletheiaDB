@@ -985,7 +985,7 @@ impl CurrentStorage {
         incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
-    ) -> std::result::Result<(), String> {
+    ) -> crate::core::error::Result<()> {
         self.indexes.import_csr(
             outgoing_node_ids,
             outgoing_offsets,
