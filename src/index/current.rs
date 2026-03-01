@@ -2027,3 +2027,49 @@ mod zero_copy_access_tests {
         assert!(ids.contains(&EdgeId::new(2).unwrap()));
     }
 }
+
+#[cfg(test)]
+mod test_import_csr {
+    use super::*;
+    use crate::core::id::VersionId;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+
+    fn create_test_edge(id: u64, source: u64, target: u64, label: &str) -> Edge {
+        Edge::new(
+            EdgeId::new(id).unwrap(),
+            GLOBAL_INTERNER.intern(label).unwrap(),
+            NodeId::new(source).unwrap(),
+            NodeId::new(target).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_import_csr_errors_with_tombstones() {
+        let indexes = CurrentIndexes::new();
+        // Insert an edge and then delete it to create a tombstone
+        indexes.insert_edge(create_test_edge(1, 0, 1, "KNOWS"));
+        indexes.remove_edge(EdgeId::new(1).unwrap());
+
+        // At this point we have a tombstone. import_csr should fail.
+        let result = indexes.import_csr(vec![], vec![0], vec![], vec![], vec![0], vec![]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot import CSR with uncommitted tombstones"));
+    }
+
+    #[test]
+    fn test_import_csr_propagates_adjacency_error() {
+        let indexes = CurrentIndexes::new();
+        // Provide mismatched CSR arrays to trigger an error from AdjacencyIndex::import_csr
+        let result = indexes.import_csr(
+            vec![1],       // node_ids len 1
+            vec![0],       // offsets len 1 (invalid, should be 2)
+            vec![100],     // edge_ids
+            vec![], vec![0], vec![]
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("CSR offsets length mismatch"));
+    }
+}
