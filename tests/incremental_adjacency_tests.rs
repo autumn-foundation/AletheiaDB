@@ -1029,25 +1029,21 @@ mod phase5_background_compaction {
         // Thread should still be running (panic recovered)
         assert!(!handle.is_finished());
 
-        // Add more edges to trigger another compaction (should succeed this time)
-        for i in 7..12 {
-            index.insert(
-                NodeId::new(i).unwrap(),
-                AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
-            );
-        }
+        // The background thread sleeps for `check_interval` (50ms) after the panic.
+        // It then wakes up, sees there are still 7 edges in the delta (which is > threshold 5),
+        // and triggers another compaction. This time it will succeed because `test_inject_panic_on_compact`
+        // was cleared during the first panic.
 
         // Wait for successful compaction (poll)
-        // Wait for frozen count to reach 12 (7 from first batch + 5 from second)
         attempts = 0;
-        while index.frozen_edge_count() < 12 && attempts < 200 {
+        while index.frozen_edge_count() < 7 && attempts < 200 {
             thread::sleep(Duration::from_millis(50));
             attempts += 1;
         }
 
         // Verify normal compaction worked after panic
         assert_eq!(index.delta_edge_count(), 0);
-        assert_eq!(index.frozen_edge_count(), 12);
+        assert_eq!(index.frozen_edge_count(), 7);
 
         // Panic count should still be 1 (no new panics)
         assert_eq!(scheduler.panic_count(), 1);
