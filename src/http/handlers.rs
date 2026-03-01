@@ -693,12 +693,47 @@ mod tests {
             "Error: {}",
             error
         );
+
+        // Boundary test: exactly 10_000 should be allowed
+        let exact_boundary_payload = json!({
+            "operation": "find_node",
+            "label": "Person",
+            "offset": 9_900,
+            "limit": 100
+        });
+        let req2 = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&exact_boundary_payload)
+            .to_request();
+        let resp2 = test::call_service(&app, req2).await;
+        assert!(resp2.status().is_success(), "Should allow exactly 10_000");
+
+        // Boundary test: exactly 10_001 should be rejected
+        let exceed_boundary_payload = json!({
+            "operation": "find_node",
+            "label": "Person",
+            "offset": 9_901,
+            "limit": 100
+        });
+        let req3 = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&exceed_boundary_payload)
+            .to_request();
+        let resp3 = test::call_service(&app, req3).await;
+        assert!(
+            resp3.status().is_client_error(),
+            "Should reject exactly 10_001"
+        );
     }
 
     // Warden: Check if FindNode allows deep pagination
     #[actix_rt::test]
     async fn test_warden_find_node_deep_pagination() {
         let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+        // Create dummy node so a valid ID exists if we get past the boundary
+        db.create_node("Node", crate::core::PropertyMap::new())
+            .unwrap();
+
         let state = web::Data::new(AppState::new(db));
 
         let app = test::init_service(
@@ -735,6 +770,37 @@ mod tests {
             error.contains("Pagination limit exceeded"),
             "Error: {}",
             error
+        );
+
+        // Boundary test: exactly 10_000 should be allowed
+        let exact_boundary_payload = json!({
+            "operation": "find_neighbors",
+            "node_id": 1,
+            "offset": 9_900,
+            "limit": 100
+        });
+        let req2 = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&exact_boundary_payload)
+            .to_request();
+        let resp2 = test::call_service(&app, req2).await;
+        assert!(resp2.status().is_success(), "Should allow exactly 10_000");
+
+        // Boundary test: exactly 10_001 should be rejected
+        let exceed_boundary_payload = json!({
+            "operation": "find_neighbors",
+            "node_id": 1,
+            "offset": 9_901,
+            "limit": 100
+        });
+        let req3 = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&exceed_boundary_payload)
+            .to_request();
+        let resp3 = test::call_service(&app, req3).await;
+        assert!(
+            resp3.status().is_client_error(),
+            "Should reject exactly 10_001"
         );
     }
 
@@ -859,5 +925,85 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_client_error()); // 400 Bad Request
+    }
+
+    #[actix_rt::test]
+    async fn test_execute_query_parse_error() {
+        let db = std::sync::Arc::new(crate::AletheiaDB::new().unwrap());
+        let state = web::Data::new(AppState::new(db));
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/query", web::post().to(handle_query)),
+        )
+        .await;
+
+        // Invalid syntax using an unsupported token (like a stray # symbol)
+        // or a query we know generates a parser error starting with "Parse"
+        let payload = json!({
+            "operation": "execute_query",
+            "query": "MATCH # INVALID"
+        });
+
+        let req = test::TestRequest::post()
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+
+        // This causes the error string to contain "parse", resulting in 400 Bad Request
+        // If the error handling logic replacing || with && was present, this would be a 500 error
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    // Warden: Kill json_to_predicate_value mutants
+    #[actix_rt::test]
+    async fn test_json_to_predicate_value() {
+        // Test Null
+        assert_eq!(
+            json_to_predicate_value(&serde_json::Value::Null),
+            Some(PredicateValue::Null)
+        );
+
+        // Test Bool
+        assert_eq!(
+            json_to_predicate_value(&serde_json::Value::Bool(true)),
+            Some(PredicateValue::Bool(true))
+        );
+        assert_eq!(
+            json_to_predicate_value(&serde_json::Value::Bool(false)),
+            Some(PredicateValue::Bool(false))
+        );
+
+        // Test Number (i64)
+        assert_eq!(
+            json_to_predicate_value(&serde_json::Value::Number(42.into())),
+            Some(PredicateValue::Int(42))
+        );
+
+        // Test Number (f64)
+        assert_eq!(
+            json_to_predicate_value(&serde_json::Value::Number(
+                serde_json::Number::from_f64(42.5).unwrap()
+            )),
+            Some(PredicateValue::Float(42.5))
+        );
+
+        // Test String
+        assert_eq!(
+            json_to_predicate_value(&serde_json::Value::String("hello".to_string())),
+            Some(PredicateValue::String("hello".to_string()))
+        );
+
+        // Test Unsupported Types (Array, Object) return None
+        assert_eq!(
+            json_to_predicate_value(&serde_json::Value::Array(vec![])),
+            None
+        );
+        assert_eq!(
+            json_to_predicate_value(&serde_json::Value::Object(serde_json::Map::new())),
+            None
+        );
     }
 }
