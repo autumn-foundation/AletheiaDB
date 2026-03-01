@@ -153,8 +153,8 @@ impl WriteBuffer {
     pub fn with_max_operations(max_operations: usize) -> Self {
         WriteBuffer {
             operations: Vec::new(),
-            modified_nodes: FastHashMap::with_hasher(BuildHasherDefault::default()),
-            modified_edges: FastHashMap::with_hasher(BuildHasherDefault::default()),
+            modified_nodes: FastHashMap::default(),
+            modified_edges: FastHashMap::default(),
             max_operations,
             has_vector_operations: false,
             has_edge_operations: false,
