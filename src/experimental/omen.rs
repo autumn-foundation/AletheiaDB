@@ -98,7 +98,12 @@ impl<'a> Omen<'a> {
         };
 
         // 2. Physics Math
-        if pos_b.len() != pos_a.len() {
+        if pos_b.len() != pos_a.len() 
+            || !pos_a.iter().all(|x| x.is_finite()) 
+            || !pos_b.iter().all(|x| x.is_finite()) 
+            || !vel_a.iter().all(|x| x.is_finite()) 
+            || !vel_b.iter().all(|x| x.is_finite())
+        {
             return Ok(None);
         }
 
@@ -501,7 +506,7 @@ mod tests {
         let t_start = time::now();
         std::thread::sleep(Duration::from_millis(50));
 
-        db.write(|tx| {
+        db.write(|tx| -> Result<()> {
             tx.update_node(
                 node_a,
                 PropertyMapBuilder::new()
@@ -514,7 +519,7 @@ mod tests {
                     .insert_vector("vec", &[1.0, 1.0, 1.0])
                     .build(),
             )?;
-            Ok::<(), crate::core::error::Error>(())
+            Ok(())
         })
         .unwrap();
 
