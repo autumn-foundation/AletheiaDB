@@ -67,3 +67,7 @@
 1. Updated `storage/index_persistence/operations.rs` to import `TxId` from `core::id` instead of `api`.
 2. Moved `VectorIndexBuilder` from `api` to `db`, as it is a concrete helper for `AletheiaDB`.
 3. Moved `utils/error.rs` to `core/error.rs` and deleted `utils` module, consolidating core domain types.
+
+## 2026-03-05 - Breaking core <-> sql Dependency Cycle
+**Tangle:** The `core` module depended on `sql` because `core::error::Error` implemented `From<crate::sql::SqlError>`. Meanwhile, `sql` depended on `core` for types like `Timestamp` and `TimeRange`, creating a circular dependency. The core domain should not depend on higher-level query parsing modules.
+**Blueprint:** Moved the `From<SqlError> for crate::core::error::Error` implementation out of `src/core/error.rs` and into `src/sql/error.rs`. This leverages Rust's orphan rules (since both types are local to the crate) to allow `sql` to define how its errors convert into `core` errors, completely removing `sql` from `core`'s dependency graph.

@@ -149,20 +149,6 @@ impl From<crate::config::ConfigError> for Error {
     }
 }
 
-#[cfg(feature = "sql")]
-impl From<crate::sql::SqlError> for Error {
-    fn from(e: crate::sql::SqlError) -> Self {
-        #[cfg(feature = "observability")]
-        crate::observability::METRICS
-            .error_query_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        Error::Query(QueryError::SyntaxError {
-            message: e.to_string(),
-        })
-    }
-}
-
 /// Errors related to storage operations.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StorageError {
