@@ -1561,7 +1561,7 @@ mod tests {
         assert!(err_msg.contains("index"));
         assert!(err_msg.contains("embedding"));
         assert!(
-            err_msg.contains("enable_vector_index"),
+            err_msg.contains("vector_index(\"embedding\").hnsw"),
             "Error message should provide hint to enable index: {}",
             err_msg
         );
