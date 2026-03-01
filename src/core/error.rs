@@ -890,12 +890,12 @@ mod tests {
         let err = QueryError::IndexNotFound {
             index_type: "vector".to_string(),
             property_name: "embedding".to_string(),
-            hint: Some("Call db.enable_vector_index(\"embedding\", config) first".to_string()),
+            hint: Some("Call db.vector_index(\"embedding\").hnsw(...).enable() first".to_string()),
         };
         let display = format!("{}", err);
         assert!(display.contains("vector index"));
         assert!(display.contains("embedding"));
-        assert!(display.contains("enable_vector_index"));
+        assert!(display.contains("vector_index(\"embedding\").hnsw"));
     }
 
     #[test]

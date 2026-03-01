@@ -473,7 +473,7 @@ impl QueryPlanner {
                 index_type: "vector".to_string(),
                 property_name: effective_property.clone(),
                 hint: Some(format!(
-                    "Call db.enable_vector_index(\"{}\", config) first",
+                    "Call db.vector_index(\"{}\").hnsw(...).enable() first",
                     effective_property
                 )),
             }));
