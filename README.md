@@ -347,7 +347,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 
 ## Usage Examples
 
-> ⚠️ **Note on State:** AletheiaDB persists data to disk by default (in `./aletheiadb`). If you are running multiple examples in the same directory, you may encounter `InvalidTimeRange` errors or other crashes due to leftover state from previous runs reading each other's data. Clear the directory between runs or configure a temporary directory.
+> ⚠️ **Note on State:** AletheiaDB persists data to disk by default (in `./aletheiadb`). If you are running multiple examples in the same directory, you may encounter `InvalidTimeRange` errors or other crashes due to leftover state from previous runs. Clear the directory between runs, or configure a temporary directory using `AletheiaDBConfig` (see the 'Index Persistence' or 'Configuration' examples for details).
 
 ### Basic Graph Operations
 
