@@ -48,14 +48,14 @@ impl From<sqlparser::parser::ParserError> for SqlError {
     }
 }
 
-impl From<SqlError> for Error {
+impl From<SqlError> for crate::core::error::Error {
     fn from(e: SqlError) -> Self {
         #[cfg(feature = "observability")]
         crate::observability::METRICS
             .error_query_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        Error::Query(QueryError::SyntaxError {
+        crate::core::error::Error::Query(crate::core::error::QueryError::SyntaxError {
             message: e.to_string(),
         })
     }
