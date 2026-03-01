@@ -21,3 +21,7 @@
 ## 2026-10-27 - Identity Hashing for PropertyMap
 **Learning:** `PropertyMap` uses `InternedString` (u32) as keys but was using default `HashMap` hashing (SipHash), incurring ~15-30ns overhead per lookup. Switching to `IdentityHasher` eliminated this, yielding a 3.6x speedup on interned lookups.
 **Action:** Audit all usages of `HashMap<InternedString, ...>` or `HashMap<u32, ...>` and replace with `HashMap<..., BuildHasherDefault<IdentityHasher>>` where keys are already high-quality IDs.
+
+## 2026-11-20 - Identity Hashing for WriteBuffer Lookups
+**Learning:** `WriteBuffer` used default `HashMap` (SipHash) for `modified_nodes` and `modified_edges` to track dirty state during transactions. Since keys are `NodeId` and `EdgeId` (wrappers around `u64`), hashing overhead was unnecessary and reduced throughput during bulk write operations.
+**Action:** Replaced `HashMap` with `FastHashMap` (`HashMap<..., BuildHasherDefault<IdentityHasher>>`) for `modified_nodes` and `modified_edges` in `WriteBuffer`. Using `IdentityHasher` for already-unique integer-like keys eliminates SipHash overhead and improves lookup/insertion speeds during transaction tracking.
