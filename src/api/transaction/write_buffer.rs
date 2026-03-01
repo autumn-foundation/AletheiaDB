@@ -1,11 +1,13 @@
 //! Write buffering for uncommitted transaction changes
 
 use crate::core::error::{Result, StorageError};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 
 /// Buffered write operation
 ///
@@ -112,12 +114,15 @@ pub struct WriteBuffer {
     operations: Vec<BufferedWrite>,
 
     /// Quick lookup: which nodes have been written to
-    /// Maps NodeId → index in operations vector
-    modified_nodes: HashMap<NodeId, usize>,
+    /// Maps NodeId → index in operations vector.
+    /// Uses IdentityHasher for optimal performance since NodeId is already a high-quality integer key,
+    /// avoiding the unnecessary overhead of SipHash.
+    modified_nodes: HashMap<NodeId, usize, BuildHasherDefault<IdentityHasher>>,
 
     /// Quick lookup: which edges have been written to
-    /// Maps EdgeId → index in operations vector
-    modified_edges: HashMap<EdgeId, usize>,
+    /// Maps EdgeId → index in operations vector.
+    /// Uses IdentityHasher for optimal performance since EdgeId is already a high-quality integer key.
+    modified_edges: HashMap<EdgeId, usize, BuildHasherDefault<IdentityHasher>>,
 
     /// Maximum number of operations allowed (DoS protection)
     max_operations: usize,
@@ -145,8 +150,8 @@ impl WriteBuffer {
     pub fn with_max_operations(max_operations: usize) -> Self {
         WriteBuffer {
             operations: Vec::new(),
-            modified_nodes: HashMap::new(),
-            modified_edges: HashMap::new(),
+            modified_nodes: HashMap::with_hasher(BuildHasherDefault::default()),
+            modified_edges: HashMap::with_hasher(BuildHasherDefault::default()),
             max_operations,
             has_vector_operations: false,
             has_edge_operations: false,
@@ -160,8 +165,14 @@ impl WriteBuffer {
     pub fn with_capacity(capacity: usize) -> Self {
         WriteBuffer {
             operations: Vec::with_capacity(capacity),
-            modified_nodes: HashMap::with_capacity(capacity / 2),
-            modified_edges: HashMap::with_capacity(capacity / 2),
+            modified_nodes: HashMap::with_capacity_and_hasher(
+                capacity / 2,
+                BuildHasherDefault::default(),
+            ),
+            modified_edges: HashMap::with_capacity_and_hasher(
+                capacity / 2,
+                BuildHasherDefault::default(),
+            ),
             max_operations: capacity,
             has_vector_operations: false,
             has_edge_operations: false,
