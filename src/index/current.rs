@@ -2025,4 +2025,48 @@ mod zero_copy_access_tests {
         assert!(ids.contains(&EdgeId::new(1).unwrap()));
         assert!(ids.contains(&EdgeId::new(2).unwrap()));
     }
+
+    #[test]
+    #[should_panic(expected = "Failed to import outgoing CSR index")]
+    fn test_import_csr_panics_on_invalid_outgoing() {
+        let indexes = CurrentIndexes::new();
+
+        let outgoing_node_ids = vec![u64::MAX]; // Invalid NodeId to trigger failure
+        let outgoing_offsets = vec![0, 1];
+        let outgoing_edge_ids = vec![1];
+        let incoming_node_ids = vec![];
+        let incoming_offsets = vec![0];
+        let incoming_edge_ids = vec![];
+
+        indexes.import_csr(
+            outgoing_node_ids,
+            outgoing_offsets,
+            outgoing_edge_ids,
+            incoming_node_ids,
+            incoming_offsets,
+            incoming_edge_ids,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Failed to import incoming CSR index")]
+    fn test_import_csr_panics_on_invalid_incoming() {
+        let indexes = CurrentIndexes::new();
+
+        let outgoing_node_ids = vec![];
+        let outgoing_offsets = vec![0];
+        let outgoing_edge_ids = vec![];
+        let incoming_node_ids = vec![u64::MAX]; // Invalid NodeId to trigger failure
+        let incoming_offsets = vec![0, 1];
+        let incoming_edge_ids = vec![1];
+
+        indexes.import_csr(
+            outgoing_node_ids,
+            outgoing_offsets,
+            outgoing_edge_ids,
+            incoming_node_ids,
+            incoming_offsets,
+            incoming_edge_ids,
+        );
+    }
 }
