@@ -163,6 +163,8 @@ pub mod sybil;
 /// Synapse: Adaptive Graph Hebbian Learning.
 pub mod synapse;
 #[cfg(feature = "nova")]
+pub mod synergy;
+#[cfg(feature = "nova")]
 /// Telepathy: Semantic Spreading Activation Engine.
 pub mod telepathy;
 #[cfg(feature = "nova")]
