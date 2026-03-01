@@ -1374,14 +1374,16 @@ mod phase7_persistence_integration {
         }
 
         // Import CSR - should reconstruct delta from diff
-        new_indexes.import_csr(
-            out_nodes,
-            out_offsets,
-            out_edges,
-            in_nodes,
-            in_offsets,
-            in_edges,
-        ).unwrap();
+        new_indexes
+            .import_csr(
+                out_nodes,
+                out_offsets,
+                out_edges,
+                in_nodes,
+                in_offsets,
+                in_edges,
+            )
+            .unwrap();
 
         // Verify all 13 edges are visible (10 in frozen + 3 in delta)
         {
@@ -1440,14 +1442,16 @@ mod phase7_persistence_integration {
             }
         }
 
-        new_indexes.import_csr(
-            out_nodes,
-            out_offsets,
-            out_edges,
-            in_nodes,
-            in_offsets,
-            in_edges,
-        ).unwrap();
+        new_indexes
+            .import_csr(
+                out_nodes,
+                out_offsets,
+                out_edges,
+                in_nodes,
+                in_offsets,
+                in_edges,
+            )
+            .unwrap();
 
         // Verify delta is empty
         assert_eq!(new_indexes.delta_edge_count(), 0, "Delta should be empty");
@@ -1519,14 +1523,16 @@ mod phase7_persistence_integration {
             }
         }
 
-        new_indexes.import_csr(
-            out_nodes,
-            out_offsets,
-            out_edges,
-            in_nodes,
-            in_offsets,
-            in_edges,
-        ).unwrap();
+        new_indexes
+            .import_csr(
+                out_nodes,
+                out_offsets,
+                out_edges,
+                in_nodes,
+                in_offsets,
+                in_edges,
+            )
+            .unwrap();
 
         // Verify each node has correct edge count
         for source in 0..3 {
@@ -1585,14 +1591,16 @@ mod phase7_persistence_integration {
             }
         }
 
-        new_indexes.import_csr(
-            out_nodes,
-            out_offsets,
-            out_edges,
-            in_nodes,
-            in_offsets,
-            in_edges,
-        ).unwrap();
+        new_indexes
+            .import_csr(
+                out_nodes,
+                out_offsets,
+                out_edges,
+                in_nodes,
+                in_offsets,
+                in_edges,
+            )
+            .unwrap();
 
         // Delta should be empty
         assert_eq!(

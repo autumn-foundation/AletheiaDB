@@ -795,8 +795,7 @@ impl CurrentIndexes {
                 "Cannot import CSR with uncommitted tombstones: {} outgoing, {} incoming. \
                  Deleted edges would reappear! Call compact() first or ensure import is \
                  only called on a fresh index during startup.",
-                outgoing_tombstones,
-                incoming_tombstones
+                outgoing_tombstones, incoming_tombstones
             ));
         }
 
@@ -2056,7 +2055,11 @@ mod test_import_csr {
         // At this point we have a tombstone. import_csr should fail.
         let result = indexes.import_csr(vec![], vec![0], vec![], vec![], vec![0], vec![]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Cannot import CSR with uncommitted tombstones"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Cannot import CSR with uncommitted tombstones")
+        );
     }
 
     #[test]
@@ -2064,10 +2067,12 @@ mod test_import_csr {
         let indexes = CurrentIndexes::new();
         // Provide mismatched CSR arrays to trigger an error from AdjacencyIndex::import_csr
         let result = indexes.import_csr(
-            vec![1],       // node_ids len 1
-            vec![0],       // offsets len 1 (invalid, should be 2)
-            vec![100],     // edge_ids
-            vec![], vec![0], vec![]
+            vec![1],   // node_ids len 1
+            vec![0],   // offsets len 1 (invalid, should be 2)
+            vec![100], // edge_ids
+            vec![],
+            vec![0],
+            vec![],
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("CSR offsets length mismatch"));
