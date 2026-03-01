@@ -979,15 +979,15 @@ impl FilterIterator {
 
     fn compare_eq(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
         match (prop, value) {
-            (PropertyValue::Bool(a), PredicateValue::Bool(b)) => a == b,
-            (PropertyValue::Int(a), PredicateValue::Int(b)) => a == b,
-            (PropertyValue::Float(a), PredicateValue::Float(b)) => (a - b).abs() < f64::EPSILON,
-            (PropertyValue::Int(a), PredicateValue::Float(b)) => {
             (PropertyValue::Bool(a), PredicateValue::Bool(b)) => *a == *b,
             (PropertyValue::Int(a), PredicateValue::Int(b)) => *a == *b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => (*a - *b).abs() < f64::EPSILON,
-            (PropertyValue::Int(a), PredicateValue::Float(b)) => ((*a as f64) - *b).abs() < f64::EPSILON,
-            (PropertyValue::Float(a), PredicateValue::Int(b)) => (*a - (*b as f64)).abs() < f64::EPSILON,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => {
+                ((*a as f64) - *b).abs() < f64::EPSILON
+            }
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => {
+                (*a - (*b as f64)).abs() < f64::EPSILON
+            }
             (PropertyValue::String(a), PredicateValue::String(b)) => a.as_ref() == b.as_str(),
             (PropertyValue::Null, PredicateValue::Null) => true,
             _ => false,
