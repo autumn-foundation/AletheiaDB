@@ -16,10 +16,10 @@
 //! - **Story Generation**: Introduce unexpected plot twists by forcing characters into unfamiliar domains.
 //! - **Anomaly Discovery**: Find paths that abruptly shift context.
 
+use crate::AletheiaDB;
 use crate::core::error::{Error, Result, StorageError, VectorError};
 use crate::core::id::NodeId;
 use crate::core::vector::ops::cosine_similarity;
-use crate::AletheiaDB;
 use std::collections::HashSet;
 
 /// The Voyager Engine for finding the path of maximal novelty.
@@ -114,9 +114,10 @@ impl<'a> Voyager<'a> {
 
     /// Helper to extract a vector from a node.
     fn get_vector(&self, node_id: NodeId, property: &str) -> Result<Vec<f32>> {
-        let node = self.db.get_node(node_id).map_err(|_| {
-            Error::Storage(StorageError::NodeNotFound(node_id))
-        })?;
+        let node = self
+            .db
+            .get_node(node_id)
+            .map_err(|_| Error::Storage(StorageError::NodeNotFound(node_id)))?;
 
         let val = node.properties.get(property).ok_or_else(|| {
             Error::Vector(VectorError::IndexError(format!(
@@ -139,40 +140,53 @@ impl<'a> Voyager<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AletheiaDB;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
-    use crate::AletheiaDB;
 
     #[test]
     fn test_voyager_chooses_lowest_similarity() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine)).unwrap();
+        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+            .unwrap();
 
         // Node A: [1.0, 0.0] (Start)
-        let props_a = PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0]).build();
+        let props_a = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
         let a = db.create_node("Node", props_a).unwrap();
 
         // Node B: [0.9, 0.1] (High similarity to A, ~0.99)
-        let props_b = PropertyMapBuilder::new().insert_vector("vec", &[0.9, 0.1]).build();
+        let props_b = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.9, 0.1])
+            .build();
         let b = db.create_node("Node", props_b).unwrap();
 
         // Node C: [0.0, 1.0] (Low similarity to A, 0.0)
-        let props_c = PropertyMapBuilder::new().insert_vector("vec", &[0.0, 1.0]).build();
+        let props_c = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 1.0])
+            .build();
         let c = db.create_node("Node", props_c).unwrap();
 
         // Node D: [-1.0, 0.0] (Lowest similarity to C, -1.0 relative to C? No, C is [0,1], D is [-1,0]. Sim is 0.0)
         // Wait, C is [0.0, 1.0]. D is [-1.0, 0.0]. Cosine sim(C, D) = 0.0.
         // Let's make D perfectly opposite to C: [0.0, -1.0]. Sim = -1.0.
-        let props_d = PropertyMapBuilder::new().insert_vector("vec", &[0.0, -1.0]).build();
+        let props_d = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, -1.0])
+            .build();
         let d = db.create_node("Node", props_d).unwrap();
 
         // Edges from A -> B and A -> C
-        db.create_edge(a, b, "LINK", PropertyMapBuilder::new().build()).unwrap();
-        db.create_edge(a, c, "LINK", PropertyMapBuilder::new().build()).unwrap();
+        db.create_edge(a, b, "LINK", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(a, c, "LINK", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Edges from C -> B and C -> D
-        db.create_edge(c, b, "LINK", PropertyMapBuilder::new().build()).unwrap();
-        db.create_edge(c, d, "LINK", PropertyMapBuilder::new().build()).unwrap();
+        db.create_edge(c, b, "LINK", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(c, d, "LINK", PropertyMapBuilder::new().build())
+            .unwrap();
 
         let voyager = Voyager::new(&db);
 
@@ -190,19 +204,26 @@ mod tests {
     #[test]
     fn test_voyager_avoids_cycles() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine)).unwrap();
+        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+            .unwrap();
 
         // Node A: [1.0, 0.0]
-        let props_a = PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0]).build();
+        let props_a = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
         let a = db.create_node("Node", props_a).unwrap();
 
         // Node B: [0.0, 1.0] (Opposite/orthogonal to A)
-        let props_b = PropertyMapBuilder::new().insert_vector("vec", &[0.0, 1.0]).build();
+        let props_b = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 1.0])
+            .build();
         let b = db.create_node("Node", props_b).unwrap();
 
         // Connect A <-> B to form a cycle
-        db.create_edge(a, b, "LINK", PropertyMapBuilder::new().build()).unwrap();
-        db.create_edge(b, a, "LINK", PropertyMapBuilder::new().build()).unwrap();
+        db.create_edge(a, b, "LINK", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(b, a, "LINK", PropertyMapBuilder::new().build())
+            .unwrap();
 
         let voyager = Voyager::new(&db);
 
