@@ -21,3 +21,7 @@
 ## 2026-10-27 - Identity Hashing for PropertyMap
 **Learning:** `PropertyMap` uses `InternedString` (u32) as keys but was using default `HashMap` hashing (SipHash), incurring ~15-30ns overhead per lookup. Switching to `IdentityHasher` eliminated this, yielding a 3.6x speedup on interned lookups.
 **Action:** Audit all usages of `HashMap<InternedString, ...>` or `HashMap<u32, ...>` and replace with `HashMap<..., BuildHasherDefault<IdentityHasher>>` where keys are already high-quality IDs.
+
+**[IdentityHasher for Integer Keys]**
+**Learning:** Using `HashMap` with default hasher for small integer-wrapper keys like `NodeId` or `EdgeId` causes unnecessary hashing overhead. `FastHashMap` (using `IdentityHasher`) should be used to avoid this overhead and improve lookup/insertion speeds.
+**Action:** Replace `HashMap` with `FastHashMap` for integer keys when hashing overhead is a bottleneck, especially in hot paths like `WriteBuffer` tracking modified entities.
