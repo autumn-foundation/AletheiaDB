@@ -7,3 +7,7 @@
 **Bloat:** `ColdStorage` trait (Single-implementation abstraction used only by `RedbColdStorage`).
 **Cut:** Deleted the `ColdStorage` trait and `cold_storage.rs` module. Refactored all consumers to use the concrete `RedbColdStorage` struct directly.
 **Saved:** ~300 lines of boilerplate (trait definitions, mock implementations, duplicate imports) + removed dynamic dispatch overhead.
+## [Reduction]
+**Bloat:** `StorageSnapshot` trait (Single-implementation abstraction used only by `CurrentStorageSnapshot`).
+**Cut:** Deleted the `StorageSnapshot` trait. Converted `impl StorageSnapshot for CurrentStorageSnapshot` into inherent public methods on `CurrentStorageSnapshot`.
+**Saved:** ~30 lines of boilerplate trait definition + dynamic dispatch/trait mental overhead.
