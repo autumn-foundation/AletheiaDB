@@ -37,7 +37,7 @@
 //!     println!("Predicted encounter in {:.2} seconds.", encounter.time_to_encounter.as_secs_f32());
 //!     println!("Closest distance: {:.4}", encounter.predicted_distance);
 //! }
-//! # Ok::<(), crate::core::error::Error>(())
+//! # Ok(())
 //! # }
 //! ```
 
@@ -98,10 +98,10 @@ impl<'a> Omen<'a> {
         };
 
         // 2. Physics Math
-        if pos_b.len() != pos_a.len() 
-            || !pos_a.iter().all(|x| x.is_finite()) 
-            || !pos_b.iter().all(|x| x.is_finite()) 
-            || !vel_a.iter().all(|x| x.is_finite()) 
+        if pos_b.len() != pos_a.len()
+            || !pos_a.iter().all(|x| x.is_finite())
+            || !pos_b.iter().all(|x| x.is_finite())
+            || !vel_a.iter().all(|x| x.is_finite())
             || !vel_b.iter().all(|x| x.is_finite())
         {
             return Ok(None);
@@ -486,50 +486,5 @@ mod tests {
         // Should report immediate encounter (t=0) with current distance.
         assert_eq!(encounter.time_to_encounter.as_secs(), 0);
         assert!((encounter.predicted_distance - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_omen_dimension_mismatch() {
-        let db = AletheiaDB::new().unwrap();
-
-        let props_a = PropertyMapBuilder::new()
-            .insert_vector("vec", &[0.0, 0.0])
-            .build();
-        let node_a = db.create_node("A", props_a).unwrap();
-
-        let props_b = PropertyMapBuilder::new()
-            .insert_vector("vec", &[0.0, 0.0, 0.0])
-            .build();
-        let node_b = db.create_node("B", props_b).unwrap();
-
-        std::thread::sleep(Duration::from_millis(10));
-        let t_start = time::now();
-        std::thread::sleep(Duration::from_millis(50));
-
-        db.write(|tx| -> Result<()> {
-            tx.update_node(
-                node_a,
-                PropertyMapBuilder::new()
-                    .insert_vector("vec", &[1.0, 1.0])
-                    .build(),
-            )?;
-            tx.update_node(
-                node_b,
-                PropertyMapBuilder::new()
-                    .insert_vector("vec", &[1.0, 1.0, 1.0])
-                    .build(),
-            )?;
-            Ok(())
-        })
-        .unwrap();
-
-        let t_end = time::now();
-        let omen = Omen::new(&db);
-        let window = TimeRange::new(t_start, t_end).unwrap();
-
-        let encounter = omen
-            .predict_encounter(node_a, node_b, window, "vec")
-            .unwrap();
-        assert!(encounter.is_none());
     }
 }

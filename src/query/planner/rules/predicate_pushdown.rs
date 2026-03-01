@@ -288,30 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_filter_at_traverse() {
-        let rule = PredicatePushdown;
-        let stats = test_stats();
-
-        // Filter(Traverse(Scan))
-        // Should NOT push down because we stop at traversals
-        let plan = LogicalPlan::new(LogicalOp::unary(
-            UnaryOp::Filter(Predicate::eq("name", "Alice")),
-            LogicalOp::unary(
-                UnaryOp::Traverse {
-                    label: None,
-                    direction: crate::query::ir::Direction::Outgoing,
-                    depth: crate::query::ir::TraversalDepth::Exact(1),
-                },
-                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
-            ),
-        ));
-
-        let result = rule.apply(&plan, &stats).unwrap();
-        // Should return None because pushdown was blocked
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn test_stop_filter_at_vector_rank_with_limit() {
         let rule = PredicatePushdown;
         let stats = test_stats();

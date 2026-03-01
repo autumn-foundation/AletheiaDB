@@ -289,21 +289,10 @@ pub(crate) fn apply_single_write(
             label,
             properties,
             valid_from,
-        }
-        | crate::api::transaction::BufferedWrite::UpdateNode {
-            node_id,
-            version_id,
-            label,
-            properties,
-            valid_from,
         } => {
-            let is_create = matches!(
-                write,
-                crate::api::transaction::BufferedWrite::CreateNode { .. }
-            );
             apply_node_write(
                 tx,
-                is_create,
+                true, // is_create
                 *node_id,
                 *version_id,
                 *label,
@@ -321,8 +310,41 @@ pub(crate) fn apply_single_write(
             label,
             properties,
             valid_from,
+        } => {
+            apply_edge_write(
+                tx,
+                true, // is_create
+                *edge_id,
+                *version_id,
+                *source,
+                *target,
+                *label,
+                properties.clone(),
+                *valid_from,
+                commit_timestamp,
+                historical,
+            )?;
         }
-        | crate::api::transaction::BufferedWrite::UpdateEdge {
+        crate::api::transaction::BufferedWrite::UpdateNode {
+            node_id,
+            version_id,
+            label,
+            properties,
+            valid_from,
+        } => {
+            apply_node_write(
+                tx,
+                false, // is_create
+                *node_id,
+                *version_id,
+                *label,
+                properties.clone(),
+                *valid_from,
+                commit_timestamp,
+                historical,
+            )?;
+        }
+        crate::api::transaction::BufferedWrite::UpdateEdge {
             edge_id,
             version_id,
             source,
@@ -331,13 +353,9 @@ pub(crate) fn apply_single_write(
             properties,
             valid_from,
         } => {
-            let is_create = matches!(
-                write,
-                crate::api::transaction::BufferedWrite::CreateEdge { .. }
-            );
             apply_edge_write(
                 tx,
-                is_create,
+                false, // is_create
                 *edge_id,
                 *version_id,
                 *source,

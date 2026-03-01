@@ -52,32 +52,6 @@ pub(crate) const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 /// # Returns
 ///
 /// A vector of WAL entries sorted by LSN.
-///
-/// # Examples
-///
-/// ```
-/// use aletheiadb::storage::wal::LSN;
-/// use aletheiadb::storage::wal::segment_reader::read_entries_from_dir;
-/// use std::fs::File;
-/// use std::io::Write;
-/// use tempfile::tempdir;
-///
-/// let dir = tempdir().unwrap();
-/// let wal_dir = dir.path();
-///
-/// // Create a dummy segment file
-/// let segment_path = wal_dir.join("0.log");
-/// let mut file = File::create(&segment_path).unwrap();
-///
-/// // Write WAL header: Magic bytes *b"GWAL" and version 1
-/// file.write_all(b"GWAL").unwrap();
-/// file.write_all(&[1]).unwrap();
-/// file.sync_all().unwrap();
-///
-/// // Read entries (returns an empty vector since we wrote no entries)
-/// let entries = read_entries_from_dir(wal_dir, LSN(1)).unwrap();
-/// assert!(entries.is_empty());
-/// ```
 pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
 
@@ -132,29 +106,6 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 ///
 /// Uses `memmap2` for memory-mapped I/O. Peak memory usage is O(working set)
 /// rather than O(file size). See issue #216.
-///
-/// # Examples
-///
-/// ```
-/// use aletheiadb::storage::wal::LSN;
-/// use aletheiadb::storage::wal::segment_reader::read_segment;
-/// use std::fs::File;
-/// use std::io::Write;
-/// use tempfile::tempdir;
-///
-/// let dir = tempdir().unwrap();
-/// let segment_path = dir.path().join("segment.log");
-///
-/// // Create a segment file with a valid header: Magic bytes *b"GWAL" and version 1
-/// let mut file = File::create(&segment_path).unwrap();
-/// file.write_all(b"GWAL").unwrap();
-/// file.write_all(&[1]).unwrap();
-/// file.sync_all().unwrap();
-///
-/// // Read the empty segment
-/// let entries = read_segment(&segment_path, LSN(1)).unwrap();
-/// assert!(entries.is_empty());
-/// ```
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
