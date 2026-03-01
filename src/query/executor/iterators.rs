@@ -1006,8 +1006,8 @@ impl FilterIterator {
 
     fn compare_lt(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
         match (prop, value) {
-            (PropertyValue::Int(a), PredicateValue::Int(b)) => a < b,
-            (PropertyValue::Float(a), PredicateValue::Float(b)) => a < b,
+            (PropertyValue::Int(a), PredicateValue::Int(b)) => *a < *b,
+            (PropertyValue::Float(a), PredicateValue::Float(b)) => *a < *b,
             (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) < *b,
             (PropertyValue::Float(a), PredicateValue::Int(b)) => *a < (*b as f64),
             _ => false,
