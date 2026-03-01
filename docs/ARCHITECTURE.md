@@ -54,6 +54,27 @@ This document describes the core architecture principles, design patterns, and s
 - **Isolation**: MVCC provides snapshot isolation
 - **Durability**: WAL + fsync guarantees
 
+### 4. Dependency Architecture
+
+**Strict Unidirectional Flow:**
+- DB -> API -> Storage -> Core
+- No circular dependencies between core systems
+
+```mermaid
+classDiagram
+    class DB
+    class API
+    class Storage
+    class Index
+    class Core
+
+    DB --> API : Depends
+    API --> Storage : Depends
+    Storage --> Core : Depends
+    Index --> Core : Depends
+    Index --> Storage : Depends
+```
+
 ## System Context (C4 Model)
 
 ```mermaid
