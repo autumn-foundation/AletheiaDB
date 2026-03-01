@@ -850,7 +850,7 @@ pub(crate) fn load_indexes_startup(
                 if !graph_data.outgoing_offsets.is_empty()
                     && !graph_data.incoming_offsets.is_empty()
                 {
-                    current.import_csr(
+                    let import_result = current.import_csr(
                         graph_data.outgoing_node_ids,
                         graph_data.outgoing_offsets,
                         graph_data.outgoing_neighbors,
@@ -858,6 +858,14 @@ pub(crate) fn load_indexes_startup(
                         graph_data.incoming_offsets,
                         graph_data.incoming_neighbors,
                     );
+
+                    if let Err(e) = import_result {
+                        eprintln!(
+                            "Warning: Failed to import CSR data ({}), falling back to compacting adjacency",
+                            e
+                        );
+                        current.compact_adjacency();
+                    }
                 } else {
                     // Fallback for older index files without CSR data
                     current.compact_adjacency();
