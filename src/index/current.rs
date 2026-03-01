@@ -812,7 +812,8 @@ impl CurrentIndexes {
             outgoing_offsets.clone(),
             outgoing_edge_ids.clone(),
             &edges_map,
-        ).expect("Failed to import outgoing CSR index");
+        )
+        .expect("Failed to import outgoing CSR index");
         self.outgoing.import_frozen_csr(Arc::new(outgoing_csr));
 
         // Rebuild edges map for incoming (maps edge_id to source, not target)
@@ -828,7 +829,8 @@ impl CurrentIndexes {
             incoming_offsets,
             incoming_edge_ids.clone(),
             &edges_map,
-        ).expect("Failed to import incoming CSR index");
+        )
+        .expect("Failed to import incoming CSR index");
         self.incoming.import_frozen_csr(Arc::new(incoming_csr));
 
         // ===== Phase 7: Reconstruct Delta Buffer =====
