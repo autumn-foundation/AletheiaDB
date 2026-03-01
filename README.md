@@ -412,79 +412,93 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 use aletheiadb::{AletheiaDB, properties, HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
-let db = AletheiaDB::new().unwrap();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
 
-// Enable vector indexing with temporal support
-db.vector_index("embedding")
-    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
-    .temporal(TemporalVectorConfig::default())
-    .enable()?;
+    // Enable vector indexing with temporal support
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+        .temporal(TemporalVectorConfig::default())
+        .enable()?;
 
-let embedding = vec![0.1f32; 384];
+    let embedding = vec![0.1f32; 384];
 
-// Store node with embedding - automatically indexed!
-// Note: We convert the vector to a slice for the properties! macro
-let doc_id = db.create_node("Document",
-    properties! {
-        "title" => "Introduction to Rust",
-        "embedding" => &embedding[..],
-    }
-)?;
+    // Store node with embedding - automatically indexed!
+    // Note: We convert the vector to a slice for the properties! macro
+    let doc_id = db.create_node("Document",
+        properties! {
+            "title" => "Introduction to Rust",
+            "embedding" => &embedding[..],
+        }
+    )?;
 
-// Create another similar node so we have something to find
-let _doc2_id = db.create_node("Document",
-    properties! {
-        "title" => "Rust for Beginners",
-        "embedding" => &embedding[..], // Same embedding for max similarity
-    }
-)?;
+    // Create another similar node so we have something to find
+    let _doc2_id = db.create_node("Document",
+        properties! {
+            "title" => "Rust for Beginners",
+            "embedding" => &embedding[..], // Same embedding for max similarity
+        }
+    )?;
 
-// Find similar nodes
-// Note: find_similar excludes the query node itself from results
-let similar = db.find_similar(doc_id, 10)?;
+    // Find similar nodes
+    // Note: find_similar excludes the query node itself from results
+    let similar = db.find_similar(doc_id, 10)?;
+
+    Ok(())
+}
 ```
 
 ### Hybrid Queries (Graph + Vector + Temporal)
 
 ```rust
-// Setup query parameters
-let query_embedding = vec![0.1f32; 384];
-let valid_time = aletheiadb::time::now();
-let tx_time = aletheiadb::time::now();
+use aletheiadb::prelude::*;
+use aletheiadb::DistanceMetric;
 
-// Simple: Graph + Vector hybrid
-let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
-for row in results {
-    // Iterate over results (QueryResults is an iterator)
-    println!("Found: {:?}", row?.entity);
-}
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
+    let alice_id = db.create_node("Person", properties! { "name" => "Alice" })?;
 
-// Complex: Full hybrid with builder
-let results = db.query()
-    .as_of(valid_time, tx_time)        // Temporal: point-in-time
-    .start(alice_id)                   // Graph: start node
-    .traverse("KNOWS")                 // Graph: traverse edges
-    .rank_by_similarity(&query_embedding, 10) // Vector: rank by similarity
-    .with_provenance()                 // Include metadata
-    .execute(&db)?;
+    // Setup query parameters
+    let query_embedding = vec![0.1f32; 384];
+    let valid_time = aletheiadb::time::now();
+    let tx_time = aletheiadb::time::now();
 
-for row in results {
-    // Access score from metadata
-    let row = row?;
-    if let Some(score) = row.score {
-        if score > 0.8 {
-            println!("High similarity match: {:?}", row.entity);
+    // Simple: Graph + Vector hybrid
+    let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
+    for row in results {
+        // Iterate over results (QueryResults is an iterator)
+        println!("Found: {:?}", row?.entity);
+    }
+
+    // Complex: Full hybrid with builder
+    let results = db.query()
+        .as_of(valid_time, tx_time)        // Temporal: point-in-time
+        .start(alice_id)                   // Graph: start node
+        .traverse("KNOWS")                 // Graph: traverse edges
+        .rank_by_similarity(&query_embedding, 10) // Vector: rank by similarity
+        .with_provenance()                 // Include metadata
+        .execute(&db)?;
+
+    for row in results {
+        // Access score from metadata
+        let row = row?;
+        if let Some(score) = row.score {
+            if score > 0.8 {
+                println!("High similarity match: {:?}", row.entity);
+            }
         }
     }
-}
 
-// Property-specific vector queries
-let _results = db.query()
-    .find_similar_builder(&query_embedding, 10)
-    .property("embedding")  // Query specific property
-    .metric(DistanceMetric::Cosine)
-    .finish()
-    .execute(&db)?;
+    // Property-specific vector queries
+    let _results = db.query()
+        .find_similar_builder(&query_embedding, 10)
+        .property("embedding")  // Query specific property
+        .metric(DistanceMetric::Cosine)
+        .finish()
+        .execute(&db)?;
+
+    Ok(())
+}
 ```
 
 See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** for complete API reference.
@@ -497,47 +511,51 @@ use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::{DriftMetric, TemporalVectorConfig, SnapshotStrategy};
 use aletheiadb::core::temporal::TimeRange;
 
-let db = AletheiaDB::new().unwrap();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
 
-// Configure vector indexing with frequent snapshots for demonstration
-let mut temp_config = TemporalVectorConfig::default();
-temp_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
+    // Configure vector indexing with frequent snapshots for demonstration
+    let mut temp_config = TemporalVectorConfig::default();
+    temp_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
 
-db.vector_index("embedding")
-    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
-    .temporal(temp_config)
-    .enable()?;
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+        .temporal(temp_config)
+        .enable()?;
 
-// 1. Create node with initial embedding
-let embedding1 = vec![0.0f32; 384];
-let node_id = db.create_node("Person", properties! {
-    "name" => "Alice",
-    "embedding" => &embedding1[..],
-})?;
+    // 1. Create node with initial embedding
+    let embedding1 = vec![0.0f32; 384];
+    let node_id = db.create_node("Person", properties! {
+        "name" => "Alice",
+        "embedding" => &embedding1[..],
+    })?;
 
-// 2. Update node with different embedding (simulating drift)
-let mut embedding2 = vec![0.0f32; 384];
-embedding2[0] = 1.0; // Changed!
-db.write(|tx| {
-    tx.update_node(node_id, properties! {
-        "embedding" => &embedding2[..],
-    })
-})?;
+    // 2. Update node with different embedding (simulating drift)
+    let mut embedding2 = vec![0.0f32; 384];
+    embedding2[0] = 1.0; // Changed!
+    db.write(|tx| {
+        tx.update_node(node_id, properties! {
+            "embedding" => &embedding2[..],
+        })
+    })?;
 
-// 3. Find drift covering the changes
-let start = aletheiadb::time::from_secs(0);
-let end = aletheiadb::time::now();
-let time_range = TimeRange::new(start, end)?;
+    // 3. Find drift covering the changes
+    let start = aletheiadb::time::from_secs(0);
+    let end = aletheiadb::time::now();
+    let time_range = TimeRange::new(start, end)?;
 
-let drifted_nodes = db.find_drift_in(
-    "embedding",
-    0.1,
-    time_range,
-    DriftMetric::Cosine,
-)?;
+    let drifted_nodes = db.find_drift_in(
+        "embedding",
+        0.1,
+        time_range,
+        DriftMetric::Cosine,
+    )?;
 
-for (node_id, drift_score) in drifted_nodes {
-    println!("Node {} drifted by {:.3}", node_id, drift_score);
+    for (node_id, drift_score) in drifted_nodes {
+        println!("Node {} drifted by {:.3}", node_id, drift_score);
+    }
+
+    Ok(())
 }
 ```
 
@@ -599,26 +617,30 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 use aletheiadb::storage::index_persistence::PersistenceConfig;
 
-// Enable index persistence for 6-30x faster startup
-let config = AletheiaDBConfig::builder()
-    .persistence(PersistenceConfig {
-        enabled: true,
-        data_dir: "data/my-database".into(),
-        load_on_startup: true,  // Load indexes on startup
-        use_mmap: true,         // Memory-map large indexes
-        ..Default::default()
-    })
-    .build();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Enable index persistence for 6-30x faster startup
+    let config = AletheiaDBConfig::builder()
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: "data/my-database".into(),
+            load_on_startup: true,  // Load indexes on startup
+            use_mmap: true,         // Memory-map large indexes
+            ..Default::default()
+        })
+        .build();
 
-let db = AletheiaDB::with_unified_config(config);
+    let db = AletheiaDB::with_unified_config(config)?;
 
-// Indexes automatically persist in background
-// On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
-// Includes StringInterner persistence (interned label/property IDs survive restart)
-// Recovery path: CheckpointManager loads indexes, then replays WAL from manifest LSN + 1
+    // Indexes automatically persist in background
+    // On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
+    // Includes StringInterner persistence (interned label/property IDs survive restart)
+    // Recovery path: CheckpointManager loads indexes, then replays WAL from manifest LSN + 1
 
-// Note: On first run, you may see "Missing required index file" warnings.
-// This is normal for a fresh database.
+    // Note: On first run, you may see "Missing required index file" warnings.
+    // This is normal for a fresh database.
+
+    Ok(())
+}
 ```
 
 See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** for complete guide.
@@ -629,19 +651,22 @@ See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-gui
 use aletheiadb::{AletheiaDB, config::AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::storage::wal::DurabilityMode;
 
-// Load from TOML file (requires file to exist)
-// let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
-// let db = AletheiaDB::with_unified_config(config);
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Load from TOML file (requires file to exist)
+    // let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
+    // let db = AletheiaDB::with_unified_config(config)?;
 
-// Programmatic configuration
-let config = AletheiaDBConfig::builder()
-    .wal(WalConfigBuilder::new()
-        .num_stripes(64).unwrap()  // High concurrency
-        .durability_mode(DurabilityMode::group_commit_default())
-        .build())
-    .build();
+    // Programmatic configuration
+    let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new()
+            .num_stripes(64).unwrap()  // High concurrency
+            .durability_mode(DurabilityMode::group_commit_default())
+            .build())
+        .build();
 
-let db = AletheiaDB::with_unified_config(config)?;
+    let db = AletheiaDB::with_unified_config(config)?;
+    Ok(())
+}
 ```
 
 See **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for all configuration options and presets.
@@ -731,20 +756,23 @@ use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 use aletheiadb::config::HistoricalConfigBuilder;
 use std::time::Duration;
 
-// Configure cold storage via the unified config builder
-let config = AletheiaDBConfig::builder()
-    .historical(
-        HistoricalConfigBuilder::new()
-            .enable_cold_storage(true)
-            .cold_storage_path("data/cold.redb")
-            .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
-            .max_hot_versions(1000)
-            .build(),
-    )
-    .build();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Configure cold storage via the unified config builder
+    let config = AletheiaDBConfig::builder()
+        .historical(
+            HistoricalConfigBuilder::new()
+                .enable_cold_storage(true)
+                .cold_storage_path("data/cold.redb")
+                .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
+                .max_hot_versions(1000)
+                .build(),
+        )
+        .build();
 
-// Cold storage automatically initialized!
-let db = AletheiaDB::with_unified_config(config)?;
+    // Cold storage automatically initialized!
+    let db = AletheiaDB::with_unified_config(config)?;
+    Ok(())
+}
 ```
 
 See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** for complete guide.
@@ -757,25 +785,33 @@ For complex operations involving multiple updates, use explicit transactions.
 
 ```rust
 use aletheiadb::prelude::*;
+use aletheiadb::core::error::Error;
 
-// Explicit read transaction
-let result = db.read(|tx| {
-    tx.get_node(alice_id).map(|node| node.label.clone())
-})?;
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
+    let alice_id = db.create_node("Person", properties! { "name" => "Alice" })?;
 
-// Explicit write transaction with multiple operations
-db.write(|tx| {
-    let node1 = tx.create_node("Event", PropertyMap::new())?;
-    let node2 = tx.create_node("Event", PropertyMap::new())?;
-    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
-})?;
+    // Explicit read transaction
+    let result = db.read(|tx| {
+        tx.get_node(alice_id).map(|node| node.label.clone())
+    })?;
+
+    // Explicit write transaction with multiple operations
+    db.write(|tx| {
+        let node1 = tx.create_node("Event", PropertyMap::new())?;
+        let node2 = tx.create_node("Event", PropertyMap::new())?;
+        tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
+    })?;
+
+    Ok(())
+}
 ```
 
 ### Embedding Generation (Optional)
 
 AletheiaDB includes an optional embedding generation system for semantic search:
 
-```rust
+```rust,ignore
 use aletheiadb::{AletheiaDB, properties};
 use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 use std::sync::Arc;
@@ -795,7 +831,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "AletheiaDB is a bi-temporal graph database",
         "It tracks both valid time and transaction time",
     ];
-    let embeddings = service.embed_batch(&documents).await?;
+    let embeddings: Vec<Vec<f32>> = service.embed_batch(&documents).await?;
 
     // 3. Store with vectors
     let db = AletheiaDB::new()?;
@@ -837,7 +873,7 @@ features = [
 
 **Basic usage:**
 
-```rust
+```rust,ignore
 use aletheiadb::observability;
 
 fn main() {
