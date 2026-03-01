@@ -30,3 +30,7 @@
 1.  **Update `tokenizers`:** Updated `tokenizers` to version `0.22` in `Cargo.toml`. This version drops the dependency on `number_prefix` and includes fixes for known vulnerabilities.
 2.  **Update Dependencies:** Ran `cargo update` to pull in the latest compatible versions of all dependencies, resolving the yanked `bumpalo` issue in `wasm-bindgen`.
 3.  **Verification:** Ran `cargo audit` to confirm the vulnerabilities are resolved. Ran tests (`cargo test --features embedding-onnx`) to ensure no regressions.
+
+**2025-05-25 - Removed unsafe transmute in AdjacencyIndex**
+**Threat:** `AdjacencyIndex::import_csr` and `convert_offsets` used `unsafe { Vec::from_raw_parts }` to zero-copy cast `Vec<u64>` to `Vec<NodeId>` and `Vec<usize>`. This bypassed `NodeId::MAX_VALID_ID` invariants and relied on potentially fragile memory layout assumptions, presenting a risk of Undefined Behavior (UB) if a corrupted index was loaded.
+**Defense:** Replaced `unsafe` transmute with safe iterator mapping (`into_iter().map().collect()`).

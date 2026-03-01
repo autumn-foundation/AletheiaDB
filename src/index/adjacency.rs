@@ -94,27 +94,38 @@ impl AdjacencyIndex {
             (NodeId, InternedString),
             BuildHasherDefault<IdentityHasher>,
         >,
-    ) -> Self {
+    ) -> Result<Self, String> {
         if offsets.is_empty() || edge_ids.is_empty() {
-            return Self::new();
+            return Ok(Self::new());
         }
 
         // Validate CSR invariants
-        Self::validate_csr_invariants(&node_ids, &offsets, &edge_ids).unwrap();
+        Self::validate_csr_invariants(&node_ids, &offsets, &edge_ids)?;
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
-        // Zero-copy conversion: NodeId(u64) has same layout as u64
-        // SAFETY: NodeId is #[repr(transparent)] wrapper around u64.
-        let node_ids_typed: Vec<NodeId> = unsafe { Self::transmute_vec(node_ids) };
+        // Safe conversion ensuring max_valid_id invariants are met.
+        let mut node_ids_typed = Vec::with_capacity(node_ids.len());
+        for id in node_ids {
+            node_ids_typed.push(
+                NodeId::new(id).map_err(|_| format!("Invalid NodeId in CSR import: {}", id))?,
+            );
+        }
 
-        // Convert offsets (zero-copy on 64-bit, allocating on 32-bit)
-        let offsets_usize = Self::convert_offsets(offsets);
+        // Convert offsets to usize safely, avoiding silent truncation on 32-bit platforms
+        let mut offsets_usize = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            let offset_usize = usize::try_from(offset)
+                .map_err(|_| format!("CSR offset {} exceeds usize capacity", offset))?;
+            offsets_usize.push(offset_usize);
+        }
 
         let mut adjacency_entries = Vec::with_capacity(edge_ids.len());
 
         for &edge_id_u64 in &edge_ids {
-            let edge_id = EdgeId::new_unchecked(edge_id_u64);
+            // Ensure edge ID is valid before casting
+            let edge_id = EdgeId::new(edge_id_u64)
+                .map_err(|_| format!("Invalid EdgeId in CSR import: {}", edge_id_u64))?;
             if let Some((target, label)) = edges_map.get(&edge_id) {
                 adjacency_entries.push(AdjacencyEntry::new(*target, edge_id, *label));
             } else {
@@ -128,12 +139,12 @@ impl AdjacencyIndex {
             }
         }
 
-        Self {
+        Ok(Self {
             node_ids: node_ids_typed,
             offsets: offsets_usize,
             edges: adjacency_entries,
             max_node_id,
-        }
+        })
     }
 }
 
@@ -312,39 +323,6 @@ impl AdjacencyIndex {
         }
 
         Ok(())
-    }
-
-    /// Convert offsets to usize vector.
-    ///
-    /// On 64-bit systems, this is a zero-copy operation because usize == u64.
-    /// On 32-bit systems, this allocates a new vector because usize == u32 != u64.
-    fn convert_offsets(offsets: Vec<u64>) -> Vec<usize> {
-        #[cfg(target_pointer_width = "64")]
-        {
-            // SAFETY: usize == u64 on 64-bit platforms, so layout is compatible.
-            unsafe { Self::transmute_vec(offsets) }
-        }
-
-        #[cfg(not(target_pointer_width = "64"))]
-        {
-            offsets.iter().map(|&x| x as usize).collect()
-        }
-    }
-
-    /// Helper for zero-copy Vec conversion
-    ///
-    /// # Safety
-    /// T and U must have same layout, size, and alignment.
-    unsafe fn transmute_vec<T, U>(v: Vec<T>) -> Vec<U> {
-        // Enforce safety invariants at compile time/runtime
-        assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<U>());
-        assert_eq!(std::mem::align_of::<T>(), std::mem::align_of::<U>());
-
-        let mut v = std::mem::ManuallyDrop::new(v);
-        // SAFETY: Caller ensures T and U layout compatibility.
-        // from_raw_parts is unsafe, but we are inside an unsafe function.
-        // In Rust 2024 (and newer editions), unsafe blocks are required inside unsafe functions.
-        unsafe { Vec::from_raw_parts(v.as_mut_ptr() as *mut U, v.len(), v.capacity()) }
     }
 }
 
@@ -750,26 +728,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transmute_vec_correctness() {
-        let original = vec![1u64, 2, 3];
-        let ptr = original.as_ptr();
-        let cap = original.capacity();
-
-        // Use NodeId which is transparent wrapper around u64
-        // SAFETY: NodeId is repr(transparent) and same size/align as u64
-        let transmuted: Vec<NodeId> = unsafe { AdjacencyIndex::transmute_vec(original) };
-
-        assert_eq!(transmuted.len(), 3);
-        assert_eq!(transmuted.capacity(), cap);
-        assert_eq!(transmuted[0], NodeId::new(1).unwrap());
-        assert_eq!(transmuted[1], NodeId::new(2).unwrap());
-        assert_eq!(transmuted[2], NodeId::new(3).unwrap());
-
-        // Verify no copy happened (best effort check, pointers should match)
-        assert_eq!(transmuted.as_ptr() as *const u64, ptr);
-    }
-
-    #[test]
     fn test_import_csr_integration() {
         // This test ensures import_csr works in the standard test module scope
         let node_ids = vec![1, 2];
@@ -786,7 +744,7 @@ mod tests {
         edges_map.insert(EdgeId::new(10).unwrap(), (NodeId::new(2).unwrap(), label));
         edges_map.insert(EdgeId::new(20).unwrap(), (NodeId::new(1).unwrap(), label));
 
-        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map).unwrap();
         assert_eq!(index.node_count(), 2);
         assert_eq!(index.edge_count(), 2);
     }
@@ -822,14 +780,15 @@ mod sentry_tests {
     }
 
     #[test]
-    #[should_panic(expected = "CSR offsets length mismatch")]
-    fn test_import_csr_panics_on_invalid() {
-        // Integration check: ensure import_csr actually calls validate and panics
+    fn test_import_csr_errors_on_invalid() {
+        // Integration check: ensure import_csr actually calls validate and errors
         let node_ids = vec![10];
         let offsets = vec![0]; // invalid len (should be 2)
         let edge_ids = vec![100]; // Non-empty to bypass early return
         let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
-        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let result = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("CSR offsets length mismatch"));
     }
 
     #[test]
@@ -848,7 +807,7 @@ mod sentry_tests {
         edges_map.insert(EdgeId::new(101).unwrap(), (target, label));
 
         // Should not panic
-        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map).unwrap();
 
         assert_eq!(index.edge_count(), 2);
         assert_eq!(index.node_count(), 2);
