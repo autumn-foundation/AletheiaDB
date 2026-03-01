@@ -781,7 +781,7 @@ impl CurrentIndexes {
         incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
-    ) {
+    ) -> Result<(), String> {
         use crate::core::hasher::IdentityHasher;
         use std::collections::{HashMap, HashSet};
         use std::hash::BuildHasherDefault;
@@ -790,14 +790,15 @@ impl CurrentIndexes {
         // If we have tombstones, importing would cause deleted edges to reappear.
         let outgoing_tombstones = self.outgoing.tombstone_count();
         let incoming_tombstones = self.incoming.tombstone_count();
-        assert!(
-            outgoing_tombstones == 0 && incoming_tombstones == 0,
-            "Cannot import CSR with uncommitted tombstones: {} outgoing, {} incoming. \
-             Deleted edges would reappear! Call compact() first or ensure import is \
-             only called on a fresh index during startup.",
-            outgoing_tombstones,
-            incoming_tombstones
-        );
+        if outgoing_tombstones != 0 || incoming_tombstones != 0 {
+            return Err(format!(
+                "Cannot import CSR with uncommitted tombstones: {} outgoing, {} incoming. \
+                 Deleted edges would reappear! Call compact() first or ensure import is \
+                 only called on a fresh index during startup.",
+                outgoing_tombstones,
+                incoming_tombstones
+            ));
+        }
 
         // Build edges map for CSR reconstruction
         let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
@@ -812,7 +813,7 @@ impl CurrentIndexes {
             outgoing_offsets.clone(),
             outgoing_edge_ids.clone(),
             &edges_map,
-        );
+        )?;
         self.outgoing.import_frozen_csr(Arc::new(outgoing_csr));
 
         // Rebuild edges map for incoming (maps edge_id to source, not target)
@@ -828,7 +829,7 @@ impl CurrentIndexes {
             incoming_offsets,
             incoming_edge_ids.clone(),
             &edges_map,
-        );
+        )?;
         self.incoming.import_frozen_csr(Arc::new(incoming_csr));
 
         // ===== Phase 7: Reconstruct Delta Buffer =====
@@ -858,6 +859,8 @@ impl CurrentIndexes {
                 );
             }
         }
+
+        Ok(())
     }
 }
 
