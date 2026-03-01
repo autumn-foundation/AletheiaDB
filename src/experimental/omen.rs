@@ -92,10 +92,15 @@ impl<'a> Omen<'a> {
             Some(t) => t,
             None => return Ok(None),
         };
+
         let (pos_b, vel_b) = match traj_b {
             Some(t) => t,
             None => return Ok(None),
         };
+
+        if pos_a.len() != pos_b.len() {
+            return Ok(None);
+        }
 
         // 2. Physics Math
         // Relative Position P = Pb - Pa (at t=0, which is window.end)
@@ -207,15 +212,11 @@ impl<'a> Omen<'a> {
 
         for v in &history.versions {
             let vt_start = v.temporal.valid_time().start().wallclock();
-            #[allow(clippy::collapsible_if)]
-            if vt_start <= time.wallclock() {
-                if vt_start >= best_time {
-                    if let Some(val) = v.properties.get(property) {
-                        if let Some(vec) = val.as_vector() {
-                            best_vec = Some(vec.to_vec());
-                            best_time = vt_start;
-                        }
-                    }
+            if vt_start <= time.wallclock() && vt_start >= best_time {
+                let vec_opt = v.properties.get(property).and_then(|val| val.as_vector());
+                if let Some(vec) = vec_opt {
+                    best_vec = Some(vec.to_vec());
+                    best_time = vt_start;
                 }
             }
         }
@@ -226,6 +227,7 @@ impl<'a> Omen<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
@@ -233,6 +235,7 @@ mod tests {
     #[test]
     fn test_omen_head_on_collision() {
         let db = AletheiaDB::new().unwrap();
+
         // Enable index
         db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
             .unwrap();
@@ -315,6 +318,7 @@ mod tests {
     #[test]
     fn test_omen_diverging() {
         let db = AletheiaDB::new().unwrap();
+
         db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
             .unwrap();
 
@@ -372,6 +376,7 @@ mod tests {
     #[test]
     fn test_omen_static_target() {
         let db = AletheiaDB::new().unwrap();
+
         db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
             .unwrap();
 
@@ -418,6 +423,7 @@ mod tests {
     #[test]
     fn test_omen_parallel() {
         let db = AletheiaDB::new().unwrap();
+
         db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
             .unwrap();
 
@@ -477,5 +483,76 @@ mod tests {
         // Should report immediate encounter (t=0) with current distance.
         assert_eq!(encounter.time_to_encounter.as_secs(), 0);
         assert!((encounter.predicted_distance - 1.0).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+    use crate::AletheiaDB;
+
+    use crate::core::temporal::{TimeRange, time};
+    use std::time::Duration;
+
+    #[test]
+    fn test_omen_dimension_mismatch() {
+        let db = AletheiaDB::new().unwrap();
+        use crate::api::transaction::WriteOps;
+        use crate::core::property::PropertyMapBuilder;
+
+        // Node A: Starts at [0, 0]
+        let props_a = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 0.0])
+            .build();
+        let a = db.create_node("A", props_a).unwrap();
+
+        // Node B: Starts at [10, 0, 0] (Different Dimension!)
+        let props_b = PropertyMapBuilder::new()
+            .insert_vector("vec", &[10.0, 0.0, 0.0])
+            .build();
+        let b = db.create_node("B", props_b).unwrap();
+
+        // Wait to establish initial state time
+        std::thread::sleep(Duration::from_millis(10));
+        let t_start = time::now();
+
+        // Wait 50ms
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Update A
+        db.write(|tx| {
+            tx.update_node(
+                a,
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 0.0])
+                    .build(),
+            )
+        })
+        .unwrap();
+
+        // Update B
+        db.write(|tx| {
+            tx.update_node(
+                b,
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[9.0, 0.0, 0.0])
+                    .build(),
+            )
+        })
+        .unwrap();
+
+        let t_end = time::now();
+
+        let omen = Omen::new(&db);
+        let window = TimeRange::new(t_start, t_end).unwrap();
+
+        // Since dimensions don't match (2 vs 3), predict_encounter should return None to avoid silent truncation.
+        let encounter = omen.predict_encounter(a, b, window, "vec").unwrap();
+
+        assert!(
+            encounter.is_none(),
+            "Expected None due to dimension mismatch, but got {:?}",
+            encounter
+        );
     }
 }
