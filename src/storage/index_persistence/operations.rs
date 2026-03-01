@@ -858,8 +858,8 @@ pub(crate) fn load_indexes_startup(
                         graph_data.incoming_offsets,
                         graph_data.incoming_neighbors,
                     ) {
-                        eprintln!(
-                            "Warning: Failed to import CSR adjacency, falling back to rebuild: {}",
+                        log::warn!(
+                            "Failed to import CSR adjacency, falling back to rebuild: {}",
                             e
                         );
                         current.compact_adjacency();
