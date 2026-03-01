@@ -68,3 +68,15 @@
 **Summary:** Potential regression in floating point equality semantics (NaN).
 **Diagnosis:** WEAK_TEST - Explicit verification of `NaN != NaN` (PartialEq) vs `NaN == NaN` (semantically_equal) was needed to prevent regressions.
 **Kill Shot:** Added `test_property_value_partial_eq_nan_semantics` in `src/core/property.rs`.
+
+**[Weak Test Coverage in Predicate Pushdown Boundaries]**
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Summary:** The `cargo-mutants` tool indicated that removing the `Traverse` and `Scan` match arms inside `push_down` survived mutation testing. This implies there were no tests ensuring that a filter would correctly stop pushing down at a graph traversal.
+**Diagnosis:** MISSING_TEST - The tests did not explicitly verify the negative condition: that `Filter` is properly halted by a `Traverse` operator. The match arms were functionally equivalent to the default case in terms of output, but they carried semantic meaning that was not checked.
+**Kill Shot:** Added `test_stop_filter_at_traverse` to ensure a `Filter` is not incorrectly pushed underneath a `Traverse` operation.
+
+**[Weak Test Coverage in Logical Equality Logic]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
+**Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
+**Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
