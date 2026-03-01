@@ -982,6 +982,8 @@ impl FilterIterator {
             (PropertyValue::Bool(a), PredicateValue::Bool(b)) => a == b,
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a == b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => (a - b).abs() < f64::EPSILON,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => ((*a as f64) - b).abs() < f64::EPSILON,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => (a - (*b as f64)).abs() < f64::EPSILON,
             (PropertyValue::String(a), PredicateValue::String(b)) => a.as_ref() == b.as_str(),
             (PropertyValue::Null, PredicateValue::Null) => true,
             _ => false,
@@ -992,6 +994,8 @@ impl FilterIterator {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a > b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a > b,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) > *b,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => *a > (*b as f64),
             _ => false,
         }
     }
@@ -1000,6 +1004,8 @@ impl FilterIterator {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a < b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a < b,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) < *b,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => *a < (*b as f64),
             _ => false,
         }
     }
@@ -1008,6 +1014,8 @@ impl FilterIterator {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a >= b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a >= b,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) >= *b,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => *a >= (*b as f64),
             _ => false,
         }
     }
@@ -1016,6 +1024,8 @@ impl FilterIterator {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a <= b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a <= b,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) <= *b,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => *a <= (*b as f64),
             _ => false,
         }
     }
@@ -2389,6 +2399,62 @@ mod tests {
         };
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
         assert!(filter.evaluate(&node));
+    }
+
+    // ==================== Type coercion ====================
+
+    #[test]
+    fn test_filter_type_coercion_eq() {
+        let props_int = PropertyMapBuilder::new().insert("value", 5i64).build();
+        let props_float = PropertyMapBuilder::new().insert("value", 5.0f64).build();
+        let label = GLOBAL_INTERNER.intern("ValueNode").unwrap();
+
+        let node_int = Node::new(NodeId::new(1).unwrap(), label, props_int, VersionId::new(1).unwrap());
+        let node_float = Node::new(NodeId::new(2).unwrap(), label, props_float, VersionId::new(1).unwrap());
+
+        // Compare Int to Float
+        let predicate_float = Predicate::eq("value", 5.0f64);
+        let filter1 = FilterIterator::new(Box::new(EmptyIterator), predicate_float.clone());
+        assert!(filter1.evaluate(&node_int));
+
+        // Compare Float to Int
+        let predicate_int = Predicate::eq("value", 5i64);
+        let filter2 = FilterIterator::new(Box::new(EmptyIterator), predicate_int);
+        assert!(filter2.evaluate(&node_float));
+    }
+
+    #[test]
+    fn test_filter_type_coercion_comparisons() {
+        let props_int = PropertyMapBuilder::new().insert("value", 5i64).build();
+        let props_float = PropertyMapBuilder::new().insert("value", 5.5f64).build();
+        let label = GLOBAL_INTERNER.intern("ValueNode").unwrap();
+
+        let node_int = Node::new(NodeId::new(1).unwrap(), label, props_int, VersionId::new(1).unwrap());
+        let node_float = Node::new(NodeId::new(2).unwrap(), label, props_float, VersionId::new(1).unwrap());
+
+        // GT: Int > Float
+        let filter_gt1 = FilterIterator::new(Box::new(EmptyIterator), Predicate::gt("value", 4.5f64));
+        assert!(filter_gt1.evaluate(&node_int));
+
+        // GT: Float > Int
+        let filter_gt2 = FilterIterator::new(Box::new(EmptyIterator), Predicate::gt("value", 5i64));
+        assert!(filter_gt2.evaluate(&node_float));
+
+        // LT: Int < Float
+        let filter_lt1 = FilterIterator::new(Box::new(EmptyIterator), Predicate::lt("value", 5.5f64));
+        assert!(filter_lt1.evaluate(&node_int));
+
+        // LT: Float < Int
+        let filter_lt2 = FilterIterator::new(Box::new(EmptyIterator), Predicate::lt("value", 6i64));
+        assert!(filter_lt2.evaluate(&node_float));
+
+        // GTE: Int >= Float
+        let filter_gte1 = FilterIterator::new(Box::new(EmptyIterator), Predicate::Gte { key: "value".to_string(), value: PredicateValue::Float(5.0f64) });
+        assert!(filter_gte1.evaluate(&node_int));
+
+        // LTE: Float <= Int
+        let filter_lte1 = FilterIterator::new(Box::new(EmptyIterator), Predicate::Lte { key: "value".to_string(), value: PredicateValue::Int(6i64) });
+        assert!(filter_lte1.evaluate(&node_float));
     }
 
     // ==================== Complex nested predicates ====================

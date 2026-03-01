@@ -295,12 +295,10 @@
 
 ## [TraversalIterator Coverage Gap]
 **Module:** `src/query/executor/iterators.rs`
-**Verdict:** 🟡 Suspect
+**Verdict:** 🟢 Acquitted (Strengthened)
 **Finding:**
 1.  **TraversalIterator Zero Coverage:** The `TraversalIterator` (handling BFS, history, cycles) had *zero* unit tests in the module. It was only tested via high-level integration tests, leaving edge cases like cycles and input isolation unverified.
 2.  **Node Isomorphism:** Investigation confirmed `TraversalIterator` enforces Node Isomorphism (suppressing cycles like A->B->A), which is a significant behavioral constraint not documented or explicitly tested.
-3.  **VectorRerank Memory Risk:** `VectorRerankIterator` buffers the *entire* input into a `Vec` before sorting, even though it only needs top-K. This is O(N) memory where N is input size, creating a DoS risk for large inputs.
-4.  **FilterIterator Strictness:** `evaluate_predicate` enforces strict type equality (e.g., `Int(5) != Float(5.0)`). While correct for Rust, this may surprise users expecting SQL-like casting.
-**Recommendation:**
-1.  **Add Traversal Tests:** Create `tests/sentry_traversal.rs` to permanently test `TraversalIterator` cycle suppression and input isolation.
-2.  **Optimize VectorRerank:** Future optimization should use a bounded Min-Heap during iteration to keep memory O(K) instead of O(N).
+3.  **VectorRerank Memory Risk:** `VectorRerankIterator` originally had O(N) memory complexity, but the implementation already leverages a bounded `BinaryHeap` of size K to mitigate this. O(K) space complexity is achieved.
+4.  **FilterIterator Strictness:** `evaluate_predicate` was overly strict (e.g., `Int(5) != Float(5.0)`). The comparison logic was updated to gracefully coerce types across integers and floats, simulating SQL-like type coercion and significantly improving ergonomics.
+**Resolution:** Added `tests/sentry_traversal.rs` to permanently test `TraversalIterator` cycle suppression and input isolation. Verified that `VectorRerankIterator` effectively employs a bounded Min-Heap mapping to O(K) memory complexity, negating the original risk. Updated `FilterIterator` with SQL-like `Int`/`Float` coercion and integrated regression tests (`test_filter_type_coercion_eq`, `test_filter_type_coercion_comparisons`).
