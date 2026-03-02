@@ -88,6 +88,8 @@ classDiagram
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+        class StorageObserver
+        class VersionMetadata
     }
     namespace Storage {
         class CurrentStorage
@@ -105,6 +107,8 @@ classDiagram
     QueryEngine --> AletheiaDB : Uses
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
+    CurrentStorage --> StorageObserver : Implements / Uses
+    CurrentStorage --> VersionMetadata : Uses
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
