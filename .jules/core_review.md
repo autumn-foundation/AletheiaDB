@@ -19,3 +19,17 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+
+## 🦀 Core Review: Warden Tests
+
+**Findings:**
+No high-severity findings.
+
+**Residual Risks:**
+* While `tests/warden_property_safety.rs` checks that calling `deserialize` with large vectors fails appropriately when the buffer is small, there are no tests ensuring we correctly protect against excessively deep nested structures (e.g., nesting properties inside Maps/Arrays) which could cause a stack overflow during serialization/deserialization.
+* `tests/warden_hnsw_exploit.rs` successfully verifies that dimension mismatch errors prevent an exploit, however, the validation happens at the usearch/loading layer. It might be worthwhile to ensure that the user-provided config is aggressively validated *before* attempting to parse the index mappings file.
+* `tests/warden_http_panic.rs` provides good coverage for malformed JSON, but there might be edge cases regarding deeply nested JSON objects or extremely large valid-JSON bodies leading to memory exhaustion.
+
+**Test Gaps:**
+* Tests to verify robustness against deeply nested PropertyValue structures.
+* Large but valid payload limit test on the HTTP API.
