@@ -80,3 +80,9 @@
 **Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
 **Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
 **Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
+
+**[Weak Test Coverage in ID Format and Boundaries]**
+**Module:** `src/core/id.rs`
+**Summary:** Mutants modifying formatting (`Display` output logic) for `NodeId`, `EdgeId`, `VersionId`, `TxId`, and `EntityId`, as well as constants boundary logic in `IdGenerator` (like `with_start`, `current_approximate`) and conversions (`is_node`, `is_edge`, `as_node`, `as_edge`) survived.
+**Diagnosis:** WEAK_TEST - The tests likely checked properties but lacked explicit assertions covering expected display outputs, boundary edge-cases for initial offset ID generation, and exact positive/negative checks for polymorphic entity conversions.
+**Kill Shot:** Added `tests/sentinel_id_tests.rs` containing targeted kill-shots for each missed property.
