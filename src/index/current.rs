@@ -796,7 +796,8 @@ impl CurrentIndexes {
                  Deleted edges would reappear! Call compact() first or ensure import is \
                  only called on a fresh index during startup.",
                 outgoing_tombstones, incoming_tombstones
-            )).into());
+            ))
+            .into());
         }
 
         // Build edges map for CSR reconstruction
@@ -2076,6 +2077,11 @@ mod test_import_csr {
             vec![],
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CSR offsets length mismatch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("CSR offsets length mismatch")
+        );
     }
 }

@@ -297,7 +297,8 @@ impl AdjacencyIndex {
                 "CSR offsets length mismatch: expected {}, got {}",
                 node_ids.len() + 1,
                 offsets.len()
-            )).into());
+            ))
+            .into());
         }
 
         #[allow(clippy::collapsible_if)]
@@ -307,7 +308,8 @@ impl AdjacencyIndex {
                     "CSR last offset mismatch: expected {}, got {}",
                     edge_ids.len(),
                     last_offset
-                )).into());
+                ))
+                .into());
             }
         }
 
@@ -832,7 +834,12 @@ mod sentry_tests {
         let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         let result = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CSR offsets length mismatch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("CSR offsets length mismatch")
+        );
     }
 
     #[test]
