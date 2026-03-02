@@ -504,6 +504,25 @@ pub trait WriteOps: ReadOps {
     ///
     /// **Warning**: This leaves orphaned edges. Use [`delete_node_cascade`](Self::delete_node_cascade)
     /// for safe deletion.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
+    /// # use aletheiadb::api::transaction::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let mut tx = db.write_transaction()?;
+    ///
+    /// let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    ///
+    /// // Delete the node
+    /// tx.delete_node(alice)?;
+    ///
+    /// tx.commit()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
         self.delete_node_with_valid_time(node_id, None)
     }
@@ -562,7 +581,28 @@ pub trait WriteOps: ReadOps {
         valid_from: Option<Timestamp>,
     ) -> Result<()>;
 
-    /// Delete an edge (delegates to delete_edge_with_valid_time with None)
+    /// Delete an edge (delegates to `delete_edge_with_valid_time` with `None`).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
+    /// # use aletheiadb::api::transaction::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let mut tx = db.write_transaction()?;
+    ///
+    /// let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    /// let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    /// let edge_id = tx.create_edge(alice, bob, "KNOWS", properties! {})?;
+    ///
+    /// // Delete the edge
+    /// tx.delete_edge(edge_id)?;
+    ///
+    /// tx.commit()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
         self.delete_edge_with_valid_time(edge_id, None)
     }
