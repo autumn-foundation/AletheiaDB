@@ -242,7 +242,7 @@ pub enum SortKey {
 /// Property predicates for filtering nodes and edges.
 ///
 /// Predicates can be combined using logical operators (And, Or, Not).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
     /// Property equals a value
     Eq {
