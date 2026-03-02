@@ -1,3 +1,4 @@
+### Findings
 No high-severity findings.
 
 ### Test gaps
