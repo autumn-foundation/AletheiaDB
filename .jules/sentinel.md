@@ -80,3 +80,9 @@
 **Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
 **Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
 **Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
+
+**[Weak Test Coverage in PropertyMap and PropertyValue Equality]**
+**Module:** `src/core/property.rs`
+**Summary:** Mutants returning `true` unconditionally for `<impl PartialEq for PropertyValue>::eq` and `<impl PartialEq for PropertyMap>::eq` survived, as well as those mutating the implementations of `contains_key`, `contains_interned_key`, and `is_empty` to return hardcoded booleans (`true` or `false`).
+**Diagnosis:** WEAK_TEST - The test suite lacked specific assertions explicitly comparing structurally distinct values and maps to verify they return false. Additionally, there were no explicit assertions validating boundaries on methods like `contains_key` or `is_empty`.
+**Kill Shot:** Added `test_property_value_equality_mutants`, `test_property_map_equality_mutants`, and `test_property_map_contains_and_empty_mutants` to fully exercise negative conditions.

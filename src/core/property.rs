@@ -4209,4 +4209,104 @@ mod sentry_tests {
             "semantically_equal should treat NaN as equal"
         );
     }
+
+    #[test]
+    fn test_property_value_equality_mutants() {
+        // Kill mutants that replace `<impl PartialEq for PropertyValue>::eq` with `true` or `false`
+        // by explicitly checking that same values are equal and different values are not equal.
+        let val1 = PropertyValue::Int(42);
+        let val2 = PropertyValue::Int(42);
+        let val3 = PropertyValue::Int(43);
+
+        assert_eq!(val1, val2);
+        assert_ne!(val1, val3);
+
+        let s1 = PropertyValue::string("hello");
+        let s2 = PropertyValue::string("hello");
+        let s3 = PropertyValue::string("world");
+
+        assert_eq!(s1, s2);
+        assert_ne!(s1, s3);
+        assert_ne!(val1, s1, "Different types must not be equal");
+
+        let arr1 = PropertyValue::array(vec![PropertyValue::Int(1)]);
+        let arr2 = PropertyValue::array(vec![PropertyValue::Int(1)]);
+        let arr3 = PropertyValue::array(vec![PropertyValue::Int(2)]);
+        let arr4 = PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]);
+
+        assert_eq!(arr1, arr2);
+        assert_ne!(arr1, arr3);
+        assert_ne!(arr1, arr4);
+
+        let v1 = PropertyValue::vector([1.0, 2.0]);
+        let v2 = PropertyValue::vector([1.0, 2.0]);
+        let v3 = PropertyValue::vector([1.0, 3.0]);
+
+        assert_eq!(v1, v2);
+        assert_ne!(v1, v3);
+
+        let bytes1 = PropertyValue::bytes([1, 2, 3]);
+        let bytes2 = PropertyValue::bytes([1, 2, 3]);
+        let bytes3 = PropertyValue::bytes([1, 2, 4]);
+
+        assert_eq!(bytes1, bytes2);
+        assert_ne!(bytes1, bytes3);
+
+        assert_eq!(PropertyValue::Null, PropertyValue::Null);
+        assert_ne!(PropertyValue::Null, PropertyValue::Int(0));
+    }
+
+    #[test]
+    fn test_property_map_equality_mutants() {
+        // Kill mutants that replace `<impl PartialEq for PropertyMap>::eq` with `true` or `false`
+        let map1 = PropertyMapBuilder::new()
+            .insert("key1", 42)
+            .insert("key2", "hello")
+            .build();
+
+        let map2 = PropertyMapBuilder::new()
+            .insert("key1", 42)
+            .insert("key2", "hello")
+            .build();
+
+        let map3 = PropertyMapBuilder::new()
+            .insert("key1", 43) // Different value
+            .insert("key2", "hello")
+            .build();
+
+        let map4 = PropertyMapBuilder::new()
+            .insert("key1", 42)
+            // Missing key2
+            .build();
+
+        let map5 = PropertyMapBuilder::new()
+            .insert("key1", 42)
+            .insert("key3", "hello") // Different key
+            .build();
+
+        assert_eq!(map1, map2);
+        assert_ne!(map1, map3);
+        assert_ne!(map1, map4);
+        assert_ne!(map1, map5);
+    }
+
+    #[test]
+    fn test_property_map_contains_and_empty_mutants() {
+        // Kill mutants replacing `contains_key`, `contains_interned_key`, `is_empty` with true/false
+        let empty_map = PropertyMap::new();
+        assert!(empty_map.is_empty(), "Empty map must be empty");
+        assert!(!empty_map.contains_key("any_key"), "Empty map must not contain keys");
+
+        let populated_map = PropertyMapBuilder::new()
+            .insert("my_key", 42)
+            .build();
+        assert!(!populated_map.is_empty(), "Populated map must not be empty");
+        assert!(populated_map.contains_key("my_key"), "Must contain inserted key");
+        assert!(!populated_map.contains_key("other_key"), "Must not contain missing key");
+
+        let interned_key = GLOBAL_INTERNER.intern("my_key").unwrap();
+        let missing_interned = GLOBAL_INTERNER.intern("missing").unwrap();
+        assert!(populated_map.contains_interned_key(&interned_key));
+        assert!(!populated_map.contains_interned_key(&missing_interned));
+    }
 }
