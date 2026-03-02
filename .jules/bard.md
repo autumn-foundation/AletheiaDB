@@ -51,3 +51,14 @@
 ## 2026-02-25 - The Case of the Sequential Scatter
 **Confusion:** The architecture documentation described a "Scatter-Gather" query executor and "Distributed Transactions", implying high-concurrency parallelism. However, the implementation actually processes shards sequentially (one by one), meaning latency scales linearly ((N)$) rather than remaining constant.
 **Clarification:** Updated `src/storage/sharding/executor.rs`, `coordinator.rs`, and `network.rs` to explicitly document the sequential, blocking nature of the current implementation. Added performance warnings to the `README.md` to set correct expectations for Phase 1 sharding.
+## 2025-02-28 - Escaping Square Brackets in Docs
+**Confusion:** The rustdoc generator attempts to resolve anything inside square brackets `[Like This]` as an intra-doc link, which causes `rustdoc::broken_intra_doc_links` warnings if the text is just meant to be a literal string (e.g., demonstrating a pattern match like `[Person ~ 'Engineer']`).
+**Clarification:** You must explicitly escape square brackets that are not meant to be links using backslashes: `\[Like This\]`.
+
+## 2025-02-28 - Redundant Explicit Link Targets
+**Confusion:** Writing `[`GLOBAL_INTERNER`](crate::core::GLOBAL_INTERNER)` causes a `rustdoc::redundant_explicit_links` warning because the path resolves to the same destination as the link text itself.
+**Clarification:** Rustdoc can automatically resolve the path if it's imported in scope or if it's a known global. Just use `[`GLOBAL_INTERNER`]` directly without the explicit target to keep the documentation source cleaner and avoid warnings.
+
+## 2025-03-01 - README Getting Started Examples
+**Confusion:** Users copying examples from the README encountered compilation errors due to missing `aletheiadb::prelude::*` imports and missing feature flags (like `sharding-rpc`). Furthermore, running multiple examples sequentially in the same directory caused runtime crashes (e.g., `InvalidTimeRange`) due to conflicting leftover state in the default `./aletheiadb` directory. Unused variables also caused compiler warnings.
+**Clarification:** Updated README examples to consistently include `use aletheiadb::prelude::*`, explicitly declare required feature flags for sharding, prefix unused variables with `_`, and added a prominent warning about database state persistence and cleanup between example runs.
