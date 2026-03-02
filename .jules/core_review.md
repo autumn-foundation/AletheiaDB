@@ -19,3 +19,15 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+
+## 🦀 Core Review: Warden test coverage
+
+**Findings:**
+
+No high-severity findings. The PR correctly adds Warden coverage asserting existing security checks.
+
+### Test gaps
+- No missing tests were identified for correctness/regression risks within the scope of these test additions.
+
+### Residual risks
+- Relying on Serde variants to catch "wrong field types" (e.g. `12345` instead of `"label"`) returns an opaque 400 Bad Request to the user instead of descriptive field-level error. This is a DX (Developer Experience) risk, not a correctness risk.
