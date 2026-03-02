@@ -105,205 +105,128 @@ impl<'a> Synergy<'a> {
             }
 
             if vectors.is_empty() {
-                return Err(Error::other(
-                    "None of the provided nodes have the specified vector property",
-                ));
+                return Ok::<(), Error>(());
             }
 
-            // 2. Calculate the Baseline Vector (simple average)
-            baseline_vector = Self::average_vectors(&vectors)?;
+            // 2. Calculate Baseline Vector (simple average)
+            let dim = vectors[0].len();
+            baseline_vector = vec![0.0; dim];
+            for v in &vectors {
+                for i in 0..dim {
+                    baseline_vector[i] += v[i];
+                }
+            }
+            for v in &mut baseline_vector {
+                *v /= vectors.len() as f32;
+            }
 
-            // 3. Calculate the Emergent Vector
-            for (i, &node_id) in valid_nodes.iter().enumerate() {
-                let mut neighbor_vectors = Vec::new();
+            // Normalize baseline
+            baseline_vector = ops::normalize(&baseline_vector);
 
-                // Get internal outgoing edges
-                let outgoing = tx.get_outgoing_edges(node_id);
-                for edge_id in outgoing {
+            // 3. Calculate Emergent Vector
+            // Start with baseline
+            emergent_components = baseline_vector.clone();
+
+            // Modulate by structural edges within the group
+            for &node_id in &valid_nodes {
+                let edge_ids = tx.get_outgoing_edges(node_id);
+                for edge_id in edge_ids {
                     if let Ok(edge) = tx.get_edge(edge_id) {
-                        let target = edge.target;
-                        if node_set.contains(&target) {
-                            if let Some(idx) = valid_nodes.iter().position(|&id| id == target) {
-                                neighbor_vectors.push(vectors[idx].clone());
+                        if node_set.contains(&edge.target) {
+                            if let Ok(target_node) = tx.get_node(edge.target) {
+                                if let Some(target_vec) = target_node.get_property(property_name).and_then(|p| p.as_vector()) {
+                                    for i in 0..dim {
+                                        emergent_components[i] += target_vec[i] * 0.1; // Magic weight factor
+                                    }
+                                }
                             }
                         }
                     }
                 }
-
-                // Get internal incoming edges
-                let incoming = tx.get_incoming_edges(node_id);
-                for edge_id in incoming {
-                    if let Ok(edge) = tx.get_edge(edge_id) {
-                        let source = edge.source;
-                        if node_set.contains(&source) {
-                            if let Some(idx) = valid_nodes.iter().position(|&id| id == source) {
-                                neighbor_vectors.push(vectors[idx].clone());
-                            }
-                        }
-                    }
-                }
-
-                // Calculate structural influence for this node
-                let node_vec = &vectors[i];
-
-                if neighbor_vectors.is_empty() {
-                    // No internal connections, use original vector
-                    emergent_components.push(node_vec.clone());
-                } else {
-                    // Average the neighbor vectors
-                    let neighbor_avg = Self::average_vectors(&neighbor_vectors)?; // Need to handle error here inside closure
-
-                    // Combine node vector with neighbor influence
-                    let alpha = 0.5_f32;
-                    let mut combined = vec![0.0; node_vec.len()];
-                    for j in 0..node_vec.len() {
-                        combined[j] = (1.0 - alpha) * node_vec[j] + alpha * neighbor_avg[j];
-                    }
-                    emergent_components.push(combined);
-                }
             }
+
+            emergent_components = ops::normalize(&emergent_components);
             Ok::<(), Error>(())
         })?;
 
-        // The overall emergent vector is the average of these structurally-influenced vectors
-        let mut emergent_vector = Self::average_vectors(&emergent_components)?;
-
-        // Normalize both vectors for comparison
-        ops::normalize_in_place(&mut emergent_vector);
-
-        let mut baseline_normalized = baseline_vector.clone();
-        ops::normalize_in_place(&mut baseline_normalized);
+        if valid_nodes.is_empty() {
+            return Err(Error::other("None of the specified nodes had the requested vector property"));
+        }
 
         // 4. Calculate Synergy Score
-        let similarity = ops::cosine_similarity(&baseline_normalized, &emergent_vector)?;
+        let mut similarity = ops::cosine_similarity(&baseline_vector, &emergent_components).unwrap_or(0.0);
 
-        // Score is the divergence from the baseline
-        let synergy_score = (1.0_f32 - similarity).max(0.0);
+        // Ensure bounds due to float inaccuracy
+        similarity = similarity.clamp(-1.0, 1.0);
+
+        // High similarity means low synergy (no change).
+        // Score = 1.0 - similarity. Max score is 2.0 (if perfectly opposite), typically we clamp to 0..1
+        let synergy_score = f32::max(1.0 - similarity, 0.0) / 2.0;
 
         Ok(SynergyResult {
-            baseline_vector: baseline_normalized,
-            emergent_vector,
+            baseline_vector,
+            emergent_vector: emergent_components,
             synergy_score,
         })
-    }
-
-    /// Helper to average a list of vectors.
-    fn average_vectors(vectors: &[Vec<f32>]) -> Result<Vec<f32>> {
-        if vectors.is_empty() {
-            return Err(Error::other("Cannot average empty vector list"));
-        }
-
-        let dim = vectors[0].len();
-        let mut sum = vec![0.0; dim];
-
-        for vec in vectors {
-            if vec.len() != dim {
-                return Err(Error::other("Vector dimensions do not match"));
-            }
-            for i in 0..dim {
-                sum[i] += vec[i];
-            }
-        }
-
-        let count = vectors.len() as f32;
-        for val in &mut sum {
-            *val /= count;
-        }
-
-        Ok(sum)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::transaction::WriteOps;
+    use crate::AletheiaDB;
     use crate::core::property::PropertyMapBuilder;
+    use crate::api::transaction::WriteOps;
+    use crate::core::vector::ops;
 
     #[test]
-    fn test_synergy_disconnected_nodes() {
-        let db = AletheiaDB::new().unwrap();
-
-        let mut n1 = NodeId::new(0).unwrap();
-        let mut n2 = NodeId::new(0).unwrap();
-
-        db.write(|tx| {
-            n1 = tx
-                .create_node(
-                    "Node",
-                    PropertyMapBuilder::new()
-                        .insert_vector("embedding", &[1.0, 0.0])
-                        .build(),
-                )
-                .unwrap();
-
-            n2 = tx
-                .create_node(
-                    "Node",
-                    PropertyMapBuilder::new()
-                        .insert_vector("embedding", &[0.0, 1.0])
-                        .build(),
-                )
-                .unwrap();
-            Ok::<(), Error>(())
-        })
-        .unwrap();
-
+    fn test_synergy_disconnected_nodes() -> Result<()> {
+        let db = AletheiaDB::new()?;
         let synergy = Synergy::new(&db);
-        let result = synergy.analyze(&[n1, n2], "embedding").unwrap();
 
-        // Disconnected nodes should have 0 synergy (emergent == baseline)
-        assert!(result.synergy_score < 0.001);
+        let n1 = db.write(|tx| {
+            tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0]).build())
+        })?;
+
+        let n2 = db.write(|tx| {
+            tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 1.0]).build())
+        })?;
+
+        let result = synergy.analyze(&[n1, n2], "vec")?;
+
+        // Disconnected nodes should have synergy score 0.0
+        assert!(result.synergy_score < 1e-5);
+
+        let expected_baseline = ops::normalize(&[0.5, 0.5]);
+        assert!((result.baseline_vector[0] - expected_baseline[0]).abs() < 1e-5);
+        assert!((result.baseline_vector[1] - expected_baseline[1]).abs() < 1e-5);
+
+        Ok(())
     }
 
     #[test]
-    fn test_synergy_connected_nodes() {
-        let db = AletheiaDB::new().unwrap();
-
-        let mut n1 = NodeId::new(0).unwrap();
-        let mut n2 = NodeId::new(0).unwrap();
-        let mut n3 = NodeId::new(0).unwrap();
-
-        db.write(|tx| {
-            n1 = tx
-                .create_node(
-                    "Node",
-                    PropertyMapBuilder::new()
-                        .insert_vector("embedding", &[1.0, 0.0])
-                        .build(),
-                )
-                .unwrap();
-
-            n2 = tx
-                .create_node(
-                    "Node",
-                    PropertyMapBuilder::new()
-                        .insert_vector("embedding", &[0.0, 1.0])
-                        .build(),
-                )
-                .unwrap();
-
-            n3 = tx
-                .create_node(
-                    "Node",
-                    PropertyMapBuilder::new()
-                        .insert_vector("embedding", &[0.5, 0.5])
-                        .build(),
-                )
-                .unwrap();
-
-            // Connect them to create structure
-            tx.create_edge(n1, n2, "LINK", Default::default()).unwrap();
-            tx.create_edge(n2, n3, "LINK", Default::default()).unwrap();
-
-            Ok::<(), Error>(())
-        })
-        .unwrap();
-
+    fn test_synergy_connected_nodes() -> Result<()> {
+        let db = AletheiaDB::new()?;
         let synergy = Synergy::new(&db);
-        let result = synergy.analyze(&[n1, n2, n3], "embedding").unwrap();
 
-        // Connected nodes with different vectors should exhibit some synergy
+        let (n1, n2, n3) = db.write(|tx| {
+            let n1 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0, 0.0]).build())?;
+            let n2 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 1.0, 0.0]).build())?;
+            let n3 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 0.0, 1.0]).build())?;
+
+            // Connect n1 -> n2 -> n3
+            tx.create_edge(n1, n2, "RELATED", PropertyMapBuilder::new().build())?;
+            tx.create_edge(n2, n3, "RELATED", PropertyMapBuilder::new().build())?;
+
+            Ok::<_, Error>((n1, n2, n3))
+        })?;
+
+        let result = synergy.analyze(&[n1, n2, n3], "vec")?;
+
+        // Because of the edges, emergent vector is pulled towards targets,
+        // leading to > 0 synergy score
         assert!(result.synergy_score > 0.0);
+
+        Ok(())
     }
 }

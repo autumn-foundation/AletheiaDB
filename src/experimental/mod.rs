@@ -47,6 +47,7 @@
 //! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
 //! | [`spectre`] | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
 //! | [`luna`] | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
+//! | [`synergy`] | **Synergy** | Identifying Emergent Properties. "Does the whole exceed the sum of its parts?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -164,6 +165,7 @@ pub mod sybil;
 /// Synapse: Adaptive Graph Hebbian Learning.
 pub mod synapse;
 #[cfg(feature = "nova")]
+/// Synergy: Identifying Emergent Properties.
 pub mod synergy;
 #[cfg(feature = "nova")]
 /// Telepathy: Semantic Spreading Activation Engine.
