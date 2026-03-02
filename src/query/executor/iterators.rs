@@ -1148,7 +1148,7 @@ impl ResultIterator for VectorRerankIterator {
                     return Some(Err(crate::core::error::Error::Vector(
                         crate::core::error::VectorError::IndexError(
                             "VectorRerank requires a vector index to be enabled. \
-                             Call db.enable_vector_index() first."
+                             Call db.vector_index(\"...\").hnsw(...).enable() first."
                                 .to_string(),
                         ),
                     )));

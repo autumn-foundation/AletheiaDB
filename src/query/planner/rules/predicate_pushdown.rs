@@ -277,14 +277,29 @@ mod tests {
         assert!(result.is_some());
 
         let new_plan = result.unwrap();
-        // Check that VectorRank is now on top
-        assert!(matches!(
-            new_plan.root,
-            LogicalOp::Unary {
-                op: UnaryOp::VectorRank { .. },
-                ..
+        // Check full AST: VectorRank -> Filter -> Scan
+        if let LogicalOp::Unary {
+            op: UnaryOp::VectorRank { top_k, .. },
+            input: rank_input,
+        } = new_plan.root
+        {
+            assert_eq!(top_k, None);
+            if let LogicalOp::Unary {
+                op: UnaryOp::Filter(pred),
+                input: filter_input,
+            } = rank_input.as_ref()
+            {
+                assert_eq!(pred, &Predicate::eq("name", "Alice"));
+                assert!(matches!(
+                    filter_input.as_ref(),
+                    LogicalOp::Scan(ScanOp::NodeLookup(_))
+                ));
+            } else {
+                panic!("Expected Filter below VectorRank");
             }
-        ));
+        } else {
+            panic!("Expected VectorRank at root");
+        }
     }
 
     #[test]
@@ -356,14 +371,30 @@ mod tests {
         assert!(result.is_some());
 
         let new_plan = result.unwrap();
-        // Check that Sort is now on top
-        assert!(matches!(
-            new_plan.root,
-            LogicalOp::Unary {
-                op: UnaryOp::Sort { .. },
-                ..
+        // Check full AST: Sort -> Filter -> Scan
+        if let LogicalOp::Unary {
+            op: UnaryOp::Sort {
+                descending: true, ..
+            },
+            input: sort_input,
+        } = new_plan.root
+        {
+            if let LogicalOp::Unary {
+                op: UnaryOp::Filter(pred),
+                input: filter_input,
+            } = sort_input.as_ref()
+            {
+                assert_eq!(pred, &Predicate::eq("active", true));
+                assert!(matches!(
+                    filter_input.as_ref(),
+                    LogicalOp::Scan(ScanOp::NodeLookup(_))
+                ));
+            } else {
+                panic!("Expected Filter below Sort");
             }
-        ));
+        } else {
+            panic!("Expected Sort at root");
+        }
     }
 
     #[test]
@@ -477,20 +508,25 @@ mod tests {
         if let LogicalOp::Binary { left, .. } = new_plan.root {
             // Verify left side is optimized: Sort -> Filter -> Scan
             if let LogicalOp::Unary {
-                op: UnaryOp::Sort { .. },
+                op: UnaryOp::Sort {
+                    descending: true, ..
+                },
                 input: sort_input,
             } = *left
             {
-                assert!(
-                    matches!(
-                        sort_input.as_ref(),
-                        LogicalOp::Unary {
-                            op: UnaryOp::Filter(_),
-                            ..
-                        }
-                    ),
-                    "Left branch should have Filter pushed down below Sort"
-                );
+                if let LogicalOp::Unary {
+                    op: UnaryOp::Filter(pred),
+                    input: filter_input,
+                } = sort_input.as_ref()
+                {
+                    assert_eq!(pred, &Predicate::eq("active", true));
+                    assert!(matches!(
+                        filter_input.as_ref(),
+                        LogicalOp::Scan(ScanOp::NodeLookup(_))
+                    ));
+                } else {
+                    panic!("Expected Filter below Sort on left branch");
+                }
             } else {
                 panic!("Expected Sort at top of left branch, got {:?}", left);
             }
@@ -551,28 +587,37 @@ mod sentry_tests {
         if let LogicalOp::Binary { left, right, .. } = new_plan.root {
             // Left should be Sort(Filter...)
             if let LogicalOp::Unary {
-                op: UnaryOp::Sort { .. },
-                input,
+                op: UnaryOp::Sort {
+                    descending: true, ..
+                },
+                input: sort_input,
             } = *left
             {
-                assert!(matches!(
-                    *input,
-                    LogicalOp::Unary {
-                        op: UnaryOp::Filter(_),
-                        ..
-                    }
-                ));
+                if let LogicalOp::Unary {
+                    op: UnaryOp::Filter(pred),
+                    input: filter_input,
+                } = sort_input.as_ref()
+                {
+                    assert_eq!(pred, &Predicate::eq("a", 1));
+                    assert!(matches!(
+                        filter_input.as_ref(),
+                        LogicalOp::Scan(ScanOp::NodeLookup(_))
+                    ));
+                } else {
+                    panic!("Expected Filter below Sort on left branch");
+                }
             } else {
                 panic!("Left branch was not optimized");
             }
 
             // Right should still be Filter(Scan)
             if let LogicalOp::Unary {
-                op: UnaryOp::Filter(_),
+                op: UnaryOp::Filter(pred),
                 input,
             } = *right
             {
-                assert!(matches!(*input, LogicalOp::Scan(_)));
+                assert_eq!(pred, Predicate::eq("b", 2));
+                assert!(matches!(*input, LogicalOp::Scan(ScanOp::NodeLookup(_))));
             } else {
                 panic!("Right branch was unexpectedly modified or corrupted");
             }
