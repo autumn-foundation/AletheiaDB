@@ -88,6 +88,8 @@ impl<'a> Synergy<'a> {
         let node_set: HashSet<NodeId> = nodes.iter().cloned().collect();
         let mut vectors = Vec::new();
         let mut valid_nodes = Vec::new();
+        let mut baseline_vector = Vec::new();
+        let mut emergent_components = Vec::new();
 
         // Use read closure
         self.db.read(|tx| {
@@ -101,22 +103,17 @@ impl<'a> Synergy<'a> {
                     }
                 }
             }
-            Ok::<(), Error>(())
-        })?;
 
-        if vectors.is_empty() {
-            return Err(Error::other(
-                "None of the provided nodes have the specified vector property",
-            ));
-        }
+            if vectors.is_empty() {
+                return Err(Error::other(
+                    "None of the provided nodes have the specified vector property",
+                ));
+            }
 
-        // 2. Calculate the Baseline Vector (simple average)
-        let baseline_vector = Self::average_vectors(&vectors)?;
+            // 2. Calculate the Baseline Vector (simple average)
+            baseline_vector = Self::average_vectors(&vectors)?;
 
-        // 3. Calculate the Emergent Vector
-        let mut emergent_components = Vec::new();
-
-        self.db.read(|tx| {
+            // 3. Calculate the Emergent Vector
             for (i, &node_id) in valid_nodes.iter().enumerate() {
                 let mut neighbor_vectors = Vec::new();
 
