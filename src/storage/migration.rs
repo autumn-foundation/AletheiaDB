@@ -63,7 +63,7 @@
 
 use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId, VersionId};
-use crate::core::version::{EdgeVersion, FastHashMap, NodeVersion};
+use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
 use crate::storage::wal::flush_coordinator::FlushCoordinator;
@@ -1270,13 +1270,13 @@ impl MigrationService {
     /// * `_current_time` - Unused, kept for API compatibility (wallclock time is used internally)
     pub fn identify_node_candidates(
         &self,
-        versions: &FastHashMap<VersionId, NodeVersion>,
-        head_versions: &FastHashMap<NodeId, VersionId>,
-        version_counts: &FastHashMap<NodeId, usize>,
+        versions: &HashMap<VersionId, NodeVersion>,
+        head_versions: &HashMap<NodeId, VersionId>,
+        version_counts: &HashMap<NodeId, usize>,
         _current_time: Instant,
     ) -> Vec<MigrationCandidate> {
         // Track how many candidates we've selected per node
-        let mut candidates_per_node: FastHashMap<NodeId, usize> = FastHashMap::default();
+        let mut candidates_per_node: HashMap<NodeId, usize> = HashMap::new();
         let mut all_candidates = Vec::new();
 
         // Get current wallclock time in milliseconds since UNIX epoch
@@ -1352,13 +1352,13 @@ impl MigrationService {
     /// * `_current_time` - Unused, kept for API compatibility (wallclock time is used internally)
     pub fn identify_edge_candidates(
         &self,
-        versions: &FastHashMap<VersionId, EdgeVersion>,
-        head_versions: &FastHashMap<EdgeId, VersionId>,
-        version_counts: &FastHashMap<EdgeId, usize>,
+        versions: &HashMap<VersionId, EdgeVersion>,
+        head_versions: &HashMap<EdgeId, VersionId>,
+        version_counts: &HashMap<EdgeId, usize>,
         _current_time: Instant,
     ) -> Vec<MigrationCandidate> {
         // Track how many candidates we've selected per edge
-        let mut candidates_per_edge: FastHashMap<EdgeId, usize> = FastHashMap::default();
+        let mut candidates_per_edge: HashMap<EdgeId, usize> = HashMap::new();
         let mut all_candidates = Vec::new();
 
         // Get current wallclock time in milliseconds since UNIX epoch
@@ -1649,9 +1649,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let mut counts = FastHashMap::default();
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
 
         // Create 3 versions for node 100
         let node_id = NodeId::new(100).unwrap();
@@ -1679,9 +1679,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let mut counts = FastHashMap::default();
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
 
         let node_id = NodeId::new(100).unwrap();
         for i in 1..=3 {
@@ -1974,9 +1974,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let mut counts = FastHashMap::default();
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
 
         // Create versions for different nodes
         let node1 = NodeId::new(100).unwrap();
@@ -2243,9 +2243,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let mut counts = FastHashMap::default();
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
 
         // Create 3 versions for edge 200
         let edge_id = EdgeId::new(200).unwrap();
@@ -2273,9 +2273,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let mut counts = FastHashMap::default();
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
 
         let edge_id = EdgeId::new(200).unwrap();
         for i in 1..=3 {
@@ -2302,9 +2302,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let mut counts = FastHashMap::default();
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
 
         let edge_id = EdgeId::new(200).unwrap();
 
@@ -2510,9 +2510,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let empty_versions: FastHashMap<VersionId, EdgeVersion> = FastHashMap::default();
-        let empty_heads: FastHashMap<EdgeId, VersionId> = FastHashMap::default();
-        let empty_counts: FastHashMap<EdgeId, usize> = FastHashMap::default();
+        let empty_versions: HashMap<VersionId, EdgeVersion> = HashMap::new();
+        let empty_heads: HashMap<EdgeId, VersionId> = HashMap::new();
+        let empty_counts: HashMap<EdgeId, usize> = HashMap::new();
 
         let candidates = service.identify_edge_candidates(
             &empty_versions,
@@ -2532,9 +2532,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let counts = FastHashMap::default(); // Empty counts
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let counts: HashMap<NodeId, usize> = HashMap::new(); // Empty counts
 
         let node_id = NodeId::new(100).unwrap();
         for i in 1..=3 {
@@ -2630,9 +2630,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let mut counts = FastHashMap::default();
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
 
         // Create versions for multiple nodes
         for node_num in [100u64, 101, 102] {
@@ -2664,9 +2664,9 @@ mod tests {
             .build();
         let service = MigrationService::new(cold, policy);
 
-        let mut versions = FastHashMap::default();
-        let mut heads = FastHashMap::default();
-        let mut counts = FastHashMap::default();
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
 
         // Create versions for multiple edges
         for edge_num in [200u64, 201, 202] {

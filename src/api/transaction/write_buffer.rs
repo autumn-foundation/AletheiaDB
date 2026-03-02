@@ -1,15 +1,11 @@
 //! Write buffering for uncommitted transaction changes
 
 use crate::core::error::{Result, StorageError};
-use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use std::collections::HashMap;
-use std::hash::BuildHasherDefault;
-
-type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
 
 /// Buffered write operation
 ///
@@ -171,15 +167,11 @@ pub struct WriteBuffer {
 
     /// Quick lookup: which nodes have been written to
     /// Maps NodeId → index in operations vector
-    ///
-    /// Using IdentityHasher avoids SipHash overhead since NodeId is already a high-quality unique u64 ID.
-    modified_nodes: FastHashMap<NodeId, usize>,
+    modified_nodes: HashMap<NodeId, usize>,
 
     /// Quick lookup: which edges have been written to
     /// Maps EdgeId → index in operations vector
-    ///
-    /// Using IdentityHasher avoids SipHash overhead since EdgeId is already a high-quality unique u64 ID.
-    modified_edges: FastHashMap<EdgeId, usize>,
+    modified_edges: HashMap<EdgeId, usize>,
 
     /// Maximum number of operations allowed (DoS protection)
     max_operations: usize,
@@ -207,8 +199,8 @@ impl WriteBuffer {
     pub fn with_max_operations(max_operations: usize) -> Self {
         WriteBuffer {
             operations: Vec::new(),
-            modified_nodes: FastHashMap::default(),
-            modified_edges: FastHashMap::default(),
+            modified_nodes: HashMap::new(),
+            modified_edges: HashMap::new(),
             max_operations,
             has_vector_operations: false,
             has_edge_operations: false,
@@ -222,14 +214,8 @@ impl WriteBuffer {
     pub fn with_capacity(capacity: usize) -> Self {
         WriteBuffer {
             operations: Vec::with_capacity(capacity),
-            modified_nodes: FastHashMap::with_capacity_and_hasher(
-                capacity / 2,
-                BuildHasherDefault::default(),
-            ),
-            modified_edges: FastHashMap::with_capacity_and_hasher(
-                capacity / 2,
-                BuildHasherDefault::default(),
-            ),
+            modified_nodes: HashMap::with_capacity(capacity / 2),
+            modified_edges: HashMap::with_capacity(capacity / 2),
             max_operations: capacity,
             has_vector_operations: false,
             has_edge_operations: false,

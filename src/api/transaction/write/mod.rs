@@ -282,23 +282,6 @@ impl WriteTransaction {
     /// - **Async**: Returns after flush to OS cache (background thread syncs)
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
-    ///
-    /// ## Examples
-    ///
-    /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
-    /// # use aletheiadb::api::transaction::WriteOps;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let db = AletheiaDB::new()?;
-    /// let mut tx = db.write_transaction()?;
-    ///
-    /// tx.create_node("Person", properties! { "name" => "Alice" })?;
-    ///
-    /// // Commit the changes to the database
-    /// tx.commit()?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn commit(self) -> Result<()> {
         self.commit_with_timestamp().map(|_| ())
     }
@@ -578,23 +561,6 @@ impl WriteTransaction {
     ///
     /// Discards all buffered writes. This is automatically called
     /// if the transaction is dropped without committing.
-    ///
-    /// ## Examples
-    ///
-    /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
-    /// # use aletheiadb::api::transaction::WriteOps;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let db = AletheiaDB::new()?;
-    /// let mut tx = db.write_transaction()?;
-    ///
-    /// tx.create_node("Person", properties! { "name" => "Alice" })?;
-    ///
-    /// // Discard the changes
-    /// tx.rollback()?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn rollback(mut self) -> Result<()> {
         if self.state == TxState::Committed {
             return Err(TransactionError::AlreadyCommitted {

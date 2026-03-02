@@ -58,7 +58,3 @@
 ## 2025-02-28 - Redundant Explicit Link Targets
 **Confusion:** Writing `[`GLOBAL_INTERNER`](crate::core::GLOBAL_INTERNER)` causes a `rustdoc::redundant_explicit_links` warning because the path resolves to the same destination as the link text itself.
 **Clarification:** Rustdoc can automatically resolve the path if it's imported in scope or if it's a known global. Just use `[`GLOBAL_INTERNER`]` directly without the explicit target to keep the documentation source cleaner and avoid warnings.
-
-## 2025-03-01 - README Getting Started Examples
-**Confusion:** Users copying examples from the README encountered compilation errors due to missing `aletheiadb::prelude::*` imports and missing feature flags (like `sharding-rpc`). Furthermore, running multiple examples sequentially in the same directory caused runtime crashes (e.g., `InvalidTimeRange`) due to conflicting leftover state in the default `./aletheiadb` directory. Unused variables also caused compiler warnings.
-**Clarification:** Updated README examples to consistently include `use aletheiadb::prelude::*`, explicitly declare required feature flags for sharding, prefix unused variables with `_`, and added a prominent warning about database state persistence and cleanup between example runs.

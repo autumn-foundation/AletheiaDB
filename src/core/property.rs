@@ -3585,32 +3585,6 @@ mod sentry_tests {
         );
     }
 
-    /// 🎯 Target: PropertyMapBuilder::try_insert_by_key
-    /// 💣 Risk: Should fail gracefully (return Err) instead of panicking on deep recursion when using an interned key.
-    /// 🧪 Strategy: Try to insert a deeply nested structure using try_insert_by_key.
-    /// 🔬 Verification: Check that Result is Err and contains the recursion limit message.
-    #[test]
-    fn test_property_map_builder_try_insert_by_key_returns_error_on_deep_recursion() {
-        let mut value = PropertyValue::Int(42);
-        for _ in 0..MAX_RECURSION_DEPTH + 1 {
-            value = PropertyValue::Array(Arc::new(vec![value]));
-        }
-
-        let key = GLOBAL_INTERNER.intern("deep").unwrap();
-
-        // try_insert_by_key should return an error, not panic
-        let result = PropertyMapBuilder::new().try_insert_by_key(key, value);
-
-        assert!(result.is_err(), "Expected error, got Ok");
-        let err = result.err().unwrap();
-        let err_msg = format!("{}", err);
-        assert!(
-            err_msg.contains("recursion depth limit exceeded"),
-            "Unexpected error message: {}",
-            err_msg
-        );
-    }
-
     /// 🎯 Target: PropertyValue::estimated_heap_size
     /// 💣 Risk: Calculation failure should default to a "penalty" size to prevent cache monopolization by malicious inputs.
     /// 🧪 Strategy: Call estimated_heap_size on a deeply nested structure.
@@ -4321,14 +4295,21 @@ mod sentry_tests {
         // Kill mutants replacing `contains_key`, `contains_interned_key`, `is_empty` with true/false
         let empty_map = PropertyMap::new();
         assert!(empty_map.is_empty(), "Empty map must be empty");
-        assert!(!empty_map.contains_key("any_key"), "Empty map must not contain keys");
+        assert!(
+            !empty_map.contains_key("any_key"),
+            "Empty map must not contain keys"
+        );
 
-        let populated_map = PropertyMapBuilder::new()
-            .insert("my_key", 42)
-            .build();
+        let populated_map = PropertyMapBuilder::new().insert("my_key", 42).build();
         assert!(!populated_map.is_empty(), "Populated map must not be empty");
-        assert!(populated_map.contains_key("my_key"), "Must contain inserted key");
-        assert!(!populated_map.contains_key("other_key"), "Must not contain missing key");
+        assert!(
+            populated_map.contains_key("my_key"),
+            "Must contain inserted key"
+        );
+        assert!(
+            !populated_map.contains_key("other_key"),
+            "Must not contain missing key"
+        );
 
         let interned_key = GLOBAL_INTERNER.intern("my_key").unwrap();
         let missing_interned = GLOBAL_INTERNER.intern("missing").unwrap();

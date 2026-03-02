@@ -46,7 +46,6 @@
 //! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
 //! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
 //! | [`spectre`] | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
-//! | [`luna`] | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -164,8 +163,6 @@ pub mod sybil;
 /// Synapse: Adaptive Graph Hebbian Learning.
 pub mod synapse;
 #[cfg(feature = "nova")]
-pub mod synergy;
-#[cfg(feature = "nova")]
 /// Telepathy: Semantic Spreading Activation Engine.
 pub mod telepathy;
 #[cfg(feature = "nova")]
@@ -213,13 +210,5 @@ pub mod omen;
 pub mod oracle;
 
 #[cfg(feature = "nova")]
-/// Luna: Semantic Subgraph Synthesis.
-pub mod luna;
-
-#[cfg(feature = "nova")]
 /// Spectre: Semantic Perspective Engine.
 pub mod spectre;
-
-#[cfg(feature = "nova")]
-/// Voyager: Maximal Novelty Traversal Engine.
-pub mod voyager;

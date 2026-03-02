@@ -168,32 +168,33 @@ impl QueryResults {
     }
 
     /// Collect all nodes from results
-    ///
-    /// ⚡ Bolt Optimization: Consumes the iterator directly to avoid allocating
-    /// a large intermediate `Vec` of all rows before extracting the nodes.
-    pub fn collect_nodes(mut self) -> Result<Vec<Node>> {
-        let mut nodes = Vec::new();
-        while let Some(row) = self.iterator.next() {
-            if let EntityResult::Node(n) = row?.entity {
-                nodes.push(n);
-            }
-        }
-        Ok(nodes)
+    pub fn collect_nodes(self) -> Result<Vec<Node>> {
+        let rows = self.collect_all()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                if let EntityResult::Node(n) = row.entity {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+            .collect())
     }
 
     /// Collect nodes with their scores
-    ///
-    /// ⚡ Bolt Optimization: Consumes the iterator directly to avoid allocating
-    /// a large intermediate `Vec` of all rows before extracting the nodes and scores.
-    pub fn collect_nodes_with_scores(mut self) -> Result<Vec<(Node, f32)>> {
-        let mut results = Vec::new();
-        while let Some(row) = self.iterator.next() {
-            let row = row?;
-            if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
-                results.push((n, score));
-            }
-        }
-        Ok(results)
+    pub fn collect_nodes_with_scores(self) -> Result<Vec<(Node, f32)>> {
+        let rows = self.collect_all()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
+                    Some((n, score))
+                } else {
+                    None
+                }
+            })
+            .collect())
     }
 
     /// Take at most n results
@@ -220,17 +221,8 @@ impl QueryResults {
     }
 
     /// Count the number of results
-    ///
-    /// ⚡ Bolt Optimization: Consumes the iterator and counts the items directly.
-    /// This avoids allocating a large `Vec` just to check its length, significantly
-    /// reducing memory overhead for large result sets.
-    pub fn count_all(mut self) -> Result<usize> {
-        let mut count = 0;
-        while let Some(row) = self.iterator.next() {
-            row?; // ensure no error
-            count += 1;
-        }
-        Ok(count)
+    pub fn count_all(self) -> Result<usize> {
+        Ok(self.collect_all()?.len())
     }
 
     /// Check if there are any results
