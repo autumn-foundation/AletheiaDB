@@ -134,7 +134,10 @@ impl<'a> Synergy<'a> {
                     if let Ok(edge) = tx.get_edge(edge_id) {
                         if node_set.contains(&edge.target) {
                             if let Ok(target_node) = tx.get_node(edge.target) {
-                                if let Some(target_vec) = target_node.get_property(property_name).and_then(|p| p.as_vector()) {
+                                if let Some(target_vec) = target_node
+                                    .get_property(property_name)
+                                    .and_then(|p| p.as_vector())
+                                {
                                     for i in 0..dim {
                                         emergent_components[i] += target_vec[i] * 0.1; // Magic weight factor
                                     }
@@ -150,11 +153,14 @@ impl<'a> Synergy<'a> {
         })?;
 
         if valid_nodes.is_empty() {
-            return Err(Error::other("None of the specified nodes had the requested vector property"));
+            return Err(Error::other(
+                "None of the specified nodes had the requested vector property",
+            ));
         }
 
         // 4. Calculate Synergy Score
-        let mut similarity = ops::cosine_similarity(&baseline_vector, &emergent_components).unwrap_or(0.0);
+        let mut similarity =
+            ops::cosine_similarity(&baseline_vector, &emergent_components).unwrap_or(0.0);
 
         // Ensure bounds due to float inaccuracy
         similarity = similarity.clamp(-1.0, 1.0);
@@ -175,8 +181,8 @@ impl<'a> Synergy<'a> {
 mod tests {
     use super::*;
     use crate::AletheiaDB;
-    use crate::core::property::PropertyMapBuilder;
     use crate::api::transaction::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
     use crate::core::vector::ops;
 
     #[test]
@@ -185,11 +191,21 @@ mod tests {
         let synergy = Synergy::new(&db);
 
         let n1 = db.write(|tx| {
-            tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0]).build())
+            tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 0.0])
+                    .build(),
+            )
         })?;
 
         let n2 = db.write(|tx| {
-            tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 1.0]).build())
+            tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 1.0])
+                    .build(),
+            )
         })?;
 
         let result = synergy.analyze(&[n1, n2], "vec")?;
@@ -210,9 +226,24 @@ mod tests {
         let synergy = Synergy::new(&db);
 
         let (n1, n2, n3) = db.write(|tx| {
-            let n1 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0, 0.0]).build())?;
-            let n2 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 1.0, 0.0]).build())?;
-            let n3 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 0.0, 1.0]).build())?;
+            let n1 = tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[1.0, 0.0, 0.0])
+                    .build(),
+            )?;
+            let n2 = tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 1.0, 0.0])
+                    .build(),
+            )?;
+            let n3 = tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 0.0, 1.0])
+                    .build(),
+            )?;
 
             // Connect n1 -> n2 -> n3
             tx.create_edge(n1, n2, "RELATED", PropertyMapBuilder::new().build())?;
