@@ -68,7 +68,6 @@ use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
 use crate::storage::wal::flush_coordinator::FlushCoordinator;
 use quick_cache::sync::Cache;
-use std::collections::HashMap;
 use std::panic;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -889,7 +888,7 @@ impl MigrationService {
         if self.policy.enable_lru {
             // Pre-fetch access times for all candidates
             // The Cache is lock-free so we can call get() for each candidate
-            let candidate_access_times: HashMap<VersionId, Option<Instant>> = candidates
+            let candidate_access_times: FastHashMap<VersionId, Option<Instant>> = candidates
                 .iter()
                 .map(|c| (c.version_id, self.access_times.get(&c.version_id)))
                 .collect();
