@@ -98,6 +98,9 @@
 /// Alchemy: Semantic Graph Transformation Engine.
 pub mod alchemy;
 #[cfg(feature = "nova")]
+/// Archetype: Semantic concept extraction and purity scoring.
+pub mod archetype;
+#[cfg(feature = "nova")]
 /// Ariadne: Semantic Thread Weaver.
 pub mod ariadne;
 #[cfg(feature = "nova")]
