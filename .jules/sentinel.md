@@ -80,3 +80,9 @@
 **Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
 **Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
 **Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
+
+**[Weak Test Coverage in HTTP API Handlers]**
+**Module:** `src/http/handlers.rs`
+**Summary:** Mutants survived regarding JSON payload type conversions (`json_to_predicate_value`), boundary condition checks for DoS protection (`> 10000` mutated to `>=` or `==`), and error code categorization logic (`||` mutated to `&&`).
+**Diagnosis:** MISSING_TEST / WEAK_TEST - The test suite didn't comprehensively cover the individual match arms of `json_to_predicate_value`, the edge cases of deep pagination limits (`offset + limit == 10000`), or explicit distinction between "syntax" and "parse" error handling branches. Also, an underlying `test_cors_headers_present` test failure masked overall mutant evaluation for `http_server` tasks.
+**Kill Shot:** Fixed the CORS test by supplying a `peer_addr`, and added `test_json_to_predicate_value`, `test_execute_query_parse_error`, and exact boundary condition payloads (9900 + 100 vs 9901 + 100) inside `test_warden_find_node_deep_pagination` and `test_warden_find_neighbors_overflow`.
