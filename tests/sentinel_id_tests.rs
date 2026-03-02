@@ -157,3 +157,35 @@ fn test_tx_id_display() {
     let id = TxId::new(5);
     assert_eq!(format!("{}", id), "TxId(5)");
 }
+
+#[test]
+fn test_entity_id_as_node_exhaustive() {
+    let node_id = NodeId::new(42).unwrap();
+    let entity_node: EntityId = node_id.into();
+    let edge_id = EdgeId::new(42).unwrap();
+    let entity_edge: EntityId = edge_id.into();
+
+    // Kill "replace EntityId::as_node -> Option<NodeId> with None"
+    // Kill "replace EntityId::as_node -> Option<NodeId> with Some(Default::default())"
+    let as_node = entity_node.as_node().expect("Should be Some(NodeId)");
+    assert_eq!(as_node.as_u64(), 42); // 42 is not default 0
+
+    // Check edge case returns None
+    assert_eq!(entity_edge.as_node(), None);
+}
+
+#[test]
+fn test_entity_id_as_edge_exhaustive() {
+    let node_id = NodeId::new(42).unwrap();
+    let entity_node: EntityId = node_id.into();
+    let edge_id = EdgeId::new(42).unwrap();
+    let entity_edge: EntityId = edge_id.into();
+
+    // Kill "replace EntityId::as_edge -> Option<EdgeId> with None"
+    // Kill "replace EntityId::as_edge -> Option<EdgeId> with Some(Default::default())"
+    let as_edge = entity_edge.as_edge().expect("Should be Some(EdgeId)");
+    assert_eq!(as_edge.as_u64(), 42); // 42 is not default 0
+
+    // Check node case returns None
+    assert_eq!(entity_node.as_edge(), None);
+}
