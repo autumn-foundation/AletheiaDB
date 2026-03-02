@@ -157,3 +157,36 @@ fn test_tx_id_display() {
     let id = TxId::new(5);
     assert_eq!(format!("{}", id), "TxId(5)");
 }
+
+#[test]
+fn test_entity_id_from_implementations() {
+    let node_id = NodeId::new(42).unwrap();
+    let entity_node = EntityId::from(node_id);
+    assert!(entity_node.is_node());
+    assert_eq!(entity_node.as_node(), Some(node_id));
+
+    let edge_id = EdgeId::new(42).unwrap();
+    let entity_edge = EntityId::from(edge_id);
+    assert!(entity_edge.is_edge());
+    assert_eq!(entity_edge.as_edge(), Some(edge_id));
+}
+
+#[test]
+fn test_id_generator_with_start_boundary() {
+    let generator_0 = IdGenerator::with_start(0);
+    assert_eq!(generator_0.current_approximate(), 0);
+    assert_eq!(generator_0.next().unwrap(), 0);
+
+    let generator_1 = IdGenerator::with_start(1);
+    assert_eq!(generator_1.current_approximate(), 1);
+    assert_eq!(generator_1.next().unwrap(), 1);
+}
+
+#[test]
+fn test_id_generator_next_boundary() {
+    let limit = u64::MAX - 1000; // MAX_VALID_ID
+    let generator = IdGenerator::with_start(limit);
+    assert_eq!(generator.next().unwrap(), limit);
+    // The next one should fail because it exceeds MAX_VALID_ID
+    assert!(generator.next().is_err());
+}

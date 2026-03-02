@@ -91,3 +91,9 @@
 **Summary:** Mutants survived regarding JSON payload type conversions (`json_to_predicate_value`), boundary condition checks for DoS protection (`> 10000` mutated to `>=` or `==`), and error code categorization logic (`||` mutated to `&&`).
 **Diagnosis:** MISSING_TEST / WEAK_TEST - The test suite didn't comprehensively cover the individual match arms of `json_to_predicate_value`, the edge cases of deep pagination limits (`offset + limit == 10000`), or explicit distinction between "syntax" and "parse" error handling branches. Also, an underlying `test_cors_headers_present` test failure masked overall mutant evaluation for `http_server` tasks.
 **Kill Shot:** Fixed the CORS test by supplying a `peer_addr`, and added `test_json_to_predicate_value`, `test_execute_query_parse_error`, and exact boundary condition payloads (9900 + 100 vs 9901 + 100) inside `test_warden_find_node_deep_pagination` and `test_warden_find_neighbors_overflow`.
+
+**[Weak Test Coverage in ID Generator Boundaries and Entity Conversions]**
+**Module:** `src/core/id.rs`
+**Summary:** `cargo-mutants` indicated potential gaps where `IdGenerator::with_start`, `IdGenerator::next`, and `EntityId::from` traits could return default values or be altered without failing the test suite (e.g., replacing `From` implementations with `Default::default()`, or off-by-one errors near `MAX_VALID_ID`).
+**Diagnosis:** MISSING_TEST / WEAK_TEST - The existing `sentinel_id_tests.rs` covered basic properties but missed explicit tests ensuring `EntityId::from` implementations match the behavior of `into()`, verifying that `IdGenerator::with_start` correctly applies exactly 0 or 1, and confirming the exact `MAX_VALID_ID` boundary exhaustion logic for `IdGenerator::next`.
+**Kill Shot:** Added `test_entity_id_from_implementations`, `test_id_generator_with_start_boundary`, and `test_id_generator_next_boundary` to `tests/sentinel_id_tests.rs`.
