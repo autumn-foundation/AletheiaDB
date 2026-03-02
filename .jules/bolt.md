@@ -25,3 +25,7 @@
 ## 2026-11-20 - Identity Hashing for WriteBuffer Lookups
 **Learning:** `WriteBuffer` used default `HashMap` (SipHash) for `modified_nodes` and `modified_edges` to track dirty state during transactions. Since keys are `NodeId` and `EdgeId` (wrappers around `u64`), hashing overhead was unnecessary and reduced throughput during bulk write operations.
 **Action:** Replaced `HashMap` with `FastHashMap` (`HashMap<..., BuildHasherDefault<IdentityHasher>>`) for `modified_nodes` and `modified_edges` in `WriteBuffer`. Using `IdentityHasher` for already-unique integer-like keys eliminates SipHash overhead and improves lookup/insertion speeds during transaction tracking.
+
+**[Removing Intermediate Collections in Iterators]**
+**Learning:** Chaining `.collect_all()?` on iterators to convert them to vectors before applying `.into_iter().filter_map(...)` incurs massive unnecessary allocations for large data sets. Also `.collect_all()?.len()` allocates a whole vector just to count elements.
+**Action:** When working with iterators, always loop through them directly with `while let Some(item) = iter.next()` to perform transformations and aggregations in a single pass without large intermediate allocations, thus minimizing heap allocations.
