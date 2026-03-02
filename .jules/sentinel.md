@@ -86,3 +86,8 @@
 **Summary:** Mutants modifying formatting (`Display` output logic) for `NodeId`, `EdgeId`, `VersionId`, `TxId`, and `EntityId`, as well as constants boundary logic in `IdGenerator` (like `with_start`, `current_approximate`) and conversions (`is_node`, `is_edge`, `as_node`, `as_edge`) survived.
 **Diagnosis:** WEAK_TEST - The tests likely checked properties but lacked explicit assertions covering expected display outputs, boundary edge-cases for initial offset ID generation, and exact positive/negative checks for polymorphic entity conversions.
 **Kill Shot:** Added `tests/sentinel_id_tests.rs` containing targeted kill-shots for each missed property.
+**[Weak Test Coverage in HTTP API Handlers]**
+**Module:** `src/http/handlers.rs`
+**Summary:** Mutants survived regarding JSON payload type conversions (`json_to_predicate_value`), boundary condition checks for DoS protection (`> 10000` mutated to `>=` or `==`), and error code categorization logic (`||` mutated to `&&`).
+**Diagnosis:** MISSING_TEST / WEAK_TEST - The test suite didn't comprehensively cover the individual match arms of `json_to_predicate_value`, the edge cases of deep pagination limits (`offset + limit == 10000`), or explicit distinction between "syntax" and "parse" error handling branches. Also, an underlying `test_cors_headers_present` test failure masked overall mutant evaluation for `http_server` tasks.
+**Kill Shot:** Fixed the CORS test by supplying a `peer_addr`, and added `test_json_to_predicate_value`, `test_execute_query_parse_error`, and exact boundary condition payloads (9900 + 100 vs 9901 + 100) inside `test_warden_find_node_deep_pagination` and `test_warden_find_neighbors_overflow`.
