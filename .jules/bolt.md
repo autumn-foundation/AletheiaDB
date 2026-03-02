@@ -29,3 +29,7 @@
 **[Removing Intermediate Collections in Iterators]**
 **Learning:** Chaining `.collect_all()?` on iterators to convert them to vectors before applying `.into_iter().filter_map(...)` incurs massive unnecessary allocations for large data sets. Also `.collect_all()?.len()` allocates a whole vector just to count elements.
 **Action:** When working with iterators, always loop through them directly with `while let Some(item) = iter.next()` to perform transformations and aggregations in a single pass without large intermediate allocations, thus minimizing heap allocations.
+
+## 2026-11-20 - Identity Hashing for Historical Storage
+**Learning:** `HistoricalStorage` and `MigrationService` used the default `HashMap` (SipHash) for integer wrapper keys like `NodeId`, `EdgeId`, and `VersionId`. Because these keys are unique internally-assigned high-quality IDs, SipHash incurs unnecessary hashing overhead.
+**Action:** Replaced `std::collections::HashMap` with `FastHashMap` (which uses `BuildHasherDefault<IdentityHasher>`) for tracking versions, heads, and stats. Using `IdentityHasher` speeds up tracking and lookups and is idiomatic across AletheiaDB for wrapper IDs.
