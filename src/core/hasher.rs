@@ -375,4 +375,134 @@ mod tests {
             "String hash should not collapse to the 0xff marker"
         );
     }
+
+    #[test]
+    fn test_identity_hasher_update_state_mutants() {
+        let mut hasher = IdentityHasher::default();
+
+        // Test first branch (self.0 == 0)
+        hasher.update_state(42);
+        assert_eq!(hasher.finish(), 42);
+
+        // Test else branch (self.0 != 0)
+        hasher.update_state(10);
+        let expected = 42u64 ^ 10u64;
+        let expected = expected.wrapping_mul(FNV_PRIME);
+        assert_eq!(hasher.finish(), expected);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_len_1() {
+        let mut hasher = IdentityHasher::default();
+        hasher.write(&[42u8]);
+        assert_eq!(hasher.finish(), 42);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_len_2() {
+        let mut hasher = IdentityHasher::default();
+        let bytes = 12345u16.to_le_bytes();
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 12345);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_len_4() {
+        let mut hasher = IdentityHasher::default();
+        let bytes = 123456789u32.to_le_bytes();
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 123456789);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_len_8() {
+        let mut hasher = IdentityHasher::default();
+        let bytes = 123456789012345u64.to_le_bytes();
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), 123456789012345);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_len_16() {
+        let mut hasher = IdentityHasher::default();
+        let low = 0x1111111111111111u64;
+        let high = 0x2222222222222222u64;
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&low.to_le_bytes());
+        bytes[8..16].copy_from_slice(&high.to_le_bytes());
+        hasher.write(&bytes);
+        assert_eq!(hasher.finish(), low ^ high);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_fallback_fnv() {
+        let mut hasher = IdentityHasher::default();
+        // length 3 falls into the _ arm
+        let bytes = [1u8, 2u8, 3u8];
+        hasher.write(&bytes);
+
+        let mut expected = FNV_OFFSET_BASIS;
+        expected ^= 1;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        expected ^= 2;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        expected ^= 3;
+        expected = expected.wrapping_mul(FNV_PRIME);
+
+        assert_eq!(hasher.finish(), expected);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_fallback_fnv_dirty() {
+        let mut hasher = IdentityHasher::default();
+        hasher.update_state(42); // make it dirty
+
+        let bytes = [1u8, 2u8, 3u8];
+        hasher.write(&bytes);
+
+        let mut expected = 42u64;
+        expected ^= 1;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        expected ^= 2;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        expected ^= 3;
+        expected = expected.wrapping_mul(FNV_PRIME);
+
+        assert_eq!(hasher.finish(), expected);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_u8() {
+        let mut hasher = IdentityHasher::default();
+        hasher.write_u8(42);
+        assert_eq!(hasher.finish(), 42);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_u16() {
+        let mut hasher = IdentityHasher::default();
+        hasher.write_u16(42);
+        assert_eq!(hasher.finish(), 42);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_u32() {
+        let mut hasher = IdentityHasher::default();
+        hasher.write_u32(42);
+        assert_eq!(hasher.finish(), 42);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_u64() {
+        let mut hasher = IdentityHasher::default();
+        hasher.write_u64(42);
+        assert_eq!(hasher.finish(), 42);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_usize() {
+        let mut hasher = IdentityHasher::default();
+        hasher.write_usize(42);
+        assert_eq!(hasher.finish(), 42);
+    }
 }
