@@ -355,3 +355,4 @@ pub fn load_indexes_parallel(
 
     Ok((graph_data, temporal_data, vector_data))
 }
+mod havoc_tests;
