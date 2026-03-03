@@ -1,4 +1,4 @@
-use crate::core::error::Result;
+use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::temporal::{Timestamp, time};
@@ -98,6 +98,7 @@ impl AletheiaDB {
         self.historical
             .read()
             .get_node_at_time(node_id, valid_time, transaction_time)
+            .record_error_metric()
     }
 
     /// Get an edge as it existed at a specific point in bi-temporal space.
@@ -116,6 +117,7 @@ impl AletheiaDB {
         self.historical
             .read()
             .get_edge_at_time(edge_id, valid_time, transaction_time)
+            .record_error_metric()
     }
 
     /// Get multiple nodes as they existed at a specific point in bi-temporal space.
@@ -195,6 +197,7 @@ impl AletheiaDB {
         self.historical
             .read()
             .get_nodes_at_time(node_ids, valid_time, transaction_time)
+            .record_error_metric()
     }
 
     /// Get multiple edges as they existed at a specific point in bi-temporal space.
@@ -269,6 +272,7 @@ impl AletheiaDB {
         self.historical
             .read()
             .get_edges_at_time(edge_ids, valid_time, transaction_time)
+            .record_error_metric()
     }
 
     // ========================================================================
@@ -322,7 +326,10 @@ impl AletheiaDB {
     /// println!("Alice has {} versions", history.version_count());
     /// ```
     pub fn get_node_history(&self, node_id: NodeId) -> Result<EntityHistory> {
-        self.historical.read().get_node_history(node_id)
+        self.historical
+            .read()
+            .get_node_history(node_id)
+            .record_error_metric()
     }
 
     /// Get a node at a specific logical version number.
@@ -339,6 +346,7 @@ impl AletheiaDB {
         self.historical
             .read()
             .get_node_at_version(node_id, version_number)
+            .record_error_metric()
     }
 
     /// Compute the difference between two versions of a node.
@@ -366,6 +374,7 @@ impl AletheiaDB {
         self.historical
             .read()
             .diff_node_versions(node_id, from_version, to_version)
+            .record_error_metric()
     }
 
     /// Get an edge at a specific valid time.
@@ -392,7 +401,10 @@ impl AletheiaDB {
     ///
     /// Returns all versions in chronological order (oldest first).
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<EntityHistory> {
-        self.historical.read().get_edge_history(edge_id)
+        self.historical
+            .read()
+            .get_edge_history(edge_id)
+            .record_error_metric()
     }
 
     /// Compute the difference between two versions of an edge.
@@ -407,5 +419,6 @@ impl AletheiaDB {
         self.historical
             .read()
             .diff_edge_versions(edge_id, from_version, to_version)
+            .record_error_metric()
     }
 }

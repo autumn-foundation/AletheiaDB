@@ -1,5 +1,5 @@
 use crate::api::transaction::WriteOps;
-use crate::core::error::Result;
+use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::{PropertyMap, PropertyValue};
@@ -33,6 +33,7 @@ impl AletheiaDB {
     /// * [`write`](Self::write) - For batched write operations.
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.write(|tx| tx.create_node(label, properties))
+            .record_error_metric()
     }
 
     /// Create an edge between two nodes.
@@ -69,13 +70,14 @@ impl AletheiaDB {
         properties: PropertyMap,
     ) -> Result<EdgeId> {
         self.write(|tx| tx.create_edge(source, target, label, properties))
+            .record_error_metric()
     }
 
     /// Get the current state of a node.
     ///
     /// This uses the fast path (current storage) for O(1) lookup.
     pub fn get_node(&self, node_id: NodeId) -> Result<Node> {
-        self.current.get_node(node_id)
+        self.current.get_node(node_id).record_error_metric()
     }
 
     /// Access a node without cloning, executing a closure on the node data.
@@ -100,12 +102,12 @@ impl AletheiaDB {
     where
         F: FnOnce(&Node) -> R,
     {
-        self.current.with_node(id, f)
+        self.current.with_node(id, f).record_error_metric()
     }
 
     /// Get the current state of an edge.
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
-        self.current.get_edge(edge_id)
+        self.current.get_edge(edge_id).record_error_metric()
     }
 
     /// Scan all nodes with a specific label, returning an iterator over node IDs.
@@ -166,7 +168,7 @@ impl AletheiaDB {
     /// - **No allocation**: Does not clone Edge or PropertyMap
     #[inline]
     pub fn get_edge_target(&self, edge_id: EdgeId) -> Result<NodeId> {
-        self.current.get_edge_target(edge_id)
+        self.current.get_edge_target(edge_id).record_error_metric()
     }
 
     /// Get the source node of an edge without cloning the entire edge.
@@ -177,7 +179,7 @@ impl AletheiaDB {
     /// - **No allocation**: Does not clone Edge or PropertyMap
     #[inline]
     pub fn get_edge_source(&self, edge_id: EdgeId) -> Result<NodeId> {
-        self.current.get_edge_source(edge_id)
+        self.current.get_edge_source(edge_id).record_error_metric()
     }
 
     /// Get outgoing edges from a node (current state).
