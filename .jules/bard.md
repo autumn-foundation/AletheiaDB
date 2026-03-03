@@ -62,3 +62,11 @@
 ## 2025-03-01 - README Getting Started Examples
 **Confusion:** Users copying examples from the README encountered compilation errors due to missing `aletheiadb::prelude::*` imports and missing feature flags (like `sharding-rpc`). Furthermore, running multiple examples sequentially in the same directory caused runtime crashes (e.g., `InvalidTimeRange`) due to conflicting leftover state in the default `./aletheiadb` directory. Unused variables also caused compiler warnings.
 **Clarification:** Updated README examples to consistently include `use aletheiadb::prelude::*`, explicitly declare required feature flags for sharding, prefix unused variables with `_`, and added a prominent warning about database state persistence and cleanup between example runs.
+
+## 2025-03-02 - Opaque Iterator Implementation Details
+**Confusion:** The `src/storage/current/iterators.rs` module lacked documentation explaining why specific iterator types were generated via macros instead of just returning a standard `Vec<EdgeId>`. This obscured the "Zero-Allocation Traversal" performance philosophy.
+**Clarification:** Added module-level documentation explaining that these iterators avoid expensive memory allocations on hot paths by holding lock-free references to contiguous memory arrays, reducing traversal overhead by 100-500ns per hop.
+
+## 2025-03-02 - Logical vs Physical Plan Clarification
+**Confusion:** The `src/query/planner/physical.rs` module lacked documentation detailing the distinction between logical query plans (what data to fetch) and physical query plans (the execution strategy used to fetch it). This is a core concept that makes the query planner opaque.
+**Clarification:** Added module-level documentation describing the optimizer's role in creating a `PhysicalPlan` and providing an example of how to view the underlying structure via `.explain()`.
