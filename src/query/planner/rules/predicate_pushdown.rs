@@ -312,6 +312,23 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_filter_at_scan() {
+        let rule = PredicatePushdown;
+        let stats = test_stats();
+
+        // Filter(Scan)
+        // Should NOT push down because we stop at scans
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        // Should return None because pushdown was blocked by Scan
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn test_stop_filter_at_vector_rank_with_limit() {
         let rule = PredicatePushdown;
         let stats = test_stats();
