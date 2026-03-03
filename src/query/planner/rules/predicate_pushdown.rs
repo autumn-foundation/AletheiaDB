@@ -557,3 +557,137 @@ mod sentry_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentry_predicate_pushdown_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{BinaryOp, LogicalOp, ScanOp, SortKey, UnaryOp};
+    use std::sync::Arc;
+
+    fn test_stats() -> Statistics {
+        Statistics::default()
+    }
+
+    #[test]
+    fn test_sentry_push_down_scan() {
+        // 🛡️ Sentry Test: Verify that push_down stops at LogicalOp::Scan
+        // Targets mutant deleting match arm `LogicalOp::Scan(_)`.
+        let rule = PredicatePushdown;
+        let stats = test_stats();
+
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_none(), "Should return None for Scan (no change)");
+    }
+
+    #[test]
+    fn test_sentry_push_down_traverse() {
+        // 🛡️ Sentry Test: Verify that push_down stops at Traverse
+        // Targets mutant deleting match arm `LogicalOp::Unary{op:UnaryOp::Traverse{..}, ..}`.
+        let rule = PredicatePushdown;
+        let stats = test_stats();
+
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::unary(
+                UnaryOp::Traverse {
+                    label: None,
+                    direction: crate::query::ir::Direction::Outgoing,
+                    depth: crate::query::ir::TraversalDepth::default(),
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_none(),
+            "Should return None for Traverse (no change)"
+        );
+    }
+
+    #[test]
+    fn test_sentry_push_down_vector_rank_with_limit() {
+        // 🛡️ Sentry Test: Verify that push_down stops at VectorRank with limit
+        // Targets mutant deleting match arm for VectorRank.
+        let rule = PredicatePushdown;
+        let stats = test_stats();
+
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::unary(
+                UnaryOp::VectorRank {
+                    embedding: Arc::from([0.1f32; 4].as_slice()),
+                    top_k: Some(10),
+                    property_key: None,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_none(),
+            "Should not push down through VectorRank with limit"
+        );
+    }
+
+    #[test]
+    fn test_sentry_push_down_sort() {
+        // 🛡️ Sentry Test: Verify that push_down succeeds through Sort
+        // Targets mutant deleting match arm for Sort.
+        let rule = PredicatePushdown;
+        let stats = test_stats();
+
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: SortKey::Property("name".to_string()),
+                    descending: false,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some(), "Should push down through Sort");
+    }
+
+    #[test]
+    fn test_sentry_push_down_binary_op_changed_flag() {
+        // 🛡️ Sentry Test: Verify || logic in BinaryOp changed flag
+        // Targets replacing || with && for left_changed || right_changed
+        let rule = PredicatePushdown;
+
+        // Right side will change: Filter -> Sort
+        let right_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("active", true)),
+            LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: SortKey::Property("created".to_string()),
+                    descending: true,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        );
+
+        // Left side will NOT change: Scan
+        let left_op = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+
+        // Binary Op: Union(Left, Right)
+        let binary_op = LogicalOp::binary(BinaryOp::Union, left_op, right_op);
+
+        let (_, changed) = rule.push_down(&binary_op).unwrap();
+        assert!(
+            changed,
+            "Should return changed=true when ONLY the right side changes"
+        );
+    }
+}

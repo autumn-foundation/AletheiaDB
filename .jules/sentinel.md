@@ -68,3 +68,15 @@
 **Summary:** Potential regression in floating point equality semantics (NaN).
 **Diagnosis:** WEAK_TEST - Explicit verification of `NaN != NaN` (PartialEq) vs `NaN == NaN` (semantically_equal) was needed to prevent regressions.
 **Kill Shot:** Added `test_property_value_partial_eq_nan_semantics` in `src/core/property.rs`.
+
+**[Weak Test Coverage in Query Planner Reordering]**
+**Module:** `aletheiadb::query::planner::rules::operation_reordering`
+**Summary:** Numerous mutants survived in selectivity estimation formulas (replacing `-` with `+`), `estimate_cardinality` (replacing `*` with `/` for join cardinality), and in equality checks (`filters_equal` logic using `||` instead of `&&`, and missing match arms in `predicates_equal`).
+**Diagnosis:** WEAK_TEST / MISSING_COVERAGE - The test suite verified overall query plans but lacked explicit unit tests for the exact values and bounds used inside the query planner's selectivity equations, and it lacked exhaustive equality match checks.
+**Kill Shot:** Added `test_sentry_filters_equal_logic`, `test_sentry_estimate_cardinality_binary_op_formula`, `test_sentry_predicates_equal_variants`, and `test_sentry_reorder_filters_exact_selectivity` in `src/query/planner/rules/operation_reordering.rs`.
+
+**[Weak Test Coverage in Query Planner Pushdown]**
+**Module:** `aletheiadb::query::planner::rules::predicate_pushdown`
+**Summary:** Mutants survived that deleted the match arms preventing pushdown for `Scan`, `Traverse`, and `VectorRank(with limit)`. Another mutant replaced `||` with `&&` when returning `changed` status for binary operators.
+**Diagnosis:** WEAK_TEST / MISSING_COVERAGE - While integration tests verified general pushdown, specific tests checking the boundaries of where pushdown *stops* (or checking partial binary tree pushdown flags) were missing.
+**Kill Shot:** Added `test_sentry_push_down_scan`, `test_sentry_push_down_traverse`, `test_sentry_push_down_vector_rank_with_limit`, `test_sentry_push_down_sort`, and `test_sentry_push_down_binary_op_changed_flag` in `src/query/planner/rules/predicate_pushdown.rs`.

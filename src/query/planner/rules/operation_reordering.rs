@@ -1065,3 +1065,284 @@ mod tests {
         assert_eq!(sel, NULL_CHECK_SELECTIVITY);
     }
 }
+
+#[cfg(test)]
+mod sentry_operation_reordering_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::ir::{Predicate, PredicateValue};
+    use crate::query::plan::{BinaryOp, LogicalOp, ScanOp, UnaryOp};
+
+    fn test_stats() -> Statistics {
+        Statistics::default()
+    }
+
+    #[test]
+    fn test_sentry_filters_equal_logic() {
+        // 🛡️ Sentry Test: Verify strict matching in `filters_equal`
+        // Targets mutants changing `&&` to `||` when combining predicates_equal and filters_equal.
+        let rule = OperationReordering;
+
+        let base_scan = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+        let base_empty = LogicalOp::Empty;
+
+        let filter_a = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            base_scan.clone(),
+        );
+
+        // Same predicate, different input type (Scan vs Empty) so discriminant differs
+        let filter_b = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            base_empty.clone(),
+        );
+
+        // Different predicate, same input
+        let filter_c = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Bob")),
+            base_scan.clone(),
+        );
+
+        // Same predicate, same input
+        let filter_d = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            base_scan.clone(),
+        );
+
+        assert!(
+            !rule.filters_equal(&filter_a, &filter_b),
+            "Should be false when inputs differ in discriminant"
+        );
+        assert!(
+            !rule.filters_equal(&filter_a, &filter_c),
+            "Should be false when predicates differ"
+        );
+        assert!(
+            rule.filters_equal(&filter_a, &filter_d),
+            "Should be true when both match"
+        );
+    }
+
+    #[test]
+    fn test_sentry_estimate_cardinality_binary_op_formula() {
+        // 🛡️ Sentry Test: Verify exact cardinality estimation formula for BinaryOp (Join)
+        // Targets mutants changing * to / or + or omitting the 0.1 factor.
+        let rule = OperationReordering;
+
+        // Left card = 1000
+        let left = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(1000),
+        });
+
+        // Right card = 200
+        let right = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(200),
+        });
+
+        let binary_op = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "k1".to_string(),
+                right_key: "k2".to_string(),
+            },
+            left,
+            right,
+        );
+
+        // Formula: (left_card * right_card * 0.1) as usize
+        // (1000 * 200 * 0.1) = 200000 * 0.1 = 20000
+        assert_eq!(rule.estimate_cardinality(&binary_op), 20000);
+    }
+
+    #[test]
+    fn test_sentry_predicates_equal_variants() {
+        // 🛡️ Sentry Test: Verify all Predicate variants are correctly matched in predicates_equal.
+        // Targets mutants that delete match arms or replace `&&` with `||` / `==` with `!=` in the comparisons.
+        let rule = OperationReordering;
+
+        let eq1 = Predicate::Eq {
+            key: "k".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        let eq2 = Predicate::Eq {
+            key: "k".to_string(),
+            value: PredicateValue::Int(2),
+        };
+        assert!(rule.predicates_equal(&eq1, &eq1));
+        assert!(!rule.predicates_equal(&eq1, &eq2));
+
+        let ne1 = Predicate::Ne {
+            key: "k".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        let ne2 = Predicate::Ne {
+            key: "k".to_string(),
+            value: PredicateValue::Int(2),
+        };
+        assert!(rule.predicates_equal(&ne1, &ne1));
+        assert!(!rule.predicates_equal(&ne1, &ne2));
+
+        let gt1 = Predicate::Gt {
+            key: "k".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        let gt2 = Predicate::Gt {
+            key: "k".to_string(),
+            value: PredicateValue::Int(2),
+        };
+        assert!(rule.predicates_equal(&gt1, &gt1));
+        assert!(!rule.predicates_equal(&gt1, &gt2));
+
+        let gte1 = Predicate::Gte {
+            key: "k".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        let gte2 = Predicate::Gte {
+            key: "k".to_string(),
+            value: PredicateValue::Int(2),
+        };
+        assert!(rule.predicates_equal(&gte1, &gte1));
+        assert!(!rule.predicates_equal(&gte1, &gte2));
+
+        let lt1 = Predicate::Lt {
+            key: "k".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        let lt2 = Predicate::Lt {
+            key: "k".to_string(),
+            value: PredicateValue::Int(2),
+        };
+        assert!(rule.predicates_equal(&lt1, &lt1));
+        assert!(!rule.predicates_equal(&lt1, &lt2));
+
+        let lte1 = Predicate::Lte {
+            key: "k".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        let lte2 = Predicate::Lte {
+            key: "k".to_string(),
+            value: PredicateValue::Int(2),
+        };
+        assert!(rule.predicates_equal(&lte1, &lte1));
+        assert!(!rule.predicates_equal(&lte1, &lte2));
+
+        let in1 = Predicate::In {
+            key: "k".to_string(),
+            values: vec![PredicateValue::Int(1)],
+        };
+        let in2 = Predicate::In {
+            key: "k".to_string(),
+            values: vec![PredicateValue::Int(2)],
+        };
+        assert!(rule.predicates_equal(&in1, &in1));
+        assert!(!rule.predicates_equal(&in1, &in2));
+
+        let c1 = Predicate::Contains {
+            key: "k".to_string(),
+            substring: "a".to_string(),
+        };
+        let c2 = Predicate::Contains {
+            key: "k".to_string(),
+            substring: "b".to_string(),
+        };
+        assert!(rule.predicates_equal(&c1, &c1));
+        assert!(!rule.predicates_equal(&c1, &c2));
+
+        let s1 = Predicate::StartsWith {
+            key: "k".to_string(),
+            prefix: "a".to_string(),
+        };
+        let s2 = Predicate::StartsWith {
+            key: "k".to_string(),
+            prefix: "b".to_string(),
+        };
+        assert!(rule.predicates_equal(&s1, &s1));
+        assert!(!rule.predicates_equal(&s1, &s2));
+
+        let e1 = Predicate::EndsWith {
+            key: "k".to_string(),
+            suffix: "a".to_string(),
+        };
+        let e2 = Predicate::EndsWith {
+            key: "k".to_string(),
+            suffix: "b".to_string(),
+        };
+        assert!(rule.predicates_equal(&e1, &e1));
+        assert!(!rule.predicates_equal(&e1, &e2));
+
+        let ex1 = Predicate::Exists("k1".to_string());
+        let ex2 = Predicate::Exists("k2".to_string());
+        assert!(rule.predicates_equal(&ex1, &ex1));
+        assert!(!rule.predicates_equal(&ex1, &ex2));
+
+        let nex1 = Predicate::NotExists("k1".to_string());
+        let nex2 = Predicate::NotExists("k2".to_string());
+        assert!(rule.predicates_equal(&nex1, &nex1));
+        assert!(!rule.predicates_equal(&nex1, &nex2));
+
+        let and1 = Predicate::And(vec![Predicate::True, Predicate::False]);
+        let and2 = Predicate::And(vec![Predicate::True, Predicate::True]);
+        assert!(rule.predicates_equal(&and1, &and1));
+        assert!(!rule.predicates_equal(&and1, &and2));
+
+        let or1 = Predicate::Or(vec![Predicate::True, Predicate::False]);
+        let or2 = Predicate::Or(vec![Predicate::True, Predicate::True]);
+        assert!(rule.predicates_equal(&or1, &or1));
+        assert!(!rule.predicates_equal(&or1, &or2));
+
+        let not1 = Predicate::Not(Box::new(Predicate::True));
+        let not2 = Predicate::Not(Box::new(Predicate::False));
+        assert!(rule.predicates_equal(&not1, &not1));
+        assert!(!rule.predicates_equal(&not1, &not2));
+    }
+
+    #[test]
+    fn test_sentry_reorder_filters_exact_selectivity() {
+        // 🛡️ Sentry Test: Verify exact selectivity values inside `estimate_filter_selectivity`
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        let p_gt = Predicate::Gt {
+            key: "k".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        assert_eq!(
+            rule.estimate_filter_selectivity(&p_gt, &stats),
+            RANGE_PREDICATE_SELECTIVITY
+        );
+
+        let p_contains = Predicate::Contains {
+            key: "k".to_string(),
+            substring: "a".to_string(),
+        };
+        assert_eq!(
+            rule.estimate_filter_selectivity(&p_contains, &stats),
+            STRING_PREDICATE_SELECTIVITY
+        );
+
+        let p_ne = Predicate::Ne {
+            key: "k".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        assert_eq!(
+            rule.estimate_filter_selectivity(&p_ne, &stats),
+            NOT_EQUALS_SELECTIVITY
+        );
+
+        let p_in = Predicate::In {
+            key: "k".to_string(),
+            values: vec![],
+        };
+        assert_eq!(
+            rule.estimate_filter_selectivity(&p_in, &stats),
+            IN_PREDICATE_SELECTIVITY
+        );
+
+        let p_exists = Predicate::Exists("k".to_string());
+        assert_eq!(
+            rule.estimate_filter_selectivity(&p_exists, &stats),
+            EXISTENCE_CHECK_SELECTIVITY
+        );
+    }
+}
