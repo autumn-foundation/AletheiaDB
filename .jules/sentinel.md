@@ -80,3 +80,9 @@
 **Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
 **Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
 **Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
+
+**[Weak Test Coverage in ID Generators]**
+**Module:** `src/core/id.rs`
+**Summary:** Mutants changing arithmetic operations (`current + 1` to `current - 1` or `current * 1`) and inequality operators (`>` to `>=`) survived in `TxIdGenerator` and `IdGenerator`.
+**Diagnosis:** WEAK_TEST - The tests did not explicitly verify the actual numeric change or edge-case boundaries of the generator functions (`ensure_at_least`, `next`).
+**Kill Shot:** Added explicit boundary tests (`test_id_generator_ensure_at_least_exact_boundary`, `test_id_generator_next_exact_boundary`) and state tracking tests (`test_tx_id_generator_loop_logic`, `test_tx_id_current`, `test_tx_id_display`) in `src/core/id.rs` within `sentinel_id_tests` module.

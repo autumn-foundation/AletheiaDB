@@ -1,0 +1,27 @@
+--- src/core/id.rs
++++ src/core/id.rs
+@@ -1570,18 +1570,18 @@
+     #[test]
+     fn test_id_generator_ensure_at_least_exact_boundary() {
+         // Target mutant: replace `>` with `>=` in IdGenerator::ensure_at_least
+-        let gen = IdGenerator::with_start(100);
++        let generator = IdGenerator::with_start(100);
+         // Should not update if given exactly the current next_id - 1
+-        gen.ensure_at_least(99);
+-        assert_eq!(gen.current(), 100);
++        generator.ensure_at_least(99);
++        assert_eq!(generator.current(), 100);
+     }
+
+     #[test]
+     fn test_id_generator_next_exact_boundary() {
+         // Target mutant: replace `>` with `>=` in IdGenerator::next for MAX_VALID_ID check
+-        let gen = IdGenerator::with_start(MAX_VALID_ID);
++        let generator = IdGenerator::with_start(MAX_VALID_ID);
+         // MAX_VALID_ID should be allowed to be generated.
+-        assert!(gen.next().is_ok());
++        assert!(generator.next().is_ok());
+         // The next one should fail (MAX_VALID_ID + 1).
+-        assert!(gen.next().is_err());
++        assert!(generator.next().is_err());
+     }
