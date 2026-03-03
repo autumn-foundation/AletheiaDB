@@ -92,6 +92,11 @@
 **Diagnosis:** MISSING_TEST / WEAK_TEST - The test suite didn't comprehensively cover the individual match arms of `json_to_predicate_value`, the edge cases of deep pagination limits (`offset + limit == 10000`), or explicit distinction between "syntax" and "parse" error handling branches. Also, an underlying `test_cors_headers_present` test failure masked overall mutant evaluation for `http_server` tasks.
 **Kill Shot:** Fixed the CORS test by supplying a `peer_addr`, and added `test_json_to_predicate_value`, `test_execute_query_parse_error`, and exact boundary condition payloads (9900 + 100 vs 9901 + 100) inside `test_warden_find_node_deep_pagination` and `test_warden_find_neighbors_overflow`.
 
+**[Weak Test Coverage in Temporal Types Duration & Methods]**
+**Module:** src/core/temporal.rs
+**Summary:** Mutants returning arbitrary Option values for `TimeRange::duration_micros` survived. The test suite also didn't explicitly assert exact return values for methods like `BiTemporalInterval::is_currently_valid` / `is_current` across all variants of open/closed intervals.
+**Diagnosis:** WEAK_TEST - The tests likely asserted presence (`is_some`) or checked properties implicitly rather than verifying the exact boundary output.
+**Kill Shot:** Added `test_timerange_duration_micros_exact`, `test_bitemporal_methods_exact`, and related exact boolean assertions to `tests/sentry_temporal.rs` catching specific returns like `Some(0)` or `None`.
 **[Weak Test Coverage in ID Generator Boundaries & EntityId Casting]**
 **Module:** `src/core/id.rs`
 **Summary:** Mutants returning default values or mutating exact operations survived in `IdGenerator` logic (`ensure_at_least` > changed to <, ==, etc., `current_approximate` returned default constant), `EntityId` casting (`as_node`, `as_edge` returned defaults instead of `Option` logic), and `TxIdGenerator::next` (boundary tests against `== u64::MAX` not strictly forced to pass/fail cleanly on simple operators + / -, and `TxId` default returns allowed).
