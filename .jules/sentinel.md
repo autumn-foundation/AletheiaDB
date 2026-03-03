@@ -103,3 +103,9 @@
 **Summary:** Mutation testing revealed numerous surviving mutants related to returning defaults (`Default::default()`, `0`, `1`) from constructors (`new_unchecked`, `with_start`), accessors (`as_u64`, `current`, `current_approximate`), and `fmt::Display`. Additional surviving mutants manipulated boundaries (`>`, `>=`, `<`), constant math (`+`, `/` for `MAX_VALID_ID`), and generator state transitions (`reset_to` return type empty).
 **Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted positive paths (e.g. `assert_eq!(id, 42)`) but lacked explicit negative bounds preventing implementations from collapsing to zero, 1, or empty structures that happen to not trigger failures down stream. Tests were also missing strict arithmetic boundary testing for constants and `TxIdGenerator` sequencing.
 **Kill Shot:** Extensively added direct bound assertions (`assert_ne!(id, 0)`), explicit exhaustiveness to `sentinel_id_tests.rs`, and introduced a `sentinel_id_generator_tests` module in `src/core/id.rs` directly to access `pub(crate)` APIs and kill underlying generator logic mutations.
+
+**[Weak Test Coverage in IdentityHasher Boundaries & Logic]**
+**Module:** `src/core/hasher.rs`
+**Summary:** Mutants returning default values or mutating exact bitwise operations survived in `IdentityHasher` logic (`^=` changed to `|=` or `&=`, `update_state` removed, match arms deleted for various byte lengths inside `write`).
+**Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted high-level collision avoidance (e.g. `assert_ne!(h1, h2)`) but lacked explicit exact bounds for `update_state` logic with `FNV_PRIME`, lengths of `write()`, default return overrides, and proper bitwise math chaining.
+**Kill Shot:** Extensively added exact bound and behavioral assertions across bitwise operators, lengths, and chaining logic within the `tests` module inside `src/core/hasher.rs`.
