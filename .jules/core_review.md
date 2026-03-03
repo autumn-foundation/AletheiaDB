@@ -19,3 +19,6 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+No high-severity findings.
+Residual risks: None.
+Test gaps: None.
