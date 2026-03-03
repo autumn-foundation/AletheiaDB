@@ -173,9 +173,13 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         .into());
     }
 
-    let dimension_bytes: [u8; 4] = bytes[1..5].try_into().map_err(|_| {
-        StorageError::CorruptedData("Buffer too short for vector dimension".to_string())
-    })?;
+    let dimension_bytes: [u8; 4] = bytes
+        .get(1..5)
+        .ok_or_else(|| {
+            StorageError::CorruptedData("Buffer too short for vector dimension".to_string())
+        })?
+        .try_into()
+        .map_err(|_| StorageError::CorruptedData("Invalid vector dimension bytes".to_string()))?;
     let dimension = u32::from_le_bytes(dimension_bytes) as usize;
 
     // Prevent DoS via memory exhaustion from malicious input
@@ -960,7 +964,7 @@ mod sentry_serialization_tests {
         match err {
             Error::Storage(StorageError::CorruptedData(msg)) => {
                 assert!(msg.contains("Buffer too short"));
-            },
+            }
             _ => panic!("Expected StorageError::CorruptedData for truncated dimension"),
         }
     }
@@ -974,7 +978,7 @@ mod sentry_serialization_tests {
         match err {
             Error::Storage(StorageError::CorruptedData(msg)) => {
                 assert!(msg.contains("Buffer too short"));
-            },
+            }
             _ => panic!("Expected StorageError::CorruptedData for truncated sparse dimension"),
         }
     }
@@ -989,7 +993,7 @@ mod sentry_serialization_tests {
         match err {
             Error::Storage(StorageError::CorruptedData(msg)) => {
                 assert!(msg.contains("Buffer too short"));
-            },
+            }
             _ => panic!("Expected StorageError::CorruptedData for truncated sparse nnz"),
         }
     }
