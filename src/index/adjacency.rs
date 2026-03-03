@@ -336,6 +336,16 @@ impl AdjacencyIndex {
     /// # Safety
     /// T and U must have same layout, size, and alignment.
     unsafe fn transmute_vec<T, U>(v: Vec<T>) -> Vec<U> {
+        assert_eq!(
+            std::mem::size_of::<T>(),
+            std::mem::size_of::<U>(),
+            "Transmute vector size mismatch"
+        );
+        assert_eq!(
+            std::mem::align_of::<T>(),
+            std::mem::align_of::<U>(),
+            "Transmute vector alignment mismatch"
+        );
         let mut v = std::mem::ManuallyDrop::new(v);
         // SAFETY: Caller ensures T and U layout compatibility.
         // from_raw_parts is unsafe, but we are inside an unsafe function.
