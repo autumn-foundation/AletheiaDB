@@ -33,3 +33,7 @@
 ## 2026-11-20 - Identity Hashing for Historical Storage
 **Learning:** `HistoricalStorage` and `MigrationService` used the default `HashMap` (SipHash) for integer wrapper keys like `NodeId`, `EdgeId`, and `VersionId`. Because these keys are unique internally-assigned high-quality IDs, SipHash incurs unnecessary hashing overhead.
 **Action:** Replaced `std::collections::HashMap` with `FastHashMap` (which uses `BuildHasherDefault<IdentityHasher>`) for tracking versions, heads, and stats. Using `IdentityHasher` speeds up tracking and lookups and is idiomatic across AletheiaDB for wrapper IDs.
+
+## 2026-11-20 - Identity Hashing for Sparse Vector Search Index
+**Learning:** In `src/index/vector/sparse.rs`, the sparse vector search and reciprocal rank fusion implementations used the default `HashMap` (SipHash) for tracking scores across nodes (keys are `NodeId`). Given `NodeId` is a u64 wrapper, the default SipHash introduces unnecessary overhead in the hottest loops of the system where entries are constantly inserted and updated.
+**Action:** Replaced `HashMap<NodeId, f32>` with `FastHashMap<NodeId, f32>` (which uses `BuildHasherDefault<IdentityHasher>`). This optimization eliminates SipHash overhead during sparse vector search accumulation and score combination without changing the logic.
