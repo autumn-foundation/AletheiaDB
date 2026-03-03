@@ -109,6 +109,11 @@
 **Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted positive paths (e.g. `assert_eq!(id, 42)`) but lacked explicit negative bounds preventing implementations from collapsing to zero, 1, or empty structures that happen to not trigger failures down stream. Tests were also missing strict arithmetic boundary testing for constants and `TxIdGenerator` sequencing.
 **Kill Shot:** Extensively added direct bound assertions (`assert_ne!(id, 0)`), explicit exhaustiveness to `sentinel_id_tests.rs`, and introduced a `sentinel_id_generator_tests` module in `src/core/id.rs` directly to access `pub(crate)` APIs and kill underlying generator logic mutations.
 
+**[Weak Test Coverage in HLC Time Bounds]**
+**Module:** `aletheiadb::core::hlc`
+**Summary:** Mutation testing indicated several surviving mutants around exact evaluation of `is_clock_skew_self_heal_enabled` reading configurations, default value handling in formatters (e.g. `ClockSkewDirection::as_str` and `Display` for `HybridTimestamp`), arithmetic operators inside `as_secs` and `as_millis` (which survived replacement to `*` and `%`), and strict evaluations within `HybridTimestamp::receive` boundary `&&` / `||` checks.
+**Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted overall flow or simple logical bumps but lacked explicit assertions regarding specific fallback arithmetic and exact boundary conditions when physical, local, and message times perfectly collided in unexpected combinations.
+**Kill Shot:** Appended targeted boundary tests `test_is_clock_skew_self_heal_enabled_override`, `test_clock_skew_direction_as_str`, `test_hybrid_timestamp_display`, `test_hybrid_timestamp_as_secs_millis_exact`, and `test_hybrid_timestamp_receive_exact_wallclock_logic` within `src/core/hlc.rs` to close these gaps.
 **[Weak Test Coverage in IdentityHasher Boundaries & Logic]**
 **Module:** `src/core/hasher.rs`
 **Summary:** Mutants returning default values or mutating exact bitwise operations survived in `IdentityHasher` logic (`^=` changed to `|=` or `&=`, `update_state` removed, match arms deleted for various byte lengths inside `write`).
