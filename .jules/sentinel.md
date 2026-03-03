@@ -68,3 +68,32 @@
 **Summary:** Potential regression in floating point equality semantics (NaN).
 **Diagnosis:** WEAK_TEST - Explicit verification of `NaN != NaN` (PartialEq) vs `NaN == NaN` (semantically_equal) was needed to prevent regressions.
 **Kill Shot:** Added `test_property_value_partial_eq_nan_semantics` in `src/core/property.rs`.
+
+**[Weak Test Coverage in Predicate Pushdown Boundaries]**
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Summary:** The `cargo-mutants` tool indicated that removing the `Traverse` and `Scan` match arms inside `push_down` survived mutation testing. This implies there were no tests ensuring that a filter would correctly stop pushing down at a graph traversal.
+**Diagnosis:** MISSING_TEST - The tests did not explicitly verify the negative condition: that `Filter` is properly halted by a `Traverse` operator. The match arms were functionally equivalent to the default case in terms of output, but they carried semantic meaning that was not checked.
+**Kill Shot:** Added `test_stop_filter_at_traverse` to ensure a `Filter` is not incorrectly pushed underneath a `Traverse` operation.
+
+**[Weak Test Coverage in Logical Equality Logic]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
+**Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
+**Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
+
+**[Weak Test Coverage in ID Format and Boundaries]**
+**Module:** `src/core/id.rs`
+**Summary:** Mutants modifying formatting (`Display` output logic) for `NodeId`, `EdgeId`, `VersionId`, `TxId`, and `EntityId`, as well as constants boundary logic in `IdGenerator` (like `with_start`, `current_approximate`) and conversions (`is_node`, `is_edge`, `as_node`, `as_edge`) survived.
+**Diagnosis:** WEAK_TEST - The tests likely checked properties but lacked explicit assertions covering expected display outputs, boundary edge-cases for initial offset ID generation, and exact positive/negative checks for polymorphic entity conversions.
+**Kill Shot:** Added `tests/sentinel_id_tests.rs` containing targeted kill-shots for each missed property.
+**[Weak Test Coverage in HTTP API Handlers]**
+**Module:** `src/http/handlers.rs`
+**Summary:** Mutants survived regarding JSON payload type conversions (`json_to_predicate_value`), boundary condition checks for DoS protection (`> 10000` mutated to `>=` or `==`), and error code categorization logic (`||` mutated to `&&`).
+**Diagnosis:** MISSING_TEST / WEAK_TEST - The test suite didn't comprehensively cover the individual match arms of `json_to_predicate_value`, the edge cases of deep pagination limits (`offset + limit == 10000`), or explicit distinction between "syntax" and "parse" error handling branches. Also, an underlying `test_cors_headers_present` test failure masked overall mutant evaluation for `http_server` tasks.
+**Kill Shot:** Fixed the CORS test by supplying a `peer_addr`, and added `test_json_to_predicate_value`, `test_execute_query_parse_error`, and exact boundary condition payloads (9900 + 100 vs 9901 + 100) inside `test_warden_find_node_deep_pagination` and `test_warden_find_neighbors_overflow`.
+
+**[Weak Test Coverage in ID Generator Boundaries & EntityId Casting]**
+**Module:** `src/core/id.rs`
+**Summary:** Mutants returning default values or mutating exact operations survived in `IdGenerator` logic (`ensure_at_least` > changed to <, ==, etc., `current_approximate` returned default constant), `EntityId` casting (`as_node`, `as_edge` returned defaults instead of `Option` logic), and `TxIdGenerator::next` (boundary tests against `== u64::MAX` not strictly forced to pass/fail cleanly on simple operators + / -, and `TxId` default returns allowed).
+**Diagnosis:** MISSING_TEST / WEAK_TEST - The previous Sentinel run added `tests/sentinel_id_tests.rs` covering basic display and structural assertions but lacked targeted logic checks (killing operator modifications `+` to `-` or `*`) inside `TxIdGenerator` and `IdGenerator` (which are also internal/`pub(crate)` scoped). `EntityId::as_node` defaults slipped past tests that only invoked `.is_node()` rather than directly asserting exact `.as_node()` value match against zero constants.
+**Kill Shot:** Added exhaustive logic tests `sentinel_id_generator_tests` covering exactly `ensure_at_least`, `current_approximate`, and `TxIdGenerator::next` within `src/core/id.rs` directly, alongside appending exact exhaustive checks to `tests/sentinel_id_tests.rs` to stop `as_node`/`as_edge` default `None` and `Some(Default::default())` mutants.

@@ -1537,3 +1537,52 @@ mod warden_repro {
         let _ = generator.next();
     }
 }
+
+#[cfg(test)]
+mod sentinel_id_generator_tests {
+    use super::*;
+
+    #[test]
+    fn test_id_generator_current_approximate_exhaustive() {
+        let generator = IdGenerator::with_start(42);
+
+        let current = generator.current_approximate();
+        assert_eq!(current, 42);
+
+        generator.next().unwrap();
+        let current2 = generator.current_approximate();
+        assert_eq!(current2, 43);
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least_exhaustive() {
+        let generator = IdGenerator::with_start(42);
+
+        // This fails if `>` was replaced with `==` (since 50 != 42, it wouldn't update)
+        generator.ensure_at_least(50);
+        assert_eq!(generator.current(), 50);
+
+        // This fails if `>` was replaced with `<` (since 40 < 50 is true, it would update)
+        generator.ensure_at_least(40);
+        assert_eq!(generator.current(), 50);
+    }
+
+    #[test]
+    fn test_tx_id_generator_next_exhaustive() {
+        let generator = TxIdGenerator::new(); // Starts at 1
+
+        // Kill "replace TxIdGenerator::next -> TxId with Default::default()"
+        let first = generator.next();
+        assert_eq!(first, TxId::new(1));
+        assert_ne!(first, TxId::new(0));
+
+        // Kill "replace + with -" or "*"
+        let second = generator.next();
+        assert_eq!(second, TxId::new(2));
+        assert_ne!(second, TxId::new(0)); // 1 - 1
+        assert_ne!(second, TxId::new(1)); // 1 * 1
+
+        // Kill "replace == with !=" for u64::MAX check
+        // If it were `!=`, it would panic immediately because 1 != u64::MAX
+    }
+}

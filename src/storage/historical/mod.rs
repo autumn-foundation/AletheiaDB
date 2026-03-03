@@ -19,10 +19,10 @@ use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
 use crate::core::version::{
-    AnchorConfig, EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData,
+    AnchorConfig, EdgeVersion, EntityVersion, FastHashMap, NodeVersion, TemporalVersion,
+    VersionData,
 };
 use quick_cache::sync::Cache;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -170,30 +170,38 @@ pub struct HistoricalStorage {
     retention_policy: RetentionPolicy,
     /// Maximum depth for version reconstruction (DoS protection)
     max_reconstruction_depth: usize,
-    /// All node versions, indexed by version ID
-    node_versions: HashMap<VersionId, NodeVersion>,
-    /// All edge versions, indexed by version ID
-    edge_versions: HashMap<VersionId, EdgeVersion>,
-    /// Head version ID for each node (most recent)
-    node_version_heads: HashMap<NodeId, VersionId>,
-    /// Head version ID for each edge (most recent)
-    edge_version_heads: HashMap<EdgeId, VersionId>,
-    /// Cached version counts per node (for O(1) capacity checks)
-    node_version_counts: HashMap<NodeId, usize>,
-    /// Cached version counts per edge (for O(1) capacity checks)
-    edge_version_counts: HashMap<EdgeId, usize>,
+    /// All node versions, indexed by version ID.
+    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    node_versions: FastHashMap<VersionId, NodeVersion>,
+    /// All edge versions, indexed by version ID.
+    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    edge_versions: FastHashMap<VersionId, EdgeVersion>,
+    /// Head version ID for each node (most recent).
+    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    node_version_heads: FastHashMap<NodeId, VersionId>,
+    /// Head version ID for each edge (most recent).
+    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    edge_version_heads: FastHashMap<EdgeId, VersionId>,
+    /// Cached version counts per node (for O(1) capacity checks).
+    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    node_version_counts: FastHashMap<NodeId, usize>,
+    /// Cached version counts per edge (for O(1) capacity checks).
+    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    edge_version_counts: FastHashMap<EdgeId, usize>,
     /// Versions since last anchor per node (for O(1) anchor interval checks)
     ///
     /// Issue #208: Cache the count of versions since the last anchor to avoid
     /// walking the version chain on every add operation. This improves write
     /// performance from O(anchor_interval) to O(1).
-    node_versions_since_anchor: HashMap<NodeId, usize>,
+    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    node_versions_since_anchor: FastHashMap<NodeId, usize>,
     /// Versions since last anchor per edge (for O(1) anchor interval checks)
     ///
     /// Issue #208: Cache the count of versions since the last anchor to avoid
     /// walking the version chain on every add operation. This improves write
     /// performance from O(anchor_interval) to O(1).
-    edge_versions_since_anchor: HashMap<EdgeId, usize>,
+    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    edge_versions_since_anchor: FastHashMap<EdgeId, usize>,
     /// Cached count of node anchor versions for O(1) stats() (Issue #212)
     ///
     /// This counter is incremented when node anchors are added and enables
@@ -375,14 +383,14 @@ impl HistoricalStorage {
             config,
             retention_policy,
             max_reconstruction_depth: MAX_RECONSTRUCTION_DEPTH,
-            node_versions: HashMap::new(),
-            edge_versions: HashMap::new(),
-            node_version_heads: HashMap::new(),
-            edge_version_heads: HashMap::new(),
-            node_version_counts: HashMap::new(),
-            edge_version_counts: HashMap::new(),
-            node_versions_since_anchor: HashMap::new(),
-            edge_versions_since_anchor: HashMap::new(),
+            node_versions: FastHashMap::default(),
+            edge_versions: FastHashMap::default(),
+            node_version_heads: FastHashMap::default(),
+            edge_version_heads: FastHashMap::default(),
+            node_version_counts: FastHashMap::default(),
+            edge_version_counts: FastHashMap::default(),
+            node_versions_since_anchor: FastHashMap::default(),
+            edge_versions_since_anchor: FastHashMap::default(),
             cached_node_anchor_count: 0,
             cached_node_delta_count: 0,
             cached_edge_anchor_count: 0,
@@ -1354,9 +1362,8 @@ impl HistoricalStorage {
     ///
     /// Returns a map of NodeId -> `Vec<NodeVersion>` for recovery property tests.
     /// This walks through all node versions and groups them by entity ID.
-    pub fn get_all_node_versions(&self) -> std::collections::HashMap<NodeId, Vec<&NodeVersion>> {
-        let mut result: std::collections::HashMap<NodeId, Vec<&NodeVersion>> =
-            std::collections::HashMap::new();
+    pub fn get_all_node_versions(&self) -> FastHashMap<NodeId, Vec<&NodeVersion>> {
+        let mut result: FastHashMap<NodeId, Vec<&NodeVersion>> = FastHashMap::default();
 
         for version in self.node_versions.values() {
             result.entry(version.node_id).or_default().push(version);
@@ -1369,9 +1376,8 @@ impl HistoricalStorage {
     ///
     /// Returns a map of EdgeId -> `Vec<EdgeVersion>` for recovery property tests.
     /// This walks through all edge versions and groups them by entity ID.
-    pub fn get_all_edge_versions(&self) -> std::collections::HashMap<EdgeId, Vec<&EdgeVersion>> {
-        let mut result: std::collections::HashMap<EdgeId, Vec<&EdgeVersion>> =
-            std::collections::HashMap::new();
+    pub fn get_all_edge_versions(&self) -> FastHashMap<EdgeId, Vec<&EdgeVersion>> {
+        let mut result: FastHashMap<EdgeId, Vec<&EdgeVersion>> = FastHashMap::default();
 
         for version in self.edge_versions.values() {
             result.entry(version.edge_id).or_default().push(version);
@@ -2668,14 +2674,14 @@ impl HistoricalStorage {
     /// Get all node versions for persistence.
     ///
     /// This is a crate-internal method used by the index persistence layer.
-    pub(crate) fn get_node_versions(&self) -> &HashMap<VersionId, NodeVersion> {
+    pub(crate) fn get_node_versions(&self) -> &FastHashMap<VersionId, NodeVersion> {
         &self.node_versions
     }
 
     /// Get all edge versions for persistence.
     ///
     /// This is a crate-internal method used by the index persistence layer.
-    pub(crate) fn get_edge_versions(&self) -> &HashMap<VersionId, EdgeVersion> {
+    pub(crate) fn get_edge_versions(&self) -> &FastHashMap<VersionId, EdgeVersion> {
         &self.edge_versions
     }
 
@@ -2787,7 +2793,7 @@ impl HistoricalStorage {
         // === Rebuild node version chains ===
 
         // Group versions by node ID
-        let mut node_versions_by_id: HashMap<NodeId, Vec<VersionId>> = HashMap::new();
+        let mut node_versions_by_id: FastHashMap<NodeId, Vec<VersionId>> = FastHashMap::default();
         for (vid, version) in &self.node_versions {
             node_versions_by_id
                 .entry(version.node_id)
@@ -2862,7 +2868,7 @@ impl HistoricalStorage {
         // === Rebuild edge version chains ===
 
         // Group versions by edge ID
-        let mut edge_versions_by_id: HashMap<EdgeId, Vec<VersionId>> = HashMap::new();
+        let mut edge_versions_by_id: FastHashMap<EdgeId, Vec<VersionId>> = FastHashMap::default();
         for (vid, version) in &self.edge_versions {
             edge_versions_by_id
                 .entry(version.edge_id)
