@@ -19,3 +19,13 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+
+## 🦀 Core Review: PropertyMapBuilder::try_insert_by_key
+
+No high-severity findings.
+
+### Test gaps
+- The requested diff is inherently a test coverage improvement (`test_property_map_builder_try_insert_by_key_returns_error_on_deep_recursion`). No missing tests were identified for correctness/regression risks for this specific isolated change.
+
+### Residual risks
+- None identified for `PropertyMapBuilder::try_insert_by_key`. It correctly defers to `serialized_size()`, which performs cycle/depth checks and returns an explicit `Result` bounding deep recursion.
