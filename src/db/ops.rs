@@ -33,7 +33,6 @@ impl AletheiaDB {
     /// * [`write`](Self::write) - For batched write operations.
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.write(|tx| tx.create_node(label, properties))
-            .record_error_metric()
     }
 
     /// Create an edge between two nodes.
@@ -70,7 +69,6 @@ impl AletheiaDB {
         properties: PropertyMap,
     ) -> Result<EdgeId> {
         self.write(|tx| tx.create_edge(source, target, label, properties))
-            .record_error_metric()
     }
 
     /// Get the current state of a node.

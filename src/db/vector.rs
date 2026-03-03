@@ -110,7 +110,8 @@ impl AletheiaDB {
 
             // Enable vector index if it doesn't exist yet
             if !self.current.is_vector_index_enabled_for(property_name) {
-                self.enable_vector_index(property_name, resolved_hnsw_config.clone())?;
+                self.current
+                    .enable_vector_index(property_name, resolved_hnsw_config.clone())?;
             }
 
             #[cfg(feature = "observability")]

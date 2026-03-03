@@ -1,4 +1,4 @@
-use crate::core::error::{Result, ResultExt};
+use crate::core::error::{Error, Result};
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::TemporalVectorConfig;
@@ -144,29 +144,31 @@ impl<'a> VectorIndexBuilder<'a> {
     /// # }
     /// ```
     pub fn enable(self) -> Result<()> {
-        let result = (|| {
-            let hnsw_config = self.hnsw_config.ok_or_else(|| {
-                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+        let hnsw_config = self
+            .hnsw_config
+            .ok_or_else(|| {
+                Error::Vector(crate::core::error::VectorError::IndexError(
                     "HNSW configuration is required. Call .hnsw() before .enable()".to_string(),
                 ))
+            })
+            .inspect_err(|err| {
+                err.record_metric();
             })?;
 
-            // If temporal config is provided, use enable_temporal_vector_index which
-            // automatically enables the current index as well (fixing #386)
-            if let Some(temporal_config) = self.temporal_config {
-                // Merge HNSW config into temporal config
-                let temporal_config_with_hnsw = TemporalVectorConfig {
-                    hnsw_config: Some(hnsw_config),
-                    ..temporal_config
-                };
-                self.db
-                    .enable_temporal_vector_index(&self.property_name, temporal_config_with_hnsw)
-            } else {
-                // Just enable the current index
-                self.db
-                    .enable_vector_index(&self.property_name, hnsw_config)
-            }
-        })();
-        result.record_error_metric()
+        // If temporal config is provided, use enable_temporal_vector_index which
+        // automatically enables the current index as well (fixing #386)
+        if let Some(temporal_config) = self.temporal_config {
+            // Merge HNSW config into temporal config
+            let temporal_config_with_hnsw = TemporalVectorConfig {
+                hnsw_config: Some(hnsw_config),
+                ..temporal_config
+            };
+            self.db
+                .enable_temporal_vector_index(&self.property_name, temporal_config_with_hnsw)
+        } else {
+            // Just enable the current index
+            self.db
+                .enable_vector_index(&self.property_name, hnsw_config)
+        }
     }
 }
