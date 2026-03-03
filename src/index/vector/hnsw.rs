@@ -453,6 +453,8 @@ where
         // Wrap user code in catch_unwind to prevent UB from unwinding into C++
         // Use AssertUnwindSafe because raw pointers are not UnwindSafe, but they are Copy/trivially safe here.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: We verified pointers are not null and properly aligned.
+            // We must trust usearch that they point to `dims` elements.
             let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
             let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
             distance_fn(slice_a, slice_b)
