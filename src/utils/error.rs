@@ -14,6 +14,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Main error type for all AletheiaDB operations.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Core errors.
+    #[error("Core error: {0}")]
+    Core(crate::core::error::CoreError),
     /// Storage-related errors.
     #[error("Storage error: {0}")]
     Storage(StorageError),
@@ -43,6 +46,12 @@ pub enum Error {
     /// Other errors.
     #[error("{0}")]
     Other(String),
+}
+
+impl From<crate::core::error::CoreError> for Error {
+    fn from(err: crate::core::error::CoreError) -> Self {
+        Error::Core(err)
+    }
 }
 
 impl Error {

@@ -12,7 +12,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(aletheiadb::utils::error::VectorError::DimensionTooLarge {
+            Err(Error::Core(aletheiadb::core::CoreError::DimensionTooLarge {
                 dimension,
                 max_allowed,
             })) => {
@@ -20,7 +20,7 @@ mod tests {
                 assert_eq!(max_allowed, MAX_VECTOR_DIMENSIONS);
             }
             Ok(_) => panic!("Expected Error, got Ok(_)"),
-            Err(e) => panic!("Expected VectorError::DimensionTooLarge, got {:?}", e),
+            Err(e) => panic!("Expected CoreError::DimensionTooLarge, got {:?}", e),
         }
     }
 
@@ -35,7 +35,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(aletheiadb::utils::error::VectorError::DimensionTooLarge {
+            Err(Error::Core(aletheiadb::core::CoreError::DimensionTooLarge {
                 dimension,
                 max_allowed,
             })) => {
@@ -43,7 +43,7 @@ mod tests {
                 assert_eq!(max_allowed, MAX_VECTOR_DIMENSIONS);
             }
             Ok(_) => panic!("Expected Error, got Ok(_)"),
-            Err(e) => panic!("Expected VectorError::DimensionTooLarge, got {:?}", e),
+            Err(e) => panic!("Expected CoreError::DimensionTooLarge, got {:?}", e),
         }
     }
 }
