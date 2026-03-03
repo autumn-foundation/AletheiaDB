@@ -1064,4 +1064,39 @@ mod tests {
         let sel = rule.estimate_filter_selectivity(&pred, &stats);
         assert_eq!(sel, NULL_CHECK_SELECTIVITY);
     }
+
+    #[test]
+    fn test_binary_op_recursion_logic() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Use a binary op like Union (anything but Join to hit the default Binary case)
+        let left_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("common_property", "value")),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("rare_property", "value")),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(1000),
+                }),
+            ),
+        );
+
+        let right_op = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(1000),
+        });
+
+        // Binary(Union, Left, Right)
+        // Left side will be optimized (Filter reordered) -> changed = true
+        // Right side is Scan -> changed = false
+        // Total changed = true || false = true
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left_op, right_op));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_some(),
+            "Binary op with one changed branch should return Some"
+        );
+    }
 }

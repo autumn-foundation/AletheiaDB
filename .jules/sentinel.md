@@ -68,3 +68,9 @@
 **Summary:** Potential regression in floating point equality semantics (NaN).
 **Diagnosis:** WEAK_TEST - Explicit verification of `NaN != NaN` (PartialEq) vs `NaN == NaN` (semantically_equal) was needed to prevent regressions.
 **Kill Shot:** Added `test_property_value_partial_eq_nan_semantics` in `src/core/property.rs`.
+
+**[Weak Test Coverage in Partial Optimization Logic]**
+**Module:** src/query/planner/rules/operation_reordering.rs
+**Summary:** The mutant `replace || with && in OperationReordering::reorder` survived for binary operators. This means existing tests don't adequately check that the rule triggers correctly when only one branch of a binary operator (e.g., Union) is changed.
+**Diagnosis:** WEAK_TEST - No test covers a binary operator (like Union) where one branch gets optimized and the other remains unchanged, causing the `changed` flag to incorrectly be `false` if `&&` is used instead of `||`.
+**Kill Shot:** Added `test_binary_op_recursion_logic` which creates a `BinaryOp::Union` with an optimizable left branch and an unchanged right branch, asserting that the rule applies correctly.
