@@ -975,11 +975,10 @@ mod sentry_serialization_tests {
         // We give it 4 bytes total (tag + 3 byte dim)
         let bytes = vec![TAG_SPARSE_VECTOR, 0x01, 0x02, 0x03];
         let err = deserialize_sparse_vector(&bytes).unwrap_err();
-        match err {
-            Error::Storage(StorageError::CorruptedData(msg)) => {
-                assert!(msg.contains("Buffer too short"));
-            }
-            _ => panic!("Expected StorageError::CorruptedData for truncated sparse dimension"),
+        if let Error::Storage(StorageError::CorruptedData(msg)) = err {
+            assert!(msg.contains("Buffer too short"));
+        } else {
+            panic!("Expected StorageError::CorruptedData");
         }
     }
 
@@ -990,11 +989,10 @@ mod sentry_serialization_tests {
         bytes.extend_from_slice(&100u32.to_le_bytes()); // dimension
         bytes.extend_from_slice(&[0x01, 0x02, 0x03]); // truncated nnz
         let err = deserialize_sparse_vector(&bytes).unwrap_err();
-        match err {
-            Error::Storage(StorageError::CorruptedData(msg)) => {
-                assert!(msg.contains("Buffer too short"));
-            }
-            _ => panic!("Expected StorageError::CorruptedData for truncated sparse nnz"),
+        if let Error::Storage(StorageError::CorruptedData(msg)) = err {
+            assert!(msg.contains("Buffer too short"));
+        } else {
+            panic!("Expected StorageError::CorruptedData");
         }
     }
 }
