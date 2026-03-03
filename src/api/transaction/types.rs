@@ -1,8 +1,8 @@
 //! Transaction types and metadata
 
 use crate::core::temporal::Timestamp;
-// Re-export TxId and TxIdGenerator from core to break dependency cycles
-pub use crate::core::id::{TxId, TxIdGenerator};
+// Re-export TxId from core to break dependency cycles
+pub use crate::core::id::TxId;
 
 /// Transaction state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +77,7 @@ mod tests {
 
     #[test]
     fn test_tx_id_generator() {
+        use crate::core::id::TxIdGenerator;
         let generator = TxIdGenerator::new();
         let tx1 = generator.next();
         let tx2 = generator.next();
@@ -90,6 +91,7 @@ mod tests {
 
     #[test]
     fn test_tx_id_generator_concurrent() {
+        use crate::core::id::TxIdGenerator;
         use std::sync::Arc;
         use std::thread;
 

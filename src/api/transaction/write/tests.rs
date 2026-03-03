@@ -1,5 +1,5 @@
 use super::*;
-use crate::api::transaction::TxIdGenerator;
+use crate::core::id::TxIdGenerator;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
 use tempfile::TempDir;
 
@@ -1456,7 +1456,7 @@ mod general_tests {
     fn create_test_write_tx_from_existing(
         current: Arc<CurrentStorage>,
     ) -> (WriteTransaction, TempDir) {
-        use crate::api::transaction::TxIdGenerator;
+        use crate::core::id::TxIdGenerator;
         use crate::core::temporal::time;
         use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
         use tempfile::TempDir;
@@ -1502,7 +1502,7 @@ mod general_tests {
 
 mod conflict_detection_tests {
     use super::*;
-    use crate::api::transaction::TxIdGenerator;
+    use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
     use tempfile::TempDir;
@@ -2417,8 +2417,8 @@ mod conflict_detection_tests {
 
 mod clock_skew_tests {
     use super::*;
-    use crate::api::transaction::TxIdGenerator;
     use crate::core::hlc::ClockSkewAutoHealTestGuard;
+    use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
     use std::time::{Duration, Instant};
@@ -2656,7 +2656,7 @@ mod clock_skew_tests {
 
 mod timestamp_ordering_tests {
     use super::*;
-    use crate::api::transaction::TxIdGenerator;
+    use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
     use std::thread;
@@ -2916,7 +2916,7 @@ mod timestamp_ordering_tests {
 
 mod bitemporal_validation_tests {
     use super::*;
-    use crate::api::transaction::types::TxIdGenerator;
+    use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMap;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
     use tempfile::TempDir;
