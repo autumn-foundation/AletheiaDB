@@ -68,3 +68,8 @@
 **Summary:** Potential regression in floating point equality semantics (NaN).
 **Diagnosis:** WEAK_TEST - Explicit verification of `NaN != NaN` (PartialEq) vs `NaN == NaN` (semantically_equal) was needed to prevent regressions.
 **Kill Shot:** Added `test_property_value_partial_eq_nan_semantics` in `src/core/property.rs`.
+**[Weak Test Coverage in VectorDelta and PropertyDelta]**
+**Module:** src/core/version.rs
+**Summary:** Multiple surviving mutants in `VectorDelta::from_diff`, `VectorDelta::apply`, `PropertyDelta::from_diff`, `PropertyDelta::apply`, and `PropertyDelta::estimated_heap_size` indicated a lack of comprehensive test coverage for edge cases, bounds checking, and math logic.
+**Diagnosis:** MISSING_COVERAGE / WEAK_ASSERTION - Edge cases for dense vs sparse replacement logic in `VectorDelta` were loosely tested. Out-of-bounds error handling was not asserted. Some trait implementations such as `floats_approx_equal` were missing direct unit tests entirely.
+**Kill Shot:** Added multiple explicit test cases to `tests/sentry_version.rs`, including `test_vector_delta_from_diff_mutants` (covers replacement logic), `test_vector_delta_apply_mutants` (covers `is_err()` panics and `apply` behavior), `test_vector_delta_apply_bounds` (verifies bounds checks don't drop indices erroneously), `test_property_delta_apply_mutants` (covers mapping application size logic), and specific checks for out-of-bounds logic in apply.

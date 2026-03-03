@@ -168,3 +168,165 @@ fn test_entity_version_methods_not_default() {
     assert_eq!(edge.version_id(), VersionId::new(20).unwrap());
     assert!(edge.is_anchor());
 }
+
+#[test]
+fn test_vector_delta_from_diff_mutants() {
+    use aletheiadb::core::version::VectorDelta;
+    use std::sync::Arc;
+
+    // same vector -> no diff
+    assert_eq!(VectorDelta::from_diff(&[1.0, 2.0], &[1.0, 2.0]), None);
+
+    // full replacement logic vs sparse logic
+    let v1 = vec![0.0f32; 100];
+    let mut v2 = v1.clone();
+    v2[0] = 1.0;
+
+    let delta = VectorDelta::from_diff(&v1, &v2).unwrap();
+    if let VectorDelta::Sparse { dimension, changes } = delta {
+        assert_eq!(dimension, 100);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0], (0, 1.0));
+    } else {
+        panic!("Expected sparse delta");
+    }
+
+    // lots of changes -> full replacement
+    let mut v3 = v1.clone();
+    for i in 0..50 {
+        v3[i] = 1.0;
+    }
+    let delta_full = VectorDelta::from_diff(&v1, &v3).unwrap();
+    if let VectorDelta::Full(v) = delta_full {
+        assert_eq!(v, Arc::from(v3.into_boxed_slice()));
+    } else {
+        panic!("Expected full delta");
+    }
+}
+
+#[test]
+fn test_vector_delta_apply_mutants() {
+    use aletheiadb::core::version::VectorDelta;
+    use std::sync::Arc;
+
+    // Apply sparse to base
+    let base = vec![0.0, 0.0, 0.0];
+    let delta = VectorDelta::Sparse {
+        dimension: 3,
+        changes: Arc::new(vec![(1, 1.0)]),
+    };
+    // Assuming apply returns Vec<f32>, looking at mutant error output
+    let new_vec = delta.apply(&base);
+    assert_eq!(new_vec, vec![0.0, 1.0, 0.0]);
+
+    // Apply full to base (should just return full)
+    let full = VectorDelta::Full(Arc::from(vec![1.0, 1.0, 1.0].into_boxed_slice()));
+    let new_vec2 = full.apply(&base);
+    assert_eq!(new_vec2, vec![1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn test_vector_delta_apply_bounds() {
+    use aletheiadb::core::version::VectorDelta;
+    use std::sync::Arc;
+    let base = vec![0.0, 0.0];
+    let delta = VectorDelta::Sparse {
+        dimension: 2,
+        changes: Arc::new(vec![(5, 1.0)]),
+    };
+    let new_vec = delta.apply(&base);
+    // Mutants change `< base.len()` to `<= base.len()`. If index is out of bounds,
+    // it panics. We expect a panic when the out of bounds condition fails to prevent the indexing.
+    // Let's actually check if it handles the out of bounds. The code says:
+    // if index < new_vec.len() { new_vec[index] = val; }
+    // If we pass an out of bounds index, it should simply ignore it or we should be able to see the length hasn't changed.
+    assert_eq!(new_vec, vec![0.0, 0.0]); // should ignore index 5
+}
+
+#[test]
+fn test_property_delta_apply_mutants() {
+    use aletheiadb::core::property::PropertyMapBuilder;
+    use aletheiadb::core::version::PropertyDelta;
+
+    // Test PropertyDelta::apply logic
+
+    // `apply` -> default check: ensure it doesn't return empty default on valid apply
+    let base = PropertyMapBuilder::new()
+        .insert("k1", 10)
+        .insert("k2", 20)
+        .build();
+    let new = PropertyMapBuilder::new()
+        .insert("k2", 30) // changed
+        .insert("k3", 40) // added
+        .build(); // "k1" removed
+
+    let delta = PropertyDelta::from_diff(&base, &new);
+    let applied = delta.apply(&base);
+
+    // Check that we did not get a default (empty) map
+    assert!(!applied.is_empty(), "Apply must not return an empty map");
+    assert_eq!(applied.get("k2").unwrap().as_int(), Some(30));
+    assert_eq!(applied.get("k3").unwrap().as_int(), Some(40));
+    assert!(applied.get("k1").is_none());
+
+    // Test `+` -> `-` / `*` logic in PropertyDelta::apply
+    // Usually this is around `with_capacity(base.len() + self.changed.len())`
+    // We can't easily detect the capacity directly through the public API,
+    // but the implementation doesn't fail on wrong capacity.
+    // We will just verify the applied map is fully correct.
+    assert_eq!(applied.len(), 2);
+}
+
+#[test]
+fn test_vector_delta_apply_replace() {
+    use aletheiadb::core::version::VectorDelta;
+    use std::sync::Arc;
+    let base = vec![0.0, 0.0];
+    let delta = VectorDelta::Sparse {
+        dimension: 2,
+        changes: Arc::new(vec![(0, 1.0)]),
+    };
+
+    // Some mutants replace `<` with `==` which would skip `index < new_vec.len()` if `index != new_vec.len()`
+    // We check that valid indices are indeed updated
+    let applied = delta.apply(&base);
+    assert_eq!(applied, vec![1.0, 0.0]);
+}
+
+#[test]
+fn test_property_delta_estimated_heap_size_mutants() {
+    use aletheiadb::core::version::{PropertyDelta, VectorDelta};
+    use std::sync::Arc;
+
+    let delta_empty = PropertyDelta::default();
+    assert_eq!(delta_empty.estimated_heap_size(), 0);
+
+    let mut delta = PropertyDelta::default();
+
+    // Using InternedString wrapper directly or interning a string string
+    let k1 = aletheiadb::core::interning::GLOBAL_INTERNER
+        .intern("k1")
+        .unwrap();
+    let k2 = aletheiadb::core::interning::GLOBAL_INTERNER
+        .intern("k2")
+        .unwrap();
+    let k3 = aletheiadb::core::interning::GLOBAL_INTERNER
+        .intern("k3")
+        .unwrap();
+
+    delta
+        .changed
+        .insert(k1, aletheiadb::PropertyValue::from(42));
+    delta.removed.insert(k2);
+    delta.vector_deltas.insert(
+        k3,
+        VectorDelta::Sparse {
+            dimension: 10,
+            changes: Arc::new(vec![(0, 1.0)]),
+        },
+    );
+
+    let size = delta.estimated_heap_size();
+
+    assert!(size > 0);
+}
