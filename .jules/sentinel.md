@@ -91,3 +91,37 @@
 **Summary:** Mutants survived regarding JSON payload type conversions (`json_to_predicate_value`), boundary condition checks for DoS protection (`> 10000` mutated to `>=` or `==`), and error code categorization logic (`||` mutated to `&&`).
 **Diagnosis:** MISSING_TEST / WEAK_TEST - The test suite didn't comprehensively cover the individual match arms of `json_to_predicate_value`, the edge cases of deep pagination limits (`offset + limit == 10000`), or explicit distinction between "syntax" and "parse" error handling branches. Also, an underlying `test_cors_headers_present` test failure masked overall mutant evaluation for `http_server` tasks.
 **Kill Shot:** Fixed the CORS test by supplying a `peer_addr`, and added `test_json_to_predicate_value`, `test_execute_query_parse_error`, and exact boundary condition payloads (9900 + 100 vs 9901 + 100) inside `test_warden_find_node_deep_pagination` and `test_warden_find_neighbors_overflow`.
+
+**[Weak Test Coverage in Temporal Types Duration & Methods]**
+**Module:** src/core/temporal.rs
+**Summary:** Mutants returning arbitrary Option values for `TimeRange::duration_micros` survived. The test suite also didn't explicitly assert exact return values for methods like `BiTemporalInterval::is_currently_valid` / `is_current` across all variants of open/closed intervals.
+**Diagnosis:** WEAK_TEST - The tests likely asserted presence (`is_some`) or checked properties implicitly rather than verifying the exact boundary output.
+**Kill Shot:** Added `test_timerange_duration_micros_exact`, `test_bitemporal_methods_exact`, and related exact boolean assertions to `tests/sentry_temporal.rs` catching specific returns like `Some(0)` or `None`.
+**[Weak Test Coverage in ID Generator Boundaries & EntityId Casting]**
+**Module:** `src/core/id.rs`
+**Summary:** Mutants returning default values or mutating exact operations survived in `IdGenerator` logic (`ensure_at_least` > changed to <, ==, etc., `current_approximate` returned default constant), `EntityId` casting (`as_node`, `as_edge` returned defaults instead of `Option` logic), and `TxIdGenerator::next` (boundary tests against `== u64::MAX` not strictly forced to pass/fail cleanly on simple operators + / -, and `TxId` default returns allowed).
+**Diagnosis:** MISSING_TEST / WEAK_TEST - The previous Sentinel run added `tests/sentinel_id_tests.rs` covering basic display and structural assertions but lacked targeted logic checks (killing operator modifications `+` to `-` or `*`) inside `TxIdGenerator` and `IdGenerator` (which are also internal/`pub(crate)` scoped). `EntityId::as_node` defaults slipped past tests that only invoked `.is_node()` rather than directly asserting exact `.as_node()` value match against zero constants.
+**Kill Shot:** Added exhaustive logic tests `sentinel_id_generator_tests` covering exactly `ensure_at_least`, `current_approximate`, and `TxIdGenerator::next` within `src/core/id.rs` directly, alongside appending exact exhaustive checks to `tests/sentinel_id_tests.rs` to stop `as_node`/`as_edge` default `None` and `Some(Default::default())` mutants.
+
+**[Weak Test Coverage in ID Generation & Defaults]**
+**Module:** `aletheiadb::core::id`
+**Summary:** Mutation testing revealed numerous surviving mutants related to returning defaults (`Default::default()`, `0`, `1`) from constructors (`new_unchecked`, `with_start`), accessors (`as_u64`, `current`, `current_approximate`), and `fmt::Display`. Additional surviving mutants manipulated boundaries (`>`, `>=`, `<`), constant math (`+`, `/` for `MAX_VALID_ID`), and generator state transitions (`reset_to` return type empty).
+**Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted positive paths (e.g. `assert_eq!(id, 42)`) but lacked explicit negative bounds preventing implementations from collapsing to zero, 1, or empty structures that happen to not trigger failures down stream. Tests were also missing strict arithmetic boundary testing for constants and `TxIdGenerator` sequencing.
+**Kill Shot:** Extensively added direct bound assertions (`assert_ne!(id, 0)`), explicit exhaustiveness to `sentinel_id_tests.rs`, and introduced a `sentinel_id_generator_tests` module in `src/core/id.rs` directly to access `pub(crate)` APIs and kill underlying generator logic mutations.
+
+**[Weak Test Coverage in HLC Time Bounds]**
+**Module:** `aletheiadb::core::hlc`
+**Summary:** Mutation testing indicated several surviving mutants around exact evaluation of `is_clock_skew_self_heal_enabled` reading configurations, default value handling in formatters (e.g. `ClockSkewDirection::as_str` and `Display` for `HybridTimestamp`), arithmetic operators inside `as_secs` and `as_millis` (which survived replacement to `*` and `%`), and strict evaluations within `HybridTimestamp::receive` boundary `&&` / `||` checks.
+**Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted overall flow or simple logical bumps but lacked explicit assertions regarding specific fallback arithmetic and exact boundary conditions when physical, local, and message times perfectly collided in unexpected combinations.
+**Kill Shot:** Appended targeted boundary tests `test_is_clock_skew_self_heal_enabled_override`, `test_clock_skew_direction_as_str`, `test_hybrid_timestamp_display`, `test_hybrid_timestamp_as_secs_millis_exact`, and `test_hybrid_timestamp_receive_exact_wallclock_logic` within `src/core/hlc.rs` to close these gaps.
+**[Weak Test Coverage in IdentityHasher Boundaries & Logic]**
+**Module:** `src/core/hasher.rs`
+**Summary:** Mutants returning default values or mutating exact bitwise operations survived in `IdentityHasher` logic (`^=` changed to `|=` or `&=`, `update_state` removed, match arms deleted for various byte lengths inside `write`).
+**Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted high-level collision avoidance (e.g. `assert_ne!(h1, h2)`) but lacked explicit exact bounds for `update_state` logic with `FNV_PRIME`, lengths of `write()`, default return overrides, and proper bitwise math chaining.
+**Kill Shot:** Extensively added exact bound and behavioral assertions across bitwise operators, lengths, and chaining logic within the `tests` module inside `src/core/hasher.rs`.
+
+**[Weak Test Coverage in Temporal Logic Boundaries and Math]**
+**Module:** `src/core/temporal.rs`
+**Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`.
+**Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, and exact exclusion of boundaries inside interval intersections.
+**Kill Shot:** Appended explicit exact boundary tests `test_timerange_from_at_exact_boundaries`, `test_time_to_secs_millis_exact_math`, `test_time_to_iso8601_exact_content`, and `test_timerange_contains_exact_boundary` directly to `tests/sentry_temporal.rs`.
