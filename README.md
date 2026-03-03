@@ -347,6 +347,8 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 
 ## Usage Examples
 
+> ⚠️ **Note on State:** AletheiaDB persists data to disk by default (in `./aletheiadb`). If you are running multiple examples in the same directory, you may encounter `InvalidTimeRange` errors or other crashes due to leftover state from previous runs. Clear the directory between runs, or configure a temporary directory using `AletheiaDBConfig` (see the 'Index Persistence' or 'Configuration' examples for details).
+
 ### Basic Graph Operations
 
 ```rust
@@ -409,7 +411,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 ### Vector Search with HNSW
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, HnswConfig, DistanceMetric};
+use aletheiadb::prelude::*;
+use aletheiadb::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
 let db = AletheiaDB::new().unwrap();
@@ -492,7 +495,7 @@ See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** f
 ### Semantic Drift Tracking
 
 ```rust
-use aletheiadb::{AletheiaDB, properties, WriteOps};
+use aletheiadb::prelude::*;
 use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::{DriftMetric, TemporalVectorConfig, SnapshotStrategy};
 use aletheiadb::core::temporal::TimeRange;
@@ -610,7 +613,7 @@ let config = AletheiaDBConfig::builder()
     })
     .build();
 
-let db = AletheiaDB::with_unified_config(config);
+let _db = AletheiaDB::with_unified_config(config);
 
 // Indexes automatically persist in background
 // On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
@@ -641,7 +644,7 @@ let config = AletheiaDBConfig::builder()
         .build())
     .build();
 
-let db = AletheiaDB::with_unified_config(config)?;
+let _db = AletheiaDB::with_unified_config(config)?;
 ```
 
 See **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for all configuration options and presets.
@@ -702,6 +705,10 @@ See **[docs/query-language-design.md](docs/query-language-design.md)** for compl
 For horizontal scaling with datasets exceeding single-machine capacity:
 
 ```rust
+// ⚠️ REQUIRES FEATURE: sharding-rpc
+// [dependencies]
+// aletheiadb = { version = "0.1", features = ["sharding-rpc"] }
+
 use aletheiadb::storage::sharding::{
     ShardConfig, ShardDefinition, ShardCoordinator,
 };
@@ -717,7 +724,7 @@ let config = ShardConfig::new(vec![
 let coordinator = ShardCoordinator::new(config);
 
 // Route queries to appropriate shards
-let shard = coordinator.router().route_node("Person");
+let _shard = coordinator.router().route_node("Person");
 ```
 
 See **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** for complete guide.
@@ -744,7 +751,7 @@ let config = AletheiaDBConfig::builder()
     .build();
 
 // Cold storage automatically initialized!
-let db = AletheiaDB::with_unified_config(config)?;
+let _db = AletheiaDB::with_unified_config(config)?;
 ```
 
 See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** for complete guide.

@@ -21,3 +21,15 @@
 ## 2026-10-27 - Identity Hashing for PropertyMap
 **Learning:** `PropertyMap` uses `InternedString` (u32) as keys but was using default `HashMap` hashing (SipHash), incurring ~15-30ns overhead per lookup. Switching to `IdentityHasher` eliminated this, yielding a 3.6x speedup on interned lookups.
 **Action:** Audit all usages of `HashMap<InternedString, ...>` or `HashMap<u32, ...>` and replace with `HashMap<..., BuildHasherDefault<IdentityHasher>>` where keys are already high-quality IDs.
+
+## 2026-11-20 - Identity Hashing for WriteBuffer Lookups
+**Learning:** `WriteBuffer` used default `HashMap` (SipHash) for `modified_nodes` and `modified_edges` to track dirty state during transactions. Since keys are `NodeId` and `EdgeId` (wrappers around `u64`), hashing overhead was unnecessary and reduced throughput during bulk write operations.
+**Action:** Replaced `HashMap` with `FastHashMap` (`HashMap<..., BuildHasherDefault<IdentityHasher>>`) for `modified_nodes` and `modified_edges` in `WriteBuffer`. Using `IdentityHasher` for already-unique integer-like keys eliminates SipHash overhead and improves lookup/insertion speeds during transaction tracking.
+
+**[Removing Intermediate Collections in Iterators]**
+**Learning:** Chaining `.collect_all()?` on iterators to convert them to vectors before applying `.into_iter().filter_map(...)` incurs massive unnecessary allocations for large data sets. Also `.collect_all()?.len()` allocates a whole vector just to count elements.
+**Action:** When working with iterators, always loop through them directly with `while let Some(item) = iter.next()` to perform transformations and aggregations in a single pass without large intermediate allocations, thus minimizing heap allocations.
+
+## 2026-11-20 - Identity Hashing for Historical Storage
+**Learning:** `HistoricalStorage` and `MigrationService` used the default `HashMap` (SipHash) for integer wrapper keys like `NodeId`, `EdgeId`, and `VersionId`. Because these keys are unique internally-assigned high-quality IDs, SipHash incurs unnecessary hashing overhead.
+**Action:** Replaced `std::collections::HashMap` with `FastHashMap` (which uses `BuildHasherDefault<IdentityHasher>`) for tracking versions, heads, and stats. Using `IdentityHasher` speeds up tracking and lookups and is idiomatic across AletheiaDB for wrapper IDs.

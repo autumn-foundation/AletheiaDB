@@ -524,9 +524,17 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_tx_id_generator_default() {
+        let tx_gen: TxIdGenerator = Default::default();
+        assert_eq!(tx_gen.current(), TxId(0));
+    }
+
+    #[test]
     fn test_tx_id_display() {
         let tx_id = TxId::new(12345);
         assert_eq!(format!("{}", tx_id), "TxId(12345)");
+        assert_ne!(format!("{}", tx_id), "TxId(0)");
+        assert_ne!(format!("{}", tx_id), "");
     }
 
     #[test]
@@ -1535,5 +1543,124 @@ mod warden_repro {
         generator.set_counter(u64::MAX);
         // This should panic to prevent wrapping to 0
         let _ = generator.next();
+    }
+}
+
+#[cfg(test)]
+mod sentinel_id_generator_tests {
+    use super::*;
+
+    #[test]
+    fn test_id_generator_current_approximate_exhaustive() {
+        let generator = IdGenerator::with_start(42);
+
+        let current = generator.current_approximate();
+        assert_eq!(current, 42);
+
+        generator.next().unwrap();
+        let current2 = generator.current_approximate();
+        assert_eq!(current2, 43);
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least_exhaustive() {
+        let generator = IdGenerator::with_start(42);
+
+        // This fails if `>` was replaced with `==` (since 50 != 42, it wouldn't update)
+        generator.ensure_at_least(50);
+        assert_eq!(generator.current(), 50);
+
+        // This fails if `>` was replaced with `<` (since 40 < 50 is true, it would update)
+        generator.ensure_at_least(40);
+        assert_eq!(generator.current(), 50);
+    }
+
+    #[test]
+    fn test_tx_id_generator_next_exhaustive() {
+        let generator = TxIdGenerator::new(); // Starts at 1
+
+        // Kill "replace TxIdGenerator::next -> TxId with Default::default()"
+        let first = generator.next();
+        assert_eq!(first, TxId::new(1));
+
+        // Kill "replace + with -" or "*"
+        let second = generator.next();
+        assert_eq!(second, TxId::new(2));
+
+        // Kill "replace == with !=" for u64::MAX check
+        // If it were `!=`, it would panic immediately because 1 != u64::MAX
+
+        // Ensure returning default current doesn't pass
+        let generator_current = generator.current();
+        assert_eq!(generator_current, TxId::new(2));
+    }
+
+    #[test]
+    fn test_id_generator_next_boundaries() {
+        // Kill "> with == / < / >="
+        // We set generator right to MAX_VALID_ID
+        let generator = IdGenerator::with_start(MAX_VALID_ID);
+
+        // This will fetch_add MAX_VALID_ID and return MAX_VALID_ID, incrementing to MAX_VALID_ID+1
+        let first = generator.next();
+        assert_eq!(first, Ok(MAX_VALID_ID));
+
+        // The next attempt will return the incremented MAX_VALID_ID+1 and fail the limit check
+        let second = generator.next();
+        assert!(second.is_err());
+
+        if let Err(crate::core::error::StorageError::InvalidId { id, .. }) = second {
+            assert_eq!(id, MAX_VALID_ID + 1);
+        } else {
+            panic!("Expected InvalidId error");
+        }
+    }
+
+    #[test]
+    fn test_max_valid_id_math() {
+        // Kill `replace - with +` or `/` in `pub const MAX_VALID_ID: u64 = u64::MAX - 1000;`
+        let id_plus = u64::MAX.wrapping_add(1000);
+        let id_div = u64::MAX / 1000;
+        assert_ne!(MAX_VALID_ID, id_plus);
+        assert_ne!(MAX_VALID_ID, id_div);
+        assert_eq!(MAX_VALID_ID, u64::MAX - 1000);
+    }
+
+    #[test]
+    fn test_id_generator_reset_to_exhaustive() {
+        let generator = IdGenerator::new();
+        generator.reset_to(42);
+        assert_eq!(generator.current(), 42);
+
+        // This fails if reset_to returned early / was empty body
+        let id = generator.next().unwrap();
+        assert_eq!(id, 42);
+    }
+
+    #[test]
+    fn test_id_generator_default() {
+        let generator: IdGenerator = Default::default();
+        assert_eq!(generator.current(), 0);
+    }
+
+    #[test]
+    fn test_node_id_new_unchecked_exhaustive() {
+        let unchecked = NodeId::new_unchecked(42);
+        assert_eq!(unchecked.as_u64(), 42);
+        assert_ne!(unchecked.as_u64(), 0);
+    }
+
+    #[test]
+    fn test_edge_id_new_unchecked_exhaustive() {
+        let unchecked = EdgeId::new_unchecked(42);
+        assert_eq!(unchecked.as_u64(), 42);
+        assert_ne!(unchecked.as_u64(), 0);
+    }
+
+    #[test]
+    fn test_version_id_new_unchecked_exhaustive() {
+        let unchecked = VersionId::new_unchecked(42);
+        assert_eq!(unchecked.as_u64(), 42);
+        assert_ne!(unchecked.as_u64(), 0);
     }
 }

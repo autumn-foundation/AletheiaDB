@@ -21,7 +21,10 @@ async fn test_health_endpoint_returns_healthy_status() {
     let app = test::init_service(App::new().configure(configure_app)).await;
 
     // Make request to health endpoint
-    let req = test::TestRequest::get().uri("/status").to_request();
+    let req = test::TestRequest::get()
+        .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+        .uri("/status")
+        .to_request();
     let resp = test::call_service(&app, req).await;
 
     // Assert response status is 200 OK
@@ -48,7 +51,10 @@ async fn test_health_endpoint_returns_healthy_status() {
 async fn test_health_endpoint_returns_json_content_type() {
     let app = test::init_service(App::new().configure(configure_app)).await;
 
-    let req = test::TestRequest::get().uri("/status").to_request();
+    let req = test::TestRequest::get()
+        .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+        .uri("/status")
+        .to_request();
     let resp = test::call_service(&app, req).await;
 
     let content_type = resp
@@ -73,6 +79,7 @@ async fn test_cors_headers_present() {
 
     // Send OPTIONS preflight request
     let req = test::TestRequest::default()
+        .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
         .method(actix_web::http::Method::OPTIONS)
         .uri("/status")
         .insert_header(("Origin", "http://example.com"))
@@ -156,7 +163,10 @@ async fn test_request_logging_middleware_configured() {
 
     // Make multiple requests to ensure logging middleware doesn't break anything
     for _ in 0..3 {
-        let req = test::TestRequest::get().uri("/status").to_request();
+        let req = test::TestRequest::get()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/status")
+            .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
     }
@@ -168,6 +178,7 @@ async fn test_unknown_route_returns_404() {
     let app = test::init_service(App::new().configure(configure_app)).await;
 
     let req = test::TestRequest::get()
+        .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
         .uri("/nonexistent-route")
         .to_request();
     let resp = test::call_service(&app, req).await;
