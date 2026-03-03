@@ -173,7 +173,15 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         .into());
     }
 
-    let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+    let dimension = u32::from_le_bytes(
+        bytes
+            .get(1..5)
+            .ok_or_else(|| {
+                StorageError::CorruptedData("Buffer too short for dimension".to_string())
+            })?
+            .try_into()
+            .unwrap(),
+    ) as usize;
 
     // Prevent DoS via memory exhaustion from malicious input
     validate_vector_dimensions(dimension)?;
@@ -331,8 +339,26 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
         .into());
     }
 
-    let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
-    let nnz = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+    let dimension = u32::from_le_bytes(
+        bytes
+            .get(1..5)
+            .ok_or_else(|| {
+                StorageError::CorruptedData(
+                    "Buffer too short for sparse vector dimension".to_string(),
+                )
+            })?
+            .try_into()
+            .unwrap(),
+    );
+    let nnz = u32::from_le_bytes(
+        bytes
+            .get(5..9)
+            .ok_or_else(|| {
+                StorageError::CorruptedData("Buffer too short for sparse vector nnz".to_string())
+            })?
+            .try_into()
+            .unwrap(),
+    ) as usize;
 
     // Validate nnz doesn't exceed dimension
     if nnz > dimension as usize {
