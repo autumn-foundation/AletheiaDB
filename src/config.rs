@@ -791,8 +791,13 @@ impl AletheiaDBConfig {
     /// ```
     #[cfg(feature = "config-toml")]
     pub fn from_toml_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let contents =
-            fs::read_to_string(path.as_ref()).map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let contents = fs::read_to_string(path.as_ref()).map_err(|e| {
+            ConfigError::IoError(format!(
+                "Failed to read config file '{}': {}",
+                path.as_ref().display(),
+                e
+            ))
+        })?;
         Self::from_toml_str(&contents)
     }
 

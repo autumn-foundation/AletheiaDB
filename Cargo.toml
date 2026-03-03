@@ -64,8 +64,6 @@ reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], def
 serde_json = { version = "1.0", optional = false }
 
 # ONNX runtime for local model inference
-ort = { version = "2.0.0-rc.0", optional = true }
-tokenizers = { version = "0.22", optional = true }
 num_cpus = { version = "1.16", optional = true }
 
 # Redb for tiered cold storage (pure Rust, ADR-0025)
@@ -124,14 +122,12 @@ embeddings = ["dep:tokio", "dep:async-trait"]
 embedding-openai = ["embeddings", "dep:reqwest"]
 embedding-huggingface = ["embeddings", "dep:reqwest"]
 # IMPORTANT: ONNX provider is currently a PLACEHOLDER - returns errors, not functional
-embedding-onnx = ["embeddings", "dep:ort", "dep:tokenizers", "dep:num_cpus"]
 embedding-ollama = ["embeddings", "dep:reqwest"]
 
 # Enable all embedding providers
 embedding-all = [
     "embedding-openai",
     "embedding-huggingface",
-    "embedding-onnx",
     "embedding-ollama"
 ]
 
@@ -210,9 +206,6 @@ required-features = ["embedding-huggingface"]
 name = "embedding_ollama"
 required-features = ["embedding-ollama"]
 
-[[example]]
-name = "embedding_onnx"
-required-features = ["embedding-onnx"]
 
 [[example]]
 name = "embedding_comparison"
