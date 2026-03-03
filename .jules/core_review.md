@@ -19,3 +19,13 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+
+## 🦀 Core Review: `src/core/id.rs` Sentinel Mutations
+
+No high-severity findings.
+
+### Test gaps
+- None identified in the updated scope. The latest mutations are comprehensively covered by targeted edge-case unit and concurrency testing for `IdGenerator` and `TxIdGenerator` boundaries.
+
+### Residual risks
+- `IdGenerator::current_approximate()` operates with `Ordering::Relaxed` memory synchronization to achieve extreme performance (~1ns). This makes it unsuitable for any critical snapshot isolation logic and strictly limits its safe usage to non-critical metrics and logging, which is well-documented but represents a slight structural misuse risk.
