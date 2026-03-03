@@ -1013,4 +1013,197 @@ mod tests {
         let sel = rule.estimate_filter_selectivity(&pred, &stats);
         assert_eq!(sel, NULL_CHECK_SELECTIVITY);
     }
+
+    // --- SENTINEL TESTS START HERE ---
+
+    #[test]
+    fn test_exact_selectivity_constants() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Null checks -> 0.1
+        let null_pred = Predicate::Eq {
+            key: "x".to_string(),
+            value: crate::query::ir::PredicateValue::Null,
+        };
+        assert_eq!(
+            rule.estimate_filter_selectivity(&null_pred, &stats),
+            0.1,
+            "NULL_CHECK_SELECTIVITY constant mismatch"
+        );
+
+        // Existence checks -> 0.1
+        let exists_pred = Predicate::exists("x");
+        assert_eq!(
+            rule.estimate_filter_selectivity(&exists_pred, &stats),
+            0.1,
+            "EXISTENCE_CHECK_SELECTIVITY constant mismatch"
+        );
+
+        // IN predicates -> 0.15
+        let in_pred = Predicate::In {
+            key: "x".to_string(),
+            values: vec![],
+        };
+        assert_eq!(
+            rule.estimate_filter_selectivity(&in_pred, &stats),
+            0.15,
+            "IN_PREDICATE_SELECTIVITY constant mismatch"
+        );
+
+        // String predicates -> 0.2
+        let string_pred = Predicate::contains("x", "y");
+        assert_eq!(
+            rule.estimate_filter_selectivity(&string_pred, &stats),
+            0.2,
+            "STRING_PREDICATE_SELECTIVITY constant mismatch"
+        );
+
+        // Range predicates -> 0.3
+        let range_pred = Predicate::gt("x", 1);
+        assert_eq!(
+            rule.estimate_filter_selectivity(&range_pred, &stats),
+            0.3,
+            "RANGE_PREDICATE_SELECTIVITY constant mismatch"
+        );
+
+        // Not-equals -> 0.9
+        let ne_pred = Predicate::ne("x", 1);
+        assert_eq!(
+            rule.estimate_filter_selectivity(&ne_pred, &stats),
+            0.9,
+            "NOT_EQUALS_SELECTIVITY constant mismatch"
+        );
+
+        // True -> 1.0
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::True, &stats),
+            1.0,
+            "TRUE_SELECTIVITY constant mismatch"
+        );
+
+        // False -> 0.0
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::False, &stats),
+            0.0,
+            "FALSE_SELECTIVITY constant mismatch"
+        );
+    }
+
+    #[test]
+    fn test_predicates_equal_structural_integrity() {
+        let rule = OperationReordering;
+
+        let variants = vec![
+            Predicate::eq("k", "v"),
+            Predicate::ne("k", "v"),
+            Predicate::gt("k", 10),
+            Predicate::Gte {
+                key: "k".into(),
+                value: crate::query::ir::PredicateValue::Int(10),
+            },
+            Predicate::lt("k", 10),
+            Predicate::Lte {
+                key: "k".into(),
+                value: crate::query::ir::PredicateValue::Int(10),
+            },
+            Predicate::contains("k", "sub"),
+            Predicate::StartsWith {
+                key: "k".into(),
+                prefix: "p".into(),
+            },
+            Predicate::EndsWith {
+                key: "k".into(),
+                suffix: "s".into(),
+            },
+            Predicate::In {
+                key: "k".into(),
+                values: vec![],
+            },
+            Predicate::exists("k"),
+            Predicate::NotExists("k".into()),
+            Predicate::And(vec![]),
+            Predicate::Or(vec![]),
+            Predicate::Not(Box::new(Predicate::True)),
+            Predicate::True,
+            Predicate::False,
+        ];
+
+        // 1. Identity check: p == p
+        for (i, p) in variants.iter().enumerate() {
+            assert!(
+                rule.predicates_equal(p, p),
+                "Predicate variant {} should equal itself",
+                i
+            );
+        }
+
+        // 2. Cross check: p != other
+        for (i, p1) in variants.iter().enumerate() {
+            for (j, p2) in variants.iter().enumerate() {
+                if i != j {
+                    assert!(
+                        !rule.predicates_equal(p1, p2),
+                        "Predicate variants {} and {} should not be equal",
+                        i,
+                        j
+                    );
+                }
+            }
+        }
+
+        // 3. Subtle difference check (key/value mismatch)
+        assert!(!rule.predicates_equal(&Predicate::eq("k", "v"), &Predicate::eq("k2", "v")));
+        assert!(!rule.predicates_equal(&Predicate::eq("k", "v"), &Predicate::eq("k", "v2")));
+        assert!(!rule.predicates_equal(&Predicate::gt("k", 10), &Predicate::gt("k", 11)));
+        assert!(!rule.predicates_equal(
+            &Predicate::In {
+                key: "k".into(),
+                values: vec![]
+            },
+            &Predicate::In {
+                key: "k".into(),
+                values: vec![crate::query::ir::PredicateValue::Int(1)]
+            }
+        ));
+    }
+
+    #[test]
+    fn test_cardinality_math() {
+        let rule = OperationReordering;
+
+        // Scan: 1000
+        let scan = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(1000),
+        });
+        assert_eq!(rule.estimate_cardinality(&scan), 1000);
+
+        // Filter(Scan(1000)) -> 1000 * 0.1 = 100
+        let filter = LogicalOp::unary(UnaryOp::Filter(Predicate::True), scan.clone());
+        assert_eq!(
+            rule.estimate_cardinality(&filter),
+            100,
+            "Filter cardinality estimation failed (expected * 0.1)"
+        );
+
+        // Limit(50) -> 50
+        let limit = LogicalOp::unary(UnaryOp::Limit(50), scan.clone());
+        assert_eq!(rule.estimate_cardinality(&limit), 50);
+
+        // Join(1000, 1000) -> 1000 * 1000 * 0.1 = 100_000
+        let join = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "k".into(),
+                right_key: "k".into(),
+            },
+            scan.clone(),
+            scan.clone(),
+        );
+        assert_eq!(
+            rule.estimate_cardinality(&join),
+            100_000,
+            "Join cardinality estimation failed (expected 0.1 * prod)"
+        );
+    }
 }

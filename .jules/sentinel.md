@@ -33,3 +33,9 @@
 **Summary:** `IdentityHasher` treats an initial state of `0` as "uninitialized", meaning `write(0)` as the first operation is effectively ignored. This causes a collision where `Hash(0, 42)` equals `Hash(42)`.
 **Diagnosis:** SUSPECTED_BUG - The zero-check logic fails to distinguish "default uninitialized state" from "initialized with valid 0".
 **Kill Shot:** None (bug reported but not fixed as per Sentinel protocol).
+
+**[Weak Test Coverage in OperationReordering]**
+**Module:** src/query/planner/rules/operation_reordering.rs
+**Summary:** Mutants modifying constants (`0.1`, `0.2`) in `estimate_filter_selectivity` and structural comparison logic in `predicates_equal` survived because existing tests only verified if some reordering occurred, not the precise values driving the optimization.
+**Diagnosis:** WEAK_TEST - Missing exact value checks for heuristics and exhaustive matching in equality tests.
+**Kill Shot:** Added `test_exact_selectivity_constants` to enforce specific heuristic values, `test_predicates_equal_structural_integrity` to ensure cross-variant inequality, and `test_cardinality_math` to test the internal arithmetic formulas.
