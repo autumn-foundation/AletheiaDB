@@ -306,4 +306,64 @@ mod tests {
         // Connected nodes with different vectors should exhibit some synergy
         assert!(result.synergy_score > 0.0);
     }
+
+    #[test]
+    fn test_synergy_concurrency_torn_read() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(AletheiaDB::new().unwrap());
+
+        let mut n1 = NodeId::new(0).unwrap();
+        let mut n2 = NodeId::new(0).unwrap();
+
+        db.write(|tx| {
+            n1 = tx
+                .create_node(
+                    "Node",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[1.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+
+            n2 = tx
+                .create_node(
+                    "Node",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.0, 1.0])
+                        .build(),
+                )
+                .unwrap();
+            Ok::<(), Error>(())
+        })
+        .unwrap();
+
+        let db_clone = db.clone();
+
+        let write_thread = thread::spawn(move || {
+            // Wait slightly to ensure the read transaction has started
+            thread::sleep(std::time::Duration::from_millis(10));
+            db_clone
+                .write(|tx| {
+                    // Modify the structure concurrently
+                    tx.create_edge(n1, n2, "LINK", Default::default()).unwrap();
+                    Ok::<(), Error>(())
+                })
+                .unwrap();
+        });
+
+        // Run synergy analysis concurrently.
+        // It should either see the state before the link (synergy ~0)
+        // or after the link (synergy > 0), but it shouldn't crash or get a torn state
+        // if snapshot isolation is correctly enforced by a single transaction.
+        let synergy = Synergy::new(&db);
+        let result = synergy.analyze(&[n1, n2], "embedding").unwrap();
+
+        write_thread.join().unwrap();
+
+        // This is primarily a no-panic and no-error test.
+        // The result should be consistent for the snapshot it acquired.
+        assert!(result.synergy_score >= 0.0);
+    }
 }
