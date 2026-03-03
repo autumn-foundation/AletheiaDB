@@ -709,7 +709,10 @@ impl PropertyValue {
             )
             .into());
         }
-        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let len =
+            u32::from_le_bytes(bytes[1..5].try_into().map_err(|_| {
+                StorageError::CorruptedData("Failed to read String length".to_string())
+            })?) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -739,7 +742,10 @@ impl PropertyValue {
             )
             .into());
         }
-        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let len =
+            u32::from_le_bytes(bytes[1..5].try_into().map_err(|_| {
+                StorageError::CorruptedData("Failed to read Bytes length".to_string())
+            })?) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -766,7 +772,10 @@ impl PropertyValue {
             )
             .into());
         }
-        let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let count =
+            u32::from_le_bytes(bytes[1..5].try_into().map_err(|_| {
+                StorageError::CorruptedData("Failed to read Array count".to_string())
+            })?) as usize;
         let mut offset: usize = 5;
 
         // Prevent DoS via memory exhaustion from malicious input
@@ -1354,7 +1363,9 @@ impl PropertyMap {
             .into());
         }
 
-        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| {
+            StorageError::CorruptedData("Failed to read PropertyMap count".to_string())
+        })?) as usize;
 
         // Prevent DoS via memory exhaustion from malicious input
         if count > MAX_PROPERTY_MAP_CAPACITY {
@@ -1395,7 +1406,9 @@ impl PropertyMap {
             }
             // SAFETY: Length check above guarantees 4 bytes available
             let key_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| {
+                    StorageError::CorruptedData("Failed to read property key length".to_string())
+                })?) as usize;
             offset += 4;
 
             // Read key
