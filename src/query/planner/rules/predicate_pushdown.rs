@@ -277,29 +277,45 @@ mod tests {
         assert!(result.is_some());
 
         let new_plan = result.unwrap();
-        // Check full AST: VectorRank -> Filter -> Scan
-        if let LogicalOp::Unary {
-            op: UnaryOp::VectorRank { top_k, .. },
+
+        // Check full exact AST using destructuring
+        let LogicalOp::Unary {
+            op: rank_op,
             input: rank_input,
         } = new_plan.root
-        {
-            assert_eq!(top_k, None);
-            if let LogicalOp::Unary {
-                op: UnaryOp::Filter(pred),
-                input: filter_input,
-            } = rank_input.as_ref()
-            {
-                assert_eq!(pred, &Predicate::eq("name", "Alice"));
-                assert!(matches!(
-                    filter_input.as_ref(),
-                    LogicalOp::Scan(ScanOp::NodeLookup(_))
-                ));
-            } else {
-                panic!("Expected Filter below VectorRank");
-            }
-        } else {
+        else {
+            panic!("Expected Unary at root");
+        };
+
+        let UnaryOp::VectorRank {
+            top_k,
+            embedding,
+            property_key,
+        } = rank_op
+        else {
             panic!("Expected VectorRank at root");
-        }
+        };
+        assert_eq!(top_k, None);
+        assert_eq!(property_key, None);
+        assert_eq!(embedding.as_ref(), [0.1f32; 4].as_slice());
+
+        let LogicalOp::Unary {
+            op: filter_op,
+            input: filter_input,
+        } = *rank_input
+        else {
+            panic!("Expected Unary below VectorRank");
+        };
+
+        let UnaryOp::Filter(pred) = filter_op else {
+            panic!("Expected Filter below VectorRank");
+        };
+        assert_eq!(pred, Predicate::eq("name", "Alice"));
+
+        let LogicalOp::Scan(ScanOp::NodeLookup(node_ids)) = *filter_input else {
+            panic!("Expected Scan below Filter");
+        };
+        assert_eq!(node_ids, vec![NodeId::new(1).unwrap()]);
     }
 
     #[test]
@@ -371,30 +387,43 @@ mod tests {
         assert!(result.is_some());
 
         let new_plan = result.unwrap();
-        // Check full AST: Sort -> Filter -> Scan
-        if let LogicalOp::Unary {
-            op: UnaryOp::Sort {
-                descending: true, ..
-            },
+
+        // Exact AST verification using destructuring instead of matches!
+        let LogicalOp::Unary {
+            op: sort_op,
             input: sort_input,
         } = new_plan.root
-        {
-            if let LogicalOp::Unary {
-                op: UnaryOp::Filter(pred),
-                input: filter_input,
-            } = sort_input.as_ref()
-            {
-                assert_eq!(pred, &Predicate::eq("active", true));
-                assert!(matches!(
-                    filter_input.as_ref(),
-                    LogicalOp::Scan(ScanOp::NodeLookup(_))
-                ));
-            } else {
-                panic!("Expected Filter below Sort");
-            }
-        } else {
+        else {
+            panic!("Expected Unary at root");
+        };
+
+        let UnaryOp::Sort {
+            key: sort_key,
+            descending: sort_desc,
+        } = sort_op
+        else {
             panic!("Expected Sort at root");
-        }
+        };
+        assert_eq!(sort_key, SortKey::Property("created".to_string()));
+        assert!(sort_desc);
+
+        let LogicalOp::Unary {
+            op: filter_op,
+            input: filter_input,
+        } = *sort_input
+        else {
+            panic!("Expected Unary below Sort");
+        };
+
+        let UnaryOp::Filter(pred) = filter_op else {
+            panic!("Expected Filter below Sort");
+        };
+        assert_eq!(pred, Predicate::eq("active", true));
+
+        let LogicalOp::Scan(ScanOp::NodeLookup(node_ids)) = *filter_input else {
+            panic!("Expected Scan below Filter");
+        };
+        assert_eq!(node_ids, vec![NodeId::new(1).unwrap()]);
     }
 
     #[test]
@@ -505,34 +534,61 @@ mod tests {
         );
 
         let new_plan = result.unwrap();
-        if let LogicalOp::Binary { left, .. } = new_plan.root {
-            // Verify left side is optimized: Sort -> Filter -> Scan
-            if let LogicalOp::Unary {
-                op: UnaryOp::Sort {
-                    descending: true, ..
-                },
-                input: sort_input,
-            } = *left
-            {
-                if let LogicalOp::Unary {
-                    op: UnaryOp::Filter(pred),
-                    input: filter_input,
-                } = sort_input.as_ref()
-                {
-                    assert_eq!(pred, &Predicate::eq("active", true));
-                    assert!(matches!(
-                        filter_input.as_ref(),
-                        LogicalOp::Scan(ScanOp::NodeLookup(_))
-                    ));
-                } else {
-                    panic!("Expected Filter below Sort on left branch");
-                }
-            } else {
-                panic!("Expected Sort at top of left branch, got {:?}", left);
-            }
-        } else {
+
+        // Exact AST verification using destructuring instead of matches!
+        let LogicalOp::Binary {
+            op: bin_op,
+            left: new_left,
+            right: new_right,
+        } = new_plan.root
+        else {
             panic!("Root should be Binary op");
-        }
+        };
+
+        assert_eq!(bin_op, BinaryOp::Union);
+
+        // Verify Left branch exact structure: Sort -> Filter -> Scan
+        let LogicalOp::Unary {
+            op: left_unary_op,
+            input: left_unary_input,
+        } = *new_left
+        else {
+            panic!("Left branch should be Unary");
+        };
+
+        let UnaryOp::Sort {
+            key: left_sort_key,
+            descending: left_sort_desc,
+        } = left_unary_op
+        else {
+            panic!("Left branch top should be Sort");
+        };
+        assert_eq!(left_sort_key, SortKey::Property("created".to_string()));
+        assert!(left_sort_desc);
+
+        let LogicalOp::Unary {
+            op: left_filter_op,
+            input: left_scan_input,
+        } = *left_unary_input
+        else {
+            panic!("Expected Filter below Sort on left branch");
+        };
+
+        let UnaryOp::Filter(left_pred) = left_filter_op else {
+            panic!("Expected Filter op below Sort on left branch");
+        };
+        assert_eq!(left_pred, Predicate::eq("active", true));
+
+        let LogicalOp::Scan(ScanOp::NodeLookup(left_node_ids)) = *left_scan_input else {
+            panic!("Expected Scan below Filter on left branch");
+        };
+        assert_eq!(left_node_ids, vec![NodeId::new(1).unwrap()]);
+
+        // Verify Right branch exact structure: Scan
+        let LogicalOp::Scan(ScanOp::NodeLookup(right_node_ids)) = *new_right else {
+            panic!("Right branch input was unexpectedly modified or corrupted");
+        };
+        assert_eq!(right_node_ids, vec![NodeId::new(2).unwrap()]);
     }
 }
 
@@ -583,46 +639,73 @@ mod sentry_tests {
         );
 
         let new_plan = result.unwrap();
-        // Verify structure
-        if let LogicalOp::Binary { left, right, .. } = new_plan.root {
-            // Left should be Sort(Filter...)
-            if let LogicalOp::Unary {
-                op: UnaryOp::Sort {
-                    descending: true, ..
-                },
-                input: sort_input,
-            } = *left
-            {
-                if let LogicalOp::Unary {
-                    op: UnaryOp::Filter(pred),
-                    input: filter_input,
-                } = sort_input.as_ref()
-                {
-                    assert_eq!(pred, &Predicate::eq("a", 1));
-                    assert!(matches!(
-                        filter_input.as_ref(),
-                        LogicalOp::Scan(ScanOp::NodeLookup(_))
-                    ));
-                } else {
-                    panic!("Expected Filter below Sort on left branch");
-                }
-            } else {
-                panic!("Left branch was not optimized");
-            }
 
-            // Right should still be Filter(Scan)
-            if let LogicalOp::Unary {
-                op: UnaryOp::Filter(pred),
-                input,
-            } = *right
-            {
-                assert_eq!(pred, Predicate::eq("b", 2));
-                assert!(matches!(*input, LogicalOp::Scan(ScanOp::NodeLookup(_))));
-            } else {
-                panic!("Right branch was unexpectedly modified or corrupted");
-            }
-        } else {
+        // Exact AST verification using destructuring instead of matches!
+        let LogicalOp::Binary {
+            op: bin_op,
+            left: new_left,
+            right: new_right,
+        } = new_plan.root
+        else {
             panic!("Root should be Binary");
-        }
+        };
+
+        assert_eq!(bin_op, BinaryOp::Union);
+
+        // Verify Left branch exact structure: Sort -> Filter -> Scan
+        let LogicalOp::Unary {
+            op: left_unary_op,
+            input: left_unary_input,
+        } = *new_left
+        else {
+            panic!("Left branch should be Unary");
+        };
+
+        let UnaryOp::Sort {
+            key: left_sort_key,
+            descending: left_sort_desc,
+        } = left_unary_op
+        else {
+            panic!("Left branch top should be Sort");
+        };
+        assert_eq!(left_sort_key, SortKey::Property("a".to_string()));
+        assert!(left_sort_desc);
+
+        let LogicalOp::Unary {
+            op: left_filter_op,
+            input: left_scan_input,
+        } = *left_unary_input
+        else {
+            panic!("Expected Filter below Sort on left branch");
+        };
+
+        let UnaryOp::Filter(left_pred) = left_filter_op else {
+            panic!("Expected Filter op below Sort on left branch");
+        };
+        assert_eq!(left_pred, Predicate::eq("a", 1));
+
+        let LogicalOp::Scan(ScanOp::NodeLookup(left_node_ids)) = *left_scan_input else {
+            panic!("Expected Scan below Filter on left branch");
+        };
+        assert_eq!(left_node_ids, vec![NodeId::new(1).unwrap()]);
+
+        // Verify Right branch exact structure: Filter -> Scan
+        let LogicalOp::Unary {
+            op: right_unary_op,
+            input: right_unary_input,
+        } = *new_right
+        else {
+            panic!("Right branch should be Unary");
+        };
+
+        let UnaryOp::Filter(right_pred) = right_unary_op else {
+            panic!("Right branch was unexpectedly modified or corrupted");
+        };
+        assert_eq!(right_pred, Predicate::eq("b", 2));
+
+        let LogicalOp::Scan(ScanOp::NodeLookup(right_node_ids)) = *right_unary_input else {
+            panic!("Right branch input was unexpectedly modified or corrupted");
+        };
+        assert_eq!(right_node_ids, vec![NodeId::new(2).unwrap()]);
     }
 }

@@ -1,2 +1,1 @@
-#!/bin/bash
-cargo mutants --features "http-server" --file src/http/handlers.rs --test-tool cargo --timeout 60 -- -q --test http_server
+cargo mutants --file src/query/planner/rules/predicate_pushdown.rs -v --timeout 60 -- -p aletheiadb --lib query::planner::rules::predicate_pushdown

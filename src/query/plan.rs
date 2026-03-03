@@ -281,7 +281,7 @@ pub enum UnaryOp {
 }
 
 /// Binary operations that combine two inputs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOp {
     /// Set union of results
     Union,
@@ -302,7 +302,7 @@ pub enum BinaryOp {
 }
 
 /// Key for sorting results.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SortKey {
     /// Sort by a property value
     Property(String),

@@ -324,3 +324,10 @@
 ```
 This asserts only that the root became a `Sort`. It doesn't verify that the *child* of `Sort` actually became the `Filter`, or that the parameters of the `Sort` operator remain correct, or that the `Filter` actually wrapped the original `Scan`.
 **Recommendation:** Replace weak `matches!` tests with exact tree matching (using `assert_eq!`) if `LogicalOp` implements `Eq`, or exhaustively destructure the AST down to the leaf nodes and assert all fields are correct.
+
+## [Predicate Pushdown Weak Assertions]
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Severity:** 🔴 Critical
+**Finding:** Tests such as `test_push_filter_below_vector_rank_no_limit`, `test_push_filter_below_sort`, `test_binary_op_recursion_logic`, and `test_binary_op_partial_optimization` use weak assertions. They verify `result.is_some()` but only use generic `matches!` on the top level or a few levels of the resulting tree, failing to verify exact structure, properties, and values.
+**Evidence:** In `test_push_filter_below_sort`, it was asserting only that the root became a `Sort`. It didn't verify that the *child* of `Sort` actually became the `Filter`, or that the parameters of the `Sort` operator remain correct, or that the `Filter` actually wrapped the original `Scan`.
+**Recommendation:** Replaced weak `matches!` tests with exact tree matching exhaustively destructuring the AST down to the leaf nodes and asserting all fields are correct. Replaced generic checks with strict `assert_eq!` verifications.
