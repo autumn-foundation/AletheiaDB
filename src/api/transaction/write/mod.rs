@@ -13,7 +13,7 @@ use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
     WriteOps,
 };
-use crate::core::error::{Result, StorageError, TransactionError};
+use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
 use crate::core::hlc::{
     SendWithSelfHealError, evaluate_clock_skew, is_clock_skew_self_heal_enabled,
@@ -332,6 +332,10 @@ impl WriteTransaction {
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
     pub fn commit_with_timestamp(mut self) -> Result<Timestamp> {
+        self.commit_with_timestamp_inner().record_error_metric()
+    }
+
+    fn commit_with_timestamp_inner(&mut self) -> Result<Timestamp> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!(
             "transaction_commit",
@@ -490,7 +494,7 @@ impl WriteTransaction {
 
             // Log operations to WAL (lock-free striped append!)
             // This must happen BEFORE applying changes for durability.
-            wal::log_operations_to_wal(&self, commit)?;
+            wal::log_operations_to_wal(self, commit)?;
 
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
@@ -546,7 +550,7 @@ impl WriteTransaction {
         };
 
         // Apply all changes atomically
-        apply::apply_changes(&self, commit_timestamp)?;
+        apply::apply_changes(self, commit_timestamp)?;
 
         // Notify temporal vector index of transaction completion (for snapshot creation)
         // Only call this if the transaction modified vector properties to avoid unnecessary overhead
@@ -660,74 +664,77 @@ impl WriteTransaction {
 
 impl ReadOps for WriteTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
-        // Read-your-writes: check write buffer first
-        if let Some(buffered) = self.buffer.get_node_write(id) {
-            match buffered {
+        let buffered_result = self
+            .buffer
+            .get_node_write(id)
+            .and_then(|buffered| match buffered {
                 super::BufferedWrite::CreateNode {
                     node_id,
                     label,
                     properties,
                     version_id,
                     ..
-                } => {
-                    // Return the buffered node
-                    return Ok(Node::with_metadata(
-                        *node_id,
-                        *label,
-                        properties.clone(),
-                        *version_id,
-                        VersionMetadata {
-                            created_by_tx: self.tx_id,
-                            commit_timestamp: None, // Not yet committed
-                        },
-                    ));
-                }
+                } => Some(Ok(Node::with_metadata(
+                    *node_id,
+                    *label,
+                    properties.clone(),
+                    *version_id,
+                    VersionMetadata {
+                        created_by_tx: self.tx_id,
+                        commit_timestamp: None, // Not yet committed
+                    },
+                ))),
                 super::BufferedWrite::UpdateNode {
                     node_id,
                     label,
                     properties,
                     version_id,
                     ..
-                } => {
-                    // Return the updated node
-                    return Ok(Node::with_metadata(
-                        *node_id,
-                        *label,
-                        properties.clone(),
-                        *version_id,
-                        VersionMetadata {
-                            created_by_tx: self.tx_id,
-                            commit_timestamp: None,
-                        },
-                    ));
-                }
+                } => Some(Ok(Node::with_metadata(
+                    *node_id,
+                    *label,
+                    properties.clone(),
+                    *version_id,
+                    VersionMetadata {
+                        created_by_tx: self.tx_id,
+                        commit_timestamp: None,
+                    },
+                ))),
                 super::BufferedWrite::DeleteNode { .. } => {
-                    // Node has been deleted in this transaction
-                    return Err(StorageError::NodeNotFound(id).into());
+                    Some(Err(StorageError::NodeNotFound(id).into()))
                 }
-                _ => {} // Not a node operation
+                _ => None, // Not a node operation
+            });
+
+        let result = if let Some(result) = buffered_result {
+            result
+        } else {
+            // Fall back to snapshot-isolated read from storage
+            match self.current.get_node(id) {
+                Ok(node) => {
+                    // Check if this version is visible in our snapshot
+                    if !self
+                        .visibility_manager
+                        .is_visible(&self.snapshot, node.metadata.created_by_tx)
+                    {
+                        // Version not visible - return NodeNotFound
+                        Err(StorageError::NodeNotFound(id).into())
+                    } else {
+                        Ok(node)
+                    }
+                }
+                Err(err) => Err(err),
             }
-        }
+        };
 
-        // Fall back to snapshot-isolated read from storage
-        let node = self.current.get_node(id)?;
-
-        // Check if this version is visible in our snapshot
-        if !self
-            .visibility_manager
-            .is_visible(&self.snapshot, node.metadata.created_by_tx)
-        {
-            // Version not visible - return NodeNotFound
-            return Err(StorageError::NodeNotFound(id).into());
-        }
-
-        Ok(node)
+        result.record_error_metric()
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        // Read-your-writes: check write buffer first
-        if let Some(buffered) = self.buffer.get_edge_write(id) {
-            match buffered {
+        let buffered_result = self
+            .buffer
+            .get_edge_write(id)
+            .and_then(|buffered| match buffered {
                 super::BufferedWrite::CreateEdge {
                     edge_id,
                     source,
@@ -736,21 +743,18 @@ impl ReadOps for WriteTransaction {
                     properties,
                     version_id,
                     ..
-                } => {
-                    // Return the buffered edge
-                    return Ok(Edge::with_metadata(
-                        *edge_id,
-                        *label,
-                        *source,
-                        *target,
-                        properties.clone(),
-                        *version_id,
-                        VersionMetadata {
-                            created_by_tx: self.tx_id,
-                            commit_timestamp: None,
-                        },
-                    ));
-                }
+                } => Some(Ok(Edge::with_metadata(
+                    *edge_id,
+                    *label,
+                    *source,
+                    *target,
+                    properties.clone(),
+                    *version_id,
+                    VersionMetadata {
+                        created_by_tx: self.tx_id,
+                        commit_timestamp: None,
+                    },
+                ))),
                 super::BufferedWrite::UpdateEdge {
                     edge_id,
                     source,
@@ -759,42 +763,46 @@ impl ReadOps for WriteTransaction {
                     properties,
                     version_id,
                     ..
-                } => {
-                    // Return the updated edge
-                    return Ok(Edge::with_metadata(
-                        *edge_id,
-                        *label,
-                        *source,
-                        *target,
-                        properties.clone(),
-                        *version_id,
-                        VersionMetadata {
-                            created_by_tx: self.tx_id,
-                            commit_timestamp: None,
-                        },
-                    ));
-                }
+                } => Some(Ok(Edge::with_metadata(
+                    *edge_id,
+                    *label,
+                    *source,
+                    *target,
+                    properties.clone(),
+                    *version_id,
+                    VersionMetadata {
+                        created_by_tx: self.tx_id,
+                        commit_timestamp: None,
+                    },
+                ))),
                 super::BufferedWrite::DeleteEdge { .. } => {
-                    // Edge has been deleted in this transaction
-                    return Err(StorageError::EdgeNotFound(id).into());
+                    Some(Err(StorageError::EdgeNotFound(id).into()))
                 }
-                _ => {} // Not an edge operation
+                _ => None, // Not an edge operation
+            });
+
+        let result = if let Some(result) = buffered_result {
+            result
+        } else {
+            // Fall back to snapshot-isolated read from storage
+            match self.current.get_edge(id) {
+                Ok(edge) => {
+                    // Check if this version is visible in our snapshot
+                    if !self
+                        .visibility_manager
+                        .is_visible(&self.snapshot, edge.metadata.created_by_tx)
+                    {
+                        // Version not visible - return EdgeNotFound
+                        Err(StorageError::EdgeNotFound(id).into())
+                    } else {
+                        Ok(edge)
+                    }
+                }
+                Err(err) => Err(err),
             }
-        }
+        };
 
-        // Fall back to snapshot-isolated read from storage
-        let edge = self.current.get_edge(id)?;
-
-        // Check if this version is visible in our snapshot
-        if !self
-            .visibility_manager
-            .is_visible(&self.snapshot, edge.metadata.created_by_tx)
-        {
-            // Version not visible - return EdgeNotFound
-            return Err(StorageError::EdgeNotFound(id).into());
-        }
-
-        Ok(edge)
+        result.record_error_metric()
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
@@ -885,37 +893,41 @@ impl WriteOps for WriteTransaction {
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
     ) -> Result<NodeId> {
-        // Check transaction state
-        if self.state != TxState::Active {
-            return Err(TransactionError::InvalidState {
-                current: format!("{:?}", self.state),
-                expected: "Active".to_string(),
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
 
-        // Generate IDs
-        let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
-        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
-        let label_interned = GLOBAL_INTERNER.intern(label)?;
+            // Generate IDs
+            let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
+            let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+            let label_interned = GLOBAL_INTERNER.intern(label)?;
 
-        // Get timestamp: use provided valid_from or default to transaction start time
-        let timestamp = self.start_timestamp;
-        let valid_from = valid_from.unwrap_or(timestamp);
+            // Get timestamp: use provided valid_from or default to transaction start time
+            let timestamp = self.start_timestamp;
+            let valid_from = valid_from.unwrap_or(timestamp);
 
-        // Validate valid_from is not too far in future
-        validation::validate_valid_from_future(valid_from)?;
+            // Validate valid_from is not too far in future
+            validation::validate_valid_from_future(valid_from)?;
 
-        // Buffer the write
-        self.buffer.add(super::BufferedWrite::CreateNode {
-            node_id,
-            version_id,
-            label: label_interned,
-            properties,
-            valid_from,
-        })?;
+            // Buffer the write
+            self.buffer.add(super::BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label: label_interned,
+                properties,
+                valid_from,
+            })?;
 
-        Ok(node_id)
+            Ok(node_id)
+        })();
+
+        result.record_error_metric()
     }
 
     fn create_edge_with_valid_time(
@@ -926,36 +938,40 @@ impl WriteOps for WriteTransaction {
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
     ) -> Result<EdgeId> {
-        // Check transaction state
-        if self.state != TxState::Active {
-            return Err(TransactionError::InvalidState {
-                current: format!("{:?}", self.state),
-                expected: "Active".to_string(),
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
 
-        // Generate IDs
-        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.next()?);
-        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
-        let label_interned = GLOBAL_INTERNER.intern(label)?;
+            // Generate IDs
+            let edge_id = EdgeId::new_unchecked(self.edge_id_gen.next()?);
+            let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+            let label_interned = GLOBAL_INTERNER.intern(label)?;
 
-        // Get timestamp: use provided valid_from or default to transaction start time
-        let timestamp = self.start_timestamp;
-        let valid_from = valid_from.unwrap_or(timestamp);
+            // Get timestamp: use provided valid_from or default to transaction start time
+            let timestamp = self.start_timestamp;
+            let valid_from = valid_from.unwrap_or(timestamp);
 
-        // Buffer the write
-        self.buffer.add(super::BufferedWrite::CreateEdge {
-            edge_id,
-            version_id,
-            source,
-            target,
-            label: label_interned,
-            properties,
-            valid_from,
-        })?;
+            // Buffer the write
+            self.buffer.add(super::BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label: label_interned,
+                properties,
+                valid_from,
+            })?;
 
-        Ok(edge_id)
+            Ok(edge_id)
+        })();
+
+        result.record_error_metric()
     }
 
     fn update_node_with_valid_time(
@@ -964,62 +980,66 @@ impl WriteOps for WriteTransaction {
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
     ) -> Result<()> {
-        // Check transaction state
-        if self.state != TxState::Active {
-            return Err(TransactionError::InvalidState {
-                current: format!("{:?}", self.state),
-                expected: "Active".to_string(),
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
 
-        // Get current node to preserve label and existing properties
-        let node = self.current.get_node(node_id)?;
-        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+            // Get current node to preserve label and existing properties
+            let node = self.current.get_node(node_id)?;
+            let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
 
-        // PATCH semantics: Merge new properties with existing ones
-        // Start with existing properties
-        let mut builder = PropertyMapBuilder::from_map(node.properties.clone());
+            // PATCH semantics: Merge new properties with existing ones
+            // Start with existing properties
+            let mut builder = PropertyMapBuilder::from_map(node.properties.clone());
 
-        // Update/add properties from the incoming map
-        for (key, value) in properties.iter() {
-            builder = builder.insert_by_key(*key, value.clone());
-        }
+            // Update/add properties from the incoming map
+            for (key, value) in properties.iter() {
+                builder = builder.insert_by_key(*key, value.clone());
+            }
 
-        // Build the final merged property map
-        let merged_properties = builder.build();
+            // Build the final merged property map
+            let merged_properties = builder.build();
 
-        // Get timestamp: use provided valid_from or default to transaction start time
-        let timestamp = self.start_timestamp;
-        let valid_from = valid_from.unwrap_or(timestamp);
+            // Get timestamp: use provided valid_from or default to transaction start time
+            let timestamp = self.start_timestamp;
+            let valid_from = valid_from.unwrap_or(timestamp);
 
-        // Validate valid_from is not too far in future
-        validation::validate_valid_from_future(valid_from)?;
+            // Validate valid_from is not too far in future
+            validation::validate_valid_from_future(valid_from)?;
 
-        // Validate valid_from is not before entity creation
-        let historical = self.historical.read();
-        if let Some(current_version_id) = historical.get_current_node_version(node_id)
-            && let Some(current_version) = historical.get_node_version(current_version_id)
-        {
-            let creation_time = current_version.temporal.valid_time().start();
-            drop(historical); // Release lock before calling validation
-            validation::validate_valid_from_not_before_creation(
-                &format!("node:{}", node_id.as_u64()),
-                creation_time,
+            // Validate valid_from is not before entity creation
+            let historical = self.historical.read();
+            if let Some(current_version_id) = historical.get_current_node_version(node_id)
+                && let Some(current_version) = historical.get_node_version(current_version_id)
+            {
+                let creation_time = current_version.temporal.valid_time().start();
+                drop(historical); // Release lock before calling validation
+                validation::validate_valid_from_not_before_creation(
+                    &format!("node:{}", node_id.as_u64()),
+                    creation_time,
+                    valid_from,
+                )?;
+            }
+
+            // Buffer the write with merged properties
+            self.buffer.add(super::BufferedWrite::UpdateNode {
+                node_id,
+                version_id,
+                label: node.label,
+                properties: merged_properties,
                 valid_from,
-            )?;
-        }
+            })?;
 
-        // Buffer the write with merged properties
-        self.buffer.add(super::BufferedWrite::UpdateNode {
-            node_id,
-            version_id,
-            label: node.label,
-            properties: merged_properties,
-            valid_from,
-        })?;
+            Ok(())
+        })();
 
-        Ok(())
+        result.record_error_metric()
     }
 
     fn update_edge_with_valid_time(
@@ -1028,47 +1048,51 @@ impl WriteOps for WriteTransaction {
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
     ) -> Result<()> {
-        // Check transaction state
-        if self.state != TxState::Active {
-            return Err(TransactionError::InvalidState {
-                current: format!("{:?}", self.state),
-                expected: "Active".to_string(),
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
 
-        // Get current edge to preserve source, target, label and existing properties
-        let edge = self.current.get_edge(edge_id)?;
-        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+            // Get current edge to preserve source, target, label and existing properties
+            let edge = self.current.get_edge(edge_id)?;
+            let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
 
-        // PATCH semantics: Merge new properties with existing ones
-        // Start with existing properties
-        let mut builder = PropertyMapBuilder::from_map(edge.properties.clone());
+            // PATCH semantics: Merge new properties with existing ones
+            // Start with existing properties
+            let mut builder = PropertyMapBuilder::from_map(edge.properties.clone());
 
-        // Update/add properties from the incoming map
-        for (key, value) in properties.iter() {
-            builder = builder.insert_by_key(*key, value.clone());
-        }
+            // Update/add properties from the incoming map
+            for (key, value) in properties.iter() {
+                builder = builder.insert_by_key(*key, value.clone());
+            }
 
-        // Build the final merged property map
-        let merged_properties = builder.build();
+            // Build the final merged property map
+            let merged_properties = builder.build();
 
-        // Get timestamp: use provided valid_from or default to transaction start time
-        let timestamp = self.start_timestamp;
-        let valid_from = valid_from.unwrap_or(timestamp);
+            // Get timestamp: use provided valid_from or default to transaction start time
+            let timestamp = self.start_timestamp;
+            let valid_from = valid_from.unwrap_or(timestamp);
 
-        // Buffer the write with merged properties
-        self.buffer.add(super::BufferedWrite::UpdateEdge {
-            edge_id,
-            version_id,
-            source: edge.source,
-            target: edge.target,
-            label: edge.label,
-            properties: merged_properties,
-            valid_from,
-        })?;
+            // Buffer the write with merged properties
+            self.buffer.add(super::BufferedWrite::UpdateEdge {
+                edge_id,
+                version_id,
+                source: edge.source,
+                target: edge.target,
+                label: edge.label,
+                properties: merged_properties,
+                valid_from,
+            })?;
 
-        Ok(())
+            Ok(())
+        })();
+
+        result.record_error_metric()
     }
 
     fn delete_node_with_valid_time(
@@ -1076,52 +1100,56 @@ impl WriteOps for WriteTransaction {
         node_id: NodeId,
         valid_from: Option<Timestamp>,
     ) -> Result<()> {
-        // Check transaction state
-        if self.state != TxState::Active {
-            return Err(TransactionError::InvalidState {
-                current: format!("{:?}", self.state),
-                expected: "Active".to_string(),
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
 
-        // Verify node exists and check for vector properties
-        let node = self.current.get_node(node_id)?;
+            // Verify node exists and check for vector properties
+            let node = self.current.get_node(node_id)?;
 
-        // If the node being deleted contains vector properties, mark the buffer
-        // to ensure the temporal vector index is notified on commit
-        if !self.buffer.has_vector_operations() && node.properties.contains_vector() {
-            self.buffer.mark_has_vector_operations();
-        }
+            // If the node being deleted contains vector properties, mark the buffer
+            // to ensure the temporal vector index is notified on commit
+            if !self.buffer.has_vector_operations() && node.properties.contains_vector() {
+                self.buffer.mark_has_vector_operations();
+            }
 
-        // Get timestamp: use provided valid_from or default to transaction start time
-        let timestamp = self.start_timestamp;
-        let valid_from = valid_from.unwrap_or(timestamp);
+            // Get timestamp: use provided valid_from or default to transaction start time
+            let timestamp = self.start_timestamp;
+            let valid_from = valid_from.unwrap_or(timestamp);
 
-        // Validate valid_from is not too far in future
-        validation::validate_valid_from_future(valid_from)?;
+            // Validate valid_from is not too far in future
+            validation::validate_valid_from_future(valid_from)?;
 
-        // Validate valid_from is not before entity creation
-        let historical = self.historical.read();
-        if let Some(current_version_id) = historical.get_current_node_version(node_id)
-            && let Some(current_version) = historical.get_node_version(current_version_id)
-        {
-            let creation_time = current_version.temporal.valid_time().start();
-            drop(historical); // Release lock before calling validation
-            validation::validate_valid_from_not_before_creation(
-                &format!("node:{}", node_id.as_u64()),
-                creation_time,
+            // Validate valid_from is not before entity creation
+            let historical = self.historical.read();
+            if let Some(current_version_id) = historical.get_current_node_version(node_id)
+                && let Some(current_version) = historical.get_node_version(current_version_id)
+            {
+                let creation_time = current_version.temporal.valid_time().start();
+                drop(historical); // Release lock before calling validation
+                validation::validate_valid_from_not_before_creation(
+                    &format!("node:{}", node_id.as_u64()),
+                    creation_time,
+                    valid_from,
+                )?;
+            }
+
+            // Buffer the write
+            self.buffer.add(super::BufferedWrite::DeleteNode {
+                node_id,
                 valid_from,
-            )?;
-        }
+            })?;
 
-        // Buffer the write
-        self.buffer.add(super::BufferedWrite::DeleteNode {
-            node_id,
-            valid_from,
-        })?;
+            Ok(())
+        })();
 
-        Ok(())
+        result.record_error_metric()
     }
 
     fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()> {
@@ -1167,35 +1195,39 @@ impl WriteOps for WriteTransaction {
         edge_id: EdgeId,
         valid_from: Option<Timestamp>,
     ) -> Result<()> {
-        // Check transaction state
-        if self.state != TxState::Active {
-            return Err(TransactionError::InvalidState {
-                current: format!("{:?}", self.state),
-                expected: "Active".to_string(),
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
 
-        // Verify edge exists and check for vector properties
-        let edge = self.current.get_edge(edge_id)?;
+            // Verify edge exists and check for vector properties
+            let edge = self.current.get_edge(edge_id)?;
 
-        // If the edge being deleted contains vector properties, mark the buffer
-        // to ensure the temporal vector index is notified on commit
-        if !self.buffer.has_vector_operations() && edge.properties.contains_vector() {
-            self.buffer.mark_has_vector_operations();
-        }
+            // If the edge being deleted contains vector properties, mark the buffer
+            // to ensure the temporal vector index is notified on commit
+            if !self.buffer.has_vector_operations() && edge.properties.contains_vector() {
+                self.buffer.mark_has_vector_operations();
+            }
 
-        // Get timestamp: use provided valid_from or default to transaction start time
-        let timestamp = self.start_timestamp;
-        let valid_from = valid_from.unwrap_or(timestamp);
+            // Get timestamp: use provided valid_from or default to transaction start time
+            let timestamp = self.start_timestamp;
+            let valid_from = valid_from.unwrap_or(timestamp);
 
-        // Buffer the write
-        self.buffer.add(super::BufferedWrite::DeleteEdge {
-            edge_id,
-            valid_from,
-        })?;
+            // Buffer the write
+            self.buffer.add(super::BufferedWrite::DeleteEdge {
+                edge_id,
+                valid_from,
+            })?;
 
-        Ok(())
+            Ok(())
+        })();
+
+        result.record_error_metric()
     }
 }
 
