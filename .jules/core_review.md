@@ -19,3 +19,11 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+
+No high-severity findings.
+
+### Test gaps
+- No new missing tests were identified for the current diff.
+
+### Residual risks
+- Unverified `warden_hnsw_exploit.rs` tests. Need to ensure the dimension mismatch checking actually mitigates exploits consistently.
