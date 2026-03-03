@@ -187,6 +187,11 @@ version-preview:
 criterion:
     cargo bench --bench '*'
 
+# Run sustained cold-storage write throughput with stable benchmark settings.
+# Usage: just bench-sustained-write-stable [threads] [sample] [seconds]
+bench-sustained-write-stable threads='8' sample='20' seconds='20':
+    RAYON_NUM_THREADS={{threads}} BENCH_SUSTAINED_WRITE_SAMPLE_SIZE={{sample}} BENCH_SUSTAINED_WRITE_MEASUREMENT_TIME={{seconds}} cargo bench --bench cold_storage sustained_write_10k_versions
+
 # Generate flamegraph (requires cargo-flamegraph)
 flamegraph:
     cargo flamegraph --bench current_state
