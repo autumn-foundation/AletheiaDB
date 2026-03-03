@@ -1366,6 +1366,15 @@ mod proptests {
 
             let version = VersionId::new_unchecked(raw_id);
             prop_assert_eq!(version.as_u64(), raw_id);
+
+        let id_zero_node = NodeId::new_unchecked(0);
+        assert_eq!(id_zero_node.as_u64(), 0);
+
+        let id_zero_edge = EdgeId::new_unchecked(0);
+        assert_eq!(id_zero_edge.as_u64(), 0);
+
+        let id_zero_version = VersionId::new_unchecked(0);
+        assert_eq!(id_zero_version.as_u64(), 0);
         }
 
         /// Property: ID ordering is transitive: if a < b and b < c then a < c
@@ -1535,5 +1544,12 @@ mod warden_repro {
         generator.set_counter(u64::MAX);
         // This should panic to prevent wrapping to 0
         let _ = generator.next();
+    }
+
+    #[test]
+    fn test_tx_id_generator_default() {
+        let generator = TxIdGenerator::default();
+        assert_eq!(generator.current(), TxId(0));
+        assert_eq!(generator.next(), TxId(1));
     }
 }

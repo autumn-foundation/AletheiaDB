@@ -80,3 +80,9 @@
 **Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
 **Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
 **Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
+
+**[Missing Test Coverage in TxIdGenerator & EntityId Creation]**
+**Module:** `src/core/id.rs`
+**Summary:** Mutants changing `TxIdGenerator::default()` behavior and `NodeId::new_unchecked(0)` survived.
+**Diagnosis:** MISSING_COVERAGE - The default implementation for `TxIdGenerator` wasn't explicitly verified to initialize starting ID to `1` (which acts as a current of `0`). Additionally, `new_unchecked` operations with ID `0` were untested, leaving edge cases surrounding empty/0-valued IDs uncovered.
+**Kill Shot:** Added `test_tx_id_generator_default` and `id_zero_*` tests inside `test_new_unchecked_bypasses_validation`.
