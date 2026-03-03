@@ -71,18 +71,6 @@ impl HybridTimestamp {
         self.logical
     }
 
-    /// Get the wallclock component in seconds since Unix epoch.
-    #[inline]
-    pub const fn as_secs(&self) -> i64 {
-        self.wallclock / 1_000_000
-    }
-
-    /// Get the wallclock component in milliseconds since Unix epoch.
-    #[inline]
-    pub const fn as_millis(&self) -> i64 {
-        self.wallclock / 1_000
-    }
-
     /// Helper: Increment logical counter with overflow check.
     ///
     /// This helper reduces duplication in `send()` and `receive()` methods.
@@ -456,27 +444,6 @@ mod tests {
         let sentinel = HybridTimestamp::new_unchecked(i64::MAX, 0);
         let bytes = sentinel.serialize();
         assert!(HybridTimestamp::deserialize(&bytes).is_ok());
-    }
-
-    #[test]
-    fn test_as_secs_and_millis() {
-        // Test basic conversion
-        let secs = 1234567890;
-        let ts = HybridTimestamp::new(secs * 1_000_000, 0).unwrap();
-        assert_eq!(ts.as_secs(), secs);
-        assert_eq!(ts.as_millis(), secs * 1000);
-
-        // Test with milliseconds precision
-        let millis = 1234567890123;
-        let ts = HybridTimestamp::new(millis * 1000, 0).unwrap();
-        assert_eq!(ts.as_secs(), millis / 1000);
-        assert_eq!(ts.as_millis(), millis);
-
-        // Test with microseconds precision (should truncate)
-        let micros = 1234567890123456;
-        let ts = HybridTimestamp::new(micros, 0).unwrap();
-        assert_eq!(ts.as_secs(), micros / 1_000_000);
-        assert_eq!(ts.as_millis(), micros / 1000);
     }
 }
 

@@ -479,34 +479,6 @@ impl AletheiaDB {
             .find_similar_by_embedding_with_label(embedding, label, k)
     }
 
-    /// Find k most similar nodes using a custom predicate for filtering.
-    ///
-    /// This method allows executing a vector search where candidates are filtered
-    /// by an arbitrary predicate closure. This is useful for complex filtering logic
-    /// that cannot be expressed as a simple label check.
-    ///
-    /// # Arguments
-    ///
-    /// * `property_name` - The property containing the vector embeddings
-    /// * `query_vector` - The query embedding vector
-    /// * `k` - Maximum number of results to return
-    /// * `predicate` - A closure that takes a `NodeId` and returns `true` if the node should be included
-    pub fn find_similar_with_predicate<F>(
-        &self,
-        property_name: &str,
-        query_vector: &[f32],
-        k: usize,
-        predicate: F,
-    ) -> Result<Vec<(NodeId, f32)>>
-    where
-        F: Fn(&NodeId) -> bool + Send + Sync,
-    {
-        #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_with_predicate").entered();
-        self.current
-            .find_similar_with_predicate(property_name, query_vector, k, predicate)
-    }
-
     /// Find k most similar nodes at a specific point in time.
     ///
     /// This method performs a temporal vector search, finding nodes with embeddings

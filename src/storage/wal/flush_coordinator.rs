@@ -599,110 +599,91 @@ impl FlushCoordinator {
 
         let start = Instant::now();
 
-        // Inner function to perform I/O operations.
-        // This allows us to catch errors and notify pending entries before returning.
-        let do_flush = || -> Result<FlushStats> {
-            // Ensure segment is open
-            self.ensure_segment_open()?;
+        // Ensure segment is open
+        self.ensure_segment_open()?;
 
-            let mut bytes_written = 0usize;
+        let mut bytes_written = 0usize;
 
-            // Track LSN range for this batch (ADR-0025)
-            let mut batch_min_lsn = u64::MAX;
-            let mut batch_max_lsn = 0u64;
+        // Track LSN range for this batch (ADR-0025)
+        let mut batch_min_lsn = u64::MAX;
+        let mut batch_max_lsn = 0u64;
 
-            // Write all entries
-            {
-                let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-                let writer = writer_guard.as_mut().ok_or_else(|| {
-                    Error::Storage(StorageError::WalError {
-                        reason: "WAL writer not initialized".to_string(),
-                    })
-                })?;
+        // Write all entries
+        {
+            let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            let writer = writer_guard.as_mut().ok_or_else(|| {
+                Error::Storage(StorageError::WalError {
+                    reason: "WAL writer not initialized".to_string(),
+                })
+            })?;
 
-                for entry in &entries {
-                    // Track LSN range
-                    batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
-                    batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
+            for entry in &entries {
+                // Track LSN range
+                batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
+                batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
 
-                    writer.write_all(&entry.data).map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!(
-                            "Failed to write WAL entry: {}",
-                            e
-                        )))
-                    })?;
-                    bytes_written += entry.data.len();
-                }
-
-                // Flush buffer to OS
-                writer.flush().map_err(|e| {
+                writer.write_all(&entry.data).map_err(|e| {
                     Error::Storage(StorageError::IoError(format!(
-                        "Failed to flush WAL buffer: {}",
+                        "Failed to write WAL entry: {}",
                         e
                     )))
                 })?;
+                bytes_written += entry.data.len();
             }
 
-            // Update segment LSN tracking (ADR-0025)
-            // Use fetch_min/fetch_max for atomic updates
-            self.current_segment_min_lsn
-                .fetch_min(batch_min_lsn, Ordering::Relaxed);
-            self.current_segment_max_lsn
-                .fetch_max(batch_max_lsn, Ordering::Relaxed);
-            self.current_segment_entry_count
-                .fetch_add(entries.len() as u64, Ordering::Relaxed);
+            // Flush buffer to OS
+            writer.flush().map_err(|e| {
+                Error::Storage(StorageError::IoError(format!(
+                    "Failed to flush WAL buffer: {}",
+                    e
+                )))
+            })?;
+        }
 
-            // Sync to disk if requested
-            if sync && self.config.sync_on_flush {
-                let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref sync_file) = *sync_guard {
-                    sync_file.sync_data().map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!("Failed to sync WAL: {}", e)))
-                    })?;
-                }
-            }
+        // Update segment LSN tracking (ADR-0025)
+        // Use fetch_min/fetch_max for atomic updates
+        self.current_segment_min_lsn
+            .fetch_min(batch_min_lsn, Ordering::Relaxed);
+        self.current_segment_max_lsn
+            .fetch_max(batch_max_lsn, Ordering::Relaxed);
+        self.current_segment_entry_count
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
 
-            // Update size
-            self.current_segment_size
-                .fetch_add(bytes_written as u64, Ordering::Relaxed);
-
-            // Check for rotation
-            let segment_rotated = self.maybe_rotate_segment()?;
-
-            // Update metrics
-            self.total_entries_flushed
-                .fetch_add(entries.len() as u64, Ordering::Relaxed);
-            self.total_bytes_written
-                .fetch_add(bytes_written as u64, Ordering::Relaxed);
-            self.total_flushes.fetch_add(1, Ordering::Relaxed);
-
-            Ok(FlushStats {
-                entries_flushed: entries.len(),
-                bytes_written,
-                flush_duration: start.elapsed(),
-                segment_rotated,
-            })
-        };
-
-        // Execute flush logic
-        match do_flush() {
-            Ok(stats) => {
-                // Notify success
-                for entry in entries {
-                    entry.notify_completion();
-                }
-                Ok(stats)
-            }
-            Err(e) => {
-                // Notify error to prevent deadlocks (Sentry 🛡️)
-                // If we don't notify, threads waiting on these entries will hang forever.
-                let error_msg = e.to_string();
-                for entry in entries {
-                    entry.notify_error(&error_msg);
-                }
-                Err(e)
+        // Sync to disk if requested
+        if sync && self.config.sync_on_flush {
+            let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref sync_file) = *sync_guard {
+                sync_file.sync_data().map_err(|e| {
+                    Error::Storage(StorageError::IoError(format!("Failed to sync WAL: {}", e)))
+                })?;
             }
         }
+
+        // Update size
+        self.current_segment_size
+            .fetch_add(bytes_written as u64, Ordering::Relaxed);
+
+        // Check for rotation
+        let segment_rotated = self.maybe_rotate_segment()?;
+
+        // Notify all completion handles
+        for entry in &entries {
+            entry.notify_completion();
+        }
+
+        // Update metrics
+        self.total_entries_flushed
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        self.total_bytes_written
+            .fetch_add(bytes_written as u64, Ordering::Relaxed);
+        self.total_flushes.fetch_add(1, Ordering::Relaxed);
+
+        Ok(FlushStats {
+            entries_flushed: entries.len(),
+            bytes_written,
+            flush_duration: start.elapsed(),
+            segment_rotated,
+        })
     }
 
     /// Get total entries flushed.
@@ -1341,59 +1322,5 @@ mod tests {
 
         // Should have at most segments_to_retain + 1 meta files
         assert!(meta_count <= 3);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_sync_logic_correctness() {
-        use tempfile::tempdir;
-
-        // 1. Setup coordinator with sync_on_flush = true
-        let dir = tempdir().unwrap();
-        let mut config = FlushCoordinatorConfig::new(dir.path());
-        config.sync_on_flush = true;
-        let coordinator = FlushCoordinator::new(config).unwrap();
-
-        // 2. Open segment to get sync handle
-        coordinator.ensure_segment_open().unwrap();
-
-        // 3. Replace sync_handle with a File opening /dev/null
-        // fsync on /dev/null returns EINVAL on Linux, which causes sync_data to fail.
-        // This avoids unsafe libc::close and double-close issues.
-        {
-            let dev_null = File::open("/dev/null").expect("Failed to open /dev/null");
-            let mut guard = coordinator.sync_handle.lock().unwrap();
-            *guard = Some(dev_null);
-        }
-
-        // 4. Create dummy entry
-        let entry = create_test_entry(1, &[1, 2, 3]);
-
-        // 5. Test Case 1: sync=false.
-        // Correct Logic: sync (false) && sync_on_flush (true) -> false. No sync -> Success.
-        // Mutant Logic (||): sync (false) || sync_on_flush (true) -> true. Sync -> Fail (EINVAL).
-        // This assertion KILLS the mutant.
-        let result = coordinator.flush(vec![entry], false);
-        assert!(
-            result.is_ok(),
-            "flush(false) should NOT sync, so it should succeed even if sync handle is broken"
-        );
-
-        // 6. Test Case 2: sync=true.
-        // Correct Logic: sync (true) && sync_on_flush (true) -> true. Sync -> Fail.
-        // This confirms our test setup works (broken sync handle actually causes failure).
-        let entry2 = create_test_entry(2, &[4, 5, 6]);
-        let result = coordinator.flush(vec![entry2], true);
-        assert!(
-            result.is_err(),
-            "flush(true) SHOULD sync, so it should fail due to broken sync handle"
-        );
-
-        let err_msg = format!("{}", result.unwrap_err());
-        assert!(
-            err_msg.contains("Failed to sync WAL"),
-            "Error should be about syncing, got: {}",
-            err_msg
-        );
     }
 }

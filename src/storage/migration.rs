@@ -1,65 +1,40 @@
 //! Migration service for tiered storage.
 //!
-//! This module implements the background migration service that automatically moves
-//! historical versions from the hot tier (in-memory) to the cold tier (disk-based Redb).
+//! This module implements Issue #121 (SCALE-003): Background migration service
+//! that automatically moves historical versions from hot tier to cold tier.
 //!
 //! # Architecture
 //!
-//! The migration service operates as a background worker that orchestrates data movement
-//! between storage tiers. It is designed to be:
+//! The migration service runs as a background thread that:
+//! 1. Monitors hot tier size and version ages
+//! 2. Identifies candidate versions for migration based on policy
+//! 3. Batches and transfers versions to cold storage
+//! 4. Updates version chain pointers
+//! 5. Removes migrated versions from hot tier
 //!
-//! - **Non-blocking**: Migration happens in the background without stalling read/write operations.
-//! - **Policy-driven**: Configurable policies determine *when* and *what* to migrate.
-//! - **Safe**: Ensures data integrity through atomic batch writes and LSN coordination.
+//! # Migration Policy
 //!
-//! ## Components
+//! Migration decisions are based on configurable thresholds:
+//! - **Age threshold**: Migrate versions older than N days
+//! - **Memory threshold**: Migrate when memory usage exceeds N bytes
+//! - **Min hot versions**: Always keep at least N versions per entity in hot tier
 //!
-//! 1.  **MigrationPolicy**: Defines thresholds (age, memory usage) for triggering migration.
-//! 2.  **MigrationService**: Manages the background worker and execution logic.
-//! 3.  **RedbColdStorage**: The destination for migrated data.
-//! 4.  **FlushCoordinator**: (Optional) Coordinates WAL truncation after successful migration.
+//! # Example
 //!
-//! # Usage
-//!
-//! ```rust
+//! ```ignore
 //! use aletheiadb::storage::migration::{MigrationPolicy, MigrationService};
-//! use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
-//! use std::sync::Arc;
+//! use aletheiadb::storage::tiered_storage::TieredStorage;
 //! use std::time::Duration;
 //!
-//! # fn example() -> aletheiadb::utils::error::Result<()> {
-//! // 1. Configure the cold storage backend
-//! let cold_storage = Arc::new(RedbColdStorage::new("data/cold.redb", RedbConfig::default())?);
-//!
-//! // 2. Define a migration policy
 //! let policy = MigrationPolicy::builder()
-//!     .age_threshold(Duration::from_secs(7 * 24 * 60 * 60)) // Migrate versions older than 7 days
-//!     .memory_threshold_bytes(1024 * 1024 * 1024)           // or when hot tier exceeds 1GB
-//!     .min_hot_versions(1)                                  // Always keep current version hot
+//!     .age_threshold(Duration::from_secs(7 * 24 * 60 * 60)) // 7 days
+//!     .memory_threshold_bytes(1024 * 1024 * 1024) // 1GB
+//!     .min_hot_versions(1)
 //!     .build();
 //!
-//! // 3. Create and start the service
-//! let service = MigrationService::new(cold_storage, policy);
-//! service.start();
-//!
-//! // The service now runs in the background.
-//! // To gracefully stop it:
-//! service.stop();
-//! # Ok(())
-//! # }
+//! let service = MigrationService::new(tiered_storage, policy);
+//! service.start(); // Starts background migration thread
 //! ```
-//!
-//! # Safety and Crash Recovery
-//!
-//! The migration service integrates with the Write-Ahead Log (WAL) to ensure crash consistency.
-//! When `migrate_batch_with_lsn` is used:
-//!
-//! 1.  **Atomic Write**: Data is written to cold storage along with the Log Sequence Number (LSN).
-//! 2.  **Verification**: The flushed LSN is verified to ensure durability.
-//! 3.  **Truncation**: Only then is the WAL truncated up to that LSN.
-//!
-//! This invariant (`WAL_truncation_lsn <= cold_storage.get_flushed_lsn()`) ensures that
-//! data is never removed from the WAL before it is safely persisted in cold storage.
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::version::{EdgeVersion, NodeVersion};
@@ -93,75 +68,37 @@ const MAX_ACCESS_ENTRIES: usize = 1_000_000;
 const DROP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Policy for determining when to migrate versions from hot to cold tier.
-///
-/// This struct defines the rules for selecting which data should be moved to cold storage.
-/// It supports both age-based and memory-pressure-based triggers.
-///
-/// # Default Policy
-///
-/// The default policy is suitable for most workloads:
-/// - Migrate versions older than 7 days
-/// - Keep at least 1 recent version in hot storage
-/// - Check for migration every 60 seconds
-/// - Trigger if memory usage exceeds 1GB
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
 pub struct MigrationPolicy {
     /// Migrate versions older than this duration.
-    ///
-    /// Versions created before `now - age_threshold` are candidates for migration.
-    ///
-    /// **Default:** 7 days
+    /// Default: 7 days
     pub age_threshold: Duration,
 
-    /// Migrate when hot tier memory usage exceeds this threshold (in bytes).
-    ///
-    /// This acts as a backpressure mechanism to prevent OOM. When memory usage
-    /// is high, migration may trigger even for versions younger than `age_threshold`
-    /// (depending on `enable_lru`).
-    ///
-    /// **Default:** 1 GB
+    /// Migrate when hot tier memory exceeds this threshold (bytes).
+    /// Default: 80% of available memory (estimated at 1GB for portability)
     pub memory_threshold_bytes: usize,
 
     /// Minimum number of versions to keep in hot tier per entity.
-    ///
-    /// This ensures that the most recent history is always fast to access,
-    /// preventing "thrashing" where a frequently accessed recent version is migrated.
-    ///
-    /// **Default:** 1 (keep only the current version hot)
+    /// This ensures current state is always available in hot tier.
+    /// Default: 1 (keep only the current version hot)
     pub min_hot_versions: usize,
 
     /// Maximum number of versions to migrate in a single batch.
-    ///
-    /// Controls the granularity of migration work units. Larger batches improve
-    /// throughput but may hold locks longer.
-    ///
-    /// **Default:** 1000
+    /// Default: 1000
     pub batch_size: usize,
 
     /// Interval between migration runs.
-    ///
-    /// Controls how often the background worker checks for migration candidates.
-    ///
-    /// **Default:** 60 seconds
+    /// Default: 60 seconds
     pub run_interval: Duration,
 
-    /// Enable/disable migration globally.
-    ///
-    /// Useful for testing, maintenance, or bulk loading phases where migration
-    /// should be paused.
-    ///
-    /// **Default:** true (enabled)
+    /// Enable/disable migration (useful for testing or maintenance).
     pub enabled: bool,
 
     /// Enable LRU (Least Recently Used) based migration.
-    ///
-    /// When `true`, versions are sorted by their last access time, migrating
-    /// least-recently-accessed data first. When `false`, migration order is
-    /// determined primarily by version age (oldest first).
-    ///
-    /// **Default:** false (Age-based)
+    /// When enabled, versions are sorted by access time in addition to age.
+    /// Default: false
     pub enable_lru: bool,
 }
 
@@ -181,29 +118,12 @@ impl Default for MigrationPolicy {
 
 impl MigrationPolicy {
     /// Create a new migration policy builder.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use aletheiadb::storage::migration::MigrationPolicy;
-    /// use std::time::Duration;
-    ///
-    /// let policy = MigrationPolicy::builder()
-    ///     .age_threshold(Duration::from_secs(3600))
-    ///     .build();
-    /// ```
     pub fn builder() -> MigrationPolicyBuilder {
         MigrationPolicyBuilder::new()
     }
 
     /// Create a policy that aggressively migrates to cold storage.
-    ///
-    /// **Use case:** Memory-constrained environments or workloads with little historical access.
-    ///
-    /// **Settings:**
-    /// - Age threshold: 1 day
-    /// - Memory threshold: 512MB
-    /// - Strategy: LRU enabled (evict unused data quickly)
+    /// Useful for memory-constrained environments.
     pub fn aggressive() -> Self {
         Self {
             age_threshold: Duration::from_secs(24 * 60 * 60), // 1 day
@@ -217,14 +137,7 @@ impl MigrationPolicy {
     }
 
     /// Create a policy that keeps more data in hot storage.
-    ///
-    /// **Use case:** Read-heavy workloads with frequent temporal queries or ample RAM.
-    ///
-    /// **Settings:**
-    /// - Age threshold: 30 days
-    /// - Memory threshold: 4GB
-    /// - Min hot versions: 5
-    /// - Strategy: Age-based (keep recent history hot)
+    /// Useful for read-heavy workloads with temporal queries.
     pub fn conservative() -> Self {
         Self {
             age_threshold: Duration::from_secs(30 * 24 * 60 * 60), // 30 days
@@ -238,8 +151,6 @@ impl MigrationPolicy {
     }
 
     /// Create a disabled policy (no automatic migration).
-    ///
-    /// Useful for testing, initial bulk loading, or maintenance modes.
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -248,14 +159,14 @@ impl MigrationPolicy {
     }
 }
 
-/// Builder for constructing a `MigrationPolicy`.
+/// Builder for MigrationPolicy.
 #[derive(Debug, Default)]
 pub struct MigrationPolicyBuilder {
     policy: MigrationPolicy,
 }
 
 impl MigrationPolicyBuilder {
-    /// Create a new builder initialized with default values.
+    /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
             policy: MigrationPolicy::default(),
@@ -263,58 +174,49 @@ impl MigrationPolicyBuilder {
     }
 
     /// Set the age threshold for migration.
-    ///
-    /// Versions older than this duration will be candidates for migration.
     pub fn age_threshold(mut self, duration: Duration) -> Self {
         self.policy.age_threshold = duration;
         self
     }
 
     /// Set the memory threshold in bytes.
-    ///
-    /// Migration may trigger if hot storage usage exceeds this value.
     pub fn memory_threshold_bytes(mut self, bytes: usize) -> Self {
         self.policy.memory_threshold_bytes = bytes;
         self
     }
 
-    /// Set the minimum number of versions to keep in hot storage per entity.
-    ///
-    /// Ensures that even old versions remain hot if they are among the N most recent
-    /// for a given entity.
+    /// Set the minimum hot versions per entity.
     pub fn min_hot_versions(mut self, count: usize) -> Self {
         self.policy.min_hot_versions = count;
         self
     }
 
-    /// Set the batch size for migration operations.
+    /// Set the batch size for migration.
     pub fn batch_size(mut self, size: usize) -> Self {
         self.policy.batch_size = size;
         self
     }
 
-    /// Set the interval between background migration checks.
+    /// Set the run interval.
     pub fn run_interval(mut self, interval: Duration) -> Self {
         self.policy.run_interval = interval;
         self
     }
 
-    /// Enable or disable the migration service.
+    /// Enable or disable migration.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.policy.enabled = enabled;
         self
     }
 
     /// Enable or disable LRU-based migration ordering.
-    ///
-    /// - `true`: Prioritize migrating least-recently-accessed data.
-    /// - `false`: Prioritize migrating oldest created data.
+    /// When enabled, least recently accessed versions are migrated first.
     pub fn enable_lru_migration(mut self, enable: bool) -> Self {
         self.policy.enable_lru = enable;
         self
     }
 
-    /// Consume the builder and return the configured `MigrationPolicy`.
+    /// Build the policy.
     pub fn build(self) -> MigrationPolicy {
         self.policy
     }
@@ -337,29 +239,24 @@ pub struct MigrationCandidate {
 ///
 /// This struct provides real-time visibility into migration progress,
 /// enabling monitoring dashboards and graceful shutdown decisions.
-///
-/// # Usage
-///
-/// Passed to `MigrationCallback::on_progress` during migration.
 #[derive(Debug, Clone, Default)]
 pub struct MigrationProgress {
-    /// Total number of versions targeted for migration in this run.
+    /// Total number of versions to migrate in this run.
     pub total_versions: usize,
-    /// Number of versions successfully migrated so far.
+    /// Number of versions migrated so far.
     pub migrated_versions: usize,
-    /// Total volume of data migrated so far (in bytes).
-    /// Used for bandwidth monitoring and throttling decisions.
+    /// Total bytes migrated so far.
     pub bytes_migrated: u64,
-    /// Current batch sequence number (1-indexed).
+    /// Current batch number (1-indexed).
     pub current_batch: usize,
-    /// Total expected batches based on `batch_size`.
+    /// Total number of batches.
     pub total_batches: usize,
-    /// Time elapsed since the start of this migration run.
+    /// Elapsed time since migration started.
     pub elapsed: Duration,
 }
 
 impl MigrationProgress {
-    /// Calculate the completion percentage (0.0 to 100.0).
+    /// Calculate the percentage of versions migrated.
     pub fn percentage(&self) -> f64 {
         if self.total_versions == 0 {
             100.0
@@ -368,12 +265,12 @@ impl MigrationProgress {
         }
     }
 
-    /// Check if the migration run is complete.
+    /// Check if the migration is complete.
     pub fn is_complete(&self) -> bool {
         self.migrated_versions >= self.total_versions
     }
 
-    /// Calculate the current throughput in versions per second.
+    /// Calculate the throughput in versions per second.
     pub fn versions_per_second(&self) -> f64 {
         let secs = self.elapsed.as_secs_f64();
         if secs > 0.0 {
@@ -383,7 +280,7 @@ impl MigrationProgress {
         }
     }
 
-    /// Calculate the current throughput in bytes per second.
+    /// Calculate the throughput in bytes per second.
     pub fn bytes_per_second(&self) -> f64 {
         let secs = self.elapsed.as_secs_f64();
         if secs > 0.0 {
@@ -393,9 +290,7 @@ impl MigrationProgress {
         }
     }
 
-    /// Estimate the time remaining until completion based on current throughput.
-    ///
-    /// Returns `Duration::ZERO` if completed or if throughput is zero.
+    /// Estimate time remaining based on current throughput.
     pub fn estimated_remaining(&self) -> Duration {
         let remaining = self.total_versions.saturating_sub(self.migrated_versions);
         let vps = self.versions_per_second();
@@ -407,29 +302,27 @@ impl MigrationProgress {
     }
 }
 
-/// aggregated statistics for migration operations.
-///
-/// Tracks lifetime statistics for the `MigrationService`.
+/// Statistics for migration operations.
 #[derive(Debug, Clone, Default)]
 pub struct MigrationStats {
-    /// Total number of node versions successfully migrated.
+    /// Total number of node versions migrated.
     pub node_versions_migrated: u64,
-    /// Total number of edge versions successfully migrated.
+    /// Total number of edge versions migrated.
     pub edge_versions_migrated: u64,
-    /// Total volume of data migrated (in bytes).
+    /// Total bytes migrated.
     pub bytes_migrated: u64,
-    /// Number of migration runs successfully completed.
+    /// Number of migration runs completed.
     pub runs_completed: u64,
-    /// Number of errors encountered during migration.
+    /// Number of migration errors.
     pub errors: u64,
-    /// Duration of the most recent migration run.
+    /// Last migration run duration.
     pub last_run_duration: Duration,
-    /// Timestamp of the most recent migration run.
+    /// Last migration run time.
     pub last_run_time: Option<Instant>,
 }
 
 impl MigrationStats {
-    /// Calculate the average throughput of the *last* run (versions per second).
+    /// Calculate migration throughput (versions per second).
     pub fn versions_per_second(&self) -> f64 {
         let total = self.node_versions_migrated + self.edge_versions_migrated;
         if self.last_run_duration.as_secs_f64() > 0.0 {
@@ -581,11 +474,6 @@ pub struct MigrationService {
 
 impl MigrationService {
     /// Create a new migration service.
-    ///
-    /// # Arguments
-    ///
-    /// * `cold_storage` - The destination storage for migrated data.
-    /// * `policy` - Configuration determining when and what to migrate.
     pub fn new(cold_storage: Arc<RedbColdStorage>, policy: MigrationPolicy) -> Self {
         Self {
             cold_storage,
@@ -602,14 +490,6 @@ impl MigrationService {
     }
 
     /// Create a new migration service with a custom callback.
-    ///
-    /// Callbacks allow monitoring migration progress and filtering specific items.
-    ///
-    /// # Arguments
-    ///
-    /// * `cold_storage` - The destination storage.
-    /// * `policy` - Configuration.
-    /// * `callback` - Implementation of `MigrationCallback` for events.
     pub fn with_callback(
         cold_storage: Arc<RedbColdStorage>,
         policy: MigrationPolicy,
@@ -652,12 +532,7 @@ impl MigrationService {
     /// Start the background migration worker.
     ///
     /// The worker runs in a separate thread and periodically checks for
-    /// versions that need to be migrated based on the configured policy.
-    ///
-    /// # Thread Safety
-    ///
-    /// This method is thread-safe and idempotent. Calling it multiple times
-    /// has no effect if the service is already running.
+    /// versions that need to be migrated. If already running, this is a no-op.
     ///
     /// # Example
     ///
@@ -771,16 +646,11 @@ impl MigrationService {
 
     /// Stop the background migration worker.
     ///
-    /// This method gracefully shuts down the migration service. It sends a stop
-    /// signal to the background worker and blocks until the worker thread exits.
-    ///
-    /// # Blocking Behavior
-    ///
     /// This method blocks until:
     /// 1. The current migration batch (if any) completes
     /// 2. The worker thread exits cleanly
     ///
-    /// If the service is not running, this is a no-op and returns immediately.
+    /// If the service is not running, this is a no-op.
     pub fn stop(&self) {
         // Signal the worker to stop
         if !self.running.swap(false, Ordering::SeqCst) {
@@ -818,14 +688,9 @@ impl MigrationService {
 
     /// Check if migration should be triggered based on current conditions.
     ///
-    /// This method evaluates the current state against the configured `MigrationPolicy`
-    /// to determine if a migration run is necessary.
-    ///
-    /// # Trigger Conditions
-    ///
     /// Returns true if either:
-    /// - **Memory Pressure**: Hot tier usage > `memory_threshold_bytes`
-    /// - **Age**: There are versions older than `age_threshold`
+    /// - Memory usage exceeds the configured threshold
+    /// - There are versions older than the age threshold
     ///
     /// # Arguments
     ///
@@ -932,22 +797,8 @@ impl MigrationService {
 
     /// Migrate a batch of node versions to cold storage.
     ///
-    /// This method takes a list of node versions, filters them via the callback,
-    /// and moves them to the cold storage tier.
-    ///
-    /// # Usage
-    ///
-    /// This is typically called by:
-    /// 1. The background worker during scheduled migration
-    /// 2. The hot tier directly when urgent memory pressure is detected
-    ///
-    /// # Progress Reporting
-    ///
-    /// Progress is reported via the configured `MigrationCallback`.
-    ///
-    /// # Returns
-    ///
-    /// Returns the number of versions successfully migrated.
+    /// This is called by the hot tier when it needs to free memory.
+    /// Progress is reported via the configured callback.
     pub fn migrate_node_versions(&self, versions: &[NodeVersion]) -> Result<usize> {
         if !self.policy.enabled {
             return Ok(0);
@@ -1022,15 +873,7 @@ impl MigrationService {
 
     /// Migrate a batch of edge versions to cold storage.
     ///
-    /// Similar to `migrate_node_versions`, but for edge data.
-    ///
-    /// # Progress Reporting
-    ///
-    /// Progress is reported via the configured `MigrationCallback`.
-    ///
-    /// # Returns
-    ///
-    /// Returns the number of versions successfully migrated.
+    /// Progress is reported via the configured callback.
     pub fn migrate_edge_versions(&self, versions: &[EdgeVersion]) -> Result<usize> {
         if !self.policy.enabled {
             return Ok(0);
@@ -1104,38 +947,28 @@ impl MigrationService {
 
     /// Migrate a batch of versions to cold storage with LSN tracking and WAL truncation.
     ///
-    /// This is the core method for crash-safe migration. It performs an atomic hand-off
-    /// of data ownership from the WAL to cold storage.
-    ///
-    /// # Atomicity Guarantees
-    ///
-    /// 1.  **Store**: Node and edge versions are written to cold storage.
-    /// 2.  **Metadata Update**: The `flushed_lsn` in cold storage is updated atomically with the data.
-    /// 3.  **Verification**: The flushed LSN is read back from cold storage to confirm durability.
-    /// 4.  **Truncation**: The WAL is truncated *only* up to the confirmed flushed LSN.
-    ///
-    /// # Failure Handling
-    ///
-    /// - If cold storage write fails: Log error, return error. WAL is untouched.
-    /// - If WAL truncation fails: Log error, return success (data is safe in cold storage, WAL will be cleaned up later).
+    /// This method atomically:
+    /// 1. Stores node and edge versions to cold storage with the given LSN
+    /// 2. On success, truncates WAL segments up to the flushed LSN
+    /// 3. On failure, leaves WAL untouched (data safe)
     ///
     /// # Key Invariant
     ///
     /// `WAL_truncation_lsn <= cold_storage.get_flushed_lsn()` (always)
     ///
-    /// This ensures that we never delete data from the WAL before it is durably persisted
-    /// in the cold tier.
-    ///
     /// # Arguments
     ///
     /// * `nodes` - Node versions to migrate
     /// * `edges` - Edge versions to migrate
-    /// * `lsn` - The LSN that this batch covers (usually the current WAL LSN)
+    /// * `lsn` - The LSN up to which these versions cover
     ///
     /// # Returns
     ///
-    /// Returns a `MigrationWithLsnResult` containing counts of migrated entities
-    /// and the number of truncated WAL segments.
+    /// A tuple of (nodes_migrated, edges_migrated, segments_truncated).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cold storage flush fails. In this case, WAL is NOT truncated.
     pub fn migrate_batch_with_lsn(
         &self,
         nodes: &[NodeVersion],
@@ -1248,19 +1081,9 @@ impl MigrationService {
 
     /// Identify node versions that are candidates for migration.
     ///
-    /// Scans the hot tier state to find versions eligible for migration based on
-    /// the configured policy (Age, LRU).
-    ///
-    /// # Safety Rules
-    ///
-    /// 1.  **Head Protection**: The current head version of a node is *never* selected.
-    /// 2.  **Min Hot Versions**: Ensures at least `min_hot_versions` remain in hot tier.
-    ///
-    /// # Selection Logic
-    ///
-    /// Candidates are sorted based on the policy strategy:
-    /// - **Age-based**: Oldest versions first.
-    /// - **LRU-based**: Least recently accessed versions first.
+    /// This method examines the hot tier and returns versions that meet
+    /// the migration policy criteria. It ensures that at least `min_hot_versions`
+    /// versions remain in hot storage for each node.
     ///
     /// # Arguments
     ///
@@ -1337,12 +1160,8 @@ impl MigrationService {
 
     /// Identify edge versions that are candidates for migration.
     ///
-    /// Similar to `identify_node_candidates`, but for edge data.
-    ///
-    /// # Safety Rules
-    ///
-    /// 1.  **Head Protection**: The current head version of an edge is *never* selected.
-    /// 2.  **Min Hot Versions**: Ensures at least `min_hot_versions` remain in hot tier.
+    /// This method ensures that at least `min_hot_versions` versions remain
+    /// in hot storage for each edge.
     ///
     /// # Arguments
     ///

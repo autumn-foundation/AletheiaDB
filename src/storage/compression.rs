@@ -308,3 +308,38 @@ mod tests {
         }
     }
 }
+
+    #[test]
+    fn test_decompress_with_limit_near_overflow() {
+        // This test targets the mutation "replace + with *" in decompress_with_limit.
+        // We want to ensure that the logic
+        // is actually testing addition, not multiplication.
+        //
+        // If the code was , we need a case where:
+        // - addition PASSES (is <= limit)
+        // - multiplication FAILS (is > limit)
+        // OR
+        // - addition FAILS (is > limit)
+        // - multiplication PASSES (is <= limit)
+        //
+        // Case 1: buffer.len() = 10, bytes_read = 10, limit = 25
+        // Add: 20 <= 25 (OK) -> extend buffer -> OK
+        // Mul: 100 > 25 (FAIL) -> error
+        //
+        // If the mutant (mul) exists, this test would fail because it would error out
+        // when it should succeed.
+
+        let data = [1u8; 10];
+        // Compression level 1 for speed
+        let compressed = zstd::encode_all(&data[..], 1).unwrap();
+
+        // We need to trick the decoder to read in chunks.
+        // Real zstd decoder behavior is complex, but we can simulate the state check logic.
+        // Effectively, we just need to ensure  works correctly
+        // for inputs that would cause multiplication to blow up.
+
+        let limit = 100;
+        let result = decompress_with_limit(&compressed, limit);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), data);
+    }

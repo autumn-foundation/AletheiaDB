@@ -22,14 +22,6 @@ use super::tracker::PersistenceTracker;
 mod tests;
 
 /// Persist vector indexes to disk.
-///
-/// This function:
-/// 1. Saves the global string interner (required for label/property lookups).
-/// 2. Iterates over all active vector indexes.
-/// 3. For each index, creates a directory and saves:
-///    - `current.usearch`: The native HNSW index.
-///    - `meta.idx`: Metadata including dimensions, metric, and configuration.
-///    - `mappings.idx`: Mapping between internal `NodeId`s and usearch's `u64` keys.
 pub(crate) fn persist_vector_indexes(
     current: &Arc<CurrentStorage>,
     manager: &Arc<IndexPersistenceManager>,
@@ -131,16 +123,6 @@ pub(crate) fn persist_vector_indexes(
 }
 
 /// Load vector indexes from disk.
-///
-/// This function:
-/// 1. Scans the vector index directory.
-/// 2. For each subdirectory (representing a property), loads metadata and mappings.
-/// 3. Reconstructs the HNSW index using `usearch`.
-/// 4. Restores the `NodeId` <-> `u64` key mappings.
-/// 5. Registers the index with `CurrentStorage`, making it immediately available for search.
-///
-/// Errors during loading of individual indexes are logged but do not abort the process,
-/// allowing valid indexes to be loaded even if some are corrupted.
 pub(crate) fn load_vector_indexes(
     current: &Arc<CurrentStorage>,
     manager: &IndexPersistenceManager,
@@ -273,17 +255,6 @@ pub(crate) fn load_vector_indexes(
 }
 
 /// Persist graph index to disk.
-///
-/// This function saves the current state of the graph (nodes and edges) to a compact binary format.
-///
-/// Steps:
-/// 1. Serialize all nodes and edges, including their properties and versions.
-/// 2. Export CSR (Compressed Sparse Row) adjacency lists for fast graph traversal.
-/// 3. Save the string interner (updated with any new strings encountered during serialization).
-/// 4. Write everything to `adjacency.idx` in the graph directory.
-///
-/// This ensures that on restart, the graph structure can be reloaded 6-30x faster than
-/// replaying the Write-Ahead Log (WAL).
 pub(crate) fn persist_graph_index(
     current: &Arc<CurrentStorage>,
     manager: &Arc<IndexPersistenceManager>,
@@ -339,14 +310,6 @@ pub(crate) fn persist_graph_index(
     graph_data.incoming_offsets = incoming_offsets;
     graph_data.incoming_neighbors = incoming_neighbors;
 
-    // Persist string interner AFTER graph conversion.
-    // Property serialization can intern previously unseen string values, so
-    // the interner snapshot must be updated before writing graph data that
-    // references those IDs.
-    manager.save_string_interner().map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
-    })?;
-
     // Save to disk
     let graph_path = manager.graph_path().join("adjacency.idx");
 
@@ -374,6 +337,11 @@ pub(crate) fn persist_temporal_index(
     use crate::storage::index_persistence::temporal::{
         convert_edge_version, convert_node_version, new_temporal_index_data, save_temporal_index,
     };
+
+    // First save string interner (versions depend on interned strings)
+    manager.save_string_interner().map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
 
     // Get read lock on historical storage
     let historical_guard = historical.read();
@@ -413,14 +381,6 @@ pub(crate) fn persist_temporal_index(
 
     // Drop the lock before disk I/O
     drop(historical_guard);
-
-    // Persist string interner AFTER converting temporal data.
-    // Conversion can intern previously unseen string values from version payloads.
-    // Saving the interner before conversion can leave temporal entries pointing to
-    // IDs that are missing from the persisted interner snapshot.
-    manager.save_string_interner().map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
-    })?;
 
     // Save to disk
     let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
@@ -546,23 +506,18 @@ pub(crate) fn persist_all_indexes(
 
 /// Load all indexes on startup.
 ///
-/// This function coordinates the restoration of the entire database state from persisted indexes.
-/// It follows a specific dependency order:
-///
-/// 1. **String Interner**: Loaded first so that `InternedString` IDs in subsequent indexes can be resolved.
-/// 2. **Graph Index**: Restores the current state (nodes, edges, properties).
-/// 3. **ID Generators**: Initialized based on the maximum IDs found in the graph index to prevent collisions.
-/// 4. **Temporal Index**: Restores historical versions into `HistoricalStorage`.
-/// 5. **Vector Indexes**: Rebuilds HNSW indexes and attaches them to the graph.
-/// 6. **Adjacency Index**: Restores optimized graph traversal structures (CSR).
+/// This function attempts to load:
+/// 1. Manifest and string interner
+/// 2. Graph index (nodes and edges)
+/// 3. Temporal index (history)
+/// 4. Vector indexes
 ///
 /// # Error Handling
 ///
 /// This function is designed to be **best-effort**. It swallows most errors
 /// (logging them as warnings) to allow the database to start up even if
 /// some indexes are corrupted or missing. It does not return a Result
-/// because it handles all errors internally, typically by falling back to
-/// an empty state for the corrupted component.
+/// because it handles all errors internally.
 pub(crate) fn load_indexes_startup(
     manager: &IndexPersistenceManager,
     current: &Arc<CurrentStorage>,

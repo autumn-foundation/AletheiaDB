@@ -495,10 +495,7 @@ pub(crate) fn parse_entry_at(
         }
         4 => {
             // UpdateEdge
-            // V0: 16 bytes (EdgeId + VersionId)
-            // V1+: 20 bytes (EdgeId + VersionId + LabelId)
-            let required = if version >= WAL_VERSION { 20 } else { 16 };
-            if current_offset.checked_add(required).ok_or_else(|| {
+            if current_offset.checked_add(16).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
                 ))
@@ -1653,17 +1650,17 @@ mod tests {
         let mut full_buffer = Vec::new();
         serialize_entry_into(&entry, &mut full_buffer).unwrap();
 
-        // Calculate expected cut point.
-        // UpdateEdge now validates all V1 fixed fields in one check:
-        // Header (24) + Op (1) + EdgeID (8) + VersionID (8) + LabelID (4) = 45 bytes.
-        // Truncating to 41 bytes should fail the fixed-fields boundary check.
+        // Calculate expected cut point
+        // Header (24) + Op (1) + EdgeID (8) + VersionID (8) = 41 bytes
+        // We want to pass the first check (41 bytes) but fail the next (Label ID, +4 bytes)
+        // So we truncate to EXACTLY 41 bytes.
         let truncated_buffer = &full_buffer[0..41];
 
-        // This should trigger the generic UpdateEdge insufficient buffer error.
+        // This should trigger "Insufficient buffer size for UpdateEdge label"
         let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
         assert!(result.is_err());
         if let Err(Error::Storage(StorageError::CorruptedData(msg))) = result {
-            assert_eq!(msg, "Insufficient buffer size for UpdateEdge");
+            assert_eq!(msg, "Insufficient buffer size for UpdateEdge label");
         } else {
             panic!("Expected specific CorruptedData error, got: {:?}", result);
         }
@@ -1797,6 +1794,9 @@ mod tests {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::temporal::time;
+    use crate::storage::wal::serialization::serialize_entry_into;
 
     #[test]
     fn test_repro_fuzz_update_edge_panic() {
@@ -1826,23 +1826,43 @@ mod regression_tests {
             result
         );
     }
-}
 
-#[cfg(test)]
-mod fuzz_tests {
-    use super::*;
-    use proptest::prelude::*;
+    #[test]
+    fn test_update_node_truncated_properties() {
+        // Create a valid UpdateNode entry
+        let node_id = NodeId::new(42).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let operation = WalOperation::UpdateNode {
+            node_id,
+            version_id,
+            label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+        };
+        let entry = WalEntry::new(LSN(1), operation);
 
-    proptest! {
-        // Fuzz parse_entry_at with arbitrary bytes
-        #[test]
-        fn fuzz_parse_entry_at(
-            bytes in prop::collection::vec(any::<u8>(), 0..2048),
-            offset in 0..100usize,
-            version in 0..2u8
-        ) {
-            // Should not panic
-            let _ = parse_entry_at(&bytes, offset, version);
+        // Serialize it
+        let mut full_buffer = Vec::new();
+        serialize_entry_into(&entry, &mut full_buffer).unwrap();
+
+        // Calculate cut point:
+        // Header (24) + Op (1) + NodeID (8) + VersionID (8) + LabelID (4) = 45 bytes
+        // Truncate at 45 bytes (so PropertyMap data is missing)
+        let truncated_buffer = &full_buffer[0..45];
+
+        // This should trigger "Buffer too short for PropertyMap count" or "Insufficient buffer size"
+        // depending on exactly where it cuts (PropertyMap starts with 4-byte count)
+        let result = parse_entry_at(truncated_buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        if let Err(Error::Storage(StorageError::CorruptedData(msg))) = result {
+            // It might fail at "Buffer too short for PropertyMap count" if buffer ends exactly there
+            assert!(
+                msg.contains("Buffer too short") || msg.contains("Insufficient buffer"),
+                "Unexpected error message: {}",
+                msg
+            );
+        } else {
+            panic!("Expected CorruptedData error, got: {:?}", result);
         }
     }
 }

@@ -360,7 +360,7 @@ println!("Created Alice: {:?}", alice);
 ### Time-Travel Queries
 
 ```rust
-use aletheiadb::core::temporal::time;
+use aletheiadb::core::temporal::{Timestamp, time};
 
 // Get current time
 let now = time::now();
@@ -408,6 +408,7 @@ let similar = db.find_similar(doc_id, 10)?;
 ### Hybrid Queries (Graph + Vector + Temporal)
 
 ```rust
+use aletheiadb::query::QueryBuilder;
 use aletheiadb::query::ir::Predicate;
 
 // Setup query parameters
@@ -417,6 +418,9 @@ let tx_time = aletheiadb::core::temporal::time::now();
 
 // Simple: Graph + Vector hybrid
 let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
+for row in results {
+    println!("Found: {:?}", row?.entity);
+}
 
 // Complex: Full hybrid with builder
 let results = db.query()
@@ -427,6 +431,11 @@ let results = db.query()
     .filter(Predicate::gt("score", 0.8)) // Filter: high similarity only
     .with_provenance()                 // Include metadata
     .execute(&db)?;
+
+for row in results {
+    let row = row?;
+    println!("Score: {:?}, Path: {:?}", row.score, row.path);
+}
 
 // Property-specific vector queries
 let results = db.query()
@@ -473,21 +482,9 @@ for (node_id, drift_score) in drifted_nodes {
 > ```
 
 ```rust
-use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 
-// Ensure you have features = ["nova"] enabled in Cargo.toml
-
-// 1. Setup database and node (for self-contained example)
-let db = AletheiaDB::new().unwrap();
-let node_id = db.write(|tx| {
-    tx.create_node("Person", PropertyMapBuilder::new()
-        .insert("name", "Alice")
-        .build()
-    )
-})?;
-
-// 2. Generate natural language history of a node
+// Generate natural language history of a node
 let generator = NarrativeGenerator::new(&db);
 let narrative = generator.generate_node_narrative(node_id)?;
 

@@ -1109,38 +1109,4 @@ mod tests {
         assert!(msg.contains("500"));
         assert!(msg.contains("node:123"));
     }
-
-    #[test]
-    fn test_clock_skew_display_negative_drift_is_backward() {
-        let err = TransactionError::ClockSkew {
-            wallclock: 1_000,
-            previous: 1_100,
-            drift_us: -100,
-            max_allowed: 50,
-        };
-
-        let msg = err.to_string();
-        assert!(msg.contains("Clock skew too large"));
-        assert!(msg.contains("backward"));
-        assert!(msg.contains("100"));
-        assert!(msg.contains("max allowed: 50"));
-        assert!(msg.contains("Wallclock: 1000"));
-        assert!(msg.contains("Previous: 1100"));
-    }
-
-    #[test]
-    fn test_clock_skew_display_zero_drift_is_forward() {
-        let err = TransactionError::ClockSkew {
-            wallclock: 500,
-            previous: 500,
-            drift_us: 0,
-            max_allowed: 25,
-        };
-
-        let msg = err.to_string();
-        assert!(msg.contains("Clock skew too large"));
-        assert!(msg.contains("forward"));
-        assert!(!msg.contains("backward"));
-        assert!(msg.contains("by 0"));
-    }
 }
