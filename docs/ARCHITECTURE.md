@@ -83,8 +83,12 @@ classDiagram
             +handle_tool_call()
         }
     }
-    namespace Core {
+    namespace DB {
         class AletheiaDB
+        class VectorIndexBuilder
+        class Transaction
+    }
+    namespace Core {
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
@@ -105,6 +109,8 @@ classDiagram
     QueryEngine --> AletheiaDB : Uses
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
+    VectorIndexBuilder --> AletheiaDB : Configures
+    Transaction --> AletheiaDB : Mutates
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
