@@ -19,3 +19,12 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+
+No high-severity findings.
+
+### Test gaps
+- Missing explicit concurrency tests checking for torn reads or consistency between node properties and graph structure within a single `analyze` call.
+- Missing test coverage for edge cases like node vectors being all zeroes, which could lead to NaNs during normalization.
+
+### Residual risks
+- Relying on `normalize_in_place` and `cosine_similarity` could produce NaNs if the `baseline_vector` or `emergent_vector` sum to zero (e.g. if node property embeddings zero each other out).
