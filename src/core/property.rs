@@ -3715,6 +3715,21 @@ mod sentry_tests {
         }
         PropertyMapBuilder::new().insert("deep", value);
     }
+    /// 🎯 Target: PropertyMapBuilder::remove panic
+    /// 💣 Risk: Incorrect panic message or behavior on recursion limit when removing.
+    /// 🧪 Strategy: Trigger recursion limit during remove and catch panic message.
+    /// 🔬 Verification: expect specific string.
+    #[test]
+    #[should_panic(expected = "Property removal failed")]
+    fn test_property_map_builder_remove_panic_message() {
+        let mut value = PropertyValue::Int(42);
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            value = PropertyValue::Array(Arc::new(vec![value]));
+        }
+        let key = GLOBAL_INTERNER.intern("deep").unwrap();
+        let map = PropertyMap::from_iter(vec![(key, value)]);
+        PropertyMapBuilder::from_map(map).remove("deep");
+    }
 
     /// 🎯 Target: PropertyMap::deserialize (MAX_PROPERTY_MAP_CAPACITY)
     /// 💣 Risk: Deserialization should fail if the count exceeds the maximum allowed capacity.

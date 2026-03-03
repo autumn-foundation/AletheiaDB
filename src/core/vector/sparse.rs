@@ -690,3 +690,91 @@ pub fn sparse_squared_euclidean_distance(a: &SparseVec, b: &SparseVec) -> Result
 pub fn sparse_euclidean_distance(a: &SparseVec, b: &SparseVec) -> Result<f32> {
     sparse_squared_euclidean_distance(a, b).map(|sq| sq.sqrt())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sparse_vec_new_valid() {
+        let vec = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        assert_eq!(vec.indices(), &[0, 2]);
+        assert_eq!(vec.values(), &[1.0, 2.0]);
+        assert_eq!(vec.dimension(), 5);
+    }
+
+    #[test]
+    fn test_sparse_vec_new_unsorted() {
+        let vec = SparseVec::new(vec![2, 0], vec![2.0, 1.0], 5).unwrap();
+        assert_eq!(vec.indices(), &[0, 2]);
+        assert_eq!(vec.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_sparse_vec_new_duplicate_indices() {
+        let result = SparseVec::new(vec![0, 0], vec![1.0, 2.0], 5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Duplicate index"));
+    }
+
+    #[test]
+    fn test_sparse_vec_new_duplicate_indices_unsorted() {
+        let result = SparseVec::new(vec![2, 0, 2], vec![3.0, 1.0, 2.0], 5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Duplicate index"));
+    }
+
+    #[test]
+    fn test_sparse_vec_new_out_of_bounds() {
+        let result = SparseVec::new(vec![0, 5], vec![1.0, 2.0], 5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("out of bounds"));
+    }
+
+    #[test]
+    fn test_sparse_vec_new_out_of_bounds_unsorted() {
+        let result = SparseVec::new(vec![5, 0], vec![2.0, 1.0], 5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("out of bounds"));
+    }
+
+    #[test]
+    fn test_sparse_vec_new_nan() {
+        let result = SparseVec::new(vec![0], vec![f32::NAN], 5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("NaN"));
+    }
+
+    #[test]
+    fn test_sparse_vec_new_infinity() {
+        let result = SparseVec::new(vec![0], vec![f32::INFINITY], 5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("infinity"));
+    }
+
+    #[test]
+    fn test_sparse_vec_new_zero() {
+        let result = SparseVec::new(vec![0], vec![0.0], 5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("zero value"));
+    }
+
+    #[test]
+    fn test_sparse_vec_new_dimension_mismatch() {
+        let result = SparseVec::new(vec![0], vec![1.0, 2.0], 5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sparse_vec_new_dimension_too_large() {
+        let result = SparseVec::new(vec![], vec![], u32::MAX);
+        assert!(result.is_err());
+    }
+}
