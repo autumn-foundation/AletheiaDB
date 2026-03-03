@@ -8,3 +8,7 @@
 2.  When seeing duplicate implementations (in-memory vs persistent structs), check which one is used in production code vs tests.
 3.  Wired up `PersistentCommitLog` to `ShardCoordinator` via new `wal_path` config.
 4.  Updated `PersistentCommitLog` schema to include `commit_timestamp` (with backward compatibility logic for V1, though V2 enforced for new writes).
+
+## Testing Serialization Panic Paths
+**Learning:** Defensive checks within low-level serialization/deserialization routines (e.g. `PropertyValue` and `PropertyMap` in `core/property.rs`) often hide untested panic paths where invalid payloads trigger out-of-bounds reads. When loops or deep array parsing are involved, ensuring boundaries are checked *before* capacity allocations avoids hidden DoS vectors.
+**Action:** When auditing `from_bytes` or `deserialize` code blocks, specifically write tests targeting exact buffer length deficiencies (e.g. providing $N-1$ bytes), invalid UTF-8 boundaries, and max-capacity constraint violations to ensure the parser returns an `Err` instead of crashing.

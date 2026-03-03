@@ -4235,4 +4235,233 @@ mod sentry_tests {
             "semantically_equal should treat NaN as equal"
         );
     }
+
+    #[test]
+    fn test_deserialize_too_short_bytes() {
+        let bytes = vec![TAG_INT, 0, 0, 0];
+        let res = PropertyValue::deserialize(&bytes);
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Buffer too short for Int value")
+        );
+
+        let bytes = vec![TAG_FLOAT, 0, 0, 0];
+        let res = PropertyValue::deserialize(&bytes);
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Buffer too short for Float value")
+        );
+    }
+
+    #[test]
+    fn test_property_map_too_short() {
+        let bytes = vec![1, 0, 0];
+        let res = PropertyMap::deserialize(&bytes);
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Buffer too short for PropertyMap count")
+        );
+    }
+
+    #[test]
+    fn test_property_map_capacity_exceeded() {
+        let mut bytes = vec![0u8; 4];
+        let count: u32 = 100_001; // MAX_PROPERTY_MAP_CAPACITY is 100_000
+        bytes[0..4].copy_from_slice(&count.to_le_bytes());
+        let err = PropertyMap::deserialize(&bytes).unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_property_map_insufficient_buffer() {
+        let mut bytes = vec![0u8; 4];
+        let count: u32 = 10;
+        bytes[0..4].copy_from_slice(&count.to_le_bytes());
+        // Only 4 bytes in total, but count is 10. Needs at least 10 * 5 = 50 bytes.
+        let err = PropertyMap::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Insufficient buffer size for PropertyMap entries")
+        );
+    }
+
+    #[test]
+    fn test_property_map_too_short_for_key_len() {
+        let mut bytes = vec![0u8; 14];
+        let count: u32 = 2;
+        bytes[0..4].copy_from_slice(&count.to_le_bytes()); // offset=4
+
+        // Iter 1:
+        let key_len: u32 = 5;
+        bytes[4..8].copy_from_slice(&key_len.to_le_bytes()); // offset=8
+        // Key data: 5 bytes
+        bytes[8..13].copy_from_slice(b"hello"); // offset=13
+        // Value: Null (tag=0)
+        bytes[13] = 0; // offset=14
+
+        // Iter 2: offset=14. bytes.len()=14. Needs offset+4. Fails!
+        let err = PropertyMap::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Buffer too short for property key length")
+        );
+    }
+
+    #[test]
+    fn test_property_map_too_short_for_key_data() {
+        let mut bytes = vec![0u8; 17];
+        let count: u32 = 2;
+        bytes[0..4].copy_from_slice(&count.to_le_bytes()); // offset=4
+
+        // Iter 1:
+        let key_len: u32 = 2;
+        bytes[4..8].copy_from_slice(&key_len.to_le_bytes()); // offset=8
+        bytes[8..10].copy_from_slice(b"hi"); // offset=10
+        bytes[10] = 0; // Null tag. offset=11
+
+        // Iter 2:
+        let key_len2: u32 = 5;
+        bytes[11..15].copy_from_slice(&key_len2.to_le_bytes()); // offset=15
+        // Key data: only 2 bytes remaining (15..17) instead of 5
+        let err = PropertyMap::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Buffer too short for property key data")
+        );
+    }
+
+    #[test]
+    fn test_property_map_invalid_utf8_key() {
+        let mut bytes = vec![0u8; 11];
+        let count: u32 = 1;
+        bytes[0..4].copy_from_slice(&count.to_le_bytes()); // offset=4
+        let key_len: u32 = 2;
+        bytes[4..8].copy_from_slice(&key_len.to_le_bytes()); // offset=8
+        bytes[8..10].copy_from_slice(&[0xff, 0xff]); // Invalid UTF8. offset=10
+        bytes[10] = 0; // Null
+
+        let err = PropertyMap::deserialize(&bytes).unwrap_err();
+        assert!(err.to_string().contains("Invalid UTF-8 in property key"));
+    }
+
+    #[test]
+    fn test_property_map_duplicate_key() {
+        let mut bytes = vec![0u8; 24];
+        let count: u32 = 2;
+        bytes[0..4].copy_from_slice(&count.to_le_bytes()); // offset=4
+
+        // Iter 1: key "hi" (tag 0)
+        let key_len: u32 = 2;
+        bytes[4..8].copy_from_slice(&key_len.to_le_bytes()); // offset=8
+        bytes[8..10].copy_from_slice(b"hi"); // offset=10
+        bytes[10] = 0; // offset=11
+
+        // Iter 2: key "hi" (tag 0)
+        let key_len2: u32 = 2;
+        bytes[11..15].copy_from_slice(&key_len2.to_le_bytes()); // offset=15
+        bytes[15..17].copy_from_slice(b"hi"); // offset=17
+        bytes[17] = 0; // offset=18
+
+        let err = PropertyMap::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Duplicate property key found during deserialization")
+        );
+    }
+
+    #[test]
+    fn test_property_array_too_short_for_count() {
+        let bytes = vec![TAG_ARRAY, 0, 0, 0];
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(err.to_string().contains("Buffer too short for Array count"));
+    }
+
+    #[test]
+    fn test_property_array_capacity_exceeded() {
+        let mut bytes = vec![TAG_ARRAY];
+        let count: u32 = 10_000_001; // exceeds MAX_ARRAY_ELEMENTS (10_000_000)
+        bytes.extend_from_slice(&count.to_le_bytes());
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_property_array_insufficient_buffer() {
+        let mut bytes = vec![TAG_ARRAY];
+        let count: u32 = 10;
+        bytes.extend_from_slice(&count.to_le_bytes());
+        // bytes len is 5, count is 10. we need 1 byte per element minimum.
+        // 5 - 5 = 0 bytes remaining.
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Insufficient buffer size for Array elements")
+        );
+    }
+
+    #[test]
+    fn test_property_string_too_short() {
+        let bytes = vec![TAG_STRING, 0, 0, 0];
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Buffer too short for String length")
+        );
+
+        let mut bytes = vec![TAG_STRING];
+        let count: u32 = 10;
+        bytes.extend_from_slice(&count.to_le_bytes());
+        // bytes.len() is 5. needs 15.
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(err.to_string().contains("Buffer too short for String data"));
+    }
+
+    #[test]
+    fn test_property_string_invalid_utf8() {
+        let mut bytes = vec![TAG_STRING];
+        let count: u32 = 2;
+        bytes.extend_from_slice(&count.to_le_bytes());
+        bytes.extend_from_slice(&[0xff, 0xff]);
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(err.to_string().contains("Invalid UTF-8 in String"));
+    }
+
+    #[test]
+    fn test_property_bytes_too_short() {
+        let bytes = vec![TAG_BYTES, 0, 0, 0];
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Buffer too short for Bytes length")
+        );
+
+        let mut bytes = vec![TAG_BYTES];
+        let count: u32 = 10;
+        bytes.extend_from_slice(&count.to_le_bytes());
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(err.to_string().contains("Buffer too short for Bytes data"));
+    }
+
+    #[test]
+    fn test_property_unknown_tag() {
+        let bytes = vec![255];
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unknown PropertyValue type tag: 255")
+        );
+    }
+
+    #[test]
+    fn test_property_empty_buffer() {
+        let bytes = vec![];
+        let err = PropertyValue::deserialize(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Empty buffer when deserializing PropertyValue")
+        );
+    }
 }
