@@ -47,6 +47,7 @@
 //! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
 //! | [`spectre`] | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
 //! | [`luna`] | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
+//! | [`serendipity`] | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -97,6 +98,9 @@
 #[cfg(feature = "nova")]
 /// Alchemy: Semantic Graph Transformation Engine.
 pub mod alchemy;
+#[cfg(feature = "nova")]
+/// Archetype: Semantic concept extraction and purity scoring.
+pub mod archetype;
 #[cfg(feature = "nova")]
 /// Ariadne: Semantic Thread Weaver.
 pub mod ariadne;
@@ -223,3 +227,7 @@ pub mod spectre;
 #[cfg(feature = "nova")]
 /// Voyager: Maximal Novelty Traversal Engine.
 pub mod voyager;
+
+#[cfg(feature = "nova")]
+/// Serendipity: The Scenic Route Finder.
+pub mod serendipity;
