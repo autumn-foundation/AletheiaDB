@@ -61,6 +61,7 @@
 //! - No approximation - exact similarity scores
 
 use crate::core::error::{Error, Result, VectorError};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::SparseVec;
@@ -71,6 +72,7 @@ use parking_lot::Mutex;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::fs;
+use std::hash::BuildHasherDefault;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -229,15 +231,15 @@ pub struct SparseVectorIndex {
     /// Configuration
     config: SparseIndexConfig,
     /// Inverted index: dimension -> list of (node_id, value) postings
-    inverted_index: DashMap<u32, Vec<Posting>>,
+    inverted_index: DashMap<u32, Vec<Posting>, BuildHasherDefault<IdentityHasher>>,
     /// Forward index: node_id -> stored vector (for removal and updates)
-    vectors: DashMap<NodeId, StoredVector>,
+    vectors: DashMap<NodeId, StoredVector, BuildHasherDefault<IdentityHasher>>,
     /// Number of vectors in the index
     count: AtomicUsize,
     /// Sum of all vector lengths (for BM25 avgdl)
     total_length: AtomicUsize,
     /// Document frequency: dimension -> count of documents containing it
-    doc_freq: DashMap<u32, usize>,
+    doc_freq: DashMap<u32, usize, BuildHasherDefault<IdentityHasher>>,
     /// Write lock to ensure atomicity of add/remove operations
     write_lock: Mutex<()>,
 }
@@ -274,11 +276,14 @@ impl SparseVectorIndex {
         let capacity = config.initial_capacity;
         Ok(SparseVectorIndex {
             config,
-            inverted_index: DashMap::with_capacity(capacity),
-            vectors: DashMap::with_capacity(capacity),
+            inverted_index: DashMap::with_capacity_and_hasher(
+                capacity,
+                BuildHasherDefault::default(),
+            ),
+            vectors: DashMap::with_capacity_and_hasher(capacity, BuildHasherDefault::default()),
             count: AtomicUsize::new(0),
             total_length: AtomicUsize::new(0),
-            doc_freq: DashMap::with_capacity(capacity),
+            doc_freq: DashMap::with_capacity_and_hasher(capacity, BuildHasherDefault::default()),
             write_lock: Mutex::new(()),
         })
     }
@@ -811,11 +816,20 @@ impl SparseVectorIndex {
 
         let index = SparseVectorIndex {
             config: loaded_config,
-            inverted_index: DashMap::with_capacity(data.count as usize),
-            vectors: DashMap::with_capacity(data.count as usize),
+            inverted_index: DashMap::with_capacity_and_hasher(
+                data.count as usize,
+                BuildHasherDefault::default(),
+            ),
+            vectors: DashMap::with_capacity_and_hasher(
+                data.count as usize,
+                BuildHasherDefault::default(),
+            ),
             count: AtomicUsize::new(data.count as usize),
             total_length: AtomicUsize::new(data.total_length as usize),
-            doc_freq: DashMap::with_capacity(data.doc_freq.len()),
+            doc_freq: DashMap::with_capacity_and_hasher(
+                data.doc_freq.len(),
+                BuildHasherDefault::default(),
+            ),
             write_lock: Mutex::new(()),
         };
 
