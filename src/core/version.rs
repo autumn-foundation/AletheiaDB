@@ -2716,6 +2716,30 @@ mod mutant_kill_tests {
     }
 
     #[test]
+    fn test_vector_delta_from_diff_dimension_limit() {
+        // Verify that vectors exceeding MAX_VECTOR_DIMENSIONS return None
+        let len = MAX_VECTOR_DIMENSIONS + 1;
+        let v1 = vec![0.0f32; len];
+        let v2 = vec![1.0f32; len];
+        let result = VectorDelta::from_diff(&v1, &v2);
+        assert!(
+            result.is_none(),
+            "Vectors exceeding dimension limit should not generate delta"
+        );
+    }
+
+    #[test]
+    fn test_property_delta_apply_returns_base_when_empty() {
+        // Covers the fast path: if self.is_empty() { return base.clone(); }
+        let base = PropertyMapBuilder::new().insert("a", 1).build();
+        let delta = PropertyDelta::new(); // Empty delta
+        let result = delta.apply(&base);
+
+        // Assert we got back the exact same map structure (fast path)
+        assert_eq!(result, base);
+    }
+
+    #[test]
     fn test_property_delta_estimated_heap_size_matches_formula() {
         let mut delta = PropertyDelta::new();
         let key_name = GLOBAL_INTERNER.intern("name").unwrap();

@@ -20,6 +20,18 @@ fn test_property_delta_from_diff_not_default() {
 }
 
 #[test]
+fn test_property_delta_from_diff_returns_empty_when_identical() {
+    // Covers the fast path: if old == new { return PropertyDelta::new(); }
+    // If removed, it will still work correctly but be slower. However, some mutants might
+    // change the behavior or return different things.
+    let old = PropertyMapBuilder::new().insert("a", 1).build();
+    // Using identical arc pointers
+    let new = old.clone();
+    let delta = PropertyDelta::from_diff(&old, &new);
+    assert!(delta.is_empty(), "Fast path should return empty delta");
+}
+
+#[test]
 fn test_property_delta_semantically_equal_guard() {
     // Tests: replace match guard old_value.semantically_equal(new_value) with true/false
     let old = PropertyMapBuilder::new().insert("a", 1).build();

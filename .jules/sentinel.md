@@ -80,3 +80,21 @@
 **Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
 **Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
 **Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
+
+**[Weak Test Coverage in VectorDelta Dimension Constraint]**
+**Module:** `src/core/version.rs`
+**Summary:** Logic limiting `VectorDelta::from_diff` maximum dimensions checking `old.len() > MAX_VECTOR_DIMENSIONS` lacked explicit tests returning `None`.
+**Diagnosis:** MISSING_COVERAGE - The maximum constraint check was not tested leading to a mutation gap.
+**Kill Shot:** Added `test_vector_delta_from_diff_dimension_limit` to ensure vectors exceeding `MAX_VECTOR_DIMENSIONS` return `None`.
+
+**[Weak Test Coverage in PropertyDelta Empty Apply Fast Path]**
+**Module:** `src/core/version.rs`
+**Summary:** The fast path optimization in `PropertyDelta::apply` checking `if self.is_empty()` to avoid allocation lacked an explicit test ensuring empty deltas don't alter the result map structure and return early.
+**Diagnosis:** MISSING_COVERAGE - Relying entirely on full deltas and removals missed verifying the bypass.
+**Kill Shot:** Added `test_property_delta_apply_returns_base_when_empty` to ensure empty properties return unmodified map reference.
+
+**[Weak Test Coverage in PropertyDelta Identical Difference Fast Path]**
+**Module:** `src/core/version.rs`
+**Summary:** The initial pointer equality check `if old == new` in `PropertyDelta::from_diff` optimizing out differences wasn't cleanly verified to return an empty delta under direct clone matching logic.
+**Diagnosis:** MISSING_COVERAGE - Tests implicitly covered structural differences and removals, not the fast path return itself.
+**Kill Shot:** Added `test_property_delta_from_diff_returns_empty_when_identical` in `tests/sentry_version.rs`.
