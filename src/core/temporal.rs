@@ -1934,3 +1934,67 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_temporal_tests {
+    use super::*;
+
+    #[test]
+    fn test_timerange_duration_micros_exact() {
+        let ts_start = HybridTimestamp::new(100, 0).unwrap();
+        let ts_end = HybridTimestamp::new(200, 0).unwrap();
+        let range = TimeRange::new(ts_start, ts_end).unwrap();
+
+        // Exact assertion kills Some(0), Some(1), None overrides
+        assert_eq!(range.duration_micros(), Some(100));
+
+        let point = TimeRange::at(ts_start);
+        assert_eq!(point.duration_micros(), Some(0));
+
+        let open = TimeRange::from(ts_start);
+        assert_eq!(open.duration_micros(), None);
+    }
+
+    #[test]
+    fn test_bitemporal_methods_exact() {
+        let ts1 = HybridTimestamp::new(1000, 0).unwrap();
+        let ts2 = HybridTimestamp::new(2000, 0).unwrap();
+        let ts3 = HybridTimestamp::new(3000, 0).unwrap();
+
+        // Interval 1: Both open
+        let open_open = BiTemporalInterval::current(ts1);
+        assert!(open_open.is_currently_valid());
+        assert!(open_open.is_currently_recorded());
+        assert!(open_open.is_current());
+        assert!(open_open.is_valid_at(ts2));
+        assert!(open_open.is_recorded_at(ts2));
+        assert!(open_open.is_visible_at(ts2, ts2));
+
+        // Interval 2: Valid closed, Tx open
+        let closed_valid = open_open.close_valid_time(ts2).unwrap();
+        assert!(!closed_valid.is_currently_valid());
+        assert!(closed_valid.is_currently_recorded());
+        assert!(!closed_valid.is_current());
+        assert!(!closed_valid.is_valid_at(ts3)); // Post valid close
+        assert!(closed_valid.is_recorded_at(ts3));
+        assert!(!closed_valid.is_visible_at(ts3, ts3));
+
+        // Interval 3: Valid open, Tx closed
+        let closed_tx = open_open.close_transaction_time(ts2).unwrap();
+        assert!(closed_tx.is_currently_valid());
+        assert!(!closed_tx.is_currently_recorded());
+        assert!(!closed_tx.is_current());
+        assert!(closed_tx.is_valid_at(ts3));
+        assert!(!closed_tx.is_recorded_at(ts3)); // Post tx close
+        assert!(!closed_tx.is_visible_at(ts3, ts3));
+
+        // Interval 4: Both closed
+        let closed_both = open_open.close_both(ts2, ts2).unwrap();
+        assert!(!closed_both.is_currently_valid());
+        assert!(!closed_both.is_currently_recorded());
+        assert!(!closed_both.is_current());
+        assert!(!closed_both.is_valid_at(ts3));
+        assert!(!closed_both.is_recorded_at(ts3));
+        assert!(!closed_both.is_visible_at(ts3, ts3));
+    }
+}

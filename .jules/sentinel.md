@@ -119,3 +119,9 @@
 **Summary:** Mutants returning default values or mutating exact bitwise operations survived in `IdentityHasher` logic (`^=` changed to `|=` or `&=`, `update_state` removed, match arms deleted for various byte lengths inside `write`).
 **Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted high-level collision avoidance (e.g. `assert_ne!(h1, h2)`) but lacked explicit exact bounds for `update_state` logic with `FNV_PRIME`, lengths of `write()`, default return overrides, and proper bitwise math chaining.
 **Kill Shot:** Extensively added exact bound and behavioral assertions across bitwise operators, lengths, and chaining logic within the `tests` module inside `src/core/hasher.rs`.
+
+**[Weak Test Coverage in Temporal Types Duration & Methods]**
+**Module:** src/core/temporal.rs
+**Summary:** Mutants returning arbitrary Option values for `TimeRange::duration_micros` survived. The test suite also didn't explicitly assert exact return values for methods like `BiTemporalInterval::is_currently_valid` / `is_current` across all variants of open/closed intervals.
+**Diagnosis:** WEAK_TEST - The tests likely asserted presence (`is_some`) or checked properties implicitly rather than verifying the exact boundary output.
+**Kill Shot:** Added `test_timerange_duration_micros_exact`, `test_bitemporal_methods_exact`, and related exact boolean assertions to `tests/sentry_temporal.rs` catching specific returns like `Some(0)` or `None`.
