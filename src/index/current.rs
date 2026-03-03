@@ -1244,6 +1244,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_import_csr_error_propagation() {
+        let indexes = CurrentIndexes::new();
+
+        // 1. Invalid outgoing CSR data (e.g., offsets length mismatch)
+        let invalid_out_offsets = vec![0, 1]; // too short for 2 nodes
+        let res_out = indexes.import_csr(
+            vec![1, 2],
+            invalid_out_offsets,
+            vec![100, 101],
+            vec![1, 2],
+            vec![0, 1, 2],
+            vec![100, 101],
+        );
+        assert!(res_out.is_err());
+        assert!(res_out.unwrap_err().contains("CSR offsets length mismatch"));
+
+        // 2. Valid outgoing, invalid incoming CSR data (e.g., non-monotonic offsets)
+        let invalid_in_offsets = vec![0, 2, 1];
+        let res_in = indexes.import_csr(
+            vec![1, 2],
+            vec![0, 1, 2],
+            vec![100, 101],
+            vec![1, 2],
+            invalid_in_offsets,
+            vec![100], // length matched to last offset is tricky, but non-monotonic fails early
+        );
+        assert!(res_in.is_err());
+        assert!(
+            res_in
+                .unwrap_err()
+                .contains("CSR offsets are not monotonically increasing")
+        );
+    }
+
     /// Test AdjacencyGuard Debug implementation for coverage.
     #[test]
     fn test_adjacency_guard_debug() {

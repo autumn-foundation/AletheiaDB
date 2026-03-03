@@ -118,6 +118,60 @@ fn test_graph_persist_keeps_interner_consistent_with_graph_string_ids() {
 }
 
 #[test]
+fn test_restore_index_impl_with_invalid_csr_data() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+    let current = Arc::new(CurrentStorage::new());
+
+    // 1. Create a minimal valid graph
+    current
+        .create_node("TestNode", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Persist to get basic structures
+    persist_graph_index(&current, &manager, None, 0).unwrap();
+
+    // Now, intentionally corrupt the graph file's CSR arrays
+    let graph_path = manager.graph_path().join("adjacency.idx");
+    let mut graph_data =
+        crate::storage::index_persistence::graph::load_graph_index(&graph_path).unwrap();
+
+    // Add invalid CSR data (non-matching lengths, missing offsets)
+    graph_data.outgoing_node_ids = vec![1, 2, 3];
+    graph_data.outgoing_offsets = vec![0, 1]; // invalid: should be len 4
+    graph_data.outgoing_neighbors = vec![100];
+
+    graph_data.incoming_node_ids = vec![1, 2];
+    graph_data.incoming_offsets = vec![0, 1, 2];
+    graph_data.incoming_neighbors = vec![200, 201];
+
+    // Save corrupted graph data
+    use crate::storage::index_persistence::graph::save_graph_index;
+    save_graph_index(&graph_data, &graph_path).unwrap();
+
+    // The load process shouldn't panic, it should gracefully fall back
+    // to rebuilding adjacency via `compact_adjacency`.
+    let historical = Arc::new(parking_lot::RwLock::new(
+        crate::storage::historical::HistoricalStorage::new(),
+    ));
+    let node_id_gen = Arc::new(crate::core::id::IdGenerator::new());
+    let edge_id_gen = Arc::new(crate::core::id::IdGenerator::new());
+    let version_id_gen = Arc::new(crate::core::id::IdGenerator::new());
+    crate::storage::index_persistence::operations::load_indexes_startup(
+        &manager,
+        &current,
+        &historical,
+        &node_id_gen,
+        &edge_id_gen,
+        &version_id_gen,
+    );
+
+    // Verification: if it panics, the test fails. If we get here, the Err path in
+    // `restore_index_impl` was successfully triggered and swallowed.
+    assert_eq!(current.node_count(), 1);
+}
+
+#[test]
 fn test_persist_all_indexes_creates_manifest() {
     let temp_dir = tempfile::tempdir().unwrap();
     let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
