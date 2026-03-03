@@ -1415,7 +1415,8 @@ mod tests {
 
         // Append 3 items. write_pos will wrap around.
         for i in 0..3 {
-            buf.try_append(PendingEntry::new_async(LSN(i), vec![])).unwrap();
+            buf.try_append(PendingEntry::new_async(LSN(i), vec![]))
+                .unwrap();
         }
 
         // At this point:
@@ -1426,7 +1427,11 @@ mod tests {
         // BUT there are 3 items in the buffer!
 
         let len = buf.len_approx();
-        assert_eq!(len, 3, "👺 HAVOC SUCCESS: len_approx() failed on wraparound! Expected 3, got {}", len);
+        assert_eq!(
+            len, 3,
+            "👺 HAVOC SUCCESS: len_approx() failed on wraparound! Expected 3, got {}",
+            len
+        );
     }
 
     #[test]
