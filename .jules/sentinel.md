@@ -27,3 +27,9 @@
 **Summary:** Default implementations (returning `None` or `false`) for `EntityVersion` methods like `is_anchor`, `prev_version`, etc., survived. This suggests generic tests for this trait are missing or not exercising concrete implementations.
 **Diagnosis:** WEAK_TEST - No test iterates through the version chain using the trait methods on `NodeVersion` / `EdgeVersion`.
 **Kill Shot:** Added `test_entity_version_trait_round_trip_links_for_node_and_edge` to verify trait methods correctly proxy to struct fields.
+
+**[Weak Test Coverage in Operation Reordering Rule]**
+**Module:** src/query/planner/rules/operation_reordering.rs
+**Summary:** Mutants in cardinality estimation (all `ScanOp` variants and non-filter `UnaryOp` / non-join `BinaryOp` nodes) and rule name checks likely survive due to lack of tests. Furthermore, mutants around structural predicate equality (such as differences between `And` and `Or` with the same children) and fallback behavior inside `reorder` for non-filter unaries and non-join binaries are weakly asserted.
+**Diagnosis:** WEAK_TEST / MISSING_COVERAGE - The test suite previously only covered simple filter reordering and join reordering. It did not test the entire plan tree traversal or the full scope of `estimate_cardinality`.
+**Kill Shot:** Added tests `test_estimate_cardinality_all_scan_types`, `test_estimate_cardinality_other_ops`, `test_operation_reordering_name`, `test_reorder_unary_non_filter_with_inner_change`, `test_reorder_binary_non_join`, `test_reorder_empty_plan`, and `test_predicates_not_equal_structural`.
