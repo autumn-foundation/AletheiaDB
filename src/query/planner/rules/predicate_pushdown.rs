@@ -84,6 +84,48 @@ use super::{OptimizationRule, Statistics};
 ///     Filter(active = true)  <-- Pushed down
 ///       Scan(...)
 /// ```
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::query::planner::rules::{OptimizationRule, PredicatePushdown};
+/// use aletheiadb::query::planner::stats::Statistics;
+/// use aletheiadb::query::plan::{LogicalPlan, LogicalOp, UnaryOp, ScanOp, SortKey};
+/// use aletheiadb::query::ir::{Predicate, PredicateValue};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Construct a sub-optimal plan: Filter is applied AFTER sorting
+/// let scan = LogicalOp::Scan(ScanOp::NodeScan {
+///     label: Some("Person".into()),
+///     estimated_rows: Some(100),
+/// });
+/// let sort = LogicalOp::unary(
+///     UnaryOp::Sort { key: SortKey::Score, descending: true },
+///     scan
+/// );
+/// let filter = LogicalOp::unary(
+///     UnaryOp::Filter(Predicate::Eq {
+///         key: "active".into(),
+///         value: PredicateValue::Bool(true)
+///     }),
+///     sort
+/// );
+///
+/// let plan = LogicalPlan { root: filter, temporal_context: None, hints: Default::default() };
+///
+/// // 2. Apply the rule
+/// let rule = PredicatePushdown;
+/// let stats = Statistics::new();
+/// let optimized_plan = rule.apply(&plan, &stats)?.unwrap();
+///
+/// // 3. The rule pushed the Filter BELOW the Sort
+/// assert!(matches!(
+///     optimized_plan.root,
+///     LogicalOp::Unary { op: UnaryOp::Sort { .. }, input: _ }
+/// ));
+/// # Ok(())
+/// # }
+/// ```
 pub struct PredicatePushdown;
 
 impl OptimizationRule for PredicatePushdown {
