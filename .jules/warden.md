@@ -33,3 +33,7 @@
 2024-XX-XX - [Warden: CSR Adjacency Index Vulnerability]
 **Threat:** `AdjacencyIndex::import_csr` did not validate that `node_ids` is sorted, and did not validate that `offsets` is monotonically increasing. It also didn't validate that the first offset is `0`. This allows a maliciously constructed CSR payload to cause OOB reads (Denial of Service) when `get_adjacency` is called, due to `start > end` or `end > edges.len()` when slicing the `edges` array.
 **Defense:** Added rigorous validation in `validate_csr_invariants` to ensure `node_ids` is strictly sorted (no duplicates), `offsets` begins with `0`, and is monotonically increasing.
+
+2025-02-28 - [DoS in CSR Data Parsing]
+**Threat:** A Denial of Service (DoS) vulnerability existed in `AdjacencyIndex::import_csr` where invalid Compressed Sparse Row (CSR) invariant validation caused an intentional panic via `.unwrap()`, leading to server crash on malformed or malicious CSR data during index restoration/import.
+**Defense:** Changed the function signature to return a `Result<Self, String>` and propagated the error upstream. Handled the error in `restore_index_impl` to gracefully fallback to `current.compact_adjacency()` instead of panicking.
