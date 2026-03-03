@@ -30,3 +30,6 @@
 1.  **Update `tokenizers`:** Updated `tokenizers` to version `0.22` in `Cargo.toml`. This version drops the dependency on `number_prefix` and includes fixes for known vulnerabilities.
 2.  **Update Dependencies:** Ran `cargo update` to pull in the latest compatible versions of all dependencies, resolving the yanked `bumpalo` issue in `wasm-bindgen`.
 3.  **Verification:** Ran `cargo audit` to confirm the vulnerabilities are resolved. Ran tests (`cargo test --features embedding-onnx`) to ensure no regressions.
+**2026-02-15 - [Removed Vulnerable Placeholder Feature]**
+**Threat:** The `tokenizers` crate introduced a supply chain vulnerability by pulling in the unmaintained `paste` crate (RUSTSEC-2024-0436). The `embedding-onnx` feature was active in Cargo.toml despite being non-functional.
+**Defense:** Completely removed the `tokenizers` and `ort` dependencies, and excised the non-functional `embedding-onnx` feature and examples, eliminating the vulnerability without impacting functionality.

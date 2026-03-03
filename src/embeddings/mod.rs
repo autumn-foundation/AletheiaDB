@@ -29,7 +29,6 @@
 //! - `embeddings` - Core embedding traits (required for all providers)
 //! - `embedding-openai` - OpenAI provider
 //! - `embedding-huggingface` - HuggingFace Inference API provider
-//! - `embedding-onnx` - Local ONNX models
 //! - `embedding-ollama` - Ollama local models
 //! - `embedding-all` - Enable all providers
 
@@ -41,7 +40,6 @@ pub mod service;
 #[cfg(any(
     feature = "embedding-openai",
     feature = "embedding-huggingface",
-    feature = "embedding-onnx",
     feature = "embedding-ollama"
 ))]
 pub mod providers;

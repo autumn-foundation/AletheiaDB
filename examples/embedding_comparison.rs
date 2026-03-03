@@ -25,7 +25,7 @@
 #![cfg(feature = "embedding-all")]
 
 use aletheiadb::embeddings::EmbeddingService;
-use aletheiadb::embeddings::providers::{huggingface::*, ollama::*, onnx::*, openai::*};
+use aletheiadb::embeddings::providers::{huggingface::*, ollama::*, openai::*};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -73,24 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => println!("❌ Error: {}", e),
     }
 
-    // Test ONNX (placeholder)
-    println!("\n📊 ONNX (all-MiniLM-L6-v2) [Placeholder]");
-    println!("{}", "-".repeat(60));
-    match test_provider_onnx(test_text).await {
-        Ok((latency, dims)) => {
-            println!("⚠️  Latency: {:?} (placeholder)", latency);
-            println!("⚠️  Dimensions: {} (placeholder)", dims);
-            println!("💰 Cost: Free (local)");
-        }
-        Err(e) => println!("❌ Error: {}", e),
-    }
-
     println!("\n{}", "=".repeat(60));
     println!("\n💡 Recommendations:");
     println!("   • OpenAI: Best quality, paid API, ~100-200ms latency");
     println!("   • HuggingFace: Good quality, free tier, ~200-500ms latency");
     println!("   • Ollama: Good quality, free, local, ~20-50ms latency");
-    println!("   • ONNX: Ultra-fast (<10ms), free, local, requires setup");
 
     Ok(())
 }
@@ -140,17 +127,3 @@ async fn test_provider_ollama(
     Ok((latency, embedding.len()))
 }
 
-#[cfg(feature = "embedding-all")]
-async fn test_provider_onnx(
-    text: &str,
-) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
-    let config = OnnxConfig::default();
-    let provider = Arc::new(OnnxProvider::new(config)?);
-    let service = EmbeddingService::new(provider);
-
-    let start = Instant::now();
-    let embedding = service.embed(text).await?;
-    let latency = start.elapsed();
-
-    Ok((latency, embedding.len()))
-}
