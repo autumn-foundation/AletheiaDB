@@ -1,2 +1,3 @@
 #!/bin/bash
-cargo mutants --features "http-server" --file src/http/handlers.rs --test-tool cargo --timeout 60 -- -q --test http_server
+cargo mutants --file src/core/id.rs --list > mutants.txt
+cat mutants.txt
