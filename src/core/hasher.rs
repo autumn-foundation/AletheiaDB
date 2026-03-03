@@ -169,6 +169,98 @@ mod tests {
     }
 
     #[test]
+    fn test_identity_hasher_bitwise_update_logic() {
+        let mut h = IdentityHasher::default();
+        h.update_state(42);
+        assert_eq!(h.finish(), 42);
+
+        h.update_state(7);
+        // Correct is bitwise XOR: (42 ^ 7) * FNV_PRIME = 45 * FNV_PRIME
+        let expected = 45u64.wrapping_mul(FNV_PRIME);
+        assert_eq!(h.finish(), expected);
+
+        let mut h2 = IdentityHasher::default();
+        h2.update_state(1);
+        assert_eq!(h2.finish(), 1);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_length_variations() {
+        // Assert exactly what happens for specific sized writes
+        let mut h1 = IdentityHasher::default();
+        h1.write(&[0x12]);
+        assert_eq!(h1.finish(), 0x12);
+
+        let mut h2 = IdentityHasher::default();
+        h2.write(&[0x12, 0x34]);
+        assert_eq!(h2.finish(), 0x3412);
+
+        let mut h4 = IdentityHasher::default();
+        h4.write(&[0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(h4.finish(), 0x78563412);
+
+        let mut h8 = IdentityHasher::default();
+        h8.write(&[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
+        assert_eq!(h8.finish(), 0xF0DEBC9A78563412);
+
+        let mut h16 = IdentityHasher::default();
+        h16.write(&[
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x00,
+        ]);
+        let low = 0x8877665544332211u64;
+        let high = 0x00FFEEDDCCBBAA99u64;
+        assert_eq!(h16.finish(), low ^ high);
+    }
+
+    #[test]
+    fn test_identity_hasher_empty_and_fallback_states() {
+        let mut hasher = IdentityHasher::default();
+        hasher.write(&[]);
+        // Explicitly assert it doesn't default to 0
+        assert_ne!(hasher.finish(), 0);
+
+        // Fallback for an unhandled byte length (e.g. 3) does not collision
+        let mut h3 = IdentityHasher::default();
+        h3.write(&[0x01, 0x02, 0x03]);
+        let h3_val = h3.finish();
+        assert_ne!(h3_val, 0);
+
+        // Dirty FNV chaining
+        let mut h3_dirty = IdentityHasher::default();
+        h3_dirty.update_state(0x42);
+        h3_dirty.write(&[0x01, 0x02, 0x03]);
+        assert_ne!(h3_dirty.finish(), h3_val);
+    }
+
+    #[test]
+    fn test_identity_hasher_exact_primitives() {
+        let mut h8 = IdentityHasher::default();
+        h8.write_u8(1);
+        assert_eq!(h8.finish(), 1);
+
+        let mut h16 = IdentityHasher::default();
+        h16.write_u16(2);
+        assert_eq!(h16.finish(), 2);
+
+        let mut h32 = IdentityHasher::default();
+        h32.write_u32(3);
+        assert_eq!(h32.finish(), 3);
+
+        let mut h64 = IdentityHasher::default();
+        h64.write_u64(4);
+        assert_eq!(h64.finish(), 4);
+
+        let mut husize = IdentityHasher::default();
+        husize.write_usize(5);
+        assert_eq!(husize.finish(), 5);
+
+        let mut h_empty = IdentityHasher::default();
+        h_empty.write_u64(0);
+        assert_eq!(h_empty.finish(), 0);
+    }
+
+    #[test]
     fn test_identity_hasher_u64() {
         let mut hasher = IdentityHasher::default();
         hasher.write_u64(u64::MAX);
