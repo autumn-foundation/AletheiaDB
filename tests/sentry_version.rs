@@ -193,8 +193,8 @@ fn test_vector_delta_from_diff_mutants() {
 
     // lots of changes -> full replacement
     let mut v3 = v1.clone();
-    for i in 0..50 {
-        v3[i] = 1.0;
+    for item in v3.iter_mut().take(50) {
+        *item = 1.0;
     }
     let delta_full = VectorDelta::from_diff(&v1, &v3).unwrap();
     if let VectorDelta::Full(v) = delta_full {

@@ -79,4 +79,3 @@ test_output_*.txt
 # Mutation testing output
 mutants.out/
 mutants.out.old/
-echo_project/

@@ -1040,51 +1040,6 @@ impl TemporalVectorIndex {
     }
 
     /// Retrieves the semantic evolution of a node over time.
-    ///
-    /// This method extracts the raw vector representations of a specific node across all
-    /// stored snapshots within the specified [`TimeRange`]. This is foundational for analyzing
-    /// how a concept's meaning has shifted in the vector space, rather than just tracking
-    /// distance from a single reference point.
-    ///
-    /// # Arguments
-    ///
-    /// * `node_id` - The [`NodeId`] whose historical embeddings to retrieve.
-    /// * `time_range` - The [`TimeRange`] defining the period of interest.
-    ///
-    /// # Returns
-    ///
-    /// A vector of `(timestamp, vector_data)` pairs, sorted chronologically. Each pair
-    /// represents the node's embedding at that specific [`Timestamp`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use aletheiadb::index::vector::temporal::TemporalVectorIndex;
-    /// use aletheiadb::core::temporal::TimeRange;
-    /// use aletheiadb::core::id::NodeId;
-    ///
-    /// # fn example(index: &TemporalVectorIndex) -> aletheiadb::core::error::Result<()> {
-    /// let node_id = NodeId::new(42).unwrap();
-    /// let time_range = TimeRange::new(1000000.into(), 2000000.into()).unwrap();
-    ///
-    /// // Retrieve all historical versions of the node's embedding
-    /// let evolution = index.semantic_evolution(node_id, time_range)?;
-    ///
-    /// println!("Node {} had {} distinct embeddings during this period.",
-    ///          node_id, evolution.len());
-    ///
-    /// for (timestamp, vector) in evolution {
-    ///     println!("At {}: vector length is {}", timestamp, vector.len());
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Use Cases
-    ///
-    /// - Visualizing the trajectory of a document's meaning in 2D/3D space (e.g., via PCA/t-SNE).
-    /// - Feeding historical embeddings into a recurrent neural network (RNN) for trend prediction.
-    /// - Debugging vector update pipelines to see *how* an embedding changed, not just *that* it changed.
     pub fn semantic_evolution(
         &self,
         node_id: NodeId,

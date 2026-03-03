@@ -473,7 +473,7 @@ impl QueryPlanner {
                 index_type: "vector".to_string(),
                 property_name: effective_property.clone(),
                 hint: Some(format!(
-                    "Call db.vector_index(\"{}\").hnsw(...).enable() first",
+                    "Call db.enable_vector_index(\"{}\", config) first",
                     effective_property
                 )),
             }));
@@ -1561,7 +1561,7 @@ mod tests {
         assert!(err_msg.contains("index"));
         assert!(err_msg.contains("embedding"));
         assert!(
-            err_msg.contains("vector_index(\"embedding\").hnsw"),
+            err_msg.contains("enable_vector_index"),
             "Error message should provide hint to enable index: {}",
             err_msg
         );

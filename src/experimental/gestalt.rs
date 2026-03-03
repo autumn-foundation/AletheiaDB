@@ -6,7 +6,7 @@
 //! not just by label, but by **semantic similarity** to a concept vector.
 //!
 //! This enables queries like:
-//! "Find a \[Person ~ 'Engineer'\] connected to a \[Company ~ 'Startup'\] via \[WORKS_FOR\]."
+//! "Find a [Person ~ 'Engineer'] connected to a [Company ~ 'Startup'] via [WORKS_FOR]."
 //!
 //! # Concepts
 //! - **Pattern**: A template subgraph with constraints.

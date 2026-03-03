@@ -20,8 +20,7 @@ use aletheiadb::core::interning::StringInterner;
 use aletheiadb::{CurrentStorage, PropertyMapBuilder};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 use std::thread;
 
 /// Create a test graph with a specified number of nodes and edges.
@@ -283,49 +282,25 @@ fn bench_id_concurrent(c: &mut Criterion) {
             BenchmarkId::new("threads", thread_count),
             &thread_count,
             |b, &thread_count| {
-                let generator = Arc::new(IdGenerator::new());
-                // Keep enough work per iteration to amortize synchronization jitter.
-                let ids_per_thread = 1000;
-                let start_barrier = Arc::new(Barrier::new(thread_count + 1));
-                let done_barrier = Arc::new(Barrier::new(thread_count + 1));
-                let stop = Arc::new(AtomicBool::new(false));
+                b.iter(|| {
+                    let generator = Arc::new(IdGenerator::new());
+                    let ids_per_thread = 1000;
 
-                // Keep worker threads alive across iterations to avoid measuring
-                // thread spawn/join overhead and OS scheduler noise.
-                let handles: Vec<_> = (0..thread_count)
-                    .map(|_| {
-                        let gen_clone = Arc::clone(&generator);
-                        let start_clone = Arc::clone(&start_barrier);
-                        let done_clone = Arc::clone(&done_barrier);
-                        let stop_clone = Arc::clone(&stop);
-                        thread::spawn(move || {
-                            loop {
-                                start_clone.wait();
-                                if stop_clone.load(Ordering::Acquire) {
-                                    break;
-                                }
-
+                    let handles: Vec<_> = (0..thread_count)
+                        .map(|_| {
+                            let gen_clone = Arc::clone(&generator);
+                            thread::spawn(move || {
                                 for _ in 0..ids_per_thread {
                                     black_box(gen_clone.next().unwrap());
                                 }
-
-                                done_clone.wait();
-                            }
+                            })
                         })
-                    })
-                    .collect();
+                        .collect();
 
-                b.iter(|| {
-                    start_barrier.wait();
-                    done_barrier.wait();
+                    for handle in handles {
+                        handle.join().unwrap();
+                    }
                 });
-
-                stop.store(true, Ordering::Release);
-                // Wake workers so they can observe the stop flag and exit.
-                start_barrier.wait();
-                for handle in handles {
-                    handle.join().unwrap();
-                }
             },
         );
     }
