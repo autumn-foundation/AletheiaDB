@@ -1,4 +1,4 @@
-use crate::core::error::Result;
+use crate::core::error::{Result, ResultExt};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
@@ -33,7 +33,9 @@ impl AletheiaDB {
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("enable_vector_index").entered();
-        self.current.enable_vector_index(property_name, config)
+        self.current
+            .enable_vector_index(property_name, config)
+            .record_error_metric()
     }
 
     /// Check if vector indexing is enabled.
@@ -79,21 +81,21 @@ impl AletheiaDB {
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
-        // Resolve hnsw_config: use provided config or get from existing vector index
-        let resolved_hnsw_config =
-            if let Some(hnsw_config) = config.hnsw_config.clone() {
+        let result = (|| {
+            // Resolve hnsw_config: use provided config or get from existing vector index
+            let resolved_hnsw_config = if let Some(hnsw_config) = config.hnsw_config.clone() {
                 // Config was provided explicitly
                 hnsw_config
             } else if self.current.is_vector_index_enabled_for(property_name) {
                 // No config provided, but vector index exists - use its config
                 self.current.get_hnsw_config_for(property_name).ok_or_else(|| {
-                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                    format!(
-                        "Vector index exists for '{}' but could not retrieve its configuration",
-                        property_name
-                    ),
-                ))
-            })?
+                    crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                        format!(
+                            "Vector index exists for '{}' but could not retrieve its configuration",
+                            property_name
+                        ),
+                    ))
+                })?
             } else {
                 // No config provided and no vector index exists - error
                 return Err(crate::core::error::Error::Vector(
@@ -106,53 +108,56 @@ impl AletheiaDB {
                 ));
             };
 
-        // Enable vector index if it doesn't exist yet
-        if !self.current.is_vector_index_enabled_for(property_name) {
-            self.enable_vector_index(property_name, resolved_hnsw_config.clone())?;
-        }
+            // Enable vector index if it doesn't exist yet
+            if !self.current.is_vector_index_enabled_for(property_name) {
+                self.current
+                    .enable_vector_index(property_name, resolved_hnsw_config.clone())?;
+            }
 
-        #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("enable_temporal_vector_index").entered();
+            #[cfg(feature = "observability")]
+            let _span = tracing::info_span!("enable_temporal_vector_index").entered();
 
-        // Create a resolved config with the hnsw_config set
-        let resolved_config = TemporalVectorConfig {
-            hnsw_config: Some(resolved_hnsw_config),
-            ..config
-        };
+            // Create a resolved config with the hnsw_config set
+            let resolved_config = TemporalVectorConfig {
+                hnsw_config: Some(resolved_hnsw_config),
+                ..config
+            };
 
-        // Enable temporal vector index in current storage
-        self.current
-            .enable_temporal_vector_index(property_name, resolved_config)?;
+            // Enable temporal vector index in current storage
+            self.current
+                .enable_temporal_vector_index(property_name, resolved_config)?;
 
-        // Get the temporal vector index from current storage
-        let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
-            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                "Temporal vector index not found after enabling".to_string(),
-            ))
-        })?;
+            // Get the temporal vector index from current storage
+            let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                    "Temporal vector index not found after enabling".to_string(),
+                ))
+            })?;
 
-        // Register pre-anchor hooks with historical storage (for strong consistency)
-        // Both node and edge hooks perform the same action, so we create one and clone it
-        let hook: crate::storage::historical::PreAnchorHook = {
-            let index = Arc::clone(&temporal_index);
-            Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
-                index.create_snapshot_for_anchor(timestamp)
-            })
-        };
+            // Register pre-anchor hooks with historical storage (for strong consistency)
+            // Both node and edge hooks perform the same action, so we create one and clone it
+            let hook: crate::storage::historical::PreAnchorHook = {
+                let index = Arc::clone(&temporal_index);
+                Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
+                    index.create_snapshot_for_anchor(timestamp)
+                })
+            };
 
-        let node_hook = Arc::clone(&hook);
-        let edge_hook = hook;
+            let node_hook = Arc::clone(&hook);
+            let edge_hook = hook;
 
-        let mut historical = self.historical.write();
+            let mut historical = self.historical.write();
 
-        historical.register_pre_node_anchor_hook(node_hook);
-        historical.register_pre_edge_anchor_hook(edge_hook);
+            historical.register_pre_node_anchor_hook(node_hook);
+            historical.register_pre_edge_anchor_hook(edge_hook);
 
-        // Create observer and register with historical storage (for extensibility)
-        let observer = VectorIndexObserver::new(temporal_index);
-        historical.add_observer(std::sync::Arc::new(observer));
+            // Create observer and register with historical storage (for extensibility)
+            let observer = VectorIndexObserver::new(temporal_index);
+            historical.add_observer(std::sync::Arc::new(observer));
 
-        Ok(())
+            Ok(())
+        })();
+        result.record_error_metric()
     }
 
     /// Check if temporal vector indexing is enabled.
@@ -291,6 +296,7 @@ impl AletheiaDB {
         let _span = tracing::info_span!("find_similar_in").entered();
         self.current
             .find_similar_in(property_name, query_node_id, k)
+            .record_error_metric()
     }
 
     /// Search a specific property's vector index with a raw embedding.
@@ -325,7 +331,9 @@ impl AletheiaDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("search_vectors_in").entered();
-        self.current.search_vectors_in(property_name, embedding, k)
+        self.current
+            .search_vectors_in(property_name, embedding, k)
+            .record_error_metric()
     }
 
     /// Find k most similar nodes to a query node based on vector similarity.
@@ -357,7 +365,9 @@ impl AletheiaDB {
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar").entered();
-        self.current.find_similar(query_node_id, k)
+        self.current
+            .find_similar(query_node_id, k)
+            .record_error_metric()
     }
 
     /// Find k most similar nodes with a specific label.
@@ -387,6 +397,7 @@ impl AletheiaDB {
         let _span = tracing::info_span!("find_similar_with_label").entered();
         self.current
             .find_similar_with_label(query_node_id, label, k)
+            .record_error_metric()
     }
 
     /// Find k most similar nodes to a raw embedding vector.
@@ -427,7 +438,9 @@ impl AletheiaDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar_by_embedding").entered();
-        self.current.find_similar_by_embedding(embedding, k)
+        self.current
+            .find_similar_by_embedding(embedding, k)
+            .record_error_metric()
     }
 
     /// Find k most similar nodes with a specific label to a raw embedding vector.
@@ -477,6 +490,7 @@ impl AletheiaDB {
         let _span = tracing::info_span!("find_similar").entered();
         self.current
             .find_similar_by_embedding_with_label(embedding, label, k)
+            .record_error_metric()
     }
 
     /// Find k most similar nodes using a custom predicate for filtering.
@@ -505,6 +519,7 @@ impl AletheiaDB {
         let _span = tracing::info_span!("find_similar_with_predicate").entered();
         self.current
             .find_similar_with_predicate(property_name, query_vector, k, predicate)
+            .record_error_metric()
     }
 
     /// Find k most similar nodes at a specific point in time.
@@ -543,7 +558,9 @@ impl AletheiaDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar_as_of").entered();
-        self.current.find_similar_as_of(embedding, k, timestamp)
+        self.current
+            .find_similar_as_of(embedding, k, timestamp)
+            .record_error_metric()
     }
 
     /// Find similar vectors at a specific point in time for a specific property.
@@ -591,6 +608,7 @@ impl AletheiaDB {
             tracing::info_span!("find_similar_as_of_in", property = property_name).entered();
         self.current
             .find_similar_as_of_in(property_name, embedding, k, timestamp)
+            .record_error_metric()
     }
 
     /// Track semantic drift for a node over time in a specific property's temporal index.
@@ -649,6 +667,7 @@ impl AletheiaDB {
                 .entered();
         self.current
             .track_drift_in(property_name, node_id, reference_embedding, time_range)
+            .record_error_metric()
     }
 
     /// Get the semantic evolution of a node's embedding over time in a specific property.
@@ -697,6 +716,7 @@ impl AletheiaDB {
                 .entered();
         self.current
             .semantic_evolution_in(property_name, node_id, time_range)
+            .record_error_metric()
     }
 
     /// Find all nodes with semantic drift above a threshold in a specific property.
@@ -757,6 +777,7 @@ impl AletheiaDB {
         .entered();
         self.current
             .find_drift_in(property_name, threshold, time_range, metric)
+            .record_error_metric()
     }
 }
 

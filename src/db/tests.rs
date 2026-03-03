@@ -2258,3 +2258,82 @@ fn test_debug_implementation() {
     assert!(debug_output.contains("persistence_enabled"));
     assert!(debug_output.contains("stats"));
 }
+
+#[cfg(feature = "observability")]
+fn poison_mutex<T>(mutex: &std::sync::Arc<std::sync::Mutex<T>>) {
+    let mutex = std::sync::Arc::clone(mutex);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _guard = mutex.lock().expect("failed to lock mutex for poisoning");
+        panic!("intentional mutex poison for metrics test");
+    }));
+}
+
+#[cfg(feature = "observability")]
+#[test]
+fn test_create_node_transaction_error_counted_once_when_lock_poisoned() {
+    crate::observability::METRICS.reset();
+    let db = AletheiaDB::new().unwrap();
+
+    poison_mutex(&db.current_timestamp);
+
+    let result = db.create_node("Person", PropertyMapBuilder::new().build());
+    assert!(result.is_err());
+
+    let snapshot = crate::observability::METRICS.snapshot();
+    assert_eq!(snapshot.error_transaction_total, 1);
+}
+
+#[cfg(feature = "observability")]
+#[test]
+fn test_vector_builder_duplicate_enable_counts_error_once() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+        .unwrap();
+
+    crate::observability::METRICS.reset();
+    let result = db
+        .vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable();
+    assert!(result.is_err());
+
+    let snapshot = crate::observability::METRICS.snapshot();
+    assert_eq!(snapshot.error_vector_total, 1);
+}
+
+#[cfg(feature = "observability")]
+#[test]
+fn test_read_closure_db_error_counts_once() {
+    crate::observability::METRICS.reset();
+    let db = AletheiaDB::new().unwrap();
+
+    let missing_id = NodeId::new(999_999).unwrap();
+    let result: Result<()> = db.read(|tx| {
+        tx.get_node(missing_id)?;
+        Ok(())
+    });
+    assert!(result.is_err());
+
+    let snapshot = crate::observability::METRICS.snapshot();
+    assert_eq!(snapshot.error_storage_total, 1);
+}
+
+#[cfg(feature = "observability")]
+#[test]
+fn test_write_commit_error_counts_once() {
+    crate::observability::METRICS.reset();
+    let db = AletheiaDB::new().unwrap();
+
+    poison_mutex(&db.commit_clock_observed_at);
+
+    let result: Result<()> = db.write(|tx| {
+        tx.create_node("Person", PropertyMapBuilder::new().build())?;
+        Ok(())
+    });
+    assert!(result.is_err());
+
+    let snapshot = crate::observability::METRICS.snapshot();
+    assert_eq!(snapshot.error_transaction_total, 1);
+}
