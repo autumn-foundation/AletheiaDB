@@ -506,3 +506,77 @@ mod tests {
         assert_eq!(hasher.finish(), 42);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A reference FNV-1a implementation for comparison.
+    fn reference_fnv1a(bytes: &[u8]) -> u64 {
+        let mut hash = FNV_OFFSET_BASIS;
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    proptest! {
+        /// Property: IdentityHasher's fallback logic for arbitrary byte slices exactly matches a
+        /// standard FNV-1a implementation when starting from an empty (0) state.
+        ///
+        /// This verifies the `_ =>` arm in `IdentityHasher::write`.
+        #[test]
+        fn prop_identity_hasher_fallback_matches_fnv1a(
+            bytes in prop::collection::vec(any::<u8>(), 0..100)
+        ) {
+            // IdentityHasher's fast paths trigger on exact lengths: 1, 2, 4, 8, 16.
+            // When testing the FNV fallback, we ignore these fast-path lengths.
+            let is_fast_path = matches!(bytes.len(), 1 | 2 | 4 | 8 | 16);
+            if !is_fast_path {
+                let mut hasher = IdentityHasher::default();
+                hasher.write(&bytes);
+                let actual = hasher.finish();
+
+                let expected = if bytes.is_empty() {
+                    FNV_OFFSET_BASIS // If bytes is empty but we hit `_ =>`, we do `self.0 = FNV_OFFSET_BASIS` and return.
+                } else {
+                    reference_fnv1a(&bytes)
+                };
+
+                prop_assert_eq!(
+                    actual,
+                    expected,
+                    "IdentityHasher FNV fallback failed for length {}",
+                    bytes.len()
+                );
+            }
+        }
+
+        /// Property: IdentityHasher chains FNV-1a correctly if the state is already dirty.
+        #[test]
+        fn prop_identity_hasher_fallback_chained(
+            bytes in prop::collection::vec(any::<u8>(), 1..100)
+        ) {
+            let is_fast_path = matches!(bytes.len(), 1 | 2 | 4 | 8 | 16);
+            if !is_fast_path {
+                let mut hasher = IdentityHasher::default();
+                // Dirty the state
+                hasher.write_u32(42);
+
+                // Fallback will now chain onto this dirty state
+                hasher.write(&bytes);
+                let actual = hasher.finish();
+
+                let mut expected_state = 42u64;
+                for &byte in bytes.iter() {
+                    expected_state ^= byte as u64;
+                    expected_state = expected_state.wrapping_mul(FNV_PRIME);
+                }
+
+                prop_assert_eq!(actual, expected_state);
+            }
+        }
+    }
+}
