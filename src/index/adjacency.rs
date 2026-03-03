@@ -94,13 +94,13 @@ impl AdjacencyIndex {
             (NodeId, InternedString),
             BuildHasherDefault<IdentityHasher>,
         >,
-    ) -> Self {
+    ) -> Result<Self, String> {
         if offsets.is_empty() || edge_ids.is_empty() {
-            return Self::new();
+            return Ok(Self::new());
         }
 
         // Validate CSR invariants
-        Self::validate_csr_invariants(&node_ids, &offsets, &edge_ids).unwrap();
+        Self::validate_csr_invariants(&node_ids, &offsets, &edge_ids)?;
 
         let max_node_id = node_ids.iter().max().copied().unwrap_or(0);
 
@@ -128,12 +128,12 @@ impl AdjacencyIndex {
             }
         }
 
-        Self {
+        Ok(Self {
             node_ids: node_ids_typed,
             offsets: offsets_usize,
             edges: adjacency_entries,
             max_node_id,
-        }
+        })
     }
 }
 
@@ -782,7 +782,7 @@ mod tests {
         edges_map.insert(EdgeId::new(10).unwrap(), (NodeId::new(2).unwrap(), label));
         edges_map.insert(EdgeId::new(20).unwrap(), (NodeId::new(1).unwrap(), label));
 
-        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map).unwrap();
         assert_eq!(index.node_count(), 2);
         assert_eq!(index.edge_count(), 2);
     }
@@ -818,14 +818,14 @@ mod sentry_tests {
     }
 
     #[test]
-    #[should_panic(expected = "CSR offsets length mismatch")]
-    fn test_import_csr_panics_on_invalid() {
-        // Integration check: ensure import_csr actually calls validate and panics
+    fn test_import_csr_errors_on_invalid() {
+        // Integration check: ensure import_csr actually calls validate and returns an error
         let node_ids = vec![10];
         let offsets = vec![0]; // invalid len (should be 2)
         let edge_ids = vec![100]; // Non-empty to bypass early return
         let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
-        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let err = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map).unwrap_err();
+        assert!(err.contains("CSR offsets length mismatch"));
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod sentry_tests {
         edges_map.insert(EdgeId::new(101).unwrap(), (target, label));
 
         // Should not panic
-        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map).unwrap();
 
         assert_eq!(index.edge_count(), 2);
         assert_eq!(index.node_count(), 2);
