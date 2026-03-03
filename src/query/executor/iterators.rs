@@ -883,98 +883,92 @@ impl FilterIterator {
         match predicate {
             Predicate::True => true,
             Predicate::False => false,
-
-            Predicate::Eq { key, value } => {
-                if let Some(prop) = node.properties.get(key) {
-                    self.compare_eq(prop, value)
-                } else {
-                    false
-                }
-            }
-
-            Predicate::Ne { key, value } => {
-                if let Some(prop) = node.properties.get(key) {
-                    !self.compare_eq(prop, value)
-                } else {
-                    true // Non-existent != anything
-                }
-            }
-
-            Predicate::Gt { key, value } => {
-                if let Some(prop) = node.properties.get(key) {
-                    self.compare_gt(prop, value)
-                } else {
-                    false
-                }
-            }
-
-            Predicate::Lt { key, value } => {
-                if let Some(prop) = node.properties.get(key) {
-                    self.compare_lt(prop, value)
-                } else {
-                    false
-                }
-            }
-
-            Predicate::Gte { key, value } => {
-                if let Some(prop) = node.properties.get(key) {
-                    self.compare_gte(prop, value)
-                } else {
-                    false
-                }
-            }
-
-            Predicate::Lte { key, value } => {
-                if let Some(prop) = node.properties.get(key) {
-                    self.compare_lte(prop, value)
-                } else {
-                    false
-                }
-            }
-
+            Predicate::Eq { key, value } => self.evaluate_eq(node, key, value),
+            Predicate::Ne { key, value } => self.evaluate_ne(node, key, value),
+            Predicate::Gt { key, value } => self.evaluate_gt(node, key, value),
+            Predicate::Lt { key, value } => self.evaluate_lt(node, key, value),
+            Predicate::Gte { key, value } => self.evaluate_gte(node, key, value),
+            Predicate::Lte { key, value } => self.evaluate_lte(node, key, value),
             Predicate::Exists(key) => node.properties.get(key).is_some(),
-
             Predicate::NotExists(key) => node.properties.get(key).is_none(),
-
-            Predicate::Contains { key, substring } => {
-                if let Some(PropertyValue::String(s)) = node.properties.get(key) {
-                    s.contains(substring.as_str())
-                } else {
-                    false
-                }
-            }
-
-            Predicate::StartsWith { key, prefix } => {
-                if let Some(PropertyValue::String(s)) = node.properties.get(key) {
-                    s.starts_with(prefix.as_str())
-                } else {
-                    false
-                }
-            }
-
-            Predicate::EndsWith { key, suffix } => {
-                if let Some(PropertyValue::String(s)) = node.properties.get(key) {
-                    s.ends_with(suffix.as_str())
-                } else {
-                    false
-                }
-            }
-
-            Predicate::In { key, values } => {
-                if let Some(prop) = node.properties.get(key) {
-                    values.iter().any(|v| self.compare_eq(prop, v))
-                } else {
-                    false
-                }
-            }
-
+            Predicate::Contains { key, substring } => self.evaluate_contains(node, key, substring),
+            Predicate::StartsWith { key, prefix } => self.evaluate_starts_with(node, key, prefix),
+            Predicate::EndsWith { key, suffix } => self.evaluate_ends_with(node, key, suffix),
+            Predicate::In { key, values } => self.evaluate_in(node, key, values),
             Predicate::And(preds) => preds.iter().all(|p| self.evaluate_predicate(p, node)),
-
             Predicate::Or(preds) => preds.iter().any(|p| self.evaluate_predicate(p, node)),
-
             Predicate::Not(pred) => !self.evaluate_predicate(pred, node),
-            // All variants covered - no default case needed
         }
+    }
+
+    fn evaluate_eq(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = node.properties.get(key) else {
+            return false;
+        };
+        self.compare_eq(prop, value)
+    }
+
+    fn evaluate_ne(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = node.properties.get(key) else {
+            return true; // Non-existent != anything
+        };
+        !self.compare_eq(prop, value)
+    }
+
+    fn evaluate_gt(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = node.properties.get(key) else {
+            return false;
+        };
+        self.compare_gt(prop, value)
+    }
+
+    fn evaluate_lt(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = node.properties.get(key) else {
+            return false;
+        };
+        self.compare_lt(prop, value)
+    }
+
+    fn evaluate_gte(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = node.properties.get(key) else {
+            return false;
+        };
+        self.compare_gte(prop, value)
+    }
+
+    fn evaluate_lte(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = node.properties.get(key) else {
+            return false;
+        };
+        self.compare_lte(prop, value)
+    }
+
+    fn evaluate_contains(&self, node: &Node, key: &str, substring: &str) -> bool {
+        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+            return false;
+        };
+        s.contains(substring)
+    }
+
+    fn evaluate_starts_with(&self, node: &Node, key: &str, prefix: &str) -> bool {
+        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+            return false;
+        };
+        s.starts_with(prefix)
+    }
+
+    fn evaluate_ends_with(&self, node: &Node, key: &str, suffix: &str) -> bool {
+        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+            return false;
+        };
+        s.ends_with(suffix)
+    }
+
+    fn evaluate_in(&self, node: &Node, key: &str, values: &[PredicateValue]) -> bool {
+        let Some(prop) = node.properties.get(key) else {
+            return false;
+        };
+        values.iter().any(|v| self.compare_eq(prop, v))
     }
 
     fn compare_eq(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
@@ -1148,7 +1142,7 @@ impl ResultIterator for VectorRerankIterator {
                     return Some(Err(crate::core::error::Error::Vector(
                         crate::core::error::VectorError::IndexError(
                             "VectorRerank requires a vector index to be enabled. \
-                             Call db.enable_vector_index() first."
+                             Call db.vector_index(\"...\").hnsw(...).enable() first."
                                 .to_string(),
                         ),
                     )));

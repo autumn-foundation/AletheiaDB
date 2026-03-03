@@ -1,11 +1,15 @@
 //! Write buffering for uncommitted transaction changes
 
 use crate::core::error::{Result, StorageError};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+
+type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
 
 /// Buffered write operation
 ///
@@ -96,6 +100,60 @@ pub enum BufferedWrite {
     },
 }
 
+impl BufferedWrite {
+    /// Return the node ID if this operation applies to a node
+    pub fn node_id(&self) -> Option<NodeId> {
+        match self {
+            Self::CreateNode { node_id, .. } => Some(*node_id),
+            Self::UpdateNode { node_id, .. } => Some(*node_id),
+            Self::DeleteNode { node_id, .. } => Some(*node_id),
+            _ => None,
+        }
+    }
+
+    /// Return the edge ID if this operation applies to an edge
+    pub fn edge_id(&self) -> Option<EdgeId> {
+        match self {
+            Self::CreateEdge { edge_id, .. } => Some(*edge_id),
+            Self::UpdateEdge { edge_id, .. } => Some(*edge_id),
+            Self::DeleteEdge { edge_id, .. } => Some(*edge_id),
+            _ => None,
+        }
+    }
+
+    /// Return a reference to the properties map if the operation has one
+    pub fn properties(&self) -> Option<&PropertyMap> {
+        match self {
+            Self::CreateNode { properties, .. } => Some(properties),
+            Self::UpdateNode { properties, .. } => Some(properties),
+            Self::CreateEdge { properties, .. } => Some(properties),
+            Self::UpdateEdge { properties, .. } => Some(properties),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a node operation
+    pub fn is_node_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateNode { .. } | Self::UpdateNode { .. } | Self::DeleteNode { .. }
+        )
+    }
+
+    /// Check if this is an edge operation
+    pub fn is_edge_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateEdge { .. } | Self::UpdateEdge { .. } | Self::DeleteEdge { .. }
+        )
+    }
+
+    /// Check if this operation modifies edge structure
+    pub fn is_edge_structure_modification(&self) -> bool {
+        matches!(self, Self::CreateEdge { .. } | Self::DeleteEdge { .. })
+    }
+}
+
 /// Default maximum number of operations per transaction (DoS protection)
 ///
 /// Set to 50,000 to accommodate realistic batch operations (imports, migrations)
@@ -113,11 +171,15 @@ pub struct WriteBuffer {
 
     /// Quick lookup: which nodes have been written to
     /// Maps NodeId → index in operations vector
-    modified_nodes: HashMap<NodeId, usize>,
+    ///
+    /// Using IdentityHasher avoids SipHash overhead since NodeId is already a high-quality unique u64 ID.
+    modified_nodes: FastHashMap<NodeId, usize>,
 
     /// Quick lookup: which edges have been written to
     /// Maps EdgeId → index in operations vector
-    modified_edges: HashMap<EdgeId, usize>,
+    ///
+    /// Using IdentityHasher avoids SipHash overhead since EdgeId is already a high-quality unique u64 ID.
+    modified_edges: FastHashMap<EdgeId, usize>,
 
     /// Maximum number of operations allowed (DoS protection)
     max_operations: usize,
@@ -145,8 +207,8 @@ impl WriteBuffer {
     pub fn with_max_operations(max_operations: usize) -> Self {
         WriteBuffer {
             operations: Vec::new(),
-            modified_nodes: HashMap::new(),
-            modified_edges: HashMap::new(),
+            modified_nodes: FastHashMap::default(),
+            modified_edges: FastHashMap::default(),
             max_operations,
             has_vector_operations: false,
             has_edge_operations: false,
@@ -160,8 +222,14 @@ impl WriteBuffer {
     pub fn with_capacity(capacity: usize) -> Self {
         WriteBuffer {
             operations: Vec::with_capacity(capacity),
-            modified_nodes: HashMap::with_capacity(capacity / 2),
-            modified_edges: HashMap::with_capacity(capacity / 2),
+            modified_nodes: FastHashMap::with_capacity_and_hasher(
+                capacity / 2,
+                BuildHasherDefault::default(),
+            ),
+            modified_edges: FastHashMap::with_capacity_and_hasher(
+                capacity / 2,
+                BuildHasherDefault::default(),
+            ),
             max_operations: capacity,
             has_vector_operations: false,
             has_edge_operations: false,
@@ -185,55 +253,20 @@ impl WriteBuffer {
         let index = self.operations.len();
 
         // Track which entities are modified for conflict detection
-        // and check for vector properties
-        match &write {
-            BufferedWrite::CreateNode {
-                node_id,
-                properties,
-                ..
-            }
-            | BufferedWrite::UpdateNode {
-                node_id,
-                properties,
-                ..
-            } => {
-                self.modified_nodes.insert(*node_id, index);
-                // Check if this operation contains vector properties
-                self.has_vector_operations =
-                    self.has_vector_operations || properties.contains_vector();
-            }
-            BufferedWrite::DeleteNode { node_id, .. } => {
-                self.modified_nodes.insert(*node_id, index);
-            }
-            BufferedWrite::CreateEdge {
-                edge_id,
-                properties,
-                ..
-            } => {
-                self.modified_edges.insert(*edge_id, index);
-                // Mark that edge structure was modified (create changes topology)
-                self.has_edge_operations = true;
-                // Check if this operation contains vector properties
-                self.has_vector_operations =
-                    self.has_vector_operations || properties.contains_vector();
-            }
-            BufferedWrite::UpdateEdge {
-                edge_id,
-                properties,
-                ..
-            } => {
-                self.modified_edges.insert(*edge_id, index);
-                // UpdateEdge only modifies properties, not topology (source/target/label)
-                // so it doesn't require adjacency rebuild
-                // Check if this operation contains vector properties
-                self.has_vector_operations =
-                    self.has_vector_operations || properties.contains_vector();
-            }
-            BufferedWrite::DeleteEdge { edge_id, .. } => {
-                self.modified_edges.insert(*edge_id, index);
-                // Mark that edge structure was modified (delete changes topology)
-                self.has_edge_operations = true;
-            }
+        if let Some(node_id) = write.node_id() {
+            self.modified_nodes.insert(node_id, index);
+        } else if let Some(edge_id) = write.edge_id() {
+            self.modified_edges.insert(edge_id, index);
+        }
+
+        // Check if this operation contains vector properties
+        if let Some(properties) = write.properties() {
+            self.has_vector_operations |= properties.contains_vector();
+        }
+
+        // Check if edge structure was modified
+        if write.is_edge_structure_modification() {
+            self.has_edge_operations = true;
         }
 
         self.operations.push(write);

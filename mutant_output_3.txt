@@ -1,0 +1,2 @@
+ INFO Waiting for lock on ok       Unmutated baseline in 718s build + 216s test
+ INFO Auto-set test timeout to 1085s
