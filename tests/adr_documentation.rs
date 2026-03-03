@@ -104,8 +104,12 @@ fn test_adr_0009_matches_implementation() {
 
     // Implementation uses SeqCst
     assert!(
-        impl_content.contains("fetch_add(1, Ordering::SeqCst)"),
+        impl_content.contains("Ordering::SeqCst"),
         "Implementation in src/core/id.rs should use Ordering::SeqCst"
+    );
+    assert!(
+        impl_content.contains("compare_exchange"),
+        "Implementation in src/core/id.rs should use compare_exchange to prevent wraparound"
     );
 
     // ADR should use SeqCst in the main implementation examples

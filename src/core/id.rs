@@ -261,14 +261,24 @@ impl IdGenerator {
     /// See [issue #21](https://github.com/madmax983/AletheiaDB/issues/21) for context.
     #[inline]
     pub fn next(&self) -> Result<u64, StorageError> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        if id > MAX_VALID_ID {
-            return Err(StorageError::InvalidId {
-                id,
-                id_type: "generated",
-            });
+        let mut current = self.next_id.load(Ordering::SeqCst);
+        loop {
+            if current > MAX_VALID_ID {
+                return Err(StorageError::InvalidId {
+                    id: current,
+                    id_type: "generated",
+                });
+            }
+            match self.next_id.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(current),
+                Err(actual) => current = actual,
+            }
         }
-        Ok(id)
     }
 
     /// Get the current value without incrementing.

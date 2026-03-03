@@ -19,3 +19,16 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+
+## Code Review: `src/core/id.rs`
+
+### Findings
+- **Severity**: Critical
+- **File reference**: `src/core/id.rs:188` (`IdGenerator::next`)
+- **What can break (concrete scenario)**: Once `IdGenerator::next_id` reaches `u64::MAX`, `fetch_add(1, Ordering::SeqCst)` wraps the value back to `0`. Subsequent calls to `next()` will evaluate `0 > MAX_VALID_ID` as `false` and return valid but duplicate IDs (`0`, `1`, etc.), destroying the global uniqueness guarantee for identifiers and inevitably corrupting relationships or data logic that depend on unique primary keys across the database.
+- **Why it breaks (technical reasoning)**: While `IdGenerator::next` properly returned an error immediately when the current value exceeded `MAX_VALID_ID` or wrapped, the underlying `AtomicU64` used `fetch_add`, which executes a wrapping addition and silently commits the overflow to the counter. This left the generator in a corrupted state, where the subsequent state became valid again relative to the `id > MAX_VALID_ID` guard.
+- **Minimal fix**: Replaced the `fetch_add` call with a `compare_exchange_weak` loop. If the current value exceeds `MAX_VALID_ID`, it now returns an error *without* incrementing the atomic counter, locking the generator safely at the failure threshold and preventing wraparound.
+- **Required tests**: Added an explicit test in `tests/warden_id_generator_overflow.rs` to start the generator at `u64::MAX` and ensure successive calls correctly fail without generating overlapping/valid IDs.
+
+### Test gaps
+- The concurrent boundary testing relies on `tests/warden_id_generator_overflow.rs` and the concurrent internal test, but missing tests for ID generator overflow limits where large batches or external processes maliciously inject large recovery bounds could skip the test suite entirely.
