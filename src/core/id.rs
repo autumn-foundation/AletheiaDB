@@ -1586,3 +1586,29 @@ mod sentinel_id_generator_tests {
         // If it were `!=`, it would panic immediately because 1 != u64::MAX
     }
 }
+
+#[cfg(test)]
+mod mutant_kill_tests {
+    use super::*;
+
+    #[test]
+    fn test_node_id_new_unchecked_not_default() {
+        let node_id = NodeId::new_unchecked(42);
+        assert_eq!(node_id.as_u64(), 42);
+        assert_ne!(node_id, NodeId::new_unchecked(0));
+    }
+
+    #[test]
+    fn test_edge_id_new_unchecked_not_default() {
+        let edge_id = EdgeId::new_unchecked(42);
+        assert_eq!(edge_id.as_u64(), 42);
+        assert_ne!(edge_id, EdgeId::new_unchecked(0));
+    }
+
+    #[test]
+    fn test_version_id_new_unchecked_not_default() {
+        let version_id = VersionId::new_unchecked(42);
+        assert_eq!(version_id.as_u64(), 42);
+        assert_ne!(version_id, VersionId::new_unchecked(0));
+    }
+}
