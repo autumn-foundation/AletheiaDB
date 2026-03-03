@@ -19,3 +19,15 @@ No high-severity findings.
 
 **Test Gaps:**
 *   No explicit concurrency tests checking for consistency between node properties and graph structure within a single `analyze` call.
+
+## 🦀 Core Review: Warden Vulnerability Tests
+
+**Findings:**
+
+No high-severity findings. The provided patch adds standalone test files (`tests/warden_hnsw_exploit.rs`, `tests/warden_http_panic.rs`, `tests/warden_property_safety.rs`) that effectively assert the integrity of existing security boundaries (HNSW dimension mismatch handling, HTTP JSON payload validation, and PropertyValue DoS amplification via oversized array declarations). Because no application logic is modified and the tests are isolated, no correctness or regression risk is introduced to the core system.
+
+### Test gaps
+- No missing tests were identified for correctness/regression risks within the context of these specific security assertions. The added tests cover the intended vectors successfully.
+
+### Residual risks
+- In `tests/warden_http_panic.rs`, the test `test_invalid_json_body` expects a `400 Bad Request` but does not assert on the error message body to guarantee the precise failure mode (e.g., distinguishing between a serde syntax error vs. an actix payload size limit error). This is a minor DX risk.
