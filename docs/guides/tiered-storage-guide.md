@@ -217,24 +217,19 @@ println!("Migrated {} versions", migrated_count);
 ```rust
 use aletheiadb::storage::migration::MigrationCallback;
 
-struct LoggingCallback;
-
-impl MigrationCallback for LoggingCallback {
-    fn before_node_migration(&self, version: &NodeVersion) -> bool {
+let callback = Arc::new(MigrationCallback {
+    before_node_migration: Some(Arc::new(|version: &NodeVersion| {
         println!("Migrating node version {}", version.id.as_u64());
         true // return false to skip
-    }
-
-    fn after_batch(&self, node_count: usize, edge_count: usize) {
+    })),
+    after_batch: Some(Arc::new(|node_count: usize, edge_count: usize| {
         println!("Batch complete: {} nodes, {} edges", node_count, edge_count);
-    }
-
-    fn on_error(&self, error: &str) {
+    })),
+    on_error: Some(Arc::new(|error: &str| {
         eprintln!("Migration error: {}", error);
-    }
-}
-
-let callback = Arc::new(LoggingCallback);
+    })),
+    ..Default::default()
+});
 let service = MigrationService::with_callback(cold, policy, callback);
 ```
 

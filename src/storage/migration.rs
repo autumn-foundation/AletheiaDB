@@ -499,34 +499,73 @@ impl AtomicMigrationStats {
 }
 
 /// Callback for migration events.
-pub trait MigrationCallback: Send + Sync {
-    /// Called when a node version is about to be migrated.
-    /// Return false to skip this version.
-    fn before_node_migration(&self, _version: &NodeVersion) -> bool {
-        true
-    }
+///
+/// Type alias for node migration hook.
+pub type BeforeNodeMigrationHook = Arc<dyn Fn(&NodeVersion) -> bool + Send + Sync>;
+/// Type alias for edge migration hook.
+pub type BeforeEdgeMigrationHook = Arc<dyn Fn(&EdgeVersion) -> bool + Send + Sync>;
+/// Type alias for batch completion hook.
+pub type AfterBatchHook = Arc<dyn Fn(usize, usize) + Send + Sync>;
+/// Type alias for error hook.
+pub type OnErrorHook = Arc<dyn Fn(&str) + Send + Sync>;
+/// Type alias for progress hook.
+pub type OnProgressHook = Arc<dyn Fn(&MigrationProgress) + Send + Sync>;
 
-    /// Called when an edge version is about to be migrated.
-    /// Return false to skip this version.
-    fn before_edge_migration(&self, _version: &EdgeVersion) -> bool {
-        true
-    }
-
-    /// Called after a migration batch completes.
-    fn after_batch(&self, _node_count: usize, _edge_count: usize) {}
-
+/// Contains functional pointers for hooks.
+#[derive(Clone, Default)]
+pub struct MigrationCallback {
+    /// Called when a node version is about to be migrated. Return false to skip.
+    pub before_node_migration: Option<BeforeNodeMigrationHook>,
+    /// Called when an edge version is about to be migrated. Return false to skip.
+    pub before_edge_migration: Option<BeforeEdgeMigrationHook>,
+    /// Called after a batch finishes migrating.
+    pub after_batch: Option<AfterBatchHook>,
     /// Called when a migration error occurs.
-    fn on_error(&self, _error: &str) {}
-
+    pub on_error: Option<OnErrorHook>,
     /// Called periodically during migration to report progress.
-    /// This enables real-time monitoring of migration operations.
-    fn on_progress(&self, _progress: &MigrationProgress) {}
+    pub on_progress: Option<OnProgressHook>,
 }
 
-/// Default callback that allows all migrations.
-pub struct DefaultMigrationCallback;
+impl MigrationCallback {
+    /// Execute the before_node_migration hook.
+    pub fn before_node_migration(&self, version: &NodeVersion) -> bool {
+        if let Some(f) = &self.before_node_migration {
+            f(version)
+        } else {
+            true
+        }
+    }
 
-impl MigrationCallback for DefaultMigrationCallback {}
+    /// Execute the before_edge_migration hook.
+    pub fn before_edge_migration(&self, version: &EdgeVersion) -> bool {
+        if let Some(f) = &self.before_edge_migration {
+            f(version)
+        } else {
+            true
+        }
+    }
+
+    /// Execute the after_batch hook.
+    pub fn after_batch(&self, node_count: usize, edge_count: usize) {
+        if let Some(f) = &self.after_batch {
+            f(node_count, edge_count)
+        }
+    }
+
+    /// Execute the on_error hook.
+    pub fn on_error(&self, error: &str) {
+        if let Some(f) = &self.on_error {
+            f(error)
+        }
+    }
+
+    /// Execute the on_progress hook.
+    pub fn on_progress(&self, progress: &MigrationProgress) {
+        if let Some(f) = &self.on_progress {
+            f(progress)
+        }
+    }
+}
 
 /// Migration service that moves versions from hot to cold storage.
 ///
@@ -555,7 +594,7 @@ pub struct MigrationService {
     policy: MigrationPolicy,
     stats: Arc<AtomicMigrationStats>,
     running: Arc<AtomicBool>,
-    callback: Arc<dyn MigrationCallback>,
+    callback: Arc<MigrationCallback>,
 
     /// Access time tracking for LRU migration (version_id -> last access time).
     /// Uses a bounded LRU cache that automatically evicts oldest entries
@@ -592,7 +631,7 @@ impl MigrationService {
             policy,
             stats: Arc::new(AtomicMigrationStats::new()),
             running: Arc::new(AtomicBool::new(false)),
-            callback: Arc::new(DefaultMigrationCallback),
+            callback: Arc::new(MigrationCallback::default()),
             access_times: Arc::new(Cache::new(MAX_ACCESS_ENTRIES)),
             worker_handle: Mutex::new(None),
             shutdown_complete: Arc::new((Mutex::new((true, 0)), Condvar::new())),
@@ -609,11 +648,11 @@ impl MigrationService {
     ///
     /// * `cold_storage` - The destination storage.
     /// * `policy` - Configuration.
-    /// * `callback` - Implementation of `MigrationCallback` for events.
+    /// * `callback` - Instance of `MigrationCallback` for events.
     pub fn with_callback(
         cold_storage: Arc<RedbColdStorage>,
         policy: MigrationPolicy,
-        callback: Arc<dyn MigrationCallback>,
+        callback: Arc<MigrationCallback>,
     ) -> Self {
         Self {
             cold_storage,
@@ -1722,22 +1761,16 @@ mod tests {
     // MigrationCallback tests
     // ========================================================================
 
-    struct FilteringCallback {
-        skip_version_ids: Vec<u64>,
-    }
-
-    impl MigrationCallback for FilteringCallback {
-        fn before_node_migration(&self, version: &NodeVersion) -> bool {
-            !self.skip_version_ids.contains(&version.id.as_u64())
-        }
-    }
-
     #[test]
     fn test_migration_callback_filtering() {
         let cold = create_cold_storage();
         let policy = MigrationPolicy::default();
-        let callback = Arc::new(FilteringCallback {
-            skip_version_ids: vec![2, 4, 6, 8, 10],
+        let skip_version_ids = [2, 4, 6, 8, 10];
+        let callback = Arc::new(MigrationCallback {
+            before_node_migration: Some(Arc::new(move |version: &NodeVersion| {
+                !skip_version_ids.contains(&version.id.as_u64())
+            })),
+            ..Default::default()
         });
         let service = MigrationService::with_callback(cold.clone(), policy, callback);
 
@@ -1804,19 +1837,13 @@ mod tests {
         let batches_completed = Arc::new(AtomicUsize::new(0));
         let batches_completed_clone = batches_completed.clone();
 
-        struct BatchTracker {
-            completed: Arc<AtomicUsize>,
-        }
-        impl MigrationCallback for BatchTracker {
-            fn after_batch(&self, node_count: usize, edge_count: usize) {
+        let callback = Arc::new(MigrationCallback {
+            after_batch: Some(Arc::new(move |node_count: usize, edge_count: usize| {
                 if node_count > 0 || edge_count > 0 {
-                    self.completed.fetch_add(1, Ordering::SeqCst);
+                    batches_completed_clone.fetch_add(1, Ordering::SeqCst);
                 }
-            }
-        }
-
-        let callback = Arc::new(BatchTracker {
-            completed: batches_completed_clone,
+            })),
+            ..Default::default()
         });
         let service = Arc::new(MigrationService::with_callback(cold, policy, callback));
 
@@ -2031,17 +2058,11 @@ mod tests {
         let progress_updates = Arc::new(std::sync::Mutex::new(Vec::new()));
         let progress_clone = progress_updates.clone();
 
-        struct ProgressTracker {
-            updates: Arc<std::sync::Mutex<Vec<MigrationProgress>>>,
-        }
-        impl MigrationCallback for ProgressTracker {
-            fn on_progress(&self, progress: &MigrationProgress) {
-                self.updates.lock().unwrap().push(progress.clone());
-            }
-        }
-
-        let callback = Arc::new(ProgressTracker {
-            updates: progress_clone,
+        let callback = Arc::new(MigrationCallback {
+            on_progress: Some(Arc::new(move |progress: &MigrationProgress| {
+                progress_clone.lock().unwrap().push(progress.clone());
+            })),
+            ..Default::default()
         });
         let service = MigrationService::with_callback(cold, policy, callback);
 
@@ -2343,38 +2364,26 @@ mod tests {
     // Edge Callback Tests
     // ========================================================================
 
-    struct EdgeFilteringCallback {
-        skip_version_ids: Vec<u64>,
-        batch_counts: std::sync::Mutex<Vec<(usize, usize)>>,
-    }
-
-    impl EdgeFilteringCallback {
-        fn new(skip_ids: Vec<u64>) -> Self {
-            Self {
-                skip_version_ids: skip_ids,
-                batch_counts: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl MigrationCallback for EdgeFilteringCallback {
-        fn before_edge_migration(&self, version: &EdgeVersion) -> bool {
-            !self.skip_version_ids.contains(&version.id.as_u64())
-        }
-
-        fn after_batch(&self, node_count: usize, edge_count: usize) {
-            self.batch_counts
-                .lock()
-                .unwrap()
-                .push((node_count, edge_count));
-        }
-    }
-
     #[test]
     fn test_edge_migration_callback_filtering() {
         let cold = create_cold_storage();
         let policy = MigrationPolicy::default();
-        let callback = Arc::new(EdgeFilteringCallback::new(vec![2, 4, 6, 8, 10]));
+        let skip_version_ids = [2, 4, 6, 8, 10];
+        let batch_counts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let batch_counts_clone = batch_counts.clone();
+
+        let callback = Arc::new(MigrationCallback {
+            before_edge_migration: Some(Arc::new(move |version: &EdgeVersion| {
+                !skip_version_ids.contains(&version.id.as_u64())
+            })),
+            after_batch: Some(Arc::new(move |node_count: usize, edge_count: usize| {
+                batch_counts_clone
+                    .lock()
+                    .unwrap()
+                    .push((node_count, edge_count));
+            })),
+            ..Default::default()
+        });
         let service = MigrationService::with_callback(cold.clone(), policy, callback.clone());
 
         let versions: Vec<EdgeVersion> =
@@ -2399,7 +2408,7 @@ mod tests {
         );
 
         // Verify batch callback was called
-        let batches = callback.batch_counts.lock().unwrap();
+        let batches = batch_counts.lock().unwrap();
         assert!(!batches.is_empty());
         // All batches should be edge batches (node_count=0)
         for (node_count, _edge_count) in batches.iter() {
