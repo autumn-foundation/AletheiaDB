@@ -2290,6 +2290,20 @@ mod tests {
     // ==================== MockIterator Tests ====================
 
     #[test]
+    fn test_project_iterator_error_passthrough() {
+        // ProjectIterator should pass through errors from the underlying iterator
+        let err_row = Err(crate::core::error::Error::Storage(
+            crate::core::error::StorageError::CorruptedData("test".to_string()),
+        ));
+        let mock_iter = MockIterator::from_results(vec![err_row]);
+
+        let mut project_iter = ProjectIterator::new(Box::new(mock_iter), vec!["deep".to_string()]);
+
+        let res = project_iter.next().unwrap();
+        assert!(res.is_err());
+    }
+
+    #[test]
     fn test_mock_iterator_from_nodes() {
         let nodes = vec![test_node(1, "Alice"), test_node(2, "Bob")];
 
