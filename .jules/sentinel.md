@@ -119,3 +119,9 @@
 **Summary:** Mutants returning default values or mutating exact bitwise operations survived in `IdentityHasher` logic (`^=` changed to `|=` or `&=`, `update_state` removed, match arms deleted for various byte lengths inside `write`).
 **Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted high-level collision avoidance (e.g. `assert_ne!(h1, h2)`) but lacked explicit exact bounds for `update_state` logic with `FNV_PRIME`, lengths of `write()`, default return overrides, and proper bitwise math chaining.
 **Kill Shot:** Extensively added exact bound and behavioral assertions across bitwise operators, lengths, and chaining logic within the `tests` module inside `src/core/hasher.rs`.
+
+**[Weak Test Coverage in Temporal Logic Boundaries and Math]**
+**Module:** `src/core/temporal.rs`
+**Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`.
+**Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, and exact exclusion of boundaries inside interval intersections.
+**Kill Shot:** Appended explicit exact boundary tests `test_timerange_from_at_exact_boundaries`, `test_time_to_secs_millis_exact_math`, `test_time_to_iso8601_exact_content`, and `test_timerange_contains_exact_boundary` directly to `tests/sentry_temporal.rs`.
