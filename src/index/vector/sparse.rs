@@ -61,6 +61,7 @@
 //! - No approximation - exact similarity scores
 
 use crate::core::error::{Error, Result, VectorError};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::SparseVec;
@@ -71,6 +72,7 @@ use parking_lot::Mutex;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::fs;
+use std::hash::BuildHasherDefault;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -453,11 +455,17 @@ impl SparseVectorIndex {
         // For cosine similarity, we track magnitudes to avoid second lookups
         // For BM25, we track document lengths to avoid second lookups
         let is_cosine = matches!(self.config.scoring, ScoringMethod::Cosine);
-        let mut scores: HashMap<NodeId, f32> = HashMap::new();
+        // Using IdentityHasher avoids SipHash overhead since NodeId is already a high-quality unique u64 ID.
+        let mut scores: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
+            HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         // Magnitudes map is only used for cosine, but we always create it (cheap)
-        let mut magnitudes: HashMap<NodeId, f32> = HashMap::new();
+        // Using IdentityHasher avoids SipHash overhead since NodeId is already a high-quality unique u64 ID.
+        let mut magnitudes: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
+            HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         // Document lengths map is only used for BM25, but we always create it (cheap)
-        let mut doc_lengths: HashMap<NodeId, f32> = HashMap::new();
+        // Using IdentityHasher avoids SipHash overhead since NodeId is already a high-quality unique u64 ID.
+        let mut doc_lengths: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
+            HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         let query_magnitude = query.magnitude();
         // Use Acquire ordering to synchronize with Release stores, ensuring we see
         // all data modifications that happened before the count was updated
@@ -1072,7 +1080,9 @@ pub fn hybrid_fusion(
     let sparse_normalized = normalize_scores(sparse_results);
 
     // Combine scores
-    let mut combined: HashMap<NodeId, f32> = HashMap::new();
+    // Using IdentityHasher avoids SipHash overhead since NodeId is already a high-quality unique u64 ID.
+    let mut combined: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
+        HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
 
     for (id, score) in dense_normalized {
         *combined.entry(id).or_insert(0.0) += alpha * score;
@@ -1133,7 +1143,9 @@ pub fn reciprocal_rank_fusion(
     let k = k.min(MAX_K);
     let k_constant = k_constant.max(1.0);
 
-    let mut rrf_scores: HashMap<NodeId, f32> = HashMap::new();
+    // Using IdentityHasher avoids SipHash overhead since NodeId is already a high-quality unique u64 ID.
+    let mut rrf_scores: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
+        HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
 
     // Add RRF contribution from dense results
     for (rank, (id, _)) in dense_results.iter().enumerate() {
@@ -1457,10 +1469,11 @@ mod tests {
         let query = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
 
         // Only allow even node IDs
-        let allowed: HashSet<NodeId> = (1..=10)
-            .filter(|i| i % 2 == 0)
-            .map(|i| NodeId::new(i).unwrap())
-            .collect();
+        let mut allowed: HashSet<NodeId, BuildHasherDefault<IdentityHasher>> =
+            HashSet::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        for i in (1..=10).filter(|i| i % 2 == 0) {
+            allowed.insert(NodeId::new(i).unwrap());
+        }
 
         let results = index
             .search_with_filter(&query, 10, |id| allowed.contains(id))
