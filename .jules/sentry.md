@@ -15,3 +15,7 @@
 **IdentityHasher Coverage Gap**
 **Learning:** `IdentityHasher` provides optimizations for pre-hashed unique integer keys. However, large portions of `Hasher::write` branches, state mutability paths, and trait implementations (like bitwise operations in `update_state`) were not comprehensively tested, leaving them vulnerable to subtle regressions if tampered with (e.g., via mutation testing).
 **Action:** Wrote exhaustive tests covering every match arm in `write`, explicitly tested the `else` branch of `update_state` (which involves a XOR mix and multiply), and checked each integer specific method (`write_u8`, `write_u16`, etc.) individually and sequentially to eliminate any remaining `cargo mutants` escapees.
+
+## Import CSR Invariant Unwrapping
+**Learning:** `AdjacencyIndex::import_csr` used `.unwrap()` directly on the result of `validate_csr_invariants`. If the persisted graph data was corrupted on disk (e.g., offsets were wrong or lengths mismatched), the database startup would panic and crash the entire process.
+**Action:** Changed the function to return a `Result<Self, String>` and use the `?` operator. Propagated this error up through `CurrentIndexes` and `CurrentStorage` so that the `IndexPersistenceManager` could safely catch it during startup. Now, if corrupted data is loaded, it gracefully logs an error and falls back to `compact_adjacency()` to rebuild the index. Verified by converting the existing `#[should_panic]` test to expect an `Err`.
