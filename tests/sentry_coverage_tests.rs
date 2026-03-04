@@ -75,7 +75,7 @@ fn test_load_indexes_startup_corrupt_csr_fallback() {
     // We can manually fake a CSR structure that fails validation to force it down the error path.
     data.outgoing_node_ids = vec![0];
     data.outgoing_offsets = vec![0, 1]; // Length 2
-    data.outgoing_neighbors = vec![1];  // Length 1 (valid so far)
+    data.outgoing_neighbors = vec![1]; // Length 1 (valid so far)
 
     // Also need incoming to bypass the `!is_empty()` checks
     data.incoming_node_ids = vec![1];
