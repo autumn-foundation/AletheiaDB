@@ -66,7 +66,10 @@ fn test_load_indexes_startup_corrupt_csr_fallback() {
     let mut data = load_graph_index(&graph_path).unwrap();
 
     // Corrupt the CSR offsets! (Make lengths mismatch to trigger import_csr error)
-    data.outgoing_offsets.pop();
+    if !data.outgoing_offsets.is_empty() {
+        let last = data.outgoing_offsets.len() - 1;
+        data.outgoing_offsets[last] = 9999;
+    }
 
     // Save back to disk
     save_graph_index(&data, &graph_path).unwrap();
