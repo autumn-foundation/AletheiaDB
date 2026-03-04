@@ -31,22 +31,6 @@ use parking_lot::RwLock;
 use crate::core::interning::InternedString;
 
 /// Atomic f64 for lock-free floating-point statistics.
-///
-/// Converts `f64` into its bit representation to be stored
-/// lock-free within an `AtomicU64`.
-///
-/// ## Examples
-///
-/// ```rust
-/// use aletheiadb::query::planner::stats::AtomicF64;
-/// use std::sync::atomic::Ordering;
-///
-/// let value = AtomicF64::new(42.5);
-/// assert_eq!(value.load(Ordering::Acquire), 42.5);
-///
-/// value.store(100.0, Ordering::Release);
-/// assert_eq!(value.load(Ordering::Acquire), 100.0);
-/// ```
 #[derive(Debug)]
 pub struct AtomicF64 {
     inner: std::sync::atomic::AtomicU64,

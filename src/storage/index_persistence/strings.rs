@@ -1,12 +1,12 @@
 //! String interner persistence.
 //!
-//! This module handles the serialization and deserialization of the [`GLOBAL_INTERNER`].
+//! This module handles the serialization and deserialization of the [`GLOBAL_INTERNER`](crate::core::GLOBAL_INTERNER).
 //! The interner is critical for the database's operation as it maps all string labels and property keys to
 //! compact integer IDs.
 //!
 //! # Format
 //!
-//! The interner is saved as a Bitcode-encoded [`StringInternerData`] struct,
+//! The interner is saved as a Bitcode-encoded [`StringInternerData`](super::formats::StringInternerData) struct,
 //! followed by a 4-byte CRC32 checksum.
 //!
 //! ```text
@@ -81,10 +81,10 @@ pub fn save_string_interner(path: &Path) -> Result<()> {
 ///
 /// Returns an error if:
 /// - The file does not exist or cannot be read.
-/// - The file size exceeds [`MAX_STRING_INTERNER_FILE_SIZE`](super::MAX_STRING_INTERNER_FILE_SIZE).
+/// - The file size exceeds `MAX_STRING_INTERNER_FILE_SIZE`.
 /// - The CRC32 checksum does not match the data.
 /// - The magic bytes or version are invalid.
-/// - The string count exceeds [`MAX_STRING_COUNT`](super::MAX_STRING_COUNT) or length exceeds [`MAX_STRING_LENGTH`](super::MAX_STRING_LENGTH) (DoS protection).
+/// - The string count or length exceeds maximum limits (DoS protection).
 pub fn load_string_interner(path: &Path) -> Result<StringInternerData> {
     let data: StringInternerData = super::common::load_encoded_with_crc(
         path,

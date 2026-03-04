@@ -1,10 +1,6 @@
-#[cfg(unix)]
 use aletheiadb::storage::wal::LSN;
-#[cfg(unix)]
 use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
-#[cfg(unix)]
 use aletheiadb::storage::wal::ring_buffer::PendingEntry;
-#[cfg(unix)]
 use tempfile::tempdir;
 
 #[cfg(unix)]

@@ -1,26 +1,3 @@
-//! Zero-Allocation Traversal Iterators
-//!
-//! This module provides high-performance iterators for traversing graph edges
-//! without allocating intermediate memory.
-//!
-//! # The "Zero-Allocation Traversal" Philosophy
-//!
-//! Graph traversal often requires fetching the neighbors of a node. Naive implementations
-//! allocate a `Vec<EdgeId>` to return these neighbors, which introduces significant overhead
-//! (100-500ns per traversal) in hot paths, especially for deep graph queries.
-//!
-//! AletheiaDB avoids this by returning lazy iterators. These iterators hold a lock-free reference
-//! ([`MergedAdjacencyGuard`](crate::index::incremental_adjacency::MergedAdjacencyGuard)) to the underlying
-//! adjacency data (frozen CSR slice + delta map) and yield edge IDs on demand.
-//!
-//! This approach provides:
-//! - **Zero allocation**: No `Vec` is created during traversal.
-//! - **Lazy evaluation**: Only the necessary edges are processed, which is crucial for `LIMIT` queries.
-//! - **Cache-friendly**: Edge IDs are read sequentially from contiguous memory (the CSR frozen state).
-//!
-//! The iterators defined here are generated via macros to ensure consistent behavior
-//! across different traversal directions (outgoing vs. incoming) and filtering conditions (with/without labels).
-
 use crate::core::id::EdgeId;
 use crate::core::interning::InternedString;
 use crate::index::incremental_adjacency::MergedAdjacencyGuard;

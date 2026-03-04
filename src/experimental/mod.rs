@@ -46,9 +46,6 @@
 //! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
 //! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
 //! | [`spectre`] | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
-//! | [`luna`] | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
-//! | [`serendipity`] | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
-//! | [`tremor`] | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -99,9 +96,6 @@
 #[cfg(feature = "nova")]
 /// Alchemy: Semantic Graph Transformation Engine.
 pub mod alchemy;
-#[cfg(feature = "nova")]
-/// Archetype: Semantic concept extraction and purity scoring.
-pub mod archetype;
 #[cfg(feature = "nova")]
 /// Ariadne: Semantic Thread Weaver.
 pub mod ariadne;
@@ -169,8 +163,6 @@ pub mod sybil;
 /// Synapse: Adaptive Graph Hebbian Learning.
 pub mod synapse;
 #[cfg(feature = "nova")]
-pub mod synergy;
-#[cfg(feature = "nova")]
 /// Telepathy: Semantic Spreading Activation Engine.
 pub mod telepathy;
 #[cfg(feature = "nova")]
@@ -218,21 +210,5 @@ pub mod omen;
 pub mod oracle;
 
 #[cfg(feature = "nova")]
-/// Luna: Semantic Subgraph Synthesis.
-pub mod luna;
-
-#[cfg(feature = "nova")]
 /// Spectre: Semantic Perspective Engine.
 pub mod spectre;
-
-#[cfg(feature = "nova")]
-/// Voyager: Maximal Novelty Traversal Engine.
-pub mod voyager;
-
-#[cfg(feature = "nova")]
-/// Serendipity: The Scenic Route Finder.
-pub mod serendipity;
-
-#[cfg(feature = "nova")]
-/// Tremor: Semantic Earthquake Detector.
-pub mod tremor;

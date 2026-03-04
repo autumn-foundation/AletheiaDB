@@ -67,7 +67,3 @@
 1. Updated `storage/index_persistence/operations.rs` to import `TxId` from `core::id` instead of `api`.
 2. Moved `VectorIndexBuilder` from `api` to `db`, as it is a concrete helper for `AletheiaDB`.
 3. Moved `utils/error.rs` to `core/error.rs` and deleted `utils` module, consolidating core domain types.
-
-## 2026-05-24 - Unwinding API/Core Dependency
-**Tangle:** `db` module imported `TxIdGenerator` through `api::transaction`. This caused a layering violation where `db` skipped `core` to rely on an `api` re-export for a domain primitive, creating coupling between `api` and `core`'s ID generation responsibilities.
-**Blueprint:** Removed `TxIdGenerator` re-export from `api::transaction::types` and `api::transaction::mod`. Updated `db::mod`, `db::config`, and all transaction tests to explicitly import `TxIdGenerator` directly from `core::id::TxIdGenerator`.

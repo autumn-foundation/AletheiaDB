@@ -31,49 +31,6 @@ use super::{OptimizationRule, Statistics};
 ///     Traverse(KNOWS)
 ///       NodeLookup([1])
 /// ```
-///
-/// ## Examples
-///
-/// ```rust
-/// use aletheiadb::query::planner::rules::{OptimizationRule, LimitPushdown};
-/// use aletheiadb::query::planner::stats::Statistics;
-/// use aletheiadb::query::plan::{LogicalPlan, LogicalOp, UnaryOp, ScanOp, SortKey};
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// // 1. Construct a plan where LIMIT is separated from VectorRank
-/// let scan = LogicalOp::Scan(ScanOp::NodeScan {
-///     label: Some("Person".into()),
-///     estimated_rows: Some(100),
-/// });
-/// let rank = LogicalOp::unary(
-///     UnaryOp::VectorRank {
-///         embedding: vec![0.1, 0.2].into(),
-///         top_k: None, // Missing limit!
-///         property_key: None,
-///     },
-///     scan
-/// );
-/// let limit = LogicalOp::unary(UnaryOp::Limit(10), rank);
-///
-/// let plan = LogicalPlan { root: limit, temporal_context: None, hints: Default::default() };
-///
-/// // 2. Apply the rule
-/// let rule = LimitPushdown;
-/// let stats = Statistics::new();
-/// let optimized_plan = rule.apply(&plan, &stats)?.unwrap(); // unwraps if `changed == true`
-///
-/// // 3. The rule preserves the outer Limit but ALSO pushes it down to VectorRank
-/// if let LogicalOp::Unary { op: UnaryOp::Limit(10), input } = optimized_plan.root {
-///     assert!(matches!(
-///         *input,
-///         LogicalOp::Unary { op: UnaryOp::VectorRank { top_k: Some(10), .. }, .. }
-///     ));
-/// } else {
-///     panic!("Expected Limit operator at root");
-/// }
-/// # Ok(())
-/// # }
-/// ```
 pub struct LimitPushdown;
 
 impl OptimizationRule for LimitPushdown {

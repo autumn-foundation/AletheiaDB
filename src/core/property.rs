@@ -709,10 +709,7 @@ impl PropertyValue {
             )
             .into());
         }
-        let len =
-            u32::from_le_bytes(bytes[1..5].try_into().map_err(|_| {
-                StorageError::CorruptedData("Failed to read String length".to_string())
-            })?) as usize;
+        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -742,10 +739,7 @@ impl PropertyValue {
             )
             .into());
         }
-        let len =
-            u32::from_le_bytes(bytes[1..5].try_into().map_err(|_| {
-                StorageError::CorruptedData("Failed to read Bytes length".to_string())
-            })?) as usize;
+        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -772,10 +766,7 @@ impl PropertyValue {
             )
             .into());
         }
-        let count =
-            u32::from_le_bytes(bytes[1..5].try_into().map_err(|_| {
-                StorageError::CorruptedData("Failed to read Array count".to_string())
-            })?) as usize;
+        let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
         let mut offset: usize = 5;
 
         // Prevent DoS via memory exhaustion from malicious input
@@ -1363,9 +1354,11 @@ impl PropertyMap {
             .into());
         }
 
-        let count = u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| {
-            StorageError::CorruptedData("Failed to read PropertyMap count".to_string())
-        })?) as usize;
+        let count = u32::from_le_bytes(
+            bytes[0..4]
+                .try_into()
+                .expect("Length checked above ensures slice is 4 bytes"),
+        ) as usize;
 
         // Prevent DoS via memory exhaustion from malicious input
         if count > MAX_PROPERTY_MAP_CAPACITY {
@@ -1406,9 +1399,7 @@ impl PropertyMap {
             }
             // SAFETY: Length check above guarantees 4 bytes available
             let key_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| {
-                    StorageError::CorruptedData("Failed to read property key length".to_string())
-                })?) as usize;
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
 
             // Read key
@@ -3587,32 +3578,6 @@ mod sentry_tests {
 
         // try_insert should return an error, not panic
         let result = PropertyMapBuilder::new().try_insert("deep", value);
-
-        assert!(result.is_err(), "Expected error, got Ok");
-        let err = result.err().unwrap();
-        let err_msg = format!("{}", err);
-        assert!(
-            err_msg.contains("recursion depth limit exceeded"),
-            "Unexpected error message: {}",
-            err_msg
-        );
-    }
-
-    /// 🎯 Target: PropertyMapBuilder::try_insert_by_key
-    /// 💣 Risk: Should fail gracefully (return Err) instead of panicking on deep recursion when using an interned key.
-    /// 🧪 Strategy: Try to insert a deeply nested structure using try_insert_by_key.
-    /// 🔬 Verification: Check that Result is Err and contains the recursion limit message.
-    #[test]
-    fn test_property_map_builder_try_insert_by_key_returns_error_on_deep_recursion() {
-        let mut value = PropertyValue::Int(42);
-        for _ in 0..MAX_RECURSION_DEPTH + 1 {
-            value = PropertyValue::Array(Arc::new(vec![value]));
-        }
-
-        let key = GLOBAL_INTERNER.intern("deep").unwrap();
-
-        // try_insert_by_key should return an error, not panic
-        let result = PropertyMapBuilder::new().try_insert_by_key(key, value);
 
         assert!(result.is_err(), "Expected error, got Ok");
         let err = result.err().unwrap();

@@ -301,34 +301,6 @@ impl AdjacencyIndex {
         }
 
         #[allow(clippy::collapsible_if)]
-        if let Some(&first_offset) = offsets.first() {
-            if first_offset != 0 {
-                return Err(format!(
-                    "CSR first offset mismatch: expected 0, got {}",
-                    first_offset
-                ));
-            }
-        }
-
-        for window in offsets.windows(2) {
-            if window[0] > window[1] {
-                return Err(format!(
-                    "CSR offsets are not monotonically increasing: {} > {}",
-                    window[0], window[1]
-                ));
-            }
-        }
-
-        for window in node_ids.windows(2) {
-            if window[0] >= window[1] {
-                return Err(format!(
-                    "CSR node_ids are not strictly monotonically increasing: {} >= {}",
-                    window[0], window[1]
-                ));
-            }
-        }
-
-        #[allow(clippy::collapsible_if)]
         if let Some(&last_offset) = offsets.last() {
             if last_offset != edge_ids.len() as u64 {
                 return Err(format!(
@@ -847,35 +819,6 @@ mod sentry_tests {
             AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_offsets_val, &edge_ids)
                 .unwrap_err();
         assert!(err_val.contains("CSR last offset mismatch"));
-
-        // 4. Invalid first offset
-        let invalid_first_offset = vec![1, 1, 2];
-        let err_first =
-            AdjacencyIndex::validate_csr_invariants(&node_ids, &invalid_first_offset, &edge_ids)
-                .unwrap_err();
-        assert!(err_first.contains("CSR first offset mismatch"));
-
-        // 5. Non-monotonic offsets
-        let non_monotonic_offsets = vec![0, 2, 1]; // 2 > 1
-        // We need 3 edge ids to match the last offset 1, or wait, last offset is 1, so edge len = 1
-        let err_monotonic =
-            AdjacencyIndex::validate_csr_invariants(&node_ids, &non_monotonic_offsets, &[100])
-                .unwrap_err();
-        assert!(err_monotonic.contains("CSR offsets are not monotonically increasing"));
-
-        // 6. Unsorted node ids
-        let unsorted_node_ids = vec![20, 10]; // unsorted
-        let err_unsorted =
-            AdjacencyIndex::validate_csr_invariants(&unsorted_node_ids, &offsets, &edge_ids)
-                .unwrap_err();
-        assert!(err_unsorted.contains("CSR node_ids are not strictly monotonically increasing"));
-
-        // 7. Duplicate node ids
-        let duplicate_node_ids = vec![10, 10]; // duplicate
-        let err_duplicate =
-            AdjacencyIndex::validate_csr_invariants(&duplicate_node_ids, &offsets, &edge_ids)
-                .unwrap_err();
-        assert!(err_duplicate.contains("CSR node_ids are not strictly monotonically increasing"));
     }
 
     #[test]

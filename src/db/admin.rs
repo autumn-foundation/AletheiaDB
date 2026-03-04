@@ -1,5 +1,5 @@
 use crate::api::transaction::visibility::CompressionStats;
-use crate::core::error::{PersistenceErrorKind, Result, ResultExt, StorageError};
+use crate::core::error::{Result, StorageError};
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;
@@ -39,93 +39,85 @@ impl AletheiaDB {
     /// db.persist_indexes()?; // Save indexes to disk
     /// ```
     pub fn persist_indexes(&self) -> Result<()> {
-        let result = (|| {
-            use crate::storage::index_persistence::formats::IndexManifest;
+        use crate::storage::index_persistence::formats::IndexManifest;
 
-            // Warn if background persistence thread has stopped
-            if self
-                .persistence_thread_stopped
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                eprintln!(
-                    "Warning: Background persistence thread has stopped. \
-                     Automatic persistence is disabled. Manual persist_indexes() calls will still work."
-                );
-            }
+        // Warn if background persistence thread has stopped
+        if self
+            .persistence_thread_stopped
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            eprintln!(
+                "Warning: Background persistence thread has stopped. \
+                 Automatic persistence is disabled. Manual persist_indexes() calls will still work."
+            );
+        }
 
-            let manager = self.persistence_manager.as_ref().ok_or_else(|| {
-                StorageError::InconsistentState {
+        let manager =
+            self.persistence_manager
+                .as_ref()
+                .ok_or_else(|| StorageError::InconsistentState {
                     reason: "Index persistence not enabled".to_string(),
-                }
-            })?;
-
-            // Capture current LSN for all operations
-            let current_lsn = self.wal.current_lsn().0;
-
-            // 1. Save string interner first (dependency for all others)
-            if let Some(ref tracker) = self.persistence_tracker {
-                // Update the string LSN tracker to current_lsn BEFORE calculating safe LSN
-                // This ensures that even if no new strings were added, the tracker reflects
-                // that the interner is up-to-date with current_lsn.
-                crate::storage::index_persistence::operations::persist_string_interner(
-                    manager,
-                    tracker,
-                    current_lsn,
-                )?;
-            } else {
-                manager.save_string_interner().map_err(|e| {
-                    StorageError::persistence_with_kind(
-                        PersistenceErrorKind::from(&e),
-                        format!("Failed to save string interner: {}", e),
-                    )
                 })?;
-            }
 
-            // 2. Save graph index
-            crate::storage::index_persistence::operations::persist_graph_index(
-                &self.current,
+        // Capture current LSN for all operations
+        let current_lsn = self.wal.current_lsn().0;
+
+        // 1. Save string interner first (dependency for all others)
+        if let Some(ref tracker) = self.persistence_tracker {
+            // Update the string LSN tracker to current_lsn BEFORE calculating safe LSN
+            // This ensures that even if no new strings were added, the tracker reflects
+            // that the interner is up-to-date with current_lsn.
+            crate::storage::index_persistence::operations::persist_string_interner(
                 manager,
-                self.persistence_tracker.as_ref(),
+                tracker,
                 current_lsn,
             )?;
-
-            // 3. Save vector indexes
-            if let Some(ref tracker) = self.persistence_tracker {
-                persist_vector_indexes(&self.current, manager, Some(tracker), current_lsn)?;
-            }
-
-            // 4. Save temporal index (version history)
-            if let Some(ref tracker) = self.persistence_tracker {
-                persist_temporal_index(
-                    &self.historical,
-                    &self.temporal_indexes,
-                    manager,
-                    tracker,
-                    current_lsn,
-                )?;
-            }
-
-            // 5. Save manifest last with SAFE LSN
-            // Note: This records the WAL position at persist time for future WAL replay coordination.
-            // We use the safe LSN (min of all components) if tracker is available, or current LSN if not.
-            // Since we just persisted everything successfully above, current_lsn is safe (and equal to min).
-            let safe_lsn = if let Some(ref tracker) = self.persistence_tracker {
-                tracker.get_safe_manifest_lsn()
-            } else {
-                current_lsn
-            };
-
-            let manifest = IndexManifest::new(safe_lsn);
-            manager.save_manifest(&manifest).map_err(|e| {
-                StorageError::persistence_with_kind(
-                    PersistenceErrorKind::from(&e),
-                    format!("Failed to save manifest: {}", e),
-                )
+        } else {
+            manager.save_string_interner().map_err(|e| {
+                StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
             })?;
+        }
 
-            Ok(())
-        })();
-        result.record_error_metric()
+        // 2. Save graph index
+        crate::storage::index_persistence::operations::persist_graph_index(
+            &self.current,
+            manager,
+            self.persistence_tracker.as_ref(),
+            current_lsn,
+        )?;
+
+        // 3. Save vector indexes
+        if let Some(ref tracker) = self.persistence_tracker {
+            persist_vector_indexes(&self.current, manager, Some(tracker), current_lsn)?;
+        }
+
+        // 4. Save temporal index (version history)
+        if let Some(ref tracker) = self.persistence_tracker {
+            persist_temporal_index(
+                &self.historical,
+                &self.temporal_indexes,
+                manager,
+                tracker,
+                current_lsn,
+            )?;
+        }
+
+        // 5. Save manifest last with SAFE LSN
+        // Note: This records the WAL position at persist time for future WAL replay coordination.
+        // We use the safe LSN (min of all components) if tracker is available, or current LSN if not.
+        // Since we just persisted everything successfully above, current_lsn is safe (and equal to min).
+        let safe_lsn = if let Some(ref tracker) = self.persistence_tracker {
+            tracker.get_safe_manifest_lsn()
+        } else {
+            current_lsn
+        };
+
+        let manifest = IndexManifest::new(safe_lsn);
+        manager.save_manifest(&manifest).map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save manifest: {}", e))
+        })?;
+
+        Ok(())
     }
 
     /// Get a reference to the current storage (test-only helper).

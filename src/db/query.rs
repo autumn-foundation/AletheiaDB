@@ -1,4 +1,4 @@
-use crate::core::error::{Result, ResultExt};
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
@@ -60,22 +60,18 @@ impl AletheiaDB {
     /// }
     /// ```
     pub fn execute_query(&self, query: Query) -> Result<QueryResults> {
-        let result = (|| {
-            #[cfg(feature = "observability")]
-            let _span = tracing::info_span!("execute_query").entered();
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("execute_query").entered();
 
-            // Use cached statistics for cost-based optimization
-            // Statistics are shared across all queries for this database instance
-            let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
-            let physical_plan = planner.plan(query)?;
+        // Use cached statistics for cost-based optimization
+        // Statistics are shared across all queries for this database instance
+        let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
+        let physical_plan = planner.plan(query)?;
 
-            // Execute the plan
-            let executor =
-                QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
+        // Execute the plan
+        let executor = QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
 
-            executor.execute(physical_plan)
-        })();
-        result.record_error_metric()
+        executor.execute(physical_plan)
     }
 
     /// Traverse from a node and rank results by similarity to an embedding.

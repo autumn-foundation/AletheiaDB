@@ -7,7 +7,7 @@
 //! - No commit overhead
 
 use super::{ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager};
-use crate::core::error::{Result, ResultExt, StorageError};
+use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyValue;
@@ -204,45 +204,43 @@ impl ReadTransaction {
 
 impl ReadOps for ReadTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
-        let result = if let Ok(current_node) = self.current.get_node(id) {
+        // FAST PATH: Try current storage first
+        // Note: Use if-let to handle deletion case (when node was deleted after snapshot)
+        if let Ok(current_node) = self.current.get_node(id) {
             // Check if current version is visible in our snapshot
             if self
                 .visibility_manager
                 .is_visible(&self.snapshot, current_node.metadata.created_by_tx)
             {
-                Ok(current_node)
-            } else {
-                // If not visible, fall through to the slow path.
-                self.get_node_from_historical(id)
+                return Ok(current_node);
             }
-        } else {
-            // If the node is not in current storage (e.g., it was deleted),
-            // we must still check historical storage.
-            self.get_node_from_historical(id)
-        };
+            // If not visible, fall through to the slow path
+        }
+        // If the node is not in current storage (e.g., it was deleted),
+        // we must still check historical storage
 
-        result.record_error_metric()
+        // SLOW PATH: Query historical storage for version visible at snapshot time
+        self.get_node_from_historical(id)
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        let result = if let Ok(current_edge) = self.current.get_edge(id) {
+        // FAST PATH: Try current storage first
+        // Note: Use if-let to handle deletion case (when edge was deleted after snapshot)
+        if let Ok(current_edge) = self.current.get_edge(id) {
             // Check if current version is visible in our snapshot
             if self
                 .visibility_manager
                 .is_visible(&self.snapshot, current_edge.metadata.created_by_tx)
             {
-                Ok(current_edge)
-            } else {
-                // If not visible, fall through to the slow path.
-                self.get_edge_from_historical(id)
+                return Ok(current_edge);
             }
-        } else {
-            // If the edge is not in current storage (e.g., it was deleted),
-            // we must still check historical storage.
-            self.get_edge_from_historical(id)
-        };
+            // If not visible, fall through to the slow path
+        }
+        // If the edge is not in current storage (e.g., it was deleted),
+        // we must still check historical storage
 
-        result.record_error_metric()
+        // SLOW PATH: Query historical storage for version visible at snapshot time
+        self.get_edge_from_historical(id)
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
