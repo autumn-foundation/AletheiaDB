@@ -3,8 +3,8 @@
 //! This module provides the primary interface to the database, coordinating
 //! between current storage (fast path) and historical storage (temporal path).
 
-use crate::api::transaction::{TxIdGenerator, TxVisibilityManager};
-use crate::core::id::IdGenerator;
+use crate::api::transaction::TxVisibilityManager;
+use crate::core::id::{IdGenerator, TxIdGenerator};
 use crate::core::temporal::Timestamp;
 use crate::index::temporal::TemporalIndexes;
 use crate::query::planner::Statistics;
