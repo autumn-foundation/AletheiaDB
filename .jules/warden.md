@@ -33,3 +33,15 @@
 2024-XX-XX - [Warden: CSR Adjacency Index Vulnerability]
 **Threat:** `AdjacencyIndex::import_csr` did not validate that `node_ids` is sorted, and did not validate that `offsets` is monotonically increasing. It also didn't validate that the first offset is `0`. This allows a maliciously constructed CSR payload to cause OOB reads (Denial of Service) when `get_adjacency` is called, due to `start > end` or `end > edges.len()` when slicing the `edges` array.
 **Defense:** Added rigorous validation in `validate_csr_invariants` to ensure `node_ids` is strictly sorted (no duplicates), `offsets` begins with `0`, and is monotonically increasing.
+
+**2025-05-25 - Supply Chain Vulnerability Remediation (paste)**
+**Threat:**
+1.  **Unmaintained Dependency with Advisory:** The `paste` crate (v1.0.15) has been marked unmaintained via advisory RUSTSEC-2024-0436.
+2.  **Transitive Dependency:** This vulnerable version was included via the `tokenizers` dependency (v0.22.2), which in turn was required by the `embedding-onnx` feature placeholder.
+3.  **Risk:** Leaving unmaintained crates with open advisories in the dependency tree increases the attack surface for potential exploitation, particularly in complex dependencies handling local AI model tokenization.
+
+**Defense:**
+1.  **Remove Vulnerable Feature:** Since `embedding-onnx` was noted as a non-functional placeholder and strictly pulled in `tokenizers` and `ort` dependencies, the `embedding-onnx` feature was entirely removed from `Cargo.toml`.
+2.  **Remove Dependencies:** The `tokenizers`, `ort`, and `num_cpus` dependencies were removed.
+3.  **Codebase Clean-up:** Purged `onnx.rs` references across `examples/` and `src/embeddings/`, dropping the `onnx` code paths.
+4.  **Verification:** Ran `cargo update` and `cargo audit` to confirm the dependency tree is now secure and free from active advisories. Tests confirm no functionality regressions for remaining services.
