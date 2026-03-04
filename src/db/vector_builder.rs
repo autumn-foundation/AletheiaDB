@@ -1,4 +1,4 @@
-use crate::core::error::Result;
+use crate::core::error::{Error, Result};
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::TemporalVectorConfig;
@@ -144,11 +144,16 @@ impl<'a> VectorIndexBuilder<'a> {
     /// # }
     /// ```
     pub fn enable(self) -> Result<()> {
-        let hnsw_config = self.hnsw_config.ok_or_else(|| {
-            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                "HNSW configuration is required. Call .hnsw() before .enable()".to_string(),
-            ))
-        })?;
+        let hnsw_config = self
+            .hnsw_config
+            .ok_or_else(|| {
+                Error::Vector(crate::core::error::VectorError::IndexError(
+                    "HNSW configuration is required. Call .hnsw() before .enable()".to_string(),
+                ))
+            })
+            .inspect_err(|err| {
+                err.record_metric();
+            })?;
 
         // If temporal config is provided, use enable_temporal_vector_index which
         // automatically enables the current index as well (fixing #386)

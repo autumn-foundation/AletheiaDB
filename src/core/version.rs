@@ -357,6 +357,29 @@ impl Default for AnchorConfig {
 /// This stores only the changes from the previous version, enabling
 /// efficient storage of temporal data. For vector properties, uses
 /// sparse delta compression when beneficial (Issue #215).
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::core::property::PropertyMapBuilder;
+/// use aletheiadb::core::version::PropertyDelta;
+///
+/// let old_props = PropertyMapBuilder::new()
+///     .insert("name", "Alice")
+///     .insert("age", 30i64)
+///     .build();
+///
+/// let new_props = PropertyMapBuilder::new()
+///     .insert("name", "Alice")
+///     .insert("age", 31i64) // age changed
+///     .build();
+///
+/// let delta = PropertyDelta::from_diff(&old_props, &new_props);
+/// assert!(!delta.is_empty());
+///
+/// let result = delta.apply(&old_props);
+/// assert_eq!(result.get("age").and_then(|v| v.as_int()), Some(31));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDelta {
     /// Properties that were added or modified (non-vector)
@@ -654,6 +677,10 @@ impl Default for PropertyDelta {
 }
 
 /// Version data - either a full snapshot (anchor) or a delta.
+///
+/// Represents the payload of a node or edge version. If the node or edge has not changed
+/// sufficiently to warrant a full snapshot, it may store a [`VersionData::Delta`] representing
+/// changes from the prior version. Otherwise, it stores a [`VersionData::Anchor`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum VersionData {
     /// Full snapshot of properties (anchor point)

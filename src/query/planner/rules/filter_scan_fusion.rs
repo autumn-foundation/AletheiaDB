@@ -26,6 +26,44 @@ use super::{OptimizationRule, Statistics};
 /// ```
 ///
 /// Non-Eq predicates and scans without a label are left unchanged.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::query::planner::rules::{OptimizationRule, FilterScanFusion};
+/// use aletheiadb::query::planner::stats::Statistics;
+/// use aletheiadb::query::plan::{LogicalPlan, LogicalOp, UnaryOp, ScanOp};
+/// use aletheiadb::query::ir::{Predicate, PredicateValue};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Construct a sub-optimal plan: Filter on Top of NodeScan
+/// let scan = LogicalOp::Scan(ScanOp::NodeScan {
+///     label: Some("Person".into()),
+///     estimated_rows: Some(100),
+/// });
+/// let filter = LogicalOp::unary(
+///     UnaryOp::Filter(Predicate::Eq {
+///         key: "name".into(),
+///         value: PredicateValue::String("Alice".into())
+///     }),
+///     scan
+/// );
+///
+/// let plan = LogicalPlan { root: filter, temporal_context: None, hints: Default::default() };
+///
+/// // 2. Apply the rule
+/// let rule = FilterScanFusion;
+/// let stats = Statistics::new();
+/// let optimized_plan = rule.apply(&plan, &stats)?.unwrap(); // unwraps if `changed == true`
+///
+/// // 3. The rule fuses them into a single PropertyScan
+/// assert!(matches!(
+///     optimized_plan.root,
+///     LogicalOp::Scan(ScanOp::PropertyScan { .. })
+/// ));
+/// # Ok(())
+/// # }
+/// ```
 pub struct FilterScanFusion;
 
 impl OptimizationRule for FilterScanFusion {
