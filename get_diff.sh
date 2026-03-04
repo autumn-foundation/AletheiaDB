@@ -1,2 +1,2 @@
 #!/bin/bash
-git diff
+git diff tests/sentry_coverage_tests.rs
