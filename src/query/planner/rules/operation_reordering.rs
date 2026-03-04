@@ -73,6 +73,55 @@ const FALSE_SELECTIVITY: f64 = 0.0;
 /// Filter(A) -> Filter(B) -> Scan
 /// (Filter A is applied first, reducing rows for Filter B)
 /// ```
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::query::planner::rules::{OptimizationRule, OperationReordering};
+/// use aletheiadb::query::planner::stats::Statistics;
+/// use aletheiadb::query::plan::{LogicalPlan, LogicalOp, UnaryOp, ScanOp};
+/// use aletheiadb::query::ir::{Predicate, PredicateValue};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Construct a sub-optimal plan: A very selective filter (Eq) is ABOVE a less selective one (NotEq)
+/// let scan = LogicalOp::Scan(ScanOp::NodeScan {
+///     label: Some("Person".into()),
+///     estimated_rows: Some(100),
+/// });
+/// let filter_bad = LogicalOp::unary(
+///     UnaryOp::Filter(Predicate::Ne {
+///         key: "status".into(),
+///         value: PredicateValue::String("deleted".into())
+///     }),
+///     scan
+/// );
+/// let filter_good = LogicalOp::unary(
+///     UnaryOp::Filter(Predicate::Eq {
+///         key: "id".into(),
+///         value: PredicateValue::Int(42)
+///     }),
+///     filter_bad
+/// );
+///
+/// let plan = LogicalPlan { root: filter_good, temporal_context: None, hints: Default::default() };
+///
+/// // 2. Apply the rule
+/// let rule = OperationReordering;
+/// let stats = Statistics::new();
+/// let optimized_plan = rule.apply(&plan, &stats)?.unwrap(); // unwraps if `changed == true`
+///
+/// // 3. The rule reorders them so the more selective Filter(Eq) is applied first (deeper in the tree)
+/// if let LogicalOp::Unary { op: UnaryOp::Filter(Predicate::Ne { .. }), input } = optimized_plan.root {
+///     assert!(matches!(
+///         *input,
+///         LogicalOp::Unary { op: UnaryOp::Filter(Predicate::Eq { .. }), .. }
+///     ));
+/// } else {
+///     panic!("Expected Ne filter at root after reordering");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct OperationReordering;
 
 impl OptimizationRule for OperationReordering {
