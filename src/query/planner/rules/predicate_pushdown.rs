@@ -321,21 +321,28 @@ mod tests {
         let new_plan = result.unwrap();
         // Check full AST: VectorRank -> Filter -> Scan
         if let LogicalOp::Unary {
-            op: UnaryOp::VectorRank { top_k, .. },
+            op:
+                UnaryOp::VectorRank {
+                    embedding,
+                    top_k,
+                    property_key,
+                },
             input: rank_input,
         } = new_plan.root
         {
+            assert_eq!(embedding, Arc::from([0.1f32; 4].as_slice()));
             assert_eq!(top_k, None);
+            assert_eq!(property_key, None);
             if let LogicalOp::Unary {
                 op: UnaryOp::Filter(pred),
                 input: filter_input,
             } = rank_input.as_ref()
             {
                 assert_eq!(pred, &Predicate::eq("name", "Alice"));
-                assert!(matches!(
+                assert_eq!(
                     filter_input.as_ref(),
-                    LogicalOp::Scan(ScanOp::NodeLookup(_))
-                ));
+                    &LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]))
+                );
             } else {
                 panic!("Expected Filter below VectorRank");
             }
@@ -432,22 +439,22 @@ mod tests {
         let new_plan = result.unwrap();
         // Check full AST: Sort -> Filter -> Scan
         if let LogicalOp::Unary {
-            op: UnaryOp::Sort {
-                descending: true, ..
-            },
+            op: UnaryOp::Sort { key, descending },
             input: sort_input,
         } = new_plan.root
         {
+            assert_eq!(key, SortKey::Property("created".to_string()));
+            assert!(descending);
             if let LogicalOp::Unary {
                 op: UnaryOp::Filter(pred),
                 input: filter_input,
             } = sort_input.as_ref()
             {
                 assert_eq!(pred, &Predicate::eq("active", true));
-                assert!(matches!(
+                assert_eq!(
                     filter_input.as_ref(),
-                    LogicalOp::Scan(ScanOp::NodeLookup(_))
-                ));
+                    &LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]))
+                );
             } else {
                 panic!("Expected Filter below Sort");
             }
@@ -502,24 +509,40 @@ mod tests {
 
         // Root should be Sort
         if let LogicalOp::Unary {
-            op: UnaryOp::Sort { .. },
+            op: UnaryOp::Sort { key, descending },
             input: sort_input,
         } = root
         {
+            assert_eq!(key, &SortKey::Property("created".to_string()));
+            assert!(descending);
             // Next should be VectorRank
             if let LogicalOp::Unary {
-                op: UnaryOp::VectorRank { .. },
+                op:
+                    UnaryOp::VectorRank {
+                        embedding,
+                        top_k,
+                        property_key,
+                    },
                 input: rank_input,
             } = sort_input.as_ref()
             {
+                assert_eq!(embedding, &Arc::from([0.1f32; 4].as_slice()));
+                assert_eq!(top_k, &None);
+                assert_eq!(property_key, &None);
                 // Next should be Filter
-                assert!(matches!(
-                    rank_input.as_ref(),
-                    LogicalOp::Unary {
-                        op: UnaryOp::Filter(_),
-                        ..
-                    }
-                ));
+                if let LogicalOp::Unary {
+                    op: UnaryOp::Filter(pred),
+                    input: filter_input,
+                } = rank_input.as_ref()
+                {
+                    assert_eq!(pred, &Predicate::eq("active", true));
+                    assert_eq!(
+                        filter_input.as_ref(),
+                        &LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]))
+                    );
+                } else {
+                    panic!("Expected Filter below VectorRank");
+                }
             } else {
                 // If it failed here, print what we got
                 panic!("Expected VectorRank below Sort, got {:?}", sort_input);
@@ -567,22 +590,22 @@ mod tests {
         if let LogicalOp::Binary { left, .. } = new_plan.root {
             // Verify left side is optimized: Sort -> Filter -> Scan
             if let LogicalOp::Unary {
-                op: UnaryOp::Sort {
-                    descending: true, ..
-                },
+                op: UnaryOp::Sort { key, descending },
                 input: sort_input,
             } = *left
             {
+                assert_eq!(key, SortKey::Property("created".to_string()));
+                assert!(descending);
                 if let LogicalOp::Unary {
                     op: UnaryOp::Filter(pred),
                     input: filter_input,
                 } = sort_input.as_ref()
                 {
                     assert_eq!(pred, &Predicate::eq("active", true));
-                    assert!(matches!(
+                    assert_eq!(
                         filter_input.as_ref(),
-                        LogicalOp::Scan(ScanOp::NodeLookup(_))
-                    ));
+                        &LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]))
+                    );
                 } else {
                     panic!("Expected Filter below Sort on left branch");
                 }
@@ -646,22 +669,22 @@ mod sentry_tests {
         if let LogicalOp::Binary { left, right, .. } = new_plan.root {
             // Left should be Sort(Filter...)
             if let LogicalOp::Unary {
-                op: UnaryOp::Sort {
-                    descending: true, ..
-                },
+                op: UnaryOp::Sort { key, descending },
                 input: sort_input,
             } = *left
             {
+                assert_eq!(key, SortKey::Property("a".to_string()));
+                assert!(descending);
                 if let LogicalOp::Unary {
                     op: UnaryOp::Filter(pred),
                     input: filter_input,
                 } = sort_input.as_ref()
                 {
                     assert_eq!(pred, &Predicate::eq("a", 1));
-                    assert!(matches!(
+                    assert_eq!(
                         filter_input.as_ref(),
-                        LogicalOp::Scan(ScanOp::NodeLookup(_))
-                    ));
+                        &LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]))
+                    );
                 } else {
                     panic!("Expected Filter below Sort on left branch");
                 }
@@ -676,7 +699,10 @@ mod sentry_tests {
             } = *right
             {
                 assert_eq!(pred, Predicate::eq("b", 2));
-                assert!(matches!(*input, LogicalOp::Scan(ScanOp::NodeLookup(_))));
+                assert_eq!(
+                    *input,
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]))
+                );
             } else {
                 panic!("Right branch was unexpectedly modified or corrupted");
             }
