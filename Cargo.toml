@@ -56,7 +56,7 @@ actix-governor = { version = "0.10", optional = true }
 
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
-tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros"], optional = true }
 async-trait = { version = "0.1", optional = true }
 
 # HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
@@ -86,7 +86,7 @@ proptest = "1.4"
 tempfile = "3.26"
 serial_test = "3.4"
 # Tokio for async tests
-tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"] }
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "test-util"] }
 # Mutex for serializing env var tests
 lazy_static = "1.4"
 # Readline with auto-complete for examples
