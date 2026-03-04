@@ -303,3 +303,141 @@ fn test_timerange_deserialize_malformed_inputs() {
         panic!("Expected error for inverted range");
     }
 }
+
+#[test]
+fn test_sentinel_timerange_contains_mutants() {
+    let start = 100.into();
+    let end = 200.into();
+    let range = TimeRange::new(start, end).unwrap();
+
+    // Target mutant: replace TimeRange::contains -> bool with true / false
+    // Also target: replace >= with <, replace < with ==, < with <=, < with >
+    // Contains is true if timestamp >= start && timestamp < end
+
+    // Boundary test: Exactly at start -> True
+    assert!(range.contains(100.into()));
+    // Boundary test: Before start -> False
+    assert!(!range.contains(99.into()));
+    // Boundary test: Just before end -> True
+    assert!(range.contains(199.into()));
+    // Boundary test: Exactly at end -> False
+    assert!(!range.contains(200.into()));
+    // Boundary test: After end -> False
+    assert!(!range.contains(201.into()));
+
+    // Contains_or_after is true if timestamp >= start
+    // Boundary test: Exactly at start -> True
+    assert!(range.contains_or_after(100.into()));
+    // Boundary test: Before start -> False
+    assert!(!range.contains_or_after(99.into()));
+    // After end -> True
+    assert!(range.contains_or_after(201.into()));
+}
+
+#[test]
+fn test_sentinel_timerange_is_empty_mutants() {
+    // is_empty -> start == end
+    let start = 100.into();
+    let end = 200.into();
+    let range = TimeRange::new(start, end).unwrap();
+    assert!(!range.is_empty());
+
+    let empty_range = TimeRange::new(100.into(), 100.into()).unwrap();
+    assert!(empty_range.is_empty());
+}
+
+#[test]
+fn test_sentinel_timerange_is_closed_mutants() {
+    let start = 100.into();
+    let current_range = TimeRange::from(start); // end is TIMESTAMP_MAX
+    assert!(!current_range.is_closed());
+
+    let closed_range = TimeRange::new(start, 200.into()).unwrap();
+    assert!(closed_range.is_closed());
+
+    // Test mutant: `< TIMESTAMP_MAX` vs `<= TIMESTAMP_MAX`
+    // Elenchus mutant `TimeRange::is_closed -> bool with true / false`
+    assert_eq!(current_range.end(), TIMESTAMP_MAX);
+    assert!(!current_range.is_closed()); // If <= TIMESTAMP_MAX, this would fail.
+
+    assert!(closed_range.end() < TIMESTAMP_MAX);
+    assert!(closed_range.is_closed());
+}
+
+#[test]
+fn test_sentinel_timerange_is_current_mutants() {
+    let start = 100.into();
+    let current_range = TimeRange::from(start); // end is TIMESTAMP_MAX
+    assert!(current_range.is_current());
+
+    let closed_range = TimeRange::new(start, 200.into()).unwrap();
+    assert!(!closed_range.is_current());
+
+    // Test mutant: `== TIMESTAMP_MAX` vs `!= TIMESTAMP_MAX`
+    assert_eq!(current_range.end(), TIMESTAMP_MAX);
+    assert!(current_range.is_current());
+
+    assert_ne!(closed_range.end(), TIMESTAMP_MAX);
+    assert!(!closed_range.is_current());
+}
+
+#[test]
+fn test_sentinel_bitemporal_is_current_mutants() {
+    let start_valid = 100.into();
+    let start_tx = 200.into();
+
+    let open_valid = TimeRange::from(start_valid);
+    let open_tx = TimeRange::from(start_tx);
+    let closed_valid = TimeRange::new(start_valid, 300.into()).unwrap();
+    let closed_tx = TimeRange::new(start_tx, 400.into()).unwrap();
+
+    let both_open = BiTemporalInterval::new(open_valid, open_tx);
+    assert!(both_open.is_currently_valid());
+    assert!(both_open.is_currently_recorded());
+    assert!(both_open.is_current());
+
+    let both_closed = BiTemporalInterval::new(closed_valid, closed_tx);
+    assert!(!both_closed.is_currently_valid());
+    assert!(!both_closed.is_currently_recorded());
+    assert!(!both_closed.is_current());
+
+    let open_valid_closed_tx = BiTemporalInterval::new(open_valid, closed_tx);
+    assert!(open_valid_closed_tx.is_currently_valid());
+    assert!(!open_valid_closed_tx.is_currently_recorded());
+    assert!(!open_valid_closed_tx.is_current());
+
+    let closed_valid_open_tx = BiTemporalInterval::new(closed_valid, open_tx);
+    assert!(!closed_valid_open_tx.is_currently_valid());
+    assert!(closed_valid_open_tx.is_currently_recorded());
+    assert!(!closed_valid_open_tx.is_current());
+}
+
+#[test]
+fn test_sentinel_bitemporal_is_valid_recorded_at_mutants() {
+    let start_valid = 100.into();
+    let end_valid = 200.into();
+    let start_tx = 300.into();
+    let end_tx = 400.into();
+
+    let valid_range = TimeRange::new(start_valid, end_valid).unwrap();
+    let tx_range = TimeRange::new(start_tx, end_tx).unwrap();
+
+    let interval = BiTemporalInterval::new(valid_range, tx_range);
+
+    // valid_at mutants (bool with true / false)
+    assert!(!interval.is_valid_at(99.into()));
+    assert!(interval.is_valid_at(100.into()));
+    assert!(interval.is_valid_at(199.into()));
+    assert!(!interval.is_valid_at(200.into()));
+
+    // recorded_at mutants (bool with true / false)
+    assert!(!interval.is_recorded_at(299.into()));
+    assert!(interval.is_recorded_at(300.into()));
+    assert!(interval.is_recorded_at(399.into()));
+    assert!(!interval.is_recorded_at(400.into()));
+
+    // visible_at mutants (&& with ||)
+    assert!(!interval.is_visible_at(100.into(), 299.into()));
+    assert!(!interval.is_visible_at(99.into(), 300.into()));
+    assert!(interval.is_visible_at(100.into(), 300.into()));
+}
