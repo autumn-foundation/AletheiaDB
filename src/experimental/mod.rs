@@ -28,6 +28,7 @@
 //! |--------|-----------|-------------|
 //! | [`sherlock`] | **Sherlock** | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
 //! | [`dreamer`] | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
+//! | [`aura`] | **Aura** | Semantic Essence over Time. "What is your long-term identity?" |
 //! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
 //! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
 //! | [`janus`] | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
@@ -105,6 +106,9 @@ pub mod archetype;
 #[cfg(feature = "nova")]
 /// Ariadne: Semantic Thread Weaver.
 pub mod ariadne;
+#[cfg(feature = "nova")]
+/// Aura: Semantic Essence over Time.
+pub mod aura;
 #[cfg(feature = "nova")]
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
