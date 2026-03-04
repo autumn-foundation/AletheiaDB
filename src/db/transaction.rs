@@ -1,5 +1,5 @@
 use crate::api::transaction::{ReadTransaction, WriteTransaction};
-use crate::core::error::{Result, TransactionError};
+use crate::core::error::{Result, ResultExt, TransactionError};
 use crate::core::hlc::HybridTimestamp;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
@@ -83,22 +83,25 @@ impl AletheiaDB {
     /// # }
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
-        let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
+        let result = (|| {
+            let tx_id = self.tx_id_gen.next();
+            let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
-        // Register as active
-        self.visibility_manager.register_active(tx_id);
+            // Register as active
+            self.visibility_manager.register_active(tx_id);
 
-        // Capture snapshot
-        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+            // Capture snapshot
+            let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-        Ok(ReadTransaction::new(
-            tx_id,
-            snapshot,
-            Arc::clone(&self.current),
-            Arc::clone(&self.visibility_manager),
-            Arc::clone(&self.historical),
-        ))
+            Ok(ReadTransaction::new(
+                tx_id,
+                snapshot,
+                Arc::clone(&self.current),
+                Arc::clone(&self.visibility_manager),
+                Arc::clone(&self.historical),
+            ))
+        })();
+        result.record_error_metric()
     }
 
     /// Execute a read-only operation in a transaction.
@@ -187,29 +190,32 @@ impl AletheiaDB {
     /// # }
     /// ```
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
-        let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
+        let result = (|| {
+            let tx_id = self.tx_id_gen.next();
+            let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
-        // Register as active
-        self.visibility_manager.register_active(tx_id);
+            // Register as active
+            self.visibility_manager.register_active(tx_id);
 
-        // Capture snapshot
-        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+            // Capture snapshot
+            let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-        Ok(WriteTransaction::new_with_clock_observed_at(
-            tx_id,
-            snapshot,
-            Arc::clone(&self.current),
-            Arc::clone(&self.historical),
-            Arc::clone(&self.temporal_indexes),
-            Arc::clone(&self.wal),
-            Arc::clone(&self.current_timestamp),
-            Arc::clone(&self.commit_clock_observed_at),
-            Arc::clone(&self.visibility_manager),
-            Arc::clone(&self.node_id_gen),
-            Arc::clone(&self.edge_id_gen),
-            Arc::clone(&self.version_id_gen),
-        ))
+            Ok(WriteTransaction::new_with_clock_observed_at(
+                tx_id,
+                snapshot,
+                Arc::clone(&self.current),
+                Arc::clone(&self.historical),
+                Arc::clone(&self.temporal_indexes),
+                Arc::clone(&self.wal),
+                Arc::clone(&self.current_timestamp),
+                Arc::clone(&self.commit_clock_observed_at),
+                Arc::clone(&self.visibility_manager),
+                Arc::clone(&self.node_id_gen),
+                Arc::clone(&self.edge_id_gen),
+                Arc::clone(&self.version_id_gen),
+            ))
+        })();
+        result.record_error_metric()
     }
 
     /// Execute a write operation in a transaction.
@@ -474,32 +480,35 @@ impl AletheiaDB {
         &self,
         options: WriteOptions,
     ) -> Result<WriteTransaction> {
-        let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
+        let result = (|| {
+            let tx_id = self.tx_id_gen.next();
+            let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
 
-        // Register as active
-        self.visibility_manager.register_active(tx_id);
+            // Register as active
+            self.visibility_manager.register_active(tx_id);
 
-        // Capture snapshot
-        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+            // Capture snapshot
+            let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-        // Determine effective durability mode
-        let durability = options.effective_durability(self.default_durability);
+            // Determine effective durability mode
+            let durability = options.effective_durability(self.default_durability);
 
-        Ok(WriteTransaction::new_with_durability_and_clock_observed_at(
-            tx_id,
-            snapshot,
-            Arc::clone(&self.current),
-            Arc::clone(&self.historical),
-            Arc::clone(&self.temporal_indexes),
-            Arc::clone(&self.wal),
-            Arc::clone(&self.current_timestamp),
-            Arc::clone(&self.commit_clock_observed_at),
-            Arc::clone(&self.visibility_manager),
-            Arc::clone(&self.node_id_gen),
-            Arc::clone(&self.edge_id_gen),
-            Arc::clone(&self.version_id_gen),
-            durability,
-        ))
+            Ok(WriteTransaction::new_with_durability_and_clock_observed_at(
+                tx_id,
+                snapshot,
+                Arc::clone(&self.current),
+                Arc::clone(&self.historical),
+                Arc::clone(&self.temporal_indexes),
+                Arc::clone(&self.wal),
+                Arc::clone(&self.current_timestamp),
+                Arc::clone(&self.commit_clock_observed_at),
+                Arc::clone(&self.visibility_manager),
+                Arc::clone(&self.node_id_gen),
+                Arc::clone(&self.edge_id_gen),
+                Arc::clone(&self.version_id_gen),
+                durability,
+            ))
+        })();
+        result.record_error_metric()
     }
 }

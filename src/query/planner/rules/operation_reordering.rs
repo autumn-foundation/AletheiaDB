@@ -73,6 +73,55 @@ const FALSE_SELECTIVITY: f64 = 0.0;
 /// Filter(A) -> Filter(B) -> Scan
 /// (Filter A is applied first, reducing rows for Filter B)
 /// ```
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::query::planner::rules::{OptimizationRule, OperationReordering};
+/// use aletheiadb::query::planner::stats::Statistics;
+/// use aletheiadb::query::plan::{LogicalPlan, LogicalOp, UnaryOp, ScanOp};
+/// use aletheiadb::query::ir::{Predicate, PredicateValue};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Construct a sub-optimal plan: A very selective filter (Eq) is ABOVE a less selective one (NotEq)
+/// let scan = LogicalOp::Scan(ScanOp::NodeScan {
+///     label: Some("Person".into()),
+///     estimated_rows: Some(100),
+/// });
+/// let filter_bad = LogicalOp::unary(
+///     UnaryOp::Filter(Predicate::Ne {
+///         key: "status".into(),
+///         value: PredicateValue::String("deleted".into())
+///     }),
+///     scan
+/// );
+/// let filter_good = LogicalOp::unary(
+///     UnaryOp::Filter(Predicate::Eq {
+///         key: "id".into(),
+///         value: PredicateValue::Int(42)
+///     }),
+///     filter_bad
+/// );
+///
+/// let plan = LogicalPlan { root: filter_good, temporal_context: None, hints: Default::default() };
+///
+/// // 2. Apply the rule
+/// let rule = OperationReordering;
+/// let stats = Statistics::new();
+/// let optimized_plan = rule.apply(&plan, &stats)?.unwrap(); // unwraps if `changed == true`
+///
+/// // 3. The rule reorders them so the more selective Filter(Eq) is applied first (deeper in the tree)
+/// if let LogicalOp::Unary { op: UnaryOp::Filter(Predicate::Ne { .. }), input } = optimized_plan.root {
+///     assert!(matches!(
+///         *input,
+///         LogicalOp::Unary { op: UnaryOp::Filter(Predicate::Eq { .. }), .. }
+///     ));
+/// } else {
+///     panic!("Expected Ne filter at root after reordering");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct OperationReordering;
 
 impl OptimizationRule for OperationReordering {
@@ -1063,5 +1112,165 @@ mod tests {
 
         let sel = rule.estimate_filter_selectivity(&pred, &stats);
         assert_eq!(sel, NULL_CHECK_SELECTIVITY);
+    }
+
+    #[test]
+    fn test_predicates_equal_exhaustive_mismatches() {
+        let rule = OperationReordering;
+
+        // Eq mismatches
+        assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("b", 1)));
+        assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("a", 2)));
+
+        // Ne mismatches
+        assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("b", 1)));
+        assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("a", 2)));
+
+        // Gt mismatches
+        assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("b", 1)));
+        assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("a", 2)));
+
+        // Gte mismatches
+        assert!(!rule.predicates_equal(
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Gte {
+                key: "b".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            }
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(2)
+            }
+        ));
+
+        // Lt mismatches
+        assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("b", 1)));
+        assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("a", 2)));
+
+        // Lte mismatches
+        assert!(!rule.predicates_equal(
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Lte {
+                key: "b".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            }
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(2)
+            }
+        ));
+
+        // In mismatches
+        assert!(!rule.predicates_equal(
+            &Predicate::In {
+                key: "a".to_string(),
+                values: vec![crate::query::ir::PredicateValue::Int(1)]
+            },
+            &Predicate::In {
+                key: "b".to_string(),
+                values: vec![crate::query::ir::PredicateValue::Int(1)]
+            }
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::In {
+                key: "a".to_string(),
+                values: vec![crate::query::ir::PredicateValue::Int(1)]
+            },
+            &Predicate::In {
+                key: "a".to_string(),
+                values: vec![crate::query::ir::PredicateValue::Int(2)]
+            }
+        ));
+
+        // Contains mismatches
+        assert!(!rule.predicates_equal(
+            &Predicate::contains("a", "abc"),
+            &Predicate::contains("b", "abc")
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::contains("a", "abc"),
+            &Predicate::contains("a", "xyz")
+        ));
+
+        // StartsWith mismatches
+        assert!(!rule.predicates_equal(
+            &Predicate::StartsWith {
+                key: "a".to_string(),
+                prefix: "abc".to_string()
+            },
+            &Predicate::StartsWith {
+                key: "b".to_string(),
+                prefix: "abc".to_string()
+            }
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::StartsWith {
+                key: "a".to_string(),
+                prefix: "abc".to_string()
+            },
+            &Predicate::StartsWith {
+                key: "a".to_string(),
+                prefix: "xyz".to_string()
+            }
+        ));
+
+        // EndsWith mismatches
+        assert!(!rule.predicates_equal(
+            &Predicate::EndsWith {
+                key: "a".to_string(),
+                suffix: "abc".to_string()
+            },
+            &Predicate::EndsWith {
+                key: "b".to_string(),
+                suffix: "abc".to_string()
+            }
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::EndsWith {
+                key: "a".to_string(),
+                suffix: "abc".to_string()
+            },
+            &Predicate::EndsWith {
+                key: "a".to_string(),
+                suffix: "xyz".to_string()
+            }
+        ));
+
+        // Exists mismatches
+        assert!(!rule.predicates_equal(&Predicate::exists("a"), &Predicate::exists("b")));
+
+        // NotExists mismatches
+        assert!(!rule.predicates_equal(
+            &Predicate::NotExists("a".to_string()),
+            &Predicate::NotExists("b".to_string())
+        ));
+
+        // And / Or structural mismatches (different sizes)
+        assert!(!rule.predicates_equal(
+            &Predicate::And(vec![Predicate::eq("a", 1)]),
+            &Predicate::And(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::Or(vec![Predicate::eq("a", 1)]),
+            &Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
+        ));
     }
 }
