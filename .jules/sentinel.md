@@ -125,3 +125,9 @@
 **Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`.
 **Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, and exact exclusion of boundaries inside interval intersections.
 **Kill Shot:** Appended explicit exact boundary tests `test_timerange_from_at_exact_boundaries`, `test_time_to_secs_millis_exact_math`, `test_time_to_iso8601_exact_content`, and `test_timerange_contains_exact_boundary` directly to `tests/sentry_temporal.rs`.
+
+**[Weak Test Coverage in Temporal Logic Boundaries and Math]**
+**Module:** `src/core/temporal.rs`
+**Summary:** Remaining surviving mutants involved serialization length checks (`len < 24`), math in time conversion methods (`+`, `-`, `/`, `%`), default returns for structs/flags (`true`/`false`, empty string, `String::new`), and tight boundaries (`<` vs `<=`).
+**Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests lacked explicit checks ensuring operators like `/` or `%` weren't swapped without altering test results. Also tests did not catch mutated default returns on `Display` formatter string outputs or exact `deserialize` buffer sizes.
+**Kill Shot:** Appended 38 explicit test cases in `tests/sentry_temporal_mutants.rs` spanning `TimeRange`, `BiTemporalInterval`, `time::now()`, `time::to_iso8601()`, explicit boundary math, and explicit non-default return values.
