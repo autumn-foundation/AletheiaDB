@@ -76,6 +76,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+use crate::core::hasher::IdentityHasher;
+
+/// Fast HashMap using IdentityHasher for unique integer keys.
+///
+/// **Why this matters for performance:**
+/// `NodeId` is already a unique high-quality 64-bit identifier. Default `HashMap`
+/// uses SipHash, which is cryptographically resistant but slow. Bypassing it with
+/// `IdentityHasher` removes measurable hashing overhead from the hot path during
+/// sparse vector scoring accumulation and fusion operations.
+pub(crate) type FastHashMap<V> = HashMap<NodeId, V, std::hash::BuildHasherDefault<IdentityHasher>>;
+
 /// Maximum number of results that can be requested in a search.
 ///
 /// This prevents DoS attacks via excessive memory allocation.
@@ -453,11 +464,11 @@ impl SparseVectorIndex {
         // For cosine similarity, we track magnitudes to avoid second lookups
         // For BM25, we track document lengths to avoid second lookups
         let is_cosine = matches!(self.config.scoring, ScoringMethod::Cosine);
-        let mut scores: HashMap<NodeId, f32> = HashMap::new();
+        let mut scores: FastHashMap<f32> = FastHashMap::default();
         // Magnitudes map is only used for cosine, but we always create it (cheap)
-        let mut magnitudes: HashMap<NodeId, f32> = HashMap::new();
+        let mut magnitudes: FastHashMap<f32> = FastHashMap::default();
         // Document lengths map is only used for BM25, but we always create it (cheap)
-        let mut doc_lengths: HashMap<NodeId, f32> = HashMap::new();
+        let mut doc_lengths: FastHashMap<f32> = FastHashMap::default();
         let query_magnitude = query.magnitude();
         // Use Acquire ordering to synchronize with Release stores, ensuring we see
         // all data modifications that happened before the count was updated
@@ -1072,7 +1083,7 @@ pub fn hybrid_fusion(
     let sparse_normalized = normalize_scores(sparse_results);
 
     // Combine scores
-    let mut combined: HashMap<NodeId, f32> = HashMap::new();
+    let mut combined: FastHashMap<f32> = FastHashMap::default();
 
     for (id, score) in dense_normalized {
         *combined.entry(id).or_insert(0.0) += alpha * score;
@@ -1133,7 +1144,7 @@ pub fn reciprocal_rank_fusion(
     let k = k.min(MAX_K);
     let k_constant = k_constant.max(1.0);
 
-    let mut rrf_scores: HashMap<NodeId, f32> = HashMap::new();
+    let mut rrf_scores: FastHashMap<f32> = FastHashMap::default();
 
     // Add RRF contribution from dense results
     for (rank, (id, _)) in dense_results.iter().enumerate() {
