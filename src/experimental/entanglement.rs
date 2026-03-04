@@ -82,7 +82,9 @@ impl<'a> EntanglementDetector<'a> {
         property_name: &str,
     ) -> Result<Vec<EntangledPair>> {
         if nodes.len() < 2 {
-            return Err(Error::other("Need at least two nodes to detect entanglement"));
+            return Err(Error::other(
+                "Need at least two nodes to detect entanglement",
+            ));
         }
 
         // 1. Gather historical vector deltas for each node, mapped by transaction time
@@ -98,7 +100,8 @@ impl<'a> EntanglementDetector<'a> {
 
             for version in history.versions.iter() {
                 if let Ok(node) = self.db.get_node_at_version(node_id, version.version_number) {
-                    if let Some(prop) = node.get_property(property_name).and_then(|p| p.as_vector()) {
+                    if let Some(prop) = node.get_property(property_name).and_then(|p| p.as_vector())
+                    {
                         let current_vector = prop.to_vec();
 
                         if let Some(prev) = &previous_vector {
@@ -110,7 +113,8 @@ impl<'a> EntanglementDetector<'a> {
                                 }
 
                                 // Group by transaction time start. BiTemporalInterval holds the timestamps.
-                                let tx_time = version.temporal.transaction_time().start().wallclock();
+                                let tx_time =
+                                    version.temporal.transaction_time().start().wallclock();
                                 deltas_map.insert(tx_time, delta);
                                 all_update_times.push(tx_time);
                             }
@@ -135,14 +139,19 @@ impl<'a> EntanglementDetector<'a> {
                 let node_a = nodes[i];
                 let node_b = nodes[j];
 
-                if let (Some(deltas_a), Some(deltas_b)) = (node_deltas_by_time.get(&node_a), node_deltas_by_time.get(&node_b)) {
+                if let (Some(deltas_a), Some(deltas_b)) = (
+                    node_deltas_by_time.get(&node_a),
+                    node_deltas_by_time.get(&node_b),
+                ) {
                     let mut total_similarity = 0.0;
                     let mut valid_comparisons = 0;
 
                     // We only correlate changes that happened at the EXACT SAME transaction time
                     // (i.e. part of the same transaction or same logical time tick).
                     for &time in &all_update_times {
-                        if let (Some(da_raw), Some(db_raw)) = (deltas_a.get(&time), deltas_b.get(&time)) {
+                        if let (Some(da_raw), Some(db_raw)) =
+                            (deltas_a.get(&time), deltas_b.get(&time))
+                        {
                             let mut da = da_raw.clone();
                             let mut db = db_raw.clone();
 
@@ -174,7 +183,11 @@ impl<'a> EntanglementDetector<'a> {
         }
 
         // Sort by score descending
-        entangled_pairs.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        entangled_pairs.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(entangled_pairs)
     }
@@ -237,23 +250,27 @@ mod tests {
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &[1.0, 0.0])
                     .build(),
-            ).unwrap();
+            )
+            .unwrap();
 
             tx.update_node(
                 n2,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &[2.0, 1.0])
                     .build(),
-            ).unwrap();
+            )
+            .unwrap();
 
             tx.update_node(
                 n3,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &[0.0, 1.0])
                     .build(),
-            ).unwrap();
+            )
+            .unwrap();
             Ok::<(), Error>(())
-        }).unwrap();
+        })
+        .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(10));
 
@@ -265,34 +282,44 @@ mod tests {
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &[1.0, 1.0])
                     .build(),
-            ).unwrap();
+            )
+            .unwrap();
 
             tx.update_node(
                 n2,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &[2.0, 2.0])
                     .build(),
-            ).unwrap();
+            )
+            .unwrap();
 
             tx.update_node(
                 n3,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &[-1.0, 1.0])
                     .build(),
-            ).unwrap();
+            )
+            .unwrap();
             Ok::<(), Error>(())
-        }).unwrap();
+        })
+        .unwrap();
 
         let detector = EntanglementDetector::new(&db);
         let nodes = vec![n1, n2, n3];
         let pairs = detector.detect_entanglement(&nodes, "embedding").unwrap();
 
         // n1 and n2 should be highly entangled
-        let n1_n2_pair = pairs.iter().find(|p| (p.node_a == n1 && p.node_b == n2) || (p.node_a == n2 && p.node_b == n1)).unwrap();
+        let n1_n2_pair = pairs
+            .iter()
+            .find(|p| (p.node_a == n1 && p.node_b == n2) || (p.node_a == n2 && p.node_b == n1))
+            .unwrap();
         assert!(n1_n2_pair.score > 0.99);
 
         // n1 and n3 should have low or negative entanglement
-        let n1_n3_pair = pairs.iter().find(|p| (p.node_a == n1 && p.node_b == n3) || (p.node_a == n3 && p.node_b == n1)).unwrap();
+        let n1_n3_pair = pairs
+            .iter()
+            .find(|p| (p.node_a == n1 && p.node_b == n3) || (p.node_a == n3 && p.node_b == n1))
+            .unwrap();
         assert!(n1_n3_pair.score < 0.1);
     }
 
@@ -322,7 +349,8 @@ mod tests {
                 )
                 .unwrap();
             Ok::<(), Error>(())
-        }).unwrap();
+        })
+        .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(10));
 
@@ -333,9 +361,11 @@ mod tests {
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &[1.0, 0.0])
                     .build(),
-            ).unwrap();
+            )
+            .unwrap();
             Ok::<(), Error>(())
-        }).unwrap();
+        })
+        .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(10));
 
@@ -346,9 +376,11 @@ mod tests {
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &[2.0, 1.0])
                     .build(),
-            ).unwrap();
+            )
+            .unwrap();
             Ok::<(), Error>(())
-        }).unwrap();
+        })
+        .unwrap();
 
         let detector = EntanglementDetector::new(&db);
         let nodes = vec![n1, n2];
