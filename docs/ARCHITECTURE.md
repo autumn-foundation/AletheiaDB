@@ -1157,6 +1157,49 @@ flowchart TD
     Move --> CheckTerm
 ```
 
+**Aura Engine (Semantic Essence over Time)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class AuraEngine {
+            +calculate_aura(node_id, property_name, half_life_us) AuraResult
+        }
+        class AuraResult {
+            +aura_vector: Option<Vec~f32~>
+            +current_vector: Option<Vec~f32~>
+            +divergence_score: f32
+        }
+    }
+    class AletheiaDB
+
+    AuraEngine --> AletheiaDB : Uses (Version History)
+    AuraEngine ..> AuraResult : Produces
+```
+
+**Sequence: Calculating Aura**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Aura as AuraEngine
+    participant DB as AletheiaDB
+
+    User->>Aura: calculate_aura(node, prop, half_life)
+    Aura->>DB: get_node_history(node)
+    DB-->>Aura: versions
+
+    loop Every Version
+        Aura->>Aura: extract target vector property
+        Aura->>Aura: calculate exponential decay weight
+        Aura->>Aura: add to weighted sum
+    end
+
+    Aura->>Aura: compute Aura (weighted average)
+    Aura->>Aura: compute divergence from current state
+    Aura-->>User: AuraResult
+```
+
 **Kairos (Semantic Event Detection)**
 
 ```mermaid
