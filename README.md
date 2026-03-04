@@ -412,7 +412,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use aletheiadb::prelude::*;
-use aletheiadb::{HnswConfig, DistanceMetric};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
 let db = AletheiaDB::new().unwrap();
@@ -485,7 +485,7 @@ for row in results {
 let _results = db.query()
     .find_similar_builder(&query_embedding, 10)
     .property("embedding")  // Query specific property
-    .metric(DistanceMetric::Cosine)
+    .metric(aletheiadb::index::vector::DistanceMetric::Cosine)
     .finish()
     .execute(&db)?;
 ```
@@ -766,7 +766,7 @@ For complex operations involving multiple updates, use explicit transactions.
 use aletheiadb::prelude::*;
 
 // Explicit read transaction
-let result = db.read(|tx| {
+let _result = db.read(|tx| {
     tx.get_node(alice_id).map(|node| node.label.clone())
 })?;
 
@@ -852,7 +852,7 @@ fn main() {
     let config = observability::Config::from_env();
     observability::init(config);
 
-    let db = aletheiadb::AletheiaDB::new().unwrap();
+    let _db = aletheiadb::AletheiaDB::new().unwrap();
 
     // Metrics automatically collected
     // Check for critical errors
@@ -936,6 +936,7 @@ See `docs/adr/` for all architectural decisions.
 **Other Examples:**
 - `examples/observability_demo.rs` - Production observability features
 - `examples/doctor_who_demo.rs` - Temporal graph modeling example
+> ⚠️ **REQUIRES FEATURE NOVA**: The `story_demo` example uses experimental features that require the `nova` feature flag to be enabled in your `Cargo.toml`.
 - `examples/story_demo.rs` - Narrative generation example (Run: `cargo run --example story_demo --features nova`)
 
 ## Use Cases
