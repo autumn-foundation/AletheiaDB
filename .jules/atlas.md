@@ -71,3 +71,7 @@
 ## 2026-05-24 - Unwinding API/Core Dependency
 **Tangle:** `db` module imported `TxIdGenerator` through `api::transaction`. This caused a layering violation where `db` skipped `core` to rely on an `api` re-export for a domain primitive, creating coupling between `api` and `core`'s ID generation responsibilities.
 **Blueprint:** Removed `TxIdGenerator` re-export from `api::transaction::types` and `api::transaction::mod`. Updated `db::mod`, `db::config`, and all transaction tests to explicitly import `TxIdGenerator` directly from `core::id::TxIdGenerator`.
+
+## 2026-06-03 - Extracting The Blob Modules
+**Tangle:** Several modules (`src/storage/checkpoint.rs`, `src/storage/redb_cold_storage.rs`, `src/query/planner/mod.rs`, and `src/query/executor/iterators.rs`) had become extremely bloated (1500 to 3500+ lines), primarily due to massive inline test modules (`#[cfg(test)] mod tests { ... }`) mixed with core domain logic.
+**Blueprint:** Converted each bloated module into a dedicated directory with a `mod.rs` and a `tests.rs`. Extracted all test code out of the inline blocks and into the newly created `tests.rs` files, linking them via `#[cfg(test)] mod tests;`. This drastically improved the navigability and structural clarity of the codebase without changing any underlying functionality or dependencies.
