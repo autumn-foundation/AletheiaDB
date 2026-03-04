@@ -1319,6 +1319,40 @@ fn test_is_normalized_diagonal() {
     assert!(is_normalized(&v, 1e-6));
 }
 
+#[test]
+fn test_is_normalized_default() {
+    // Unnormalized vector
+    assert!(!is_normalized_default(&[3.0, 4.0]));
+    assert!(!is_normalized_default(&[2.0, 0.0, 0.0]));
+
+    // Normalized vectors
+    assert!(is_normalized_default(&[1.0, 0.0, 0.0]));
+    assert!(is_normalized_default(&[0.0, 1.0, 0.0]));
+    assert!(is_normalized_default(&[0.0, 0.0, 1.0]));
+
+    let v = normalize(&[3.0, 4.0]);
+    assert!(is_normalized_default(&v));
+
+    // Zero vector
+    assert!(!is_normalized_default(&[0.0, 0.0, 0.0]));
+
+    // Edge cases with explicit bounds checking
+    // NORMALIZATION_TOLERANCE is 1e-6
+    // Within bounds
+    let valid_plus = [1.0 + 1e-7, 0.0];
+    assert!(is_normalized_default(&valid_plus));
+
+    let valid_minus = [1.0 - 1e-7, 0.0];
+    assert!(is_normalized_default(&valid_minus));
+
+    // Outside bounds
+    let invalid_plus = [1.0 + 1e-5, 0.0];
+    assert!(!is_normalized_default(&invalid_plus));
+
+    let invalid_minus = [1.0 - 1e-5, 0.0];
+    assert!(!is_normalized_default(&invalid_minus));
+}
+
 // ========================================================================
 // DistanceMetric Tests
 // ========================================================================
