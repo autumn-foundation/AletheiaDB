@@ -10,7 +10,7 @@
 //! (100-500ns per traversal) in hot paths, especially for deep graph queries.
 //!
 //! AletheiaDB avoids this by returning lazy iterators. These iterators hold a lock-free reference
-//! ([`MergedAdjacencyGuard`](crate::index::incremental_adjacency::MergedAdjacencyGuard)) to the underlying
+//! ([`MergedAdjacencyGuard`]) to the underlying
 //! adjacency data (frozen CSR slice + delta map) and yield edge IDs on demand.
 //!
 //! This approach provides:
