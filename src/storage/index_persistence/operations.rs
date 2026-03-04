@@ -312,6 +312,21 @@ pub(crate) fn load_vector_indexes(
 ///
 /// This ensures that on restart, the graph structure can be reloaded 6-30x faster than
 /// replaying the Write-Ahead Log (WAL).
+///
+/// # Examples
+///
+/// ```ignore
+/// use aletheiadb::storage::index_persistence::operations::persist_graph_index;
+///
+/// // Example of persisting the graph (Internal API)
+/// let (nodes, edges) = persist_graph_index(
+///     &current_storage,
+///     &manager,
+///     Some(&tracker),
+///     current_lsn
+/// ).unwrap();
+/// println!("Persisted {} nodes and {} edges", nodes, edges);
+/// ```
 pub(crate) fn persist_graph_index(
     current: &Arc<CurrentStorage>,
     manager: &Arc<IndexPersistenceManager>,
@@ -396,6 +411,14 @@ pub(crate) fn persist_graph_index(
 }
 
 /// Persist temporal index to disk.
+///
+/// Converts the historical versions of nodes and edges into a disk-friendly format
+/// and writes them to `versions.idx`.
+///
+/// # Panics
+///
+/// This function does not panic under normal conditions, but relies on obtaining a read lock
+/// on the `HistoricalStorage`. If the lock is poisoned, it will panic.
 pub(crate) fn persist_temporal_index(
     historical: &Arc<RwLock<HistoricalStorage>>,
     _temporal_indexes: &Arc<TemporalIndexes>,
@@ -466,6 +489,9 @@ pub(crate) fn persist_temporal_index(
 }
 
 /// Persist string interner to disk.
+///
+/// Writes the global string interner state so that `InternedString` IDs can be accurately
+/// resolved across restarts. This must be the first index loaded on startup.
 pub(crate) fn persist_string_interner(
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
@@ -489,6 +515,9 @@ pub(crate) fn persist_string_interner(
 }
 
 /// Persist temporal adjacency index to disk.
+///
+/// Saves the temporal adjacency index which allows fast temporal edge traversal.
+/// If the index is not enabled or empty, this does nothing.
 pub(crate) fn persist_temporal_adjacency_index(
     historical: &Arc<RwLock<HistoricalStorage>>,
     manager: &Arc<IndexPersistenceManager>,
