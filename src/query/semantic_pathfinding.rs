@@ -1,11 +1,63 @@
 //! Semantic Pathfinding Module (Experimental)
 //!
 //! This module implements pathfinding algorithms that consider semantic similarity
-//! (vector embeddings) as part of the cost function.
+//! (vector embeddings) as part of the cost function. Instead of just finding the shortest
+//! structural path between two nodes, semantic pathfinding finds the *most contextually relevant*
+//! path, allowing queries to be guided by a concept.
 //!
 //! # Features
-//! - **Semantic A***: Finds paths where nodes are semantically similar to a query concept.
-//! - **Time-Travel Pathfinding**: Finds paths that were valid at a specific point in time.
+//! - **Semantic A***: Finds paths where intermediate nodes are semantically similar to a query concept.
+//! - **Time-Travel Pathfinding**: Finds paths that were valid at a specific historical point in time.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use aletheiadb::db::AletheiaDB;
+//! use aletheiadb::core::property::PropertyMapBuilder;
+//! use aletheiadb::query::semantic_pathfinding::SemanticPathfinder;
+//! use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+//! use aletheiadb::api::transaction::WriteOps;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 1. Setup Database with vector index
+//! let db = AletheiaDB::new()?;
+//! db.vector_index("embedding")
+//!     .hnsw(HnswConfig::new(3, DistanceMetric::Cosine))
+//!     .enable()?;
+//!
+//! // 2. Create nodes with vector embeddings
+//! let start = db.create_node("Start", PropertyMapBuilder::new().insert_vector("embedding", &[0.5, 0.5, 0.0]).build())?;
+//! let end = db.create_node("End", PropertyMapBuilder::new().insert_vector("embedding", &[0.5, 0.5, 0.0]).build())?;
+//!
+//! // Intermediate nodes
+//! let apple = db.create_node("Apple", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0, 0.0]).build())?; // Fruit
+//! let laptop = db.create_node("Laptop", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 1.0, 0.0]).build())?; // Tech
+//!
+//! // Create edges: Start -> [Apple, Laptop] -> End
+//! db.create_edge(start, apple, "NEXT", PropertyMapBuilder::new().build())?;
+//! db.create_edge(apple, end, "NEXT", PropertyMapBuilder::new().build())?;
+//! db.create_edge(start, laptop, "NEXT", PropertyMapBuilder::new().build())?;
+//! db.create_edge(laptop, end, "NEXT", PropertyMapBuilder::new().build())?;
+//!
+//! // 3. Find path using a query vector (e.g., "Banana", which is closer to "Apple" than "Laptop")
+//! let query_embedding = vec![0.9, 0.1, 0.0];
+//! let pathfinder = SemanticPathfinder::new(&db, "embedding");
+//!
+//! // The pathfinder will prefer the route through 'Apple' because it's semantically closer
+//! let path = pathfinder.find_path(start, end, &query_embedding, 10, false)?.unwrap();
+//! assert_eq!(path, vec![start, apple, end]);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Errors
+//! Methods in this module will return a [`Result`] indicating failure if:
+//! - An underlying database read operation fails.
+//! - Property maps contain malformed vector properties.
+//!
+//! # Panics
+//! This module does not intentionally panic. If any node has a vector that differs in dimension from the `query_embedding`,
+//! it treats the cost as infinite (effectively blocking the path) instead of panicking.
 
 use crate::core::error::Result;
 use crate::core::id::NodeId;
@@ -55,11 +107,24 @@ pub struct SemanticPathfinder<'a, G: GraphView + ?Sized> {
 }
 
 impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
-    /// Create a new SemanticPathfinder.
+    /// Creates a new [`SemanticPathfinder`].
     ///
     /// # Arguments
     /// * `db` - Reference to the graph view (e.g., database instance).
     /// * `vector_property` - Name of the property containing vector embeddings.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use aletheiadb::db::AletheiaDB;
+    /// use aletheiadb::query::semantic_pathfinding::SemanticPathfinder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let pathfinder = SemanticPathfinder::new(&db, "embedding");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(db: &'a G, vector_property: &str) -> Self {
         Self {
             db,
@@ -67,20 +132,47 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         }
     }
 
-    /// Find a path from start to end that minimizes semantic distance to the query vector.
+    /// Finds a path from `start` to `end` that minimizes semantic distance to the `query_embedding`.
     ///
-    /// Uses Dijkstra's algorithm where edge weight = `1.0 - cosine_similarity(target_node, query)`.
-    /// This favors paths through nodes that are semantically relevant to the query concept.
+    /// Uses Dijkstra's algorithm where the edge weight is calculated as:
+    /// `1.0 - cosine_similarity(target_node, query_embedding)`.
+    /// This heavily favors paths through nodes that are semantically relevant to the query concept.
+    /// A small structural cost (0.1) is added per hop to prefer shorter paths when semantics are equal.
     ///
     /// # Arguments
-    /// * `start` - Starting node ID.
-    /// * `end` - Target node ID.
+    /// * `start` - Starting [`NodeId`].
+    /// * `end` - Target [`NodeId`].
     /// * `query_embedding` - Vector representing the semantic concept to follow.
     /// * `max_depth` - Maximum path length (to prevent infinite loops in large graphs).
-    /// * `bidirectional` - If true, traverses both outgoing and incoming edges.
+    /// * `bidirectional` - If `true`, traverses both outgoing and incoming edges.
     ///
     /// # Returns
-    /// A vector of NodeIds representing the path, or None if no path found.
+    /// An `Ok(Some(Vec<NodeId>))` representing the path from start to end, or `Ok(None)` if no valid path exists within the `max_depth`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use aletheiadb::db::AletheiaDB;
+    /// use aletheiadb::core::id::NodeId;
+    /// use aletheiadb::query::semantic_pathfinding::SemanticPathfinder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let pathfinder = SemanticPathfinder::new(&db, "embedding");
+    ///
+    /// let start = NodeId::new(1).unwrap();
+    /// let end = NodeId::new(2).unwrap();
+    /// let concept = vec![0.5, 0.5, 0.0];
+    ///
+    /// if let Some(path) = pathfinder.find_path(start, end, &concept, 5, true)? {
+    ///     println!("Found semantic path: {:?}", path);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error if an underlying database operation fails.
     pub fn find_path(
         &self,
         start: NodeId,
@@ -163,19 +255,49 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         Ok(None)
     }
 
-    /// Find a path at a specific point in time.
+    /// Finds a path at a specific point in time.
     ///
-    /// Similar to `find_path`, but only considers nodes and edges valid at `time`.
+    /// Similar to [`find_path`](Self::find_path), but only considers nodes and edges valid at the specified `time`.
     /// Uses the temporal adjacency index to find edges that existed at the specified
-    /// time, even if they have been deleted from current storage.
+    /// time, even if they have since been deleted from current storage.
     ///
     /// # Arguments
-    /// * `start` - Starting node ID.
-    /// * `end` - Target node ID.
+    /// * `start` - Starting [`NodeId`].
+    /// * `end` - Target [`NodeId`].
     /// * `query_embedding` - Vector representing the semantic concept to follow.
-    /// * `time` - The timestamp at which to evaluate the graph.
+    /// * `time` - The [`Timestamp`] at which to evaluate the graph state.
     /// * `max_depth` - Maximum path length (to prevent infinite loops in large graphs).
-    /// * `bidirectional` - If true, traverses both outgoing and incoming edges.
+    /// * `bidirectional` - If `true`, traverses both outgoing and incoming edges.
+    ///
+    /// # Returns
+    /// An `Ok(Some(Vec<NodeId>))` representing the path from start to end as it existed at `time`, or `Ok(None)` if no valid path existed within the `max_depth`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use aletheiadb::db::AletheiaDB;
+    /// use aletheiadb::core::id::NodeId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::query::semantic_pathfinding::SemanticPathfinder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let pathfinder = SemanticPathfinder::new(&db, "embedding");
+    ///
+    /// let start = NodeId::new(1).unwrap();
+    /// let end = NodeId::new(2).unwrap();
+    /// let concept = vec![0.5, 0.5, 0.0];
+    /// let historical_time: Timestamp = 1622505600.into();
+    ///
+    /// if let Some(path) = pathfinder.find_path_at_time(start, end, &concept, historical_time, 5, false)? {
+    ///     println!("Found historical semantic path: {:?}", path);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error if an underlying database operation fails.
     pub fn find_path_at_time(
         &self,
         start: NodeId,
