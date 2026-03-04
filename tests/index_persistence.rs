@@ -2841,3 +2841,110 @@ fn test_parallel_loading_graph_error() {
 
     println!("✓ Parallel loading graph error test passed");
 }
+
+#[test]
+fn test_malformed_csr_data_fallback() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::{AletheiaDB, PropertyMapBuilder, config::AletheiaDBConfig};
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
+
+    // Create database with data
+    {
+        let config = AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: false,
+                ..Default::default()
+            })
+            .build();
+
+        let db = AletheiaDB::with_unified_config(config).unwrap();
+
+        let n1 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+
+        let n2 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+
+        db.create_edge(
+            n1,
+            n2,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020).build(),
+        )
+        .unwrap();
+
+        db.persist_indexes().unwrap();
+    }
+
+    // Now corrupt the graph persistence file directly to have an invalid CSR state
+    // We will do this by injecting corrupted CSR offsets in the serialized data.
+    use aletheiadb::storage::index_persistence::IndexPersistenceManager;
+    let manager = IndexPersistenceManager::new(&data_dir);
+    let graph_path = manager.graph_path().join("adjacency.idx");
+
+    // The best way to test this without manually messing with binary format is to replace the file with valid structure
+    // but invalid CSR invariants (e.g. non-monotonic offsets).
+    // Instead of raw byte hacking, we will just use a helper method to write malformed data.
+    use aletheiadb::storage::index_persistence::formats::GraphIndexData;
+
+    let corrupted_graph_data = GraphIndexData {
+        magic: *b"GGRP",
+        version: 1,
+        node_count: 2,
+        edge_count: 1,
+        nodes: vec![],
+        edges: vec![],
+        outgoing_node_ids: vec![1, 2],
+        outgoing_offsets: vec![0, 5, 2], // INVALID: non-monotonic offsets
+        outgoing_neighbors: vec![100, 101, 102],
+
+        // Valid incoming but outgoing is enough to fail the overall CSR import
+        incoming_node_ids: vec![1, 2],
+        incoming_offsets: vec![0, 1, 2],
+        incoming_neighbors: vec![100, 101],
+    };
+
+    let serialized_data = bitcode::encode(&corrupted_graph_data);
+
+    let mut file = std::fs::File::create(&graph_path).unwrap();
+
+    // We also need to add zstd compression because graph files are compressed
+    let mut encoder = zstd::stream::Encoder::new(&mut file, 0).unwrap();
+    std::io::Write::write_all(&mut encoder, &serialized_data).unwrap();
+    encoder.finish().unwrap();
+
+    // Try to load - should handle corrupted CSR gracefully by falling back to rebuilding adjacency
+    let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: data_dir.clone(),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .build();
+
+    // Should not panic, but successfully start
+    let _db = AletheiaDB::with_unified_config(config).unwrap();
+
+    // The graph might be empty if it had to completely rebuild and no WAL/other data was there
+    // But importantly, it didn't panic!
+
+    println!("✓ Malformed CSR data fallback test passed");
+}
