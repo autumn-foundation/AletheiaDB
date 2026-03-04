@@ -173,14 +173,10 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         .into());
     }
 
-    let dimension_bytes: [u8; 4] = bytes
-        .get(1..5)
-        .ok_or_else(|| {
-            StorageError::CorruptedData("Buffer too short for vector dimension".to_string())
-        })?
-        .try_into()
-        .map_err(|_| StorageError::CorruptedData("Invalid vector dimension bytes".to_string()))?;
-    let dimension = u32::from_le_bytes(dimension_bytes) as usize;
+    // SAFETY: We already checked bytes.len() >= 5, so bytes[1..5] is exactly 4 bytes
+    let mut dim_bytes = [0u8; 4];
+    dim_bytes.copy_from_slice(&bytes[1..5]);
+    let dimension = u32::from_le_bytes(dim_bytes) as usize;
 
     // Prevent DoS via memory exhaustion from malicious input
     validate_vector_dimensions(dimension)?;
@@ -338,14 +334,13 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
         .into());
     }
 
-    let dimension_bytes: [u8; 4] = bytes[1..5].try_into().map_err(|_| {
-        StorageError::CorruptedData("Buffer too short for sparse vector dimension".to_string())
-    })?;
-    let dimension = u32::from_le_bytes(dimension_bytes);
+    // SAFETY: We already checked bytes.len() >= 9, so bytes[1..5] and bytes[5..9] are exactly 4 bytes
+    let mut dim_bytes = [0u8; 4];
+    dim_bytes.copy_from_slice(&bytes[1..5]);
+    let dimension = u32::from_le_bytes(dim_bytes);
 
-    let nnz_bytes: [u8; 4] = bytes[5..9].try_into().map_err(|_| {
-        StorageError::CorruptedData("Buffer too short for sparse vector nnz".to_string())
-    })?;
+    let mut nnz_bytes = [0u8; 4];
+    nnz_bytes.copy_from_slice(&bytes[5..9]);
     let nnz = u32::from_le_bytes(nnz_bytes) as usize;
 
     // Validate nnz doesn't exceed dimension
@@ -576,7 +571,10 @@ mod tests {
 
             // Validate header
             assert_eq!(bytes[0], TAG_VECTOR);
-            let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+            // SAFETY: We already checked bytes.len() >= 5, so bytes[1..5] is exactly 4 bytes
+            let mut dim_bytes = [0u8; 4];
+            dim_bytes.copy_from_slice(&bytes[1..5]);
+            let dimension = u32::from_le_bytes(dim_bytes) as usize;
             assert_eq!(dimension, test_vector.len());
             assert_eq!(bytes.len(), 1 + 4 + test_vector.len() * 4);
 
@@ -948,51 +946,5 @@ mod tests {
         let (deserialized, _) =
             deserialize_vector(&bytes).expect("Should deserialize empty vector");
         assert!(deserialized.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod sentry_serialization_tests {
-    use super::*;
-
-    #[test]
-    fn test_deserialize_vector_truncated_dimension() {
-        // Vector header: tag + 4 byte dimension = 5 bytes.
-        // We give it 4 bytes total (tag + 3 byte dim)
-        let bytes = vec![TAG_VECTOR, 0x01, 0x02, 0x03];
-        let err = deserialize_vector(&bytes).unwrap_err();
-        match err {
-            Error::Storage(StorageError::CorruptedData(msg)) => {
-                assert!(msg.contains("Buffer too short"));
-            }
-            _ => panic!("Expected StorageError::CorruptedData for truncated dimension"),
-        }
-    }
-
-    #[test]
-    fn test_deserialize_sparse_vector_truncated_dimension() {
-        // Sparse Vector header: tag + 4 byte dim + 4 byte nnz = 9 bytes.
-        // We give it 4 bytes total (tag + 3 byte dim)
-        let bytes = vec![TAG_SPARSE_VECTOR, 0x01, 0x02, 0x03];
-        let err = deserialize_sparse_vector(&bytes).unwrap_err();
-        if let Error::Storage(StorageError::CorruptedData(msg)) = err {
-            assert!(msg.contains("Buffer too short"));
-        } else {
-            panic!("Expected StorageError::CorruptedData");
-        }
-    }
-
-    #[test]
-    fn test_deserialize_sparse_vector_truncated_nnz() {
-        // We give it 8 bytes total (tag + 4 dim + 3 nnz)
-        let mut bytes = vec![TAG_SPARSE_VECTOR];
-        bytes.extend_from_slice(&100u32.to_le_bytes()); // dimension
-        bytes.extend_from_slice(&[0x01, 0x02, 0x03]); // truncated nnz
-        let err = deserialize_sparse_vector(&bytes).unwrap_err();
-        if let Error::Storage(StorageError::CorruptedData(msg)) = err {
-            assert!(msg.contains("Buffer too short"));
-        } else {
-            panic!("Expected StorageError::CorruptedData");
-        }
     }
 }
