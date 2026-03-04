@@ -48,6 +48,7 @@
 //! | [`spectre`] | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
 //! | [`luna`] | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //! | [`serendipity`] | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
+//! | [`tremor`] | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -231,3 +232,7 @@ pub mod voyager;
 #[cfg(feature = "nova")]
 /// Serendipity: The Scenic Route Finder.
 pub mod serendipity;
+
+#[cfg(feature = "nova")]
+/// Tremor: Semantic Earthquake Detector.
+pub mod tremor;
