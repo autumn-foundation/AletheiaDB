@@ -639,6 +639,39 @@ impl WriteTransaction {
         self.buffer.has_vector_operations()
     }
 
+    fn check_active(&self) -> Result<()> {
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn resolve_valid_from(&self, valid_from: Option<Timestamp>) -> Result<Timestamp> {
+        let ts = valid_from.unwrap_or(self.start_timestamp);
+        validation::validate_valid_from_future(ts)?;
+        Ok(ts)
+    }
+
+    fn validate_node_creation_time(&self, node_id: NodeId, valid_from: Timestamp) -> Result<()> {
+        let historical = self.historical.read();
+        if let Some(current_version_id) = historical.get_current_node_version(node_id)
+            && let Some(current_version) = historical.get_node_version(current_version_id)
+        {
+            let creation_time = current_version.temporal.valid_time().start();
+            drop(historical); // Release lock before calling validation
+            validation::validate_valid_from_not_before_creation(
+                &format!("node:{}", node_id.as_u64()),
+                creation_time,
+                valid_from,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Validate all buffered writes.
     ///
     /// Checks:
@@ -894,26 +927,13 @@ impl WriteOps for WriteTransaction {
         valid_from: Option<Timestamp>,
     ) -> Result<NodeId> {
         let result = (|| {
-            // Check transaction state
-            if self.state != TxState::Active {
-                return Err(TransactionError::InvalidState {
-                    current: format!("{:?}", self.state),
-                    expected: "Active".to_string(),
-                }
-                .into());
-            }
+            self.check_active()?;
+            let valid_from = self.resolve_valid_from(valid_from)?;
 
             // Generate IDs
             let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
             let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
             let label_interned = GLOBAL_INTERNER.intern(label)?;
-
-            // Get timestamp: use provided valid_from or default to transaction start time
-            let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
-
-            // Validate valid_from is not too far in future
-            validation::validate_valid_from_future(valid_from)?;
 
             // Buffer the write
             self.buffer.add(super::BufferedWrite::CreateNode {
@@ -939,23 +959,13 @@ impl WriteOps for WriteTransaction {
         valid_from: Option<Timestamp>,
     ) -> Result<EdgeId> {
         let result = (|| {
-            // Check transaction state
-            if self.state != TxState::Active {
-                return Err(TransactionError::InvalidState {
-                    current: format!("{:?}", self.state),
-                    expected: "Active".to_string(),
-                }
-                .into());
-            }
+            self.check_active()?;
+            let valid_from = valid_from.unwrap_or(self.start_timestamp);
 
             // Generate IDs
             let edge_id = EdgeId::new_unchecked(self.edge_id_gen.next()?);
             let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
             let label_interned = GLOBAL_INTERNER.intern(label)?;
-
-            // Get timestamp: use provided valid_from or default to transaction start time
-            let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
 
             // Buffer the write
             self.buffer.add(super::BufferedWrite::CreateEdge {
@@ -981,14 +991,9 @@ impl WriteOps for WriteTransaction {
         valid_from: Option<Timestamp>,
     ) -> Result<()> {
         let result = (|| {
-            // Check transaction state
-            if self.state != TxState::Active {
-                return Err(TransactionError::InvalidState {
-                    current: format!("{:?}", self.state),
-                    expected: "Active".to_string(),
-                }
-                .into());
-            }
+            self.check_active()?;
+            let valid_from = self.resolve_valid_from(valid_from)?;
+            self.validate_node_creation_time(node_id, valid_from)?;
 
             // Get current node to preserve label and existing properties
             let node = self.current.get_node(node_id)?;
@@ -1005,27 +1010,6 @@ impl WriteOps for WriteTransaction {
 
             // Build the final merged property map
             let merged_properties = builder.build();
-
-            // Get timestamp: use provided valid_from or default to transaction start time
-            let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
-
-            // Validate valid_from is not too far in future
-            validation::validate_valid_from_future(valid_from)?;
-
-            // Validate valid_from is not before entity creation
-            let historical = self.historical.read();
-            if let Some(current_version_id) = historical.get_current_node_version(node_id)
-                && let Some(current_version) = historical.get_node_version(current_version_id)
-            {
-                let creation_time = current_version.temporal.valid_time().start();
-                drop(historical); // Release lock before calling validation
-                validation::validate_valid_from_not_before_creation(
-                    &format!("node:{}", node_id.as_u64()),
-                    creation_time,
-                    valid_from,
-                )?;
-            }
 
             // Buffer the write with merged properties
             self.buffer.add(super::BufferedWrite::UpdateNode {
@@ -1049,14 +1033,8 @@ impl WriteOps for WriteTransaction {
         valid_from: Option<Timestamp>,
     ) -> Result<()> {
         let result = (|| {
-            // Check transaction state
-            if self.state != TxState::Active {
-                return Err(TransactionError::InvalidState {
-                    current: format!("{:?}", self.state),
-                    expected: "Active".to_string(),
-                }
-                .into());
-            }
+            self.check_active()?;
+            let valid_from = valid_from.unwrap_or(self.start_timestamp);
 
             // Get current edge to preserve source, target, label and existing properties
             let edge = self.current.get_edge(edge_id)?;
@@ -1073,10 +1051,6 @@ impl WriteOps for WriteTransaction {
 
             // Build the final merged property map
             let merged_properties = builder.build();
-
-            // Get timestamp: use provided valid_from or default to transaction start time
-            let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
 
             // Buffer the write with merged properties
             self.buffer.add(super::BufferedWrite::UpdateEdge {
@@ -1101,14 +1075,9 @@ impl WriteOps for WriteTransaction {
         valid_from: Option<Timestamp>,
     ) -> Result<()> {
         let result = (|| {
-            // Check transaction state
-            if self.state != TxState::Active {
-                return Err(TransactionError::InvalidState {
-                    current: format!("{:?}", self.state),
-                    expected: "Active".to_string(),
-                }
-                .into());
-            }
+            self.check_active()?;
+            let valid_from = self.resolve_valid_from(valid_from)?;
+            self.validate_node_creation_time(node_id, valid_from)?;
 
             // Verify node exists and check for vector properties
             let node = self.current.get_node(node_id)?;
@@ -1117,27 +1086,6 @@ impl WriteOps for WriteTransaction {
             // to ensure the temporal vector index is notified on commit
             if !self.buffer.has_vector_operations() && node.properties.contains_vector() {
                 self.buffer.mark_has_vector_operations();
-            }
-
-            // Get timestamp: use provided valid_from or default to transaction start time
-            let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
-
-            // Validate valid_from is not too far in future
-            validation::validate_valid_from_future(valid_from)?;
-
-            // Validate valid_from is not before entity creation
-            let historical = self.historical.read();
-            if let Some(current_version_id) = historical.get_current_node_version(node_id)
-                && let Some(current_version) = historical.get_node_version(current_version_id)
-            {
-                let creation_time = current_version.temporal.valid_time().start();
-                drop(historical); // Release lock before calling validation
-                validation::validate_valid_from_not_before_creation(
-                    &format!("node:{}", node_id.as_u64()),
-                    creation_time,
-                    valid_from,
-                )?;
             }
 
             // Buffer the write
@@ -1153,14 +1101,7 @@ impl WriteOps for WriteTransaction {
     }
 
     fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()> {
-        // Check transaction state
-        if self.state != TxState::Active {
-            return Err(TransactionError::InvalidState {
-                current: format!("{:?}", self.state),
-                expected: "Active".to_string(),
-            }
-            .into());
-        }
+        self.check_active()?;
 
         // Verify node exists before attempting deletion
         let _node = self.current.get_node(node_id)?;
@@ -1196,14 +1137,8 @@ impl WriteOps for WriteTransaction {
         valid_from: Option<Timestamp>,
     ) -> Result<()> {
         let result = (|| {
-            // Check transaction state
-            if self.state != TxState::Active {
-                return Err(TransactionError::InvalidState {
-                    current: format!("{:?}", self.state),
-                    expected: "Active".to_string(),
-                }
-                .into());
-            }
+            self.check_active()?;
+            let valid_from = valid_from.unwrap_or(self.start_timestamp);
 
             // Verify edge exists and check for vector properties
             let edge = self.current.get_edge(edge_id)?;
@@ -1213,10 +1148,6 @@ impl WriteOps for WriteTransaction {
             if !self.buffer.has_vector_operations() && edge.properties.contains_vector() {
                 self.buffer.mark_has_vector_operations();
             }
-
-            // Get timestamp: use provided valid_from or default to transaction start time
-            let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
 
             // Buffer the write
             self.buffer.add(super::BufferedWrite::DeleteEdge {

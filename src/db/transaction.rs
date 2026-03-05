@@ -218,6 +218,29 @@ impl AletheiaDB {
         result.record_error_metric()
     }
 
+    /// Record mutations after successful commit for persistence tracking.
+    ///
+    /// This is an internal helper that triggers tracker updates if the transaction
+    /// performed graph operations or vector updates.
+    pub(crate) fn record_mutations(
+        &self,
+        has_node_writes: bool,
+        has_edge_writes: bool,
+        has_vector_writes: bool,
+    ) {
+        if let Some(ref tracker) = self.persistence_tracker {
+            if has_node_writes || has_edge_writes {
+                tracker.record_graph_mutation();
+                tracker.record_temporal_mutation();
+                // String interner mutations happen with every node/edge (labels)
+                tracker.record_string_mutation();
+            }
+            if has_vector_writes {
+                tracker.record_vector_mutation();
+            }
+        }
+    }
+
     /// Execute a write operation in a transaction.
     ///
     /// This is a closure-based API that automatically manages the transaction lifecycle.
@@ -281,17 +304,7 @@ impl AletheiaDB {
         tx.commit().map_err(E::from)?; // Ignore commit timestamp for simple write()
 
         // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
-            if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
-                // String interner mutations happen with every node/edge (labels)
-                tracker.record_string_mutation();
-            }
-            if has_vector_writes {
-                tracker.record_vector_mutation();
-            }
-        }
+        self.record_mutations(has_node_writes, has_edge_writes, has_vector_writes);
 
         Ok(result)
     }
@@ -355,15 +368,7 @@ impl AletheiaDB {
         let commit_ts = tx.commit_with_timestamp().map_err(E::from)?;
 
         // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
-            if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
-            }
-            if has_vector_writes {
-                tracker.record_vector_mutation();
-            }
-        }
+        self.record_mutations(has_node_writes, has_edge_writes, has_vector_writes);
 
         Ok((result, commit_ts))
     }
@@ -438,17 +443,7 @@ impl AletheiaDB {
         tx.commit().map_err(E::from)?; // Ignore commit timestamp for simple write_with_options()
 
         // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
-            if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
-                // String interner mutations happen with every node/edge (labels)
-                tracker.record_string_mutation();
-            }
-            if has_vector_writes {
-                tracker.record_vector_mutation();
-            }
-        }
+        self.record_mutations(has_node_writes, has_edge_writes, has_vector_writes);
 
         Ok(result)
     }
