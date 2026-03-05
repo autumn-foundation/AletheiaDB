@@ -337,10 +337,7 @@ impl CompletionNotifier {
         // Wait for notification
         let mut guard = guard;
         while self.state.load(Ordering::Acquire) == CompletionState::Pending as u64 {
-            guard = self
-                .condvar
-                .wait(guard)
-                .unwrap_or_else(|e| e.into_inner());
+            guard = self.condvar.wait(guard).unwrap_or_else(|e| e.into_inner());
         }
 
         // Check final state
@@ -598,7 +595,9 @@ impl WalRingBuffer {
                         // The sequence protocol ensures the consumer won't read until we
                         // update the sequence number.
                         #[cfg(not(loom))]
-                        unsafe { *slot.entry.get() = Some(entry); }
+                        unsafe {
+                            *slot.entry.get() = Some(entry);
+                        }
                         #[cfg(loom)]
                         slot.entry.with_mut(|ptr| unsafe { *ptr = Some(entry) });
 
@@ -754,7 +753,9 @@ impl WalRingBuffer {
                         //    the producer's Release store of the entry data.
                         let entry = {
                             #[cfg(not(loom))]
-                            unsafe { (*slot.entry.get()).take() }
+                            unsafe {
+                                (*slot.entry.get()).take()
+                            }
                             #[cfg(loom)]
                             slot.entry.with_mut(|ptr| unsafe { (*ptr).take() })
                         };
@@ -1315,9 +1316,13 @@ mod tests {
 
                 // Clear entries
                 #[cfg(not(loom))]
-                unsafe { *self.slots[slot_idx].entry.get() = None; }
+                unsafe {
+                    *self.slots[slot_idx].entry.get() = None;
+                }
                 #[cfg(loom)]
-                self.slots[slot_idx].entry.with_mut(|ptr| unsafe { *ptr = None });
+                self.slots[slot_idx]
+                    .entry
+                    .with_mut(|ptr| unsafe { *ptr = None });
             }
         }
     }
@@ -1584,9 +1589,13 @@ mod sentry_tests {
         buf.slots[0].sequence.store(0, Ordering::Relaxed);
         let (entry0, _) = PendingEntry::new_sync(LSN(0), vec![0]);
         #[cfg(not(loom))]
-        unsafe { *buf.slots[0].entry.get() = Some(entry0); }
+        unsafe {
+            *buf.slots[0].entry.get() = Some(entry0);
+        }
         #[cfg(loom)]
-        buf.slots[0].entry.with_mut(|ptr| unsafe { *ptr = Some(entry0) });
+        buf.slots[0]
+            .entry
+            .with_mut(|ptr| unsafe { *ptr = Some(entry0) });
 
         // Manually overwrite Slot 1 to simulate READY (write completed).
         // For read_pos=1, expected_seq is 2.
@@ -1594,9 +1603,13 @@ mod sentry_tests {
         buf.slots[1].sequence.store(2, Ordering::Relaxed);
         let (entry1, _) = PendingEntry::new_sync(LSN(1), vec![1]);
         #[cfg(not(loom))]
-        unsafe { *buf.slots[1].entry.get() = Some(entry1); }
+        unsafe {
+            *buf.slots[1].entry.get() = Some(entry1);
+        }
         #[cfg(loom)]
-        buf.slots[1].entry.with_mut(|ptr| unsafe { *ptr = Some(entry1) });
+        buf.slots[1]
+            .entry
+            .with_mut(|ptr| unsafe { *ptr = Some(entry1) });
 
         // Attempt drain
         let drained = buf.drain();

@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use loom::sync::Arc;
-    use aletheiadb::storage::wal::ring_buffer::*;
     use aletheiadb::storage::wal::LSN;
+    use aletheiadb::storage::wal::ring_buffer::*;
+    use loom::sync::Arc;
     use loom::thread;
 
     #[test]
