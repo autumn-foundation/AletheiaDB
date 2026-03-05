@@ -172,6 +172,46 @@ sequenceDiagram
     CA-->>User: Result (Queen)
 ```
 
+**Semantic Essence (Aura)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class AuraEngine {
+            +calculate_aura(node_id, property_name, half_life_us)
+        }
+        class AuraResult {
+            +aura_vector: Option~Vec~
+            +current_vector: Option~Vec~
+            +divergence_score: f32
+        }
+    }
+    class AletheiaDB
+
+    AuraEngine --> AletheiaDB : Uses (History)
+    AuraEngine ..> AuraResult : Produces
+```
+
+**Sequence: Calculating Aura**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Aura as AuraEngine
+    participant DB as AletheiaDB
+
+    User->>Aura: calculate_aura(node, prop, half_life)
+    Aura->>DB: get_node_history(node)
+    DB-->>Aura: history.versions
+    loop Every Version
+        Aura->>Aura: compute weight (exponential decay)
+        Aura->>Aura: add to weighted sum
+    end
+    Aura->>Aura: normalize aura_vector
+    Aura->>Aura: divergence = 1.0 - cosine_similarity(aura, current)
+    Aura-->>User: AuraResult
+```
+
 **Temporal Resonance (Echo)**
 
 ```mermaid
