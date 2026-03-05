@@ -436,7 +436,27 @@ pub(crate) fn persist_temporal_index(
     // Convert all node versions
     let mut node_versions = Vec::with_capacity(historical_guard.get_node_versions().len());
     for version in historical_guard.get_node_versions().values() {
-        let entry = convert_node_version(version).map_err(|e| {
+        let mut version_to_persist = version;
+        let cloned_version;
+
+        let has_sparse = if let crate::core::version::VersionData::Delta { delta } = &version.data {
+            delta.vector_deltas.values().any(|vd| matches!(vd, crate::core::version::VectorDelta::Sparse { .. }))
+        } else {
+            false
+        };
+
+        if has_sparse {
+            let prev_id = version.prev_version.ok_or_else(|| StorageError::PersistenceError(format!("Missing prev_version for NodeVersion {} with sparse vector delta", version.id.as_u64())))?;
+            let base_props = historical_guard.reconstruct_node_properties(prev_id).map_err(|e| StorageError::PersistenceError(format!("Failed to reconstruct properties for NodeVersion {}: {}", prev_id.as_u64(), e)))?;
+            let mut temp_clone = version.clone();
+            if let crate::core::version::VersionData::Delta { ref mut delta } = temp_clone.data {
+                delta.materialize_vector_deltas(&base_props).map_err(|e| StorageError::PersistenceError(format!("Failed to materialize vector deltas for NodeVersion {}: {}", version.id.as_u64(), e)))?;
+            }
+            cloned_version = temp_clone;
+            version_to_persist = &cloned_version;
+        }
+
+        let entry = convert_node_version(version_to_persist).map_err(|e| {
             StorageError::PersistenceError(format!(
                 "Failed to convert node version {}: {}",
                 version.id.as_u64(),
@@ -449,7 +469,27 @@ pub(crate) fn persist_temporal_index(
     // Convert all edge versions
     let mut edge_versions = Vec::with_capacity(historical_guard.get_edge_versions().len());
     for version in historical_guard.get_edge_versions().values() {
-        let entry = convert_edge_version(version).map_err(|e| {
+        let mut version_to_persist = version;
+        let cloned_version;
+
+        let has_sparse = if let crate::core::version::VersionData::Delta { delta } = &version.data {
+            delta.vector_deltas.values().any(|vd| matches!(vd, crate::core::version::VectorDelta::Sparse { .. }))
+        } else {
+            false
+        };
+
+        if has_sparse {
+            let prev_id = version.prev_version.ok_or_else(|| StorageError::PersistenceError(format!("Missing prev_version for EdgeVersion {} with sparse vector delta", version.id.as_u64())))?;
+            let base_props = historical_guard.reconstruct_edge_properties(prev_id).map_err(|e| StorageError::PersistenceError(format!("Failed to reconstruct properties for EdgeVersion {}: {}", prev_id.as_u64(), e)))?;
+            let mut temp_clone = version.clone();
+            if let crate::core::version::VersionData::Delta { ref mut delta } = temp_clone.data {
+                delta.materialize_vector_deltas(&base_props).map_err(|e| StorageError::PersistenceError(format!("Failed to materialize vector deltas for EdgeVersion {}: {}", version.id.as_u64(), e)))?;
+            }
+            cloned_version = temp_clone;
+            version_to_persist = &cloned_version;
+        }
+
+        let entry = convert_edge_version(version_to_persist).map_err(|e| {
             StorageError::PersistenceError(format!(
                 "Failed to convert edge version {}: {}",
                 version.id.as_u64(),
