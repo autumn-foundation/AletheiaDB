@@ -164,9 +164,13 @@ impl<'a> AuraEngine<'a> {
                     let mut curr_normalized = current.clone();
                     ops::normalize_in_place(&mut curr_normalized);
 
-                    let sim = ops::cosine_similarity(&sum, &curr_normalized)?;
-                    // Divergence is distance: 1.0 - similarity
-                    divergence_score = (1.0 - sim).max(0.0);
+                    if sum.len() == curr_normalized.len() {
+                        let sim = ops::cosine_similarity(&sum, &curr_normalized)?;
+                        // Divergence is distance: 1.0 - similarity
+                        divergence_score = (1.0 - sim).max(0.0);
+                    } else {
+                        divergence_score = 1.0;
+                    }
                 }
 
                 aura_vector = Some(sum);
