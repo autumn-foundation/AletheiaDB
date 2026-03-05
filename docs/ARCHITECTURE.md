@@ -100,11 +100,15 @@ classDiagram
             +send_batch()
         }
     }
+    namespace Utils {
+        class Error
+    }
 
     MCPServer --> QueryEngine : Uses
     QueryEngine --> AletheiaDB : Uses
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
+    Utils --> Core : "Uses (CoreError)"
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
