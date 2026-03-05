@@ -156,36 +156,92 @@ pub struct Statistics {
 
 impl Statistics {
     /// Create new empty statistics
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// assert_eq!(stats.node_count(), 0);
+    /// assert!(!stats.is_initialized());
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Check if statistics have been initialized
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// assert!(!stats.is_initialized()); // false by default
+    /// ```
     #[must_use]
     pub fn is_initialized(&self) -> bool {
         self.initialized.load(Ordering::Acquire)
     }
 
     /// Get the total node count
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// assert_eq!(stats.node_count(), 0);
+    /// ```
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.node_count.load(Ordering::Relaxed)
     }
 
     /// Get the total edge count
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// assert_eq!(stats.edge_count(), 0);
+    /// ```
     #[must_use]
     pub fn edge_count(&self) -> usize {
         self.edge_count.load(Ordering::Relaxed)
     }
 
     /// Get the number of indexed vectors
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// assert_eq!(stats.vector_count(), 0);
+    /// ```
     #[must_use]
     pub fn vector_count(&self) -> usize {
         self.vector_count.load(Ordering::Relaxed)
     }
 
     /// Get the average out-degree
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// // Returns a non-zero default estimate if statistics are uninitialized or the graph is empty.
+    /// assert!(stats.average_out_degree() > 0.0);
+    /// ```
     #[must_use]
     pub fn average_out_degree(&self) -> f64 {
         let avg = self.avg_out_degree.load(Ordering::Relaxed);
@@ -198,6 +254,16 @@ impl Statistics {
     }
 
     /// Get the average delta chain length
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// // Returns a non-zero default even when uninitialized
+    /// assert!(stats.average_delta_chain_length() > 0.0);
+    /// ```
     #[must_use]
     pub fn average_delta_chain_length(&self) -> f64 {
         let avg = self.avg_delta_chain.load(Ordering::Relaxed);
@@ -210,6 +276,17 @@ impl Statistics {
     }
 
     /// Get cardinality for a specific label
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    /// use aletheiadb::core::interning::InternedString;
+    ///
+    /// let stats = Statistics::new();
+    /// let label = InternedString::from_raw(1); // Assuming 1 represents "Person"
+    /// assert_eq!(stats.label_cardinality(&label), None);
+    /// ```
     #[must_use]
     pub fn label_cardinality(&self, label: &InternedString) -> Option<usize> {
         self.label_counts.get(label).map(|r| *r)
@@ -251,6 +328,16 @@ impl Statistics {
     ///
     /// This is called by [`AletheiaDB::refresh_statistics`](crate::db::AletheiaDB::refresh_statistics)
     /// to populate the cache with fresh values from the storage engine.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// stats.refresh(100, 50, 10, vec![], 2.0);
+    /// assert_eq!(stats.node_count(), 100);
+    /// ```
     pub fn refresh(
         &self,
         node_count: usize,
@@ -284,6 +371,19 @@ impl Statistics {
     /// Invalidate cached statistics.
     ///
     /// Forces the next query to trigger a refresh.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// stats.refresh(100, 50, 10, vec![], 2.0);
+    /// assert!(stats.is_initialized());
+    ///
+    /// stats.invalidate();
+    /// assert!(!stats.is_initialized());
+    /// ```
     pub fn invalidate(&self) {
         self.initialized.store(false, Ordering::Release);
     }
@@ -291,6 +391,16 @@ impl Statistics {
     /// Update property statistics.
     ///
     /// Used to feed distinct counts from background analysis jobs.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::Statistics;
+    ///
+    /// let stats = Statistics::new();
+    /// stats.update_property_stats("status", 3);
+    /// assert_eq!(stats.estimate_selectivity("status", "active"), 1.0 / 3.0);
+    /// ```
     pub fn update_property_stats(&self, property: &str, distinct_count: usize) {
         let mut stats = self.property_stats.write();
         stats
