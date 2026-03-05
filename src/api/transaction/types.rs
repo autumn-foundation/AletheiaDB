@@ -1,10 +1,30 @@
 //! Transaction types and metadata
+//!
+//! This module defines the core types that describe the lifecycle and identity
+//! of a transaction in AletheiaDB.
+//!
+//! # Transaction State Lifecycle
+//!
+//! 1.  `Active`: The transaction is currently open and accepting operations.
+//! 2.  `Preparing`: The transaction is validating operations before commit.
+//! 3.  `Committed` or `Aborted`: Terminal states indicating success or failure.
 
 use crate::core::temporal::Timestamp;
 // Re-export TxId from core to break dependency cycles
 pub use crate::core::id::TxId;
 
 /// Transaction state
+///
+/// Represents the current phase of a transaction's lifecycle.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::TxState;
+///
+/// let state = TxState::Active;
+/// assert_eq!(format!("{}", state), "Active");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxState {
     /// Transaction is active and can perform operations
@@ -29,6 +49,27 @@ impl std::fmt::Display for TxState {
 }
 
 /// Transaction metadata
+///
+/// Contains information about a transaction's identity, timestamps, and current state.
+/// This is typically retrieved via the `metadata()` method on a transaction handle.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::{TxId, TxState, TxMetadata};
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let metadata = TxMetadata {
+///     tx_id: TxId::new(42),
+///     start_timestamp: Timestamp::from(100),
+///     commit_timestamp: None,
+///     state: TxState::Active,
+///     is_read_only: false,
+/// };
+///
+/// assert_eq!(metadata.state, TxState::Active);
+/// assert!(!metadata.is_read_only);
+/// ```
 #[derive(Debug, Clone)]
 pub struct TxMetadata {
     /// Transaction ID

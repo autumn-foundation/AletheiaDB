@@ -50,6 +50,14 @@ pub struct ReadTransaction {
 
 impl ReadTransaction {
     /// Create a new read-only transaction
+    ///
+    /// # Arguments
+    ///
+    /// * `tx_id` - The unique identifier assigned to this transaction
+    /// * `snapshot` - The isolated view of the database state captured at the start of this transaction
+    /// * `current` - Reference to the current (latest) graph state storage
+    /// * `visibility_manager` - Manages which versions of entities are visible to this transaction
+    /// * `historical` - Reference to the historical graph state storage for resolving older versions
     pub(crate) fn new(
         tx_id: TxId,
         snapshot: TransactionSnapshot,
