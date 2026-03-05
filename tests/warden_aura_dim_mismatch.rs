@@ -1,3 +1,5 @@
+#![cfg(feature = "nova")]
+
 use aletheiadb::AletheiaDB;
 use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::core::property::PropertyMapBuilder;
