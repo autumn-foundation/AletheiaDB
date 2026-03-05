@@ -135,6 +135,9 @@ pub mod echo;
 /// Associative retrieval ("Fishing") module.
 pub mod fishing;
 #[cfg(feature = "nova")]
+/// Fossil: Semantic Stagnation Detector.
+pub mod fossil;
+#[cfg(feature = "nova")]
 /// Graph context exporter for LLM integration.
 pub mod graph_context;
 #[cfg(feature = "nova")]
