@@ -30,6 +30,7 @@
 //! | [`dreamer`] | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
 //! | [`aura`] | **Aura** | Semantic Essence over Time. "What is your long-term identity?" |
 //! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
+//! | [`doppelganger`] | **Doppelganger** | Structural Twins, Semantic Strangers. |
 //! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
 //! | [`janus`] | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
 //! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
@@ -126,6 +127,8 @@ pub mod concept_algebra;
 #[cfg(feature = "nova")]
 /// Dissonance: Semantic Stress Detector.
 pub mod dissonance;
+#[cfg(feature = "nova")]
+pub mod doppelganger;
 #[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
