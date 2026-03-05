@@ -1,9 +1,9 @@
 #[cfg(feature = "nova")]
 mod tests {
     use aletheiadb::AletheiaDB;
-    use aletheiadb::experimental::aura::AuraEngine;
-    use aletheiadb::core::property::PropertyMapBuilder;
     use aletheiadb::api::transaction::WriteOps;
+    use aletheiadb::core::property::PropertyMapBuilder;
+    use aletheiadb::experimental::aura::AuraEngine;
 
     #[test]
     fn test_aura_dimension_mismatch() {
@@ -43,8 +43,14 @@ mod tests {
 
         let engine = AuraEngine::new(&db);
         let result = engine.calculate_aura(n1, "vec", 1_000_000);
-        assert!(result.is_ok(), "Should not return an error due to dimension mismatch");
+        assert!(
+            result.is_ok(),
+            "Should not return an error due to dimension mismatch"
+        );
         let result = result.unwrap();
-        assert_eq!(result.divergence_score, 1.0, "Divergence should be 1.0 on dimension mismatch");
+        assert_eq!(
+            result.divergence_score, 1.0,
+            "Divergence should be 1.0 on dimension mismatch"
+        );
     }
 }
