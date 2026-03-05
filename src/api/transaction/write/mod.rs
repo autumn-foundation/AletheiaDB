@@ -10,9 +10,10 @@
 //! On commit, changes are validated and applied atomically.
 
 use super::{
-    ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
+    ReadOps, TransactionSnapshot, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
     WriteOps,
 };
+use crate::core::id::TxId;
 use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
 use crate::core::hlc::{

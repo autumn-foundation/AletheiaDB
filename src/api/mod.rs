@@ -92,4 +92,4 @@
 pub mod transaction;
 
 // Re-export commonly used types
-pub use transaction::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
+pub use transaction::{ReadOps, ReadTransaction, TxState, WriteOps, WriteTransaction};

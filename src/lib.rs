@@ -101,8 +101,9 @@ pub use core::{
     PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange,
     Timestamp, VersionId,
 };
+pub use core::id::TxId;
 
-pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
+pub use api::{ReadOps, ReadTransaction, TxState, WriteOps, WriteTransaction};
 pub use core::error::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
 pub use db::{AletheiaDB, VectorIndexBuilder};
 pub use index::{

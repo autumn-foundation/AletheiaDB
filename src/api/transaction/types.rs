@@ -1,8 +1,7 @@
 //! Transaction types and metadata
 
 use crate::core::temporal::Timestamp;
-// Re-export TxId from core to break dependency cycles
-pub use crate::core::id::TxId;
+use crate::core::id::TxId;
 
 /// Transaction state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

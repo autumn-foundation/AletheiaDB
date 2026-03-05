@@ -66,7 +66,7 @@ pub mod write;
 pub mod write_buffer;
 
 pub use read_tx::ReadTransaction;
-pub use types::{TxId, TxMetadata, TxState};
+pub use types::{TxMetadata, TxState};
 pub use visibility::{CompressionStats, TransactionSnapshot, TxVisibilityManager};
 pub use write::WriteTransaction;
 pub use write_buffer::{BufferedWrite, WriteBuffer};

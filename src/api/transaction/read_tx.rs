@@ -6,7 +6,8 @@
 //! - Snapshot-based reads for consistency
 //! - No commit overhead
 
-use super::{ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager};
+use super::{ReadOps, TransactionSnapshot, TxMetadata, TxState, TxVisibilityManager};
+use crate::core::id::TxId;
 use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
@@ -111,7 +112,7 @@ impl ReadTransaction {
                 // NOTE: Historical versions don't track created_by_tx, so we use TxId(0)
                 // The commit_timestamp is extracted from transaction_time.start
                 let metadata = VersionMetadata::new(
-                    super::TxId::new(0), // Historical versions don't track creating tx
+                    TxId::new(0), // Historical versions don't track creating tx
                     version.temporal.transaction_time().start(), // Extract commit timestamp
                 );
 
@@ -179,7 +180,7 @@ impl ReadTransaction {
                 // NOTE: Historical versions don't track created_by_tx, so we use TxId(0)
                 // The commit_timestamp is extracted from transaction_time.start
                 let metadata = VersionMetadata::new(
-                    super::TxId::new(0), // Historical versions don't track creating tx
+                    TxId::new(0), // Historical versions don't track creating tx
                     version.temporal.transaction_time().start(), // Extract commit timestamp
                 );
 
