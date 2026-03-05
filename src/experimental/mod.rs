@@ -132,6 +132,9 @@ pub mod dreamer;
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
 #[cfg(feature = "nova")]
+/// Entanglement: Detecting Quantum Entanglement in the Graph.
+pub mod entanglement;
+#[cfg(feature = "nova")]
 /// Associative retrieval ("Fishing") module.
 pub mod fishing;
 #[cfg(feature = "nova")]
