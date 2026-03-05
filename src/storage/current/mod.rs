@@ -1039,7 +1039,10 @@ impl CurrentStorage {
 
         // Find min key alphabetically
         // Note: DashMap iteration order is not guaranteed, so we must scan all keys
-        self.vector_indexes.iter().map(|r| r.key().clone()).min()
+        self.vector_indexes
+            .iter()
+            .min_by(|a, b| a.key().cmp(b.key()))
+            .map(|r| r.key().clone())
     }
 
     /// Get or create filter statistics for a label (Issue #334).
