@@ -28,12 +28,34 @@ pub struct Cost {
 
 impl Cost {
     /// Create a new cost with all zero values
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::Cost;
+    ///
+    /// let cost = Cost::zero();
+    /// assert_eq!(cost.cpu, 0.0);
+    /// assert_eq!(cost.io, 0.0);
+    /// ```
     #[must_use]
     pub fn zero() -> Self {
         Cost::default()
     }
 
     /// Calculate total weighted cost for comparison
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::{Cost, CostWeights};
+    ///
+    /// let cost = Cost { cpu: 10.0, io: 5.0, memory: 100, network: 0.0 };
+    /// let weights = CostWeights { cpu_weight: 1.0, io_weight: 10.0, memory_weight: 0.1, network_weight: 1.0 };
+    ///
+    /// // 10.0 * 1.0 + 5.0 * 10.0 + 100.0 * 0.1 = 10.0 + 50.0 + 10.0 = 70.0
+    /// assert_eq!(cost.total(&weights), 70.0);
+    /// ```
     #[must_use]
     pub fn total(&self, weights: &CostWeights) -> f64 {
         self.cpu * weights.cpu_weight
@@ -43,6 +65,20 @@ impl Cost {
     }
 
     /// Add two costs together
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::Cost;
+    ///
+    /// let c1 = Cost { cpu: 1.0, io: 2.0, memory: 100, network: 0.0 };
+    /// let c2 = Cost { cpu: 2.0, io: 3.0, memory: 50, network: 0.0 };
+    ///
+    /// let sum = c1.add(&c2);
+    /// assert_eq!(sum.cpu, 3.0);
+    /// assert_eq!(sum.io, 5.0);
+    /// assert_eq!(sum.memory, 150);
+    /// ```
     #[must_use]
     pub fn add(&self, other: &Cost) -> Cost {
         Cost {
@@ -54,6 +90,19 @@ impl Cost {
     }
 
     /// Scale cost by a factor
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::Cost;
+    ///
+    /// let cost = Cost { cpu: 2.0, io: 4.0, memory: 100, network: 0.0 };
+    /// let scaled = cost.scale(1.5);
+    ///
+    /// assert_eq!(scaled.cpu, 3.0);
+    /// assert_eq!(scaled.io, 6.0);
+    /// assert_eq!(scaled.memory, 150);
+    /// ```
     #[must_use]
     pub fn scale(&self, factor: f64) -> Cost {
         Cost {
@@ -159,12 +208,33 @@ pub struct CostModel {
 
 impl CostModel {
     /// Create a new cost model with default values
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::CostModel;
+    ///
+    /// let model = CostModel::new();
+    /// assert_eq!(model.weights.cpu_weight, 1.0);
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Create a cost model optimized for low-latency queries
+    ///
+    /// This model penalizes I/O and network operations more heavily to favor
+    /// fast, in-memory execution strategies.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::CostModel;
+    ///
+    /// let model = CostModel::low_latency();
+    /// assert!(model.weights.io_weight > 10.0); // Heavily penalizes IO
+    /// ```
     #[must_use]
     pub fn low_latency() -> Self {
         CostModel {
@@ -179,6 +249,18 @@ impl CostModel {
     }
 
     /// Create a cost model optimized for throughput
+    ///
+    /// This model is more tolerant of high memory usage and I/O if it means
+    /// processing more data efficiently in parallel.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::CostModel;
+    ///
+    /// let model = CostModel::high_throughput();
+    /// assert!(model.weights.cpu_weight < 1.0); // CPU is weighted less heavily
+    /// ```
     #[must_use]
     pub fn high_throughput() -> Self {
         CostModel {
@@ -198,12 +280,43 @@ impl CostModel {
     /// of per-node iteration exceeds the cost of holding the lock longer.
     ///
     /// Returns true if batch mode should be used.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::CostModel;
+    ///
+    /// let model = CostModel::new();
+    /// // Single lookup is cheaper with per-node lock
+    /// assert!(!model.should_use_batch_temporal_lookup(1));
+    /// // Large batches are cheaper holding the lock
+    /// assert!(model.should_use_batch_temporal_lookup(1000));
+    /// ```
     #[must_use]
     pub fn should_use_batch_temporal_lookup(&self, node_count: usize) -> bool {
         node_count >= self.operation_costs.batch_threshold
     }
 
     /// Estimate the cost of executing a physical operator
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::CostModel;
+    /// use aletheiadb::query::planner::stats::Statistics;
+    /// use aletheiadb::query::planner::physical::PhysicalOp;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// let model = CostModel::new();
+    /// let stats = Statistics::new();
+    /// let op = PhysicalOp::NodeLookup {
+    ///     node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()]
+    /// };
+    ///
+    /// let cost = model.estimate(&op, &stats);
+    /// assert!(cost.cpu > 0.0);
+    /// assert_eq!(cost.io, 0.0); // Simple lookups are assumed in-memory
+    /// ```
     #[must_use]
     pub fn estimate(&self, op: &PhysicalOp, stats: &Statistics) -> Cost {
         match op {
@@ -296,6 +409,23 @@ impl CostModel {
     }
 
     /// Estimate cardinality of a physical operator's output
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::planner::cost::CostModel;
+    /// use aletheiadb::query::planner::stats::Statistics;
+    /// use aletheiadb::query::planner::physical::PhysicalOp;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// let model = CostModel::new();
+    /// let stats = Statistics::new();
+    /// let op = PhysicalOp::NodeLookup {
+    ///     node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()]
+    /// };
+    ///
+    /// assert_eq!(model.estimate_cardinality(&op, &stats), 2);
+    /// ```
     #[must_use]
     pub fn estimate_cardinality(&self, op: &PhysicalOp, stats: &Statistics) -> usize {
         match op {
