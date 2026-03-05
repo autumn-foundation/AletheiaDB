@@ -161,12 +161,17 @@ impl<'a> AuraEngine<'a> {
                 ops::normalize_in_place(&mut sum);
 
                 if let Some(current) = &current_vector {
-                    let mut curr_normalized = current.clone();
-                    ops::normalize_in_place(&mut curr_normalized);
+                    if sum.len() == current.len() {
+                        let mut curr_normalized = current.clone();
+                        ops::normalize_in_place(&mut curr_normalized);
 
-                    let sim = ops::cosine_similarity(&sum, &curr_normalized)?;
-                    // Divergence is distance: 1.0 - similarity
-                    divergence_score = (1.0 - sim).max(0.0);
+                        let sim = ops::cosine_similarity(&sum, &curr_normalized)?;
+                        // Divergence is distance: 1.0 - similarity
+                        divergence_score = (1.0 - sim).max(0.0);
+                    } else {
+                        // Dimension mismatch implies a total semantic shift
+                        divergence_score = 1.0;
+                    }
                 }
 
                 aura_vector = Some(sum);
