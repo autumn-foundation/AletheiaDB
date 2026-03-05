@@ -164,9 +164,14 @@ impl<'a> AuraEngine<'a> {
                     let mut curr_normalized = current.clone();
                     ops::normalize_in_place(&mut curr_normalized);
 
-                    let sim = ops::cosine_similarity(&sum, &curr_normalized)?;
-                    // Divergence is distance: 1.0 - similarity
-                    divergence_score = (1.0 - sim).max(0.0);
+                    if sum.len() == curr_normalized.len() {
+                        let sim = ops::cosine_similarity(&sum, &curr_normalized)?;
+                        // Divergence is distance: 1.0 - similarity
+                        divergence_score = (1.0 - sim).max(0.0);
+                    } else {
+                        // Dimension mismatch implies total semantic shift
+                        divergence_score = 1.0;
+                    }
                 }
 
                 aura_vector = Some(sum);
@@ -289,5 +294,51 @@ mod tests {
             "Expected significant divergence, got {}",
             result.divergence_score
         );
+    }
+
+    #[test]
+    fn test_aura_dimension_mismatch() {
+        let db = AletheiaDB::new().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let mut n1 = crate::core::id::NodeId::new(0).unwrap();
+
+        // State 1: Established Aura with dimension 2
+        db.write(|tx| {
+            n1 = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[1.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            Ok::<(), crate::core::error::Error>(())
+        })
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // State 2: Sudden shift to dimension 3
+        db.write(|tx| {
+            tx.update_node(
+                n1,
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 1.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+            Ok::<(), crate::core::error::Error>(())
+        })
+        .unwrap();
+
+        let engine = AuraEngine::new(&db);
+
+        // This should not panic or return a DimensionMismatch error, but handle it gracefully
+        let result = engine.calculate_aura(n1, "vec", 1_000_000).unwrap();
+
+        // When dimensions mismatch, divergence should default to total shift (1.0)
+        assert_eq!(result.divergence_score, 1.0);
     }
 }
