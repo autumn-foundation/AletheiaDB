@@ -284,7 +284,7 @@ impl Statistics {
     /// use aletheiadb::core::interning::InternedString;
     ///
     /// let stats = Statistics::new();
-    /// let label = InternedString::new("Person");
+    /// let label = InternedString::from_raw(1); // Assuming 1 represents "Person"
     /// assert_eq!(stats.label_cardinality(&label), None);
     /// ```
     #[must_use]
