@@ -450,6 +450,22 @@ let similar = db.find_similar(doc_id, 10)?;
 ### Hybrid Queries (Graph + Vector + Temporal)
 
 ```rust
+use aletheiadb::prelude::*;
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::index::vector::temporal::TemporalVectorConfig;
+
+let db = AletheiaDB::new().unwrap();
+
+// First, configure and enable the vector index
+db.vector_index("embedding")
+    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .temporal(TemporalVectorConfig::default())
+    .enable()?;
+
+let alice_id = db.create_node("Person", properties! { "name" => "Alice", "age" => 30 })?;
+let bob_id = db.create_node("Person", properties! { "name" => "Bob", "age" => 30 })?;
+db.create_edge(alice_id, bob_id, "KNOWS", properties! {})?;
+
 // Setup query parameters
 let query_embedding = vec![0.1f32; 384];
 let valid_time = aletheiadb::time::now();
@@ -845,6 +861,10 @@ features = [
 **Basic usage:**
 
 ```rust
+// ⚠️ REQUIRES FEATURE: observability
+// [dependencies]
+// aletheiadb = { version = "0.1", features = ["observability"] }
+
 use aletheiadb::observability;
 
 fn main() {
