@@ -1,7 +1,7 @@
 //! Transaction types and metadata
 
-use crate::core::temporal::Timestamp;
 use crate::core::id::TxId;
+use crate::core::temporal::Timestamp;
 
 /// Transaction state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

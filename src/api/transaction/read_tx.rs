@@ -7,9 +7,9 @@
 //! - No commit overhead
 
 use super::{ReadOps, TransactionSnapshot, TxMetadata, TxState, TxVisibilityManager};
-use crate::core::id::TxId;
 use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::graph::{Edge, Node};
+use crate::core::id::TxId;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyValue;
 use crate::core::temporal::time;
@@ -554,5 +554,70 @@ mod tests {
             &crate::core::property::PropertyValue::String("Nobody".into()),
         );
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_read_transaction_get_edge_from_historical() {
+        use crate::core::GLOBAL_INTERNER;
+
+        // Test fallback to historical storage when an edge is not in current storage
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+
+        let valid_time = time::from_secs(1000);
+        let tx_time = time::from_secs(1000);
+
+        let node1 = NodeId::new(1).unwrap();
+        let node2 = NodeId::new(2).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = crate::core::id::VersionId::new(1).unwrap();
+        let knows_label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Inject a historical edge directly into the historical storage
+        {
+            let mut hist_writer = historical.write();
+            let properties = PropertyMapBuilder::new().insert("weight", 1.5).build();
+
+            // This correctly formats the test for AletheiaDB internal structure
+            hist_writer
+                .add_edge_version(
+                    edge_id,
+                    version_id,
+                    valid_time,
+                    tx_time,
+                    knows_label,
+                    node1,
+                    node2,
+                    properties,
+                    false, // not a tombstone
+                )
+                .unwrap();
+        }
+
+        // We take a snapshot AFTER the transaction time of the historical edge
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::from_secs(2000),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+
+        let tx = ReadTransaction::new(
+            TxId::new(2),
+            snapshot,
+            current,
+            visibility_manager,
+            historical,
+        );
+
+        // This edge is NOT in current storage, so it will fall back to get_edge_from_historical
+        // and exercise line 183 where TxId::new(0) is used to create a VersionMetadata.
+        let edge = tx
+            .get_edge(edge_id)
+            .expect("Should find edge in historical storage");
+        assert_eq!(edge.id, edge_id);
+        assert_eq!(edge.source, node1);
+        assert_eq!(edge.target, node2);
+        assert_eq!(edge.label, knows_label);
+        assert_eq!(edge.metadata.created_by_tx, TxId::new(0));
     }
 }

@@ -10,16 +10,15 @@
 //! On commit, changes are validated and applied atomically.
 
 use super::{
-    ReadOps, TransactionSnapshot, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
-    WriteOps,
+    ReadOps, TransactionSnapshot, TxMetadata, TxState, TxVisibilityManager, WriteBuffer, WriteOps,
 };
-use crate::core::id::TxId;
 use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
 use crate::core::hlc::{
     SendWithSelfHealError, evaluate_clock_skew, is_clock_skew_self_heal_enabled,
     send_with_overflow_self_heal,
 };
+use crate::core::id::TxId;
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder};

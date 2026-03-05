@@ -95,13 +95,13 @@ pub use config::{
     HistoricalConfigBuilder, VectorIndexConfig, VectorIndexConfigBuilder, WalConfig,
     WalConfigBuilder,
 };
+pub use core::id::TxId;
 pub use core::temporal::time;
 pub use core::{
     BiTemporalInterval, Edge, EdgeId, EntityId, GLOBAL_INTERNER, InternedString, Node, NodeId,
     PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange,
     Timestamp, VersionId,
 };
-pub use core::id::TxId;
 
 pub use api::{ReadOps, ReadTransaction, TxState, WriteOps, WriteTransaction};
 pub use core::error::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
