@@ -239,7 +239,7 @@ impl Statistics {
     /// use aletheiadb::query::planner::Statistics;
     ///
     /// let stats = Statistics::new();
-    /// // Returns a non-zero default even when uninitialized to prevent divide-by-zero
+    /// // Returns a non-zero default estimate if statistics are uninitialized or the graph is empty.
     /// assert!(stats.average_out_degree() > 0.0);
     /// ```
     #[must_use]
