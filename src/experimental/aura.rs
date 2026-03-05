@@ -284,7 +284,10 @@ mod tests {
 
         let result = engine.calculate_aura(n1, "vec", 1_000_000).unwrap();
 
-        assert_eq!(result.divergence_score, 1.0, "Expected a total divergence of 1.0 on dimension mismatch");
+        assert_eq!(
+            result.divergence_score, 1.0,
+            "Expected a total divergence of 1.0 on dimension mismatch"
+        );
     }
 
     #[test]
