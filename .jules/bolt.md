@@ -33,3 +33,7 @@
 ## 2026-11-20 - Identity Hashing for Historical Storage
 **Learning:** `HistoricalStorage` and `MigrationService` used the default `HashMap` (SipHash) for integer wrapper keys like `NodeId`, `EdgeId`, and `VersionId`. Because these keys are unique internally-assigned high-quality IDs, SipHash incurs unnecessary hashing overhead.
 **Action:** Replaced `std::collections::HashMap` with `FastHashMap` (which uses `BuildHasherDefault<IdentityHasher>`) for tracking versions, heads, and stats. Using `IdentityHasher` speeds up tracking and lookups and is idiomatic across AletheiaDB for wrapper IDs.
+
+**Avoid `.map(|r| r.key().clone()).min()`**
+**Learning:** `.map(...).min()` allocates a new string (via clone) for *every* element in a `DashMap` (or any iterator of refs) before it computes the minimum. This means `O(N)` heap allocations instead of O(1).
+**Action:** Use `.min_by(|a, b| a.key().cmp(b.key()))` first to find the ref to the minimal element, and *then* call `.map(|r| r.key().clone())` to allocate exactly once!
