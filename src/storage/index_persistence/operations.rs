@@ -858,7 +858,10 @@ pub(crate) fn load_indexes_startup(
                         graph_data.incoming_offsets,
                         graph_data.incoming_neighbors,
                     ) {
-                        log::error!("Failed to import CSR data: {}. Falling back to rebuilding adjacency...", e);
+                        eprintln!(
+                            "Failed to import CSR data: {}. Falling back to rebuilding adjacency...",
+                            e
+                        );
                         current.compact_adjacency();
                     }
                 } else {
