@@ -161,12 +161,17 @@ impl<'a> AuraEngine<'a> {
                 ops::normalize_in_place(&mut sum);
 
                 if let Some(current) = &current_vector {
-                    let mut curr_normalized = current.clone();
-                    ops::normalize_in_place(&mut curr_normalized);
+                    if sum.len() == current.len() {
+                        let mut curr_normalized = current.clone();
+                        ops::normalize_in_place(&mut curr_normalized);
 
-                    let sim = ops::cosine_similarity(&sum, &curr_normalized)?;
-                    // Divergence is distance: 1.0 - similarity
-                    divergence_score = (1.0 - sim).max(0.0);
+                        let sim = ops::cosine_similarity(&sum, &curr_normalized)?;
+                        // Divergence is distance: 1.0 - similarity
+                        divergence_score = (1.0 - sim).max(0.0);
+                    } else {
+                        // Dimension mismatch implies a complete semantic shift
+                        divergence_score = 1.0;
+                    }
                 }
 
                 aura_vector = Some(sum);
@@ -236,6 +241,50 @@ mod tests {
 
         // Divergence should be very low since the current state matches the historical aura
         assert!(result.divergence_score < 0.05);
+    }
+
+    #[test]
+    fn test_aura_dimension_mismatch() {
+        let db = AletheiaDB::new().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let mut n1 = crate::core::id::NodeId::new(0).unwrap();
+
+        // State 1: Established Aura at [1.0, 0.0]
+        db.write(|tx| {
+            n1 = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[1.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            Ok::<(), crate::core::error::Error>(())
+        })
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // State 2: Sudden shift to a different dimension
+        db.write(|tx| {
+            tx.update_node(
+                n1,
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 1.0, 0.5])
+                    .build(),
+            )
+            .unwrap();
+            Ok::<(), crate::core::error::Error>(())
+        })
+        .unwrap();
+
+        let engine = AuraEngine::new(&db);
+
+        let result = engine.calculate_aura(n1, "vec", 1_000_000).unwrap();
+
+        assert_eq!(result.divergence_score, 1.0, "Expected a total divergence of 1.0 on dimension mismatch");
     }
 
     #[test]
