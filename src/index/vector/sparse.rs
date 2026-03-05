@@ -457,9 +457,6 @@ impl SparseVectorIndex {
         let is_cosine = matches!(self.config.scoring, ScoringMethod::Cosine);
         let mut scores: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
             HashMap::default();
-        // Magnitudes map is only used for cosine, but we always create it (cheap)
-        let mut magnitudes: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
-            HashMap::default();
         // Document lengths map is only used for BM25, but we always create it (cheap)
         let mut doc_lengths: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
             HashMap::default();
@@ -494,13 +491,8 @@ impl SparseVectorIndex {
                     let score_delta = match self.config.scoring {
                         ScoringMethod::DotProduct => query_val * posting.value,
                         ScoringMethod::Cosine => {
-                            // Accumulate unnormalized dot product, normalize at the end
-                            // Cache magnitude on first encounter to avoid second lookup
-                            if !magnitudes.contains_key(&posting.node_id)
-                                && let Some(stored) = self.vectors.get(&posting.node_id)
-                            {
-                                magnitudes.insert(posting.node_id, stored.magnitude);
-                            }
+                            // Accumulate unnormalized dot product, normalize at the end.
+                            // ⚡ Bolt: Removed magnitudes cache, magnitude normalization is deferred to post-loop to save N map lookups and 1 heap allocation.
                             query_val * posting.value
                         }
                         ScoringMethod::BM25 { k1, b } => {
@@ -525,13 +517,13 @@ impl SparseVectorIndex {
             }
         }
 
-        // Normalize cosine scores using cached magnitudes
+        // Normalize cosine scores by looking up magnitudes once per matched document
         if is_cosine && query_magnitude > 0.0 {
             for (&node_id, score) in scores.iter_mut() {
-                if let Some(&mag) = magnitudes.get(&node_id)
-                    && mag > 0.0
+                if let Some(stored) = self.vectors.get(&node_id)
+                    && stored.magnitude > 0.0
                 {
-                    *score /= query_magnitude * mag;
+                    *score /= query_magnitude * stored.magnitude;
                 }
             }
         }
