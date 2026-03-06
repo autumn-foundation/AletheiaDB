@@ -448,68 +448,72 @@ impl<'a> Lexer<'a> {
             }
 
             // Check for comments
-            if let Some(&(_, ch)) = self.chars.peek() {
-                if ch == '-' {
-                    // Check for -- comment
-                    let mut chars_clone = self.chars.clone();
-                    chars_clone.next();
-                    if let Some(&(_, '-')) = chars_clone.peek() {
-                        // Skip to end of line
-                        self.advance(); // first -
-                        self.advance(); // second -
-                        while let Some(&(_, ch)) = self.chars.peek() {
-                            if ch == '\n' {
-                                self.advance();
-                                break;
-                            }
-                            self.advance();
-                        }
+            let Some(&(_, ch)) = self.chars.peek() else {
+                break;
+            };
+
+            if ch == '-' {
+                let mut chars_clone = self.chars.clone();
+                chars_clone.next();
+                if let Some(&(_, '-')) = chars_clone.peek() {
+                    self.skip_single_line_comment();
+                    continue;
+                }
+            } else if ch == '/' {
+                let mut chars_clone = self.chars.clone();
+                chars_clone.next();
+                if let Some(&(_, next_ch)) = chars_clone.peek() {
+                    if next_ch == '/' {
+                        self.skip_single_line_comment();
                         continue;
-                    }
-                } else if ch == '/' {
-                    // Check for // or /* comment
-                    let mut chars_clone = self.chars.clone();
-                    chars_clone.next();
-                    if let Some(&(_, next_ch)) = chars_clone.peek() {
-                        if next_ch == '/' {
-                            // Skip to end of line
-                            self.advance(); // first /
-                            self.advance(); // second /
-                            while let Some(&(_, ch)) = self.chars.peek() {
-                                if ch == '\n' {
-                                    self.advance();
-                                    break;
-                                }
-                                self.advance();
-                            }
-                            continue;
-                        } else if next_ch == '*' {
-                            // Skip to */
-                            self.advance(); // /
-                            self.advance(); // *
-                            let mut found_end = false;
-                            loop {
-                                match self.advance() {
-                                    Some((_, '*')) => {
-                                        if let Some(&(_, '/')) = self.chars.peek() {
-                                            self.advance();
-                                            found_end = true;
-                                            break;
-                                        }
-                                    }
-                                    None => break,
-                                    _ => {}
-                                }
-                            }
-                            if !found_end {
-                                return Err(self.error("Unterminated block comment".to_string()));
-                            }
-                            continue;
-                        }
+                    } else if next_ch == '*' {
+                        self.skip_block_comment()?;
+                        continue;
                     }
                 }
             }
+
             break;
+        }
+        Ok(())
+    }
+
+    fn skip_single_line_comment(&mut self) {
+        // Advance past the two comment characters (e.g., '--' or '//')
+        self.advance();
+        self.advance();
+
+        while let Some(&(_, ch)) = self.chars.peek() {
+            if ch == '\n' {
+                self.advance();
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    fn skip_block_comment(&mut self) -> Result<(), LexerError> {
+        // Advance past '/*'
+        self.advance();
+        self.advance();
+
+        let mut found_end = false;
+        loop {
+            match self.advance() {
+                Some((_, '*')) => {
+                    if let Some(&(_, '/')) = self.chars.peek() {
+                        self.advance();
+                        found_end = true;
+                        break;
+                    }
+                }
+                None => break,
+                _ => {}
+            }
+        }
+
+        if !found_end {
+            return Err(self.error("Unterminated block comment".to_string()));
         }
         Ok(())
     }
