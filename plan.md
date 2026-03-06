@@ -1,12 +1,16 @@
-1. *The Spark:* Create `entanglement.rs` in `src/experimental/` to detect Quantum Entanglement in the graph! It identifies pairs of nodes whose semantic vectors change synchronously over time, even without direct edges (or to find hidden correlations).
-2. *The Scaffold:* Implement `EntanglementDetector`.
-   - `struct EntanglementDetector`
-   - It will take a list of node IDs and analyze their histories over a specific `TimeRange` or simply across versions.
-   - For each node, compute a sequence of vector *deltas* (changes between consecutive versions).
-   - Compute the correlation (cosine similarity between the delta vectors) between pairs of nodes.
-   - High correlation = High Entanglement.
-3. *Unslop:* Add tests that create two nodes, mutate them together synchronously with the same delta, and one node with different mutations. The test will assert that the entangled pair has a higher entanglement score.
-   - Refactor the code to ensure it's DRY and minimal. Use exact match on node IDs, and proper error handling.
-4. *Add module:* Add `#[cfg(feature = "nova")] \n pub mod entanglement;` to `src/experimental/mod.rs`
-5. *Check:* Run `cargo clippy`, `cargo test`, `cargo fmt --all`. (Pre-commit steps).
-6. *Present:* PR Title "🌟 Nova: Entanglement Detector". Include Spark, Feature, Potential, Risk in description.
+1. **The Target:** We are removing the single-implementation trait `StorageSnapshot` in `src/storage/snapshot.rs`.
+   - The trait `StorageSnapshot` has exactly one full implementation, `CurrentStorageSnapshot` (note that `HistoricalStorageSnapshot` doesn't even implement it currently but exists in the same file).
+   - This fits perfectly with Razor's philosophy of "De-Abstract: Replace single-implementation Traits with concrete Structs" and "The One-Time Trait: A trait that is implemented by exactly one struct. (Delete the trait)."
+
+2. **The Execution:**
+   - Remove the `StorageSnapshot` trait definition from `src/storage/snapshot.rs`.
+   - Remove the `impl StorageSnapshot for CurrentStorageSnapshot` block. Instead, implement those methods directly on `CurrentStorageSnapshot`.
+   - Update usages. In `src/storage/checkpoint.rs`, there's a function `extract_graph_data_from_snapshot` that imports and uses `StorageSnapshot` methods on `CurrentStorageSnapshot`. After the change, it will just call the methods directly on the struct without needing the trait.
+   - Update `src/storage/mod.rs` to remove the re-export of `StorageSnapshot`.
+
+3. **Verification (Razor's Check):**
+   - Run `cargo test` to ensure tests still pass.
+   - Run `cargo clippy` to check for lints.
+   - Write critical learnings to `.jules/razor.md` following Razor's journal format.
+
+4. **Pre-commit:** Complete pre-commit steps to ensure proper testing, verification, review, and reflection are done.

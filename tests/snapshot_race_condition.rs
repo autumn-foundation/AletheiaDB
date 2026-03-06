@@ -10,7 +10,7 @@ use aletheiadb::core::temporal::time;
 use aletheiadb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
 use aletheiadb::storage::current::CurrentStorage;
 use aletheiadb::storage::historical::HistoricalStorage;
-use aletheiadb::storage::snapshot::StorageSnapshot;
+
 use aletheiadb::storage::wal::LSN;
 use std::sync::{Arc, Barrier};
 use std::thread;
