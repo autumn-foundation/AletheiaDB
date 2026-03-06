@@ -1,17 +1,101 @@
 //! Prophet: Link Prediction Engine.
 //!
-//! This module implements a link prediction engine that suggests missing connections
-//! in the graph based on topological structure (Adamic-Adar) and semantic similarity.
+//! Why do some nodes connect while others remain isolated? The [`Prophet`] engine attempts to
+//! answer this by predicting missing links in the graph. Unlike traditional link prediction
+//! that relies solely on graph topology (like mutual friends), `Prophet` bridges the gap
+//! between **structural topology** and **semantic vector similarity**.
+//!
+//! It combines the Adamic-Adar index (which measures topological closeness) with cosine
+//! similarity of the nodes' vector embeddings. This means it recommends connections not just
+//! because nodes share a neighborhood, but because they are structurally positioned *and*
+//! conceptually aligned to connect.
 //!
 //! # The Algorithm
-//! Score(A, B) = AdamicAdar(A, B) * (1.0 + VectorSimilarity(A, B))
+//! The prediction score between two unconnected nodes $A$ and $B$ is calculated as:
+//!
+//! `Score(A, B) = AdamicAdar(A, B) * (1.0 + VectorSimilarity(A, B))`
+//!
+//! - **Adamic-Adar:** Sum of $\frac{1}{\log(degree(z))}$ for all shared neighbors $z$.
+//! - **Vector Similarity:** Cosine similarity of the vector embeddings between $A$ and $B$.
+//!
+//! If vectors are perfectly orthogonal, the score reverts to standard Adamic-Adar. If they
+//! are similar, the topological score is boosted, surfacing structurally valid but semantically
+//! richer recommendations.
+//!
+//! # Examples
+//!
+//! > ⚠️ **REQUIRES FEATURE: nova**
+//!
+//! ```rust
+//! // [dependencies]
+//! // aletheiadb = { version = "0.1", features = ["nova"] }
+//!
+//! # #[cfg(feature = "nova")]
+//! use aletheiadb::AletheiaDB;
+//! # #[cfg(feature = "nova")]
+//! use aletheiadb::experimental::prophet::Prophet;
+//! # #[cfg(feature = "nova")]
+//! use aletheiadb::core::property::PropertyMapBuilder;
+//!
+//! # #[cfg(feature = "nova")]
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//!
+//! // Assume we have a graph of users and their interests.
+//! // We want to recommend new connections for User A.
+//! # let props = PropertyMapBuilder::new().build();
+//! # let node_a = db.create_node("User", props.clone())?;
+//! # let node_b = db.create_node("User", props.clone())?;
+//! # let node_c = db.create_node("User", props.clone())?;
+//! # db.create_edge(node_a, node_b, "KNOWS", props.clone())?;
+//! # db.create_edge(node_b, node_c, "KNOWS", props)?;
+//!
+//! let prophet = Prophet::new(&db);
+//!
+//! // Predict the top 5 most likely future connections for node_a
+//! let predictions = prophet.predict_links(node_a, 5)?;
+//!
+//! for (target_node, score) in predictions {
+//!     println!("Predicted connection to node {} with confidence score {}", target_node, score);
+//! }
+//! # Ok(())
+//! # }
+//! # #[cfg(not(feature = "nova"))]
+//! # fn main() {}
+//! ```
 
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
 use std::collections::HashSet;
 
-/// The Prophet predicts the future (connections).
+/// The engine for predicting missing or future connections in the graph.
+///
+/// `Prophet` operates by combining topological network structure with vector semantics.
+/// It uses the Adamic-Adar index to find structurally likely connections, and then scales
+/// that probability by the cosine similarity of the nodes' vector embeddings.
+///
+/// This requires a [`AletheiaDB`] instance to query both the graph topology and the
+/// vector properties. By default, it will use the first registered vector index it finds.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// use aletheiadb::AletheiaDB;
+/// # #[cfg(feature = "nova")]
+/// use aletheiadb::experimental::prophet::Prophet;
+///
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+/// // Initialize the prophet engine attached to the database
+/// let prophet = Prophet::new(&db);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct Prophet<'a> {
     db: &'a AletheiaDB,
     /// Optional vector property override.
@@ -19,7 +103,29 @@ pub struct Prophet<'a> {
 }
 
 impl<'a> Prophet<'a> {
-    /// Create a new Prophet.
+    /// Initializes a new link prediction engine bound to the given database.
+    ///
+    /// By default, the engine will attempt to automatically discover the primary vector property
+    /// by querying the database's registered vector indexes. If you have multiple vector indexes
+    /// and need to target a specific one, use [`Prophet::with_property`] after initialization.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "nova")]
+    /// use aletheiadb::AletheiaDB;
+    /// # #[cfg(feature = "nova")]
+    /// use aletheiadb::experimental::prophet::Prophet;
+    ///
+    /// # #[cfg(feature = "nova")]
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let prophet = Prophet::new(&db);
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(feature = "nova"))]
+    /// # fn main() {}
+    /// ```
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self {
             db,
@@ -27,7 +133,29 @@ impl<'a> Prophet<'a> {
         }
     }
 
-    /// Set the property name to use for vector operations.
+    /// Specifies the exact vector property name to use for calculating semantic similarity.
+    ///
+    /// This is required if the database contains multiple vector properties (e.g., "title_embedding"
+    /// and "body_embedding") and you want to base predictions on a specific semantic domain.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "nova")]
+    /// use aletheiadb::AletheiaDB;
+    /// # #[cfg(feature = "nova")]
+    /// use aletheiadb::experimental::prophet::Prophet;
+    ///
+    /// # #[cfg(feature = "nova")]
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// // Force the prophet to only consider the "bio_embedding" property for similarity
+    /// let prophet = Prophet::new(&db).with_property("bio_embedding");
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(feature = "nova"))]
+    /// # fn main() {}
+    /// ```
     pub fn with_property(mut self, name: impl Into<String>) -> Self {
         self.property_name = Some(name.into());
         self
@@ -125,7 +253,62 @@ impl<'a> Prophet<'a> {
         }
     }
 
-    /// Predict missing links for a target node.
+    /// Predicts the most likely new connections for the given target node.
+    ///
+    /// This method performs a graph traversal to find "neighbors of neighbors" and evaluates them
+    /// as candidates. It calculates an Adamic-Adar score for topological closeness and then multiplies
+    /// it by `(1.0 + vector_similarity)`.
+    ///
+    /// The algorithm deliberately returns the top `k` candidates, ranked by this combined score.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The `NodeId` for which you want to predict new links.
+    /// * `k` - The maximum number of recommendations to return (e.g., "Top 5").
+    ///
+    /// # Returns
+    ///
+    /// A sorted vector of tuples containing `(CandidateNodeId, PredictionScore)`,
+    /// ordered descending from most likely to least likely.
+    ///
+    /// # Edge Cases
+    ///
+    /// - If `target` has no neighbors, it will have no "neighbors of neighbors" to evaluate, returning an empty list.
+    /// - If the database has no vector properties or missing vectors, the similarity score defaults to 0.0 (falling back to pure Adamic-Adar).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "nova")]
+    /// use aletheiadb::AletheiaDB;
+    /// # #[cfg(feature = "nova")]
+    /// use aletheiadb::experimental::prophet::Prophet;
+    /// # #[cfg(feature = "nova")]
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    ///
+    /// # #[cfg(feature = "nova")]
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// # let props = PropertyMapBuilder::new().build();
+    /// # let user = db.create_node("User", props.clone())?;
+    /// # let intermediate = db.create_node("User", props.clone())?;
+    /// # let candidate = db.create_node("User", props.clone())?;
+    /// # db.create_edge(user, intermediate, "KNOWS", props.clone())?;
+    /// # db.create_edge(intermediate, candidate, "KNOWS", props)?;
+    ///
+    /// let prophet = Prophet::new(&db);
+    ///
+    /// // Recommend top 3 connections
+    /// let recommendations = prophet.predict_links(user, 3)?;
+    ///
+    /// if let Some((top_candidate, top_score)) = recommendations.first() {
+    ///     println!("Top recommendation: {} (score: {})", top_candidate, top_score);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(feature = "nova"))]
+    /// # fn main() {}
+    /// ```
     pub fn predict_links(&self, target: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         let neighbors = self.get_neighbors(target)?;
 
