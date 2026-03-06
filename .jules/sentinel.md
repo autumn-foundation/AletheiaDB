@@ -125,3 +125,9 @@
 **Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`.
 **Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, and exact exclusion of boundaries inside interval intersections.
 **Kill Shot:** Appended explicit exact boundary tests `test_timerange_from_at_exact_boundaries`, `test_time_to_secs_millis_exact_math`, `test_time_to_iso8601_exact_content`, and `test_timerange_contains_exact_boundary` directly to `tests/sentry_temporal.rs`.
+
+**[Weak Test Coverage in Edge Logic & Formatting]**
+**Module:** `src/core/graph.rs`
+**Summary:** Mutants returning default values or mutating exact operations survived in `Edge` logic (`connects` replaced with `true`, `false`, `||`, `!=`; `has_label_str` replaced with `false`, and `<impl std::fmt::Debug for Edge>::fmt` returning `Ok(Default::default())`).
+**Diagnosis:** WEAK_TEST / MISSING_TEST - Existing tests did not strictly verify `Edge::connects` behavior with mismatched inputs, did not check `Edge::has_label_str` against exact mismatches, and did not assert the content of the `Edge` debug string.
+**Kill Shot:** Added `tests/sentry_graph.rs` with `test_edge_connects_mutants`, `test_edge_has_label_str_mutants`, and `test_edge_fmt_mutants` to cover these exact gaps.
