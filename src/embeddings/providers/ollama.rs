@@ -13,7 +13,7 @@
 //! # Prerequisites
 //!
 //! Ollama must be installed and running:
-//! 1. Install: https://ollama.ai
+//! 1. Install: <https://ollama.ai>
 //! 2. Pull a model: `ollama pull nomic-embed-text`
 //! 3. Ollama server runs on `localhost:11434` by default
 //!
