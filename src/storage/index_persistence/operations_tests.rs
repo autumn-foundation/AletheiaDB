@@ -236,3 +236,91 @@ fn test_temporal_persist_keeps_interner_consistent_with_temporal_string_ids() {
         .expect("persisted string id should index into persisted interner");
     assert_eq!(resolved, &unique_value);
 }
+
+#[test]
+fn test_persist_temporal_index_sparse_vector_missing_prev() {
+    use crate::core::id::{NodeId, VersionId, EdgeId};
+    use crate::core::temporal::{BiTemporalInterval, TimeRange, TIMESTAMP_MAX};
+    use crate::core::version::{NodeVersion, EdgeVersion, PropertyDelta, VectorDelta, VersionData};
+    use crate::storage::historical::HistoricalStorage;
+    use crate::storage::index_persistence::{IndexPersistenceManager};
+    use crate::storage::index_persistence::tracker::PersistenceTracker;
+    use crate::index::temporal::TemporalIndexes;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use crate::core::GLOBAL_INTERNER;
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    let mut historical = HistoricalStorage::new();
+
+    let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
+    let label = GLOBAL_INTERNER.intern("Doc").unwrap();
+
+    let mut delta = PropertyDelta::new();
+    delta.vector_deltas.insert(
+        embedding_key,
+        VectorDelta::Sparse {
+            dimension: 384,
+            changes: Arc::new(vec![(0, 0.5f32)]),
+        },
+    );
+
+    let version = NodeVersion {
+        id: VersionId::new(2).unwrap(),
+        node_id: NodeId::new(1).unwrap(),
+        temporal: BiTemporalInterval::new(
+            TimeRange::new(2000.into(), 3000.into()).unwrap(),
+            TimeRange::new(2000.into(), TIMESTAMP_MAX).unwrap(),
+        ),
+        label,
+        data: VersionData::Delta { delta },
+        next_version: None,
+        prev_version: None, // Missing prev_version
+    };
+
+    historical.insert_restored_node_version(version).unwrap();
+
+    let mut edge_delta = PropertyDelta::new();
+    edge_delta.vector_deltas.insert(
+        embedding_key,
+        VectorDelta::Sparse {
+            dimension: 384,
+            changes: Arc::new(vec![(0, 0.5f32)]),
+        },
+    );
+
+    let edge_version = EdgeVersion {
+        id: VersionId::new(3).unwrap(),
+        edge_id: EdgeId::new(1).unwrap(),
+        source: NodeId::new(1).unwrap(),
+        target: NodeId::new(2).unwrap(),
+        temporal: BiTemporalInterval::new(
+            TimeRange::new(2000.into(), 3000.into()).unwrap(),
+            TimeRange::new(2000.into(), TIMESTAMP_MAX).unwrap(),
+        ),
+        label,
+        data: VersionData::Delta { delta: edge_delta },
+        next_version: None,
+        prev_version: None, // Missing prev_version
+    };
+
+    historical.insert_restored_edge_version(edge_version).unwrap();
+
+    let historical_arc = Arc::new(RwLock::new(historical));
+    let temporal_indexes = Arc::new(TemporalIndexes::default());
+    let manager = Arc::new(IndexPersistenceManager::new(data_dir.clone()));
+    let tracker = Arc::new(PersistenceTracker::new());
+
+    let result = crate::storage::index_persistence::operations::persist_temporal_index(
+        &historical_arc,
+        &temporal_indexes,
+        &manager,
+        &tracker,
+        0,
+    );
+
+    assert!(result.is_err());
+}
