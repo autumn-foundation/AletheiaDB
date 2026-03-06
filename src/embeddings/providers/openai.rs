@@ -69,7 +69,7 @@ pub struct OpenAIConfig {
     api_key: String,
     /// Model to use
     pub model: OpenAIModel,
-    /// API base URL (default: https://api.openai.com/v1)
+    /// API base URL (default: <https://api.openai.com/v1>)
     pub base_url: Option<String>,
     /// Request timeout in seconds
     pub timeout_secs: u64,

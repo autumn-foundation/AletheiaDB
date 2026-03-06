@@ -361,7 +361,7 @@ pub fn init(config: Config) {
 
 /// Get a snapshot of current metrics.
 ///
-/// This is a convenience function that delegates to [`METRICS.snapshot()`].
+/// This is a convenience function that delegates to [`METRICS`]'s `snapshot()` method.
 ///
 /// # Example
 ///
