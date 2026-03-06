@@ -162,7 +162,6 @@ pub mod kaleidoscope;
 /// Prism: Semantic Spectroscopy for Vectors.
 pub mod prism;
 #[cfg(feature = "nova")]
-/// Prophet Link Prediction Engine.
 pub mod prophet;
 #[cfg(feature = "nova")]
 /// Ripple: Semantic Causality Detector.

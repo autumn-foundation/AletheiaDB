@@ -70,3 +70,11 @@
 ## 2025-03-02 - Logical vs Physical Plan Clarification
 **Confusion:** The `src/query/planner/physical.rs` module lacked documentation detailing the distinction between logical query plans (what data to fetch) and physical query plans (the execution strategy used to fetch it). This is a core concept that makes the query planner opaque.
 **Clarification:** Added module-level documentation describing the optimizer's role in creating a `PhysicalPlan` and providing an example of how to view the underlying structure via `.explain()`.
+
+## 2025-03-05 - Prophet Algorithm Clarification
+**Confusion:** The `Prophet` link prediction engine was vaguely documented as "predicting the future". Users could easily assume it was a standard ML model or purely topological (like mutual friends). The interplay between the Adamic-Adar index (topology) and cosine similarity (semantics) was buried in the source code.
+**Clarification:** Added comprehensive module-level documentation and struct-level examples detailing the specific algorithm (`Score = AdamicAdar * (1.0 + VectorSimilarity)`), explaining exactly how it bridges structural positioning with conceptual alignment.
+
+## 2025-03-05 - Doctests with Feature Flags
+**Confusion:** When writing doctests for modules behind a feature flag (like `nova`), wrapping the test block in `# #[cfg(feature = "nova")] \n # { ... }` causes `rustdoc` to generate invalid syntax when the test is extracted. It creates an anonymous block at the root level which is an expression, not an item, breaking `cargo test`. If the feature flag is disabled, it leaves an empty file causing a `main function not found` error.
+**Clarification:** To properly feature-gate doctests, conditionally compile the imports and the `main` function itself: `# #[cfg(feature = "nova")] \n fn main() { ... }`, and crucially, provide an empty fallback `main` function for when the feature is disabled: `# #[cfg(not(feature = "nova"))] \n # fn main() {}`.
