@@ -103,6 +103,32 @@ impl PhysicalPlan {
     /// - Estimated cardinalities (row counts)
     /// - Temporal context if applicable
     ///
+    /// # Panics
+    ///
+    /// This method will never panic.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::query::planner::physical::{PhysicalPlan, PhysicalOp};
+    /// # use aletheiadb::query::planner::cost::Cost;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let plan = PhysicalPlan {
+    ///     root: PhysicalOp::NodeLookup { node_ids: vec![NodeId::new(1)?] },
+    ///     estimated_cost: Cost { cpu: 0.5, io: 1.0, memory: 1024, network: 0.0 },
+    ///     temporal_context: None,
+    ///     parallel: false,
+    ///     include_provenance: false,
+    /// };
+    ///
+    /// let explanation = plan.explain();
+    /// assert!(explanation.contains("Physical Plan"));
+    /// assert!(explanation.contains("NodeLookup"));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Example Output
     ///
     /// ```text
@@ -617,7 +643,28 @@ impl PhysicalOp {
         }
     }
 
-    /// Format the plan tree as a string for debugging
+    /// Format the plan tree as a string for debugging.
+    ///
+    /// This will recursively format the `PhysicalOp` into a multiline string
+    /// detailing its type and parameters.
+    ///
+    /// # Panics
+    ///
+    /// This method does not panic.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::query::planner::physical::PhysicalOp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let op = PhysicalOp::NodeLookup { node_ids: vec![NodeId::new(42)?] };
+    /// let output = op.explain();
+    /// assert!(output.contains("NodeLookup"));
+    /// assert!(output.contains("ids: [42]"));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn explain(&self) -> String {
         self.explain_indent(0)

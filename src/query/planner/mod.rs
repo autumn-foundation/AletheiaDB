@@ -1,13 +1,26 @@
 //! Query Planner
 //!
-//! Transforms logical plans into optimized physical plans for execution.
-//! The planner applies optimization rules and uses a cost model to choose
-//! the best execution strategy.
+//! The Query Planner acts as the brains of AletheiaDB's query engine. It translates
+//! user-facing queries into highly optimized execution strategies, bridging the gap
+//! between "what the user wants" and "how the database fetches it."
+//!
+//! # Logical vs. Physical Plans
+//!
+//! The planner operates in two distinct phases, dealing with two types of plans:
+//!
+//! - **Logical Plans**: The *what*. These represent the intent of the query independently
+//!   of the database's internal state. For example, "Find all `Person` nodes with `age > 30`."
+//!   The logical plan does not know if there is an index on `age`.
+//!
+//! - **Physical Plans**: The *how*. These represent the exact execution operations
+//!   (`PhysicalOp`) the database will perform. The planner looks at the logical plan,
+//!   consults `Statistics` and available indexes, and produces a physical plan like:
+//!   "Perform an `IndexScan` on the `age` property, then yield the resulting node IDs."
 //!
 //! # Life of a Query
 //!
-//! 1. **Logical Planning**: The `Query` struct (IR) is converted into a `LogicalPlan`.
-//!    This represents *what* to compute without specifying *how*.
+//! 1. **Logical Planning**: The `Query` struct (Intermediate Representation) is converted
+//!    into a `LogicalPlan`.
 //!    - Example: `Scan(Person) -> Filter(age > 30)`
 //!
 //! 2. **Optimization**: The planner applies a series of `OptimizationRule`s to the logical plan.
@@ -16,7 +29,6 @@
 //!    - **Cost-Based Decisions**: Uses `Statistics` and a `CostModel` to estimate the cost of different plans.
 //!
 //! 3. **Physical Planning**: The optimized logical plan is converted into a `PhysicalPlan`.
-//!    This represents the actual execution strategy (e.g., "Index Scan" vs "Full Scan").
 //!    - Example: `IndexScan(Person, age > 30)`
 //!
 //! 4. **Execution**: The `PhysicalPlan` is handed off to the `Executor` (not part of this module).
