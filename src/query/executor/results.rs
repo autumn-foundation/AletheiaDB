@@ -159,8 +159,12 @@ impl QueryResults {
     }
 
     /// Collect all results into a vector, stopping on first error
+    ///
+    /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
+    /// to reduce heap allocations during collection.
     pub fn collect_all(mut self) -> Result<Vec<QueryRow>> {
-        let mut results = Vec::new();
+        let (lower, _) = self.iterator.size_hint();
+        let mut results = Vec::with_capacity(lower);
         while let Some(row) = self.iterator.next() {
             results.push(row?);
         }
@@ -171,8 +175,10 @@ impl QueryResults {
     ///
     /// ⚡ Bolt Optimization: Consumes the iterator directly to avoid allocating
     /// a large intermediate `Vec` of all rows before extracting the nodes.
+    /// Pre-allocates vector based on iterator's lower size bound.
     pub fn collect_nodes(mut self) -> Result<Vec<Node>> {
-        let mut nodes = Vec::new();
+        let (lower, _) = self.iterator.size_hint();
+        let mut nodes = Vec::with_capacity(lower);
         while let Some(row) = self.iterator.next() {
             if let EntityResult::Node(n) = row?.entity {
                 nodes.push(n);
@@ -185,8 +191,10 @@ impl QueryResults {
     ///
     /// ⚡ Bolt Optimization: Consumes the iterator directly to avoid allocating
     /// a large intermediate `Vec` of all rows before extracting the nodes and scores.
+    /// Pre-allocates vector based on iterator's lower size bound.
     pub fn collect_nodes_with_scores(mut self) -> Result<Vec<(Node, f32)>> {
-        let mut results = Vec::new();
+        let (lower, _) = self.iterator.size_hint();
+        let mut results = Vec::with_capacity(lower);
         while let Some(row) = self.iterator.next() {
             let row = row?;
             if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
