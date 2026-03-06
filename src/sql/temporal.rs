@@ -212,3 +212,156 @@ impl TemporalClause {
         Ok(TemporalClause::ValidTimeBetween(range))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_validate_sql_timestamps_correctly() {
+        struct TestCase<'a> {
+            input: &'a str,
+            expected: bool,
+            desc: &'a str,
+        }
+
+        let cases = vec![
+            TestCase {
+                input: "2024-01-15 10:00:00",
+                expected: true,
+                desc: "Valid exact length timestamp",
+            },
+            TestCase {
+                input: "2024-01-15 10:00:00.1",
+                expected: true,
+                desc: "Valid 1 fractional digit",
+            },
+            TestCase {
+                input: "2024-01-15 10:00:00.123456",
+                expected: true,
+                desc: "Valid 6 fractional digits",
+            },
+            TestCase {
+                input: "2024-01-15 10:00:00.1234567",
+                expected: false,
+                desc: "Invalid 7 fractional digits (too long)",
+            },
+            TestCase {
+                input: "2024-01-15 10:00:0",
+                expected: false,
+                desc: "Invalid short length",
+            },
+            TestCase {
+                input: "2024/01/15 10:00:00",
+                expected: false,
+                desc: "Invalid separator (slash instead of dash)",
+            },
+            TestCase {
+                input: "2024-01-15T10:00:00",
+                expected: false,
+                desc: "Invalid separator (T instead of space)",
+            },
+            TestCase {
+                input: "2024-01-15 10-00-00",
+                expected: false,
+                desc: "Invalid time separator",
+            },
+            TestCase {
+                input: "abcd-ef-gh ij:kl:mn",
+                expected: false,
+                desc: "Invalid non-digit characters",
+            },
+            TestCase {
+                input: "2024-01-15 10:00:00x123",
+                expected: false,
+                desc: "Invalid fractional separator",
+            },
+            TestCase {
+                input: "2024-01-15 10:00:00.abc",
+                expected: false,
+                desc: "Invalid fractional non-digits",
+            },
+            TestCase {
+                input: "2024-01-15 10:00:00 invalid",
+                expected: false,
+                desc: "Invalid trailing characters",
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                TemporalClause::is_valid_sql_timestamp(case.input),
+                case.expected,
+                "Failed on: {}",
+                case.desc
+            );
+        }
+    }
+
+    #[test]
+    fn should_return_error_when_timestamp_format_unsupported() {
+        let result = TemporalClause::parse_timestamp("unsupported_format");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            SqlError::InvalidTimestamp(msg) => {
+                assert!(msg.contains("Cannot parse timestamp 'unsupported_format'"));
+                assert!(msg.contains("Supported formats:"));
+            }
+            _ => panic!("Expected SqlError::InvalidTimestamp"),
+        }
+    }
+
+    #[test]
+    fn should_create_as_of_clauses_correctly() {
+        let ts = Timestamp::from(1000);
+
+        let sys_clause = TemporalClause::system_time_as_of(ts);
+        assert_eq!(sys_clause, TemporalClause::SystemTimeAsOf(ts));
+
+        let valid_clause = TemporalClause::valid_time_as_of(ts);
+        assert_eq!(valid_clause, TemporalClause::ValidTimeAsOf(ts));
+    }
+
+    #[test]
+    fn should_create_between_clauses_correctly() {
+        let start = Timestamp::from(1000);
+        let end = Timestamp::from(2000);
+
+        let sys_clause = TemporalClause::system_time_between(start, end).unwrap();
+        assert!(matches!(sys_clause, TemporalClause::SystemTimeBetween(_)));
+        if let TemporalClause::SystemTimeBetween(range) = sys_clause {
+            assert_eq!(range.start(), start);
+            assert_eq!(range.end(), end);
+        }
+
+        let valid_clause = TemporalClause::valid_time_between(start, end).unwrap();
+        assert!(matches!(valid_clause, TemporalClause::ValidTimeBetween(_)));
+        if let TemporalClause::ValidTimeBetween(range) = valid_clause {
+            assert_eq!(range.start(), start);
+            assert_eq!(range.end(), end);
+        }
+    }
+
+    #[test]
+    fn should_return_error_when_between_clause_range_invalid() {
+        let start = Timestamp::from(2000);
+        let end = Timestamp::from(1000); // end before start
+
+        let sys_err = TemporalClause::system_time_between(start, end).unwrap_err();
+        match sys_err {
+            SqlError::InvalidTemporalClause(msg) => {
+                assert!(msg.contains("Invalid time range:"));
+            }
+            _ => panic!("Expected SqlError::InvalidTemporalClause"),
+        }
+
+        let valid_err = TemporalClause::valid_time_between(start, end).unwrap_err();
+        match valid_err {
+            SqlError::InvalidTemporalClause(msg) => {
+                assert!(msg.contains("Invalid time range:"));
+            }
+            _ => panic!("Expected SqlError::InvalidTemporalClause"),
+        }
+    }
+}
