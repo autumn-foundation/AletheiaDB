@@ -1,3 +1,21 @@
+//! Write validation and constraint checks.
+//!
+//! This module provides the logic to validate all buffered writes before
+//! they are committed to the Write-Ahead Log (WAL) or applied to the
+//! storage engine.
+//!
+//! # Validation Rules
+//!
+//! The following checks are enforced on every commit:
+//!
+//! 1.  **Temporal Consistency**:
+//!     *   `valid_from` cannot be set arbitrarily far into the future (limited by `MAX_VALID_TIME_FUTURE_OFFSET_US`).
+//!     *   `valid_from` for an update or delete must be *after* the entity's initial creation time.
+//! 2.  **Referential Integrity**:
+//!     *   New or updated edges must reference source and target nodes that either already exist
+//!         in storage or are being created in the same transaction.
+//!     *   Nodes cannot be referenced by edges if they are being deleted in the same transaction.
+
 use super::{MAX_VALID_TIME_FUTURE_OFFSET_US, WriteTransaction};
 use crate::core::error::{Result, TransactionError};
 use crate::core::temporal::{Timestamp, time};
