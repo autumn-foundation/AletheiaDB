@@ -64,10 +64,12 @@ impl fmt::Display for NodeId {
     }
 }
 
-impl From<u64> for NodeId {
+impl TryFrom<u64> for NodeId {
+    type Error = StorageError;
+
     #[inline]
-    fn from(id: u64) -> Self {
-        Self::new(id).unwrap_or_else(|e| panic!("{}", e))
+    fn try_from(id: u64) -> Result<Self, Self::Error> {
+        Self::new(id)
     }
 }
 
@@ -115,10 +117,12 @@ impl fmt::Display for EdgeId {
     }
 }
 
-impl From<u64> for EdgeId {
+impl TryFrom<u64> for EdgeId {
+    type Error = StorageError;
+
     #[inline]
-    fn from(id: u64) -> Self {
-        Self::new(id).unwrap_or_else(|e| panic!("{}", e))
+    fn try_from(id: u64) -> Result<Self, Self::Error> {
+        Self::new(id)
     }
 }
 
@@ -166,10 +170,12 @@ impl fmt::Display for VersionId {
     }
 }
 
-impl From<u64> for VersionId {
+impl TryFrom<u64> for VersionId {
+    type Error = StorageError;
+
     #[inline]
-    fn from(id: u64) -> Self {
-        Self::new(id).unwrap_or_else(|e| panic!("{}", e))
+    fn try_from(id: u64) -> Result<Self, Self::Error> {
+        Self::new(id)
     }
 }
 
@@ -559,6 +565,12 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_tx_id_from_u64() {
+        let tx_id: TxId = 42.into();
+        assert_eq!(tx_id.as_u64(), 42);
+    }
+
+    #[test]
     fn test_entity_id_conversion_negative() {
         let node_id = NodeId::new(1).unwrap();
         let entity_node: EntityId = node_id.into();
@@ -659,6 +671,36 @@ mod tests {
         // The following would fail to compile (which is what we want):
         // fn takes_node_id(_id: NodeId) {}
         // takes_node_id(_edge); // Type error!
+    }
+
+    #[test]
+    fn test_id_try_from_u64() {
+        let node_id = NodeId::try_from(42).unwrap();
+        assert_eq!(node_id.as_u64(), 42);
+
+        let edge_id = EdgeId::try_from(100).unwrap();
+        assert_eq!(edge_id.as_u64(), 100);
+
+        let version_id = VersionId::try_from(1000).unwrap();
+        assert_eq!(version_id.as_u64(), 1000);
+    }
+
+    #[test]
+    fn test_node_id_try_from_u64_error() {
+        let node_result = NodeId::try_from(MAX_VALID_ID + 1);
+        assert!(node_result.is_err());
+    }
+
+    #[test]
+    fn test_edge_id_try_from_u64_error() {
+        let edge_result = EdgeId::try_from(MAX_VALID_ID + 1);
+        assert!(edge_result.is_err());
+    }
+
+    #[test]
+    fn test_version_id_try_from_u64_error() {
+        let version_result = VersionId::try_from(MAX_VALID_ID + 1);
+        assert!(version_result.is_err());
     }
 
     #[test]
