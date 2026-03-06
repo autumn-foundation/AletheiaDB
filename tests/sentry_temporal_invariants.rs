@@ -2,7 +2,7 @@
 mod tests {
     use aletheiadb::core::error::TemporalError;
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{time, BiTemporalInterval, TimeRange, TIMESTAMP_MAX};
+    use aletheiadb::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, time};
 
     #[test]
     fn test_timerange_close_at_enforces_invariant() {
