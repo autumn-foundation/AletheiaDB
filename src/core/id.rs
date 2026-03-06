@@ -64,6 +64,13 @@ impl fmt::Display for NodeId {
     }
 }
 
+impl From<u64> for NodeId {
+    #[inline]
+    fn from(id: u64) -> Self {
+        Self::new(id).unwrap_or_else(|e| panic!("{}", e))
+    }
+}
+
 /// Unique identifier for an edge in the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
@@ -108,6 +115,13 @@ impl fmt::Display for EdgeId {
     }
 }
 
+impl From<u64> for EdgeId {
+    #[inline]
+    fn from(id: u64) -> Self {
+        Self::new(id).unwrap_or_else(|e| panic!("{}", e))
+    }
+}
+
 /// Unique identifier for a version of a node or edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
@@ -149,6 +163,13 @@ impl VersionId {
 impl fmt::Display for VersionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Version({})", self.0)
+    }
+}
+
+impl From<u64> for VersionId {
+    #[inline]
+    fn from(id: u64) -> Self {
+        Self::new(id).unwrap_or_else(|e| panic!("{}", e))
     }
 }
 
@@ -1474,6 +1495,13 @@ impl TxId {
 impl std::fmt::Display for TxId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "TxId({})", self.0)
+    }
+}
+
+impl From<u64> for TxId {
+    #[inline]
+    fn from(id: u64) -> Self {
+        Self::new(id)
     }
 }
 
