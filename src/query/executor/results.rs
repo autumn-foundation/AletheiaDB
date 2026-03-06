@@ -159,8 +159,11 @@ impl QueryResults {
     }
 
     /// Collect all results into a vector, stopping on first error
+    ///
+    /// ⚡ Bolt Optimization: Uses `.size_hint().0` to pre-allocate the vector with `Vec::with_capacity()`.
     pub fn collect_all(mut self) -> Result<Vec<QueryRow>> {
-        let mut results = Vec::new();
+        let (lower_bound, _) = self.iterator.size_hint();
+        let mut results = Vec::with_capacity(lower_bound);
         while let Some(row) = self.iterator.next() {
             results.push(row?);
         }
@@ -171,8 +174,10 @@ impl QueryResults {
     ///
     /// ⚡ Bolt Optimization: Consumes the iterator directly to avoid allocating
     /// a large intermediate `Vec` of all rows before extracting the nodes.
+    /// ⚡ Bolt Optimization: Uses `.size_hint().0` to pre-allocate the vector with `Vec::with_capacity()`.
     pub fn collect_nodes(mut self) -> Result<Vec<Node>> {
-        let mut nodes = Vec::new();
+        let (lower_bound, _) = self.iterator.size_hint();
+        let mut nodes = Vec::with_capacity(lower_bound);
         while let Some(row) = self.iterator.next() {
             if let EntityResult::Node(n) = row?.entity {
                 nodes.push(n);
@@ -185,8 +190,10 @@ impl QueryResults {
     ///
     /// ⚡ Bolt Optimization: Consumes the iterator directly to avoid allocating
     /// a large intermediate `Vec` of all rows before extracting the nodes and scores.
+    /// ⚡ Bolt Optimization: Uses `.size_hint().0` to pre-allocate the vector with `Vec::with_capacity()`.
     pub fn collect_nodes_with_scores(mut self) -> Result<Vec<(Node, f32)>> {
-        let mut results = Vec::new();
+        let (lower_bound, _) = self.iterator.size_hint();
+        let mut results = Vec::with_capacity(lower_bound);
         while let Some(row) = self.iterator.next() {
             let row = row?;
             if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
@@ -539,9 +546,12 @@ impl QueryResults {
     ///
     /// For very large result sets, this may consume significant memory. Consider using
     /// the streaming iterator directly for result sets exceeding 100K rows.
+    ///
+    /// ⚡ Bolt Optimization: Uses `.size_hint().0` and `rows.len()` to pre-allocate vectors with `Vec::with_capacity()`.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
         // First pass: collect all rows
-        let mut rows = Vec::new();
+        let (lower_bound, _) = self.iterator.size_hint();
+        let mut rows = Vec::with_capacity(lower_bound);
         while let Some(row) = self.iterator.next() {
             rows.push(row?);
         }
@@ -553,24 +563,25 @@ impl QueryResults {
         let has_any_nodes = rows.iter().any(|r| r.entity.as_node().is_some());
 
         // Second pass: extract data with padding
-        let mut nodes = Vec::new();
+        let rows_len = rows.len();
+        let mut nodes = Vec::with_capacity(rows_len);
         let mut properties = if has_any_nodes {
-            Some(Vec::new())
+            Some(Vec::with_capacity(rows_len))
         } else {
             None
         };
         let mut scores = if has_any_scores {
-            Some(Vec::new())
+            Some(Vec::with_capacity(rows_len))
         } else {
             None
         };
         let mut paths = if has_any_paths {
-            Some(Vec::new())
+            Some(Vec::with_capacity(rows_len))
         } else {
             None
         };
         let mut versions = if has_any_versions {
-            Some(Vec::new())
+            Some(Vec::with_capacity(rows_len))
         } else {
             None
         };
