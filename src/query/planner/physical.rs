@@ -661,7 +661,7 @@ impl PhysicalOp {
     /// let op = PhysicalOp::NodeLookup { node_ids: vec![NodeId::new(42)?] };
     /// let output = op.explain();
     /// assert!(output.contains("NodeLookup"));
-    /// assert!(output.contains("ids: [42]"));
+    /// assert!(output.contains("ids: [NodeId(42)]"));
     /// # Ok(())
     /// # }
     /// ```
