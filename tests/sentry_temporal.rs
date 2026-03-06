@@ -240,3 +240,104 @@ fn test_timerange_contains_exact_boundary() {
         "Touching ranges should NOT overlap (exact boundary check reverse)"
     );
 }
+
+#[test]
+fn test_sentry_time_range_contains_boundaries() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let mid = HybridTimestamp::new(150, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let before = HybridTimestamp::new(99, 0).unwrap();
+    let after = HybridTimestamp::new(201, 0).unwrap();
+
+    let range = TimeRange::new(start, end).unwrap();
+
+    // Kill mutants replacing `>=` with `<` or `>`, `<` with `<=`, `==`, etc.
+    assert!(range.contains(start), "Must contain exact start boundary");
+    assert!(!range.contains(before), "Must NOT contain before start");
+
+    assert!(range.contains(mid), "Must contain value inside range");
+
+    assert!(!range.contains(end), "Must NOT contain exact end boundary");
+    assert!(!range.contains(after), "Must NOT contain after end");
+}
+
+#[test]
+fn test_sentry_time_range_contains_or_after_boundaries() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let before = HybridTimestamp::new(99, 0).unwrap();
+    let after = HybridTimestamp::new(101, 0).unwrap();
+
+    let range = TimeRange::new(start, end).unwrap();
+
+    // Kill mutants replacing `>=` with `<` or `>`
+    assert!(
+        range.contains_or_after(start),
+        "Must contain exact start boundary"
+    );
+    assert!(
+        range.contains_or_after(after),
+        "Must contain after start boundary"
+    );
+    assert!(
+        !range.contains_or_after(before),
+        "Must NOT contain before start boundary"
+    );
+}
+
+#[test]
+fn test_sentry_time_range_contains_range_boundaries() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+
+    let range = TimeRange::new(start, end).unwrap();
+
+    // Exact match
+    let exact_range = TimeRange::new(start, end).unwrap();
+    assert!(
+        range.contains_range(&exact_range),
+        "Must contain exact range"
+    );
+
+    // Strictly inside
+    let inside_range = TimeRange::new(
+        HybridTimestamp::new(101, 0).unwrap(),
+        HybridTimestamp::new(199, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        range.contains_range(&inside_range),
+        "Must contain strictly inner range"
+    );
+
+    // Spills before start
+    let earlier_start_range = TimeRange::new(
+        HybridTimestamp::new(99, 0).unwrap(),
+        HybridTimestamp::new(150, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !range.contains_range(&earlier_start_range),
+        "Must NOT contain range starting earlier"
+    );
+
+    // Spills after end
+    let later_end_range = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(201, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !range.contains_range(&later_end_range),
+        "Must NOT contain range ending later"
+    );
+}

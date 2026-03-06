@@ -125,3 +125,9 @@
 **Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`.
 **Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, and exact exclusion of boundaries inside interval intersections.
 **Kill Shot:** Appended explicit exact boundary tests `test_timerange_from_at_exact_boundaries`, `test_time_to_secs_millis_exact_math`, `test_time_to_iso8601_exact_content`, and `test_timerange_contains_exact_boundary` directly to `tests/sentry_temporal.rs`.
+
+**[Weak Test Coverage in TimeRange Boundary Conditions]**
+**Module:** `src/core/temporal.rs`
+**Summary:** Mutants regarding strict boolean boundaries and inclusion inside `TimeRange::contains`, `TimeRange::contains_or_after` and `TimeRange::contains_range` survived. Specifically, mutants swapping `&&` to `||` and modifying bound exclusivity (`<` to `<=`, `==`, `>`) were allowed to persist due to non-exhaustive edge-case verification.
+**Diagnosis:** MISSING_TEST / WEAK_TEST - The test suite previously evaluated positive paths for logical temporal overlap but neglected exact tests on exact integer boundary overlap on the `[start, end)` boundary structures causing conditions to slip.
+**Kill Shot:** Appended explicitly constructed boundary tests `test_sentry_time_range_contains_boundaries`, `test_sentry_time_range_contains_or_after_boundaries`, and `test_sentry_time_range_contains_range_boundaries` directly to `tests/sentry_temporal.rs`.
