@@ -36,7 +36,7 @@ mod loom_tests {
         }
 
         fn notify_success(&self) {
-            // FIX: Acquire mutex before updating state and notifying
+            // Acquire mutex before updating state and notifying
             // This prevents the "lost wakeup" scenario where a waiter checks the state (Pending),
             // then the notifier updates state and signals (Lost), then the waiter sleeps forever.
             let _guard = self.wait_mutex.lock().unwrap();
