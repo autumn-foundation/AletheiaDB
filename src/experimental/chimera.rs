@@ -214,10 +214,18 @@ impl<'a> ChimeraEngine<'a> {
                 }
                 PropertyMergeStrategy::Sum => self.merge_numeric(a, b, |x, y| x + y, config),
                 PropertyMergeStrategy::Min => {
-                    self.merge_comparable(a, b, |x, y| if x < y { x } else { y })
+                    if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
+                        Some(if sa < sb { a.clone() } else { b.clone() })
+                    } else {
+                        self.merge_numeric(a, b, |x, y| if x < y { x } else { y }, config)
+                    }
                 }
                 PropertyMergeStrategy::Max => {
-                    self.merge_comparable(a, b, |x, y| if x > y { x } else { y })
+                    if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
+                        Some(if sa > sb { a.clone() } else { b.clone() })
+                    } else {
+                        self.merge_numeric(a, b, |x, y| if x > y { x } else { y }, config)
+                    }
                 }
                 PropertyMergeStrategy::Concatenate => {
                     if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
@@ -276,25 +284,6 @@ impl<'a> ChimeraEngine<'a> {
             // Fallback for non-numerics under numeric strategy
             Some(a.clone())
         }
-    }
-
-    fn merge_comparable<F>(
-        &self,
-        a: &PropertyValue,
-        b: &PropertyValue,
-        op: F,
-    ) -> Option<PropertyValue>
-    where
-        F: Fn(f64, f64) -> f64,
-    {
-        // For Min/Max, we can reuse numeric logic if both are numbers.
-        // If they are strings, we can compare strings.
-        if let (Some(_sa), Some(_sb)) = (a.as_str(), b.as_str()) {
-            // String comparison - fallback to A for now as 'op' is numeric only.
-            // TODO: Implement string comparison logic if needed.
-            return Some(a.clone());
-        }
-        self.merge_numeric(a, b, op, &SynthesisConfig::default())
     }
 }
 
@@ -452,5 +441,84 @@ mod tests {
         assert_eq!(in_edges.len(), 1);
         let edge = db.get_edge(in_edges[0]).unwrap();
         assert_eq!(edge.source, source);
+    }
+
+    #[test]
+    fn test_chimera_string_comparison() {
+        let (db, _dir) = create_test_db();
+
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("first_name", "Alice")
+                    .insert("last_name", "Zeta")
+                    .build(),
+            )
+            .unwrap();
+
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("first_name", "Bob")
+                    .insert("last_name", "Alpha")
+                    .build(),
+            )
+            .unwrap();
+
+        let mut strategies = HashMap::new();
+        // Min should pick "Alice" (A < B)
+        strategies.insert("first_name".to_string(), PropertyMergeStrategy::Min);
+        // Max should pick "Zeta" (Z > A)
+        strategies.insert("last_name".to_string(), PropertyMergeStrategy::Max);
+
+        let config = SynthesisConfig {
+            alpha: 0.5,
+            default_strategy: PropertyMergeStrategy::KeepA,
+            property_strategies: strategies,
+            string_separator: "&".to_string(),
+            new_label: Some("Hybrid".to_string()),
+        };
+
+        let engine = ChimeraEngine::new(&db);
+        let chimera = engine.synthesize(a, b, config).unwrap();
+        let node = db.get_node(chimera).unwrap();
+
+        assert_eq!(
+            node.get_property("first_name").unwrap().as_str(),
+            Some("Alice")
+        );
+        assert_eq!(
+            node.get_property("last_name").unwrap().as_str(),
+            Some("Zeta")
+        );
+
+        // Let's swap the conditions to test the other branches
+        let mut strategies = HashMap::new();
+        // Max should pick "Bob" (B > A)
+        strategies.insert("first_name".to_string(), PropertyMergeStrategy::Max);
+        // Min should pick "Alpha" (A < Z)
+        strategies.insert("last_name".to_string(), PropertyMergeStrategy::Min);
+
+        let config = SynthesisConfig {
+            alpha: 0.5,
+            default_strategy: PropertyMergeStrategy::KeepA,
+            property_strategies: strategies,
+            string_separator: "&".to_string(),
+            new_label: Some("Hybrid2".to_string()),
+        };
+
+        let chimera2 = engine.synthesize(a, b, config).unwrap();
+        let node2 = db.get_node(chimera2).unwrap();
+
+        assert_eq!(
+            node2.get_property("first_name").unwrap().as_str(),
+            Some("Bob")
+        );
+        assert_eq!(
+            node2.get_property("last_name").unwrap().as_str(),
+            Some("Alpha")
+        );
     }
 }
