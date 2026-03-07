@@ -56,6 +56,11 @@ impl ShutdownHandle {
 /// let app = App::new().configure(configure_app);
 /// ```
 pub fn configure_app(cfg: &mut web::ServiceConfig) {
+    // Defense in Depth: Protect against deserialization DoS bombs
+    // by limiting JSON payloads to 2MB (2 * 1024 * 1024 bytes).
+    let json_config = web::JsonConfig::default().limit(2 * 1024 * 1024);
+
+    cfg.app_data(json_config);
     configure_health_routes(cfg);
     cfg.route("/query", web::post().to(handle_query));
 }
@@ -293,6 +298,52 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use actix_web::test;
+
+    #[actix_rt::test]
+    async fn test_payload_too_large() {
+        // We need AppState to handle /query, so mock it for testing
+        let db = crate::AletheiaDB::new().unwrap();
+        let app_state =
+            actix_web::web::Data::new(crate::http::AppState::new(std::sync::Arc::new(db)));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(app_state.clone())
+                .configure(configure_app),
+        )
+        .await;
+
+        // Create a payload larger than 2MB (2 * 1024 * 1024 bytes)
+        // A string with 3_000_000 characters is approx 3MB in JSON
+        let large_string = "x".repeat(3_000_000);
+
+        let payload = serde_json::json!({
+            "operation": "find_node",
+            "label": large_string,
+            "properties": {
+                "name": "Alice"
+            }
+        });
+
+        let req = test::TestRequest::post()
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+            .uri("/query")
+            .set_json(&payload)
+            .to_request();
+
+        // We explicitly define the type to prevent E0282
+        let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
+
+        // The actix-web JSON extractor should reject the payload with 400 Payload Too Large (or similar Bad Request)
+        // specifically, it returns 400 Bad Request if it exceeds limit. actix-web JsonConfig.limit() returns a Payload Too Large error,
+        // which maps to a 400 Bad Request status code, but let's check for either 400 or 413
+        assert!(
+            resp.status() == actix_web::http::StatusCode::BAD_REQUEST
+                || resp.status() == actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "Expected 400 Bad Request or 413 Payload Too Large, got {}",
+            resp.status()
+        );
+    }
 
     #[actix_rt::test]
     async fn test_configure_app_has_health_endpoint() {
