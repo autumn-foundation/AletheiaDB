@@ -1,9 +1,4 @@
 ## [Reduction]
-**Bloat:** `FileColdStorage` (Redundant, inferior implementation of `ColdStorage` trait).
-**Cut:** Deleted `FileColdStorage` struct, implementation, and tests.
-**Saved:** ~200 lines of code + cognitive load of maintaining two cold storage backends.
-
-## [Reduction]
-**Bloat:** `ColdStorage` trait (Single-implementation abstraction used only by `RedbColdStorage`).
-**Cut:** Deleted the `ColdStorage` trait and `cold_storage.rs` module. Refactored all consumers to use the concrete `RedbColdStorage` struct directly.
-**Saved:** ~300 lines of boilerplate (trait definitions, mock implementations, duplicate imports) + removed dynamic dispatch overhead.
+**Bloat:** The `StorageSnapshot` trait in `src/storage/snapshot.rs`. It was implemented by exactly one struct (`CurrentStorageSnapshot`). `HistoricalStorageSnapshot` did not implement it. All callers explicitly took `&CurrentStorageSnapshot`.
+**Cut:** Deleted the `StorageSnapshot` trait, merged its methods directly into `CurrentStorageSnapshot`, and updated `src/storage/checkpoint.rs` to stop importing and using it.
+**Saved:** Unnecessary indirection and a useless trait definition. Code is more explicit and easier to read.
