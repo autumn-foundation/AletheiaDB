@@ -1039,10 +1039,19 @@ impl CurrentStorage {
 
         // Find min key alphabetically
         // Note: DashMap iteration order is not guaranteed, so we must scan all keys
+        // We use `.fold` instead of `.min_by` to prevent deadlocks. `.min_by` holds
+        // multiple `RefMulti` read guards across iteration steps, which can block
+        // concurrent writers indefinitely. `.fold` immediately drops the guard for
+        // each element after extracting the necessary data.
         self.vector_indexes
             .iter()
-            .min_by(|a, b| a.key().cmp(b.key()))
-            .map(|r| r.key().clone())
+            .fold(None, |min: Option<String>, current| {
+                let key = current.key();
+                match min {
+                    Some(m) if m.as_str() <= key.as_str() => Some(m),
+                    _ => Some(key.clone()),
+                }
+            })
     }
 
     /// Get or create filter statistics for a label (Issue #334).
