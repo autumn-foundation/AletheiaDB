@@ -434,18 +434,32 @@ mod tests {
 
     #[test]
     fn test_entity_history_version_count() {
-        let history = EntityHistory {
-            versions: vec![
-                create_test_version_info(1, 1000),
-                create_test_version_info(2, 2000),
-            ],
-        };
+        // Table-driven test to kill multiple mutants for `version_count`
+        let test_cases = vec![
+            (vec![], 0),
+            (vec![create_test_version_info(1, 1000)], 1),
+            (
+                vec![
+                    create_test_version_info(1, 1000),
+                    create_test_version_info(2, 2000),
+                ],
+                2,
+            ),
+        ];
 
-        assert_eq!(history.version_count(), 2);
+        for (versions, expected_count) in test_cases {
+            let history = EntityHistory { versions };
+            assert_eq!(history.version_count(), expected_count);
+        }
     }
 
     #[test]
     fn test_entity_history_current_version() {
+        // Test with empty history
+        let empty_history = EntityHistory { versions: vec![] };
+        assert!(empty_history.current_version().is_none());
+
+        // Test with multiple versions
         let v1 = create_test_version_info(1, 1000);
         let v2 = create_test_version_info(2, 2000);
 
@@ -460,6 +474,11 @@ mod tests {
 
     #[test]
     fn test_entity_history_first_version() {
+        // Test with empty history
+        let empty_history = EntityHistory { versions: vec![] };
+        assert!(empty_history.first_version().is_none());
+
+        // Test with multiple versions
         let v1 = create_test_version_info(1, 1000);
         let v2 = create_test_version_info(2, 2000);
 
@@ -484,65 +503,52 @@ mod tests {
     // ==================== VersionSummary Tests ====================
 
     #[test]
-    fn test_version_summary_has_changes() {
-        let mut summary = VersionSummary {
-            version_id: test_version_id(1),
-            version_number: 1,
-            valid_from: test_timestamp(1000),
-            transaction_time: test_timestamp(2000),
-            properties_added: 0,
-            properties_removed: 0,
-            properties_modified: 0,
-        };
+    fn test_version_summary_changes_and_count() {
+        // Table-driven test to kill all mutants related to has_changes and change_count
+        let test_cases = vec![
+            // (added, removed, modified, expected_has_changes, expected_change_count)
+            (0, 0, 0, false, 0),
+            (1, 0, 0, true, 1),
+            (0, 1, 0, true, 1),
+            (0, 0, 1, true, 1),
+            (1, 1, 0, true, 2),
+            (1, 0, 1, true, 2),
+            (0, 1, 1, true, 2),
+            (1, 1, 1, true, 3),
+            (2, 1, 3, true, 6),
+            (0, 0, 5, true, 5),
+            (5, 0, 0, true, 5),
+            (0, 5, 0, true, 5),
+        ];
 
-        // No changes
-        assert!(!summary.has_changes());
+        for (added, removed, modified, expected_has_changes, expected_change_count) in test_cases {
+            let summary = VersionSummary {
+                version_id: test_version_id(1),
+                version_number: 1,
+                valid_from: test_timestamp(1000),
+                transaction_time: test_timestamp(2000),
+                properties_added: added,
+                properties_removed: removed,
+                properties_modified: modified,
+            };
 
-        // Added only
-        summary.properties_added = 1;
-        assert!(summary.has_changes());
-        summary.properties_added = 0;
-
-        // Removed only
-        summary.properties_removed = 1;
-        assert!(summary.has_changes());
-        summary.properties_removed = 0;
-
-        // Modified only
-        summary.properties_modified = 1;
-        assert!(summary.has_changes());
-    }
-
-    #[test]
-    fn test_version_summary_no_changes() {
-        let summary = VersionSummary {
-            version_id: test_version_id(1),
-            version_number: 1,
-            valid_from: test_timestamp(1000),
-            transaction_time: test_timestamp(2000),
-            properties_added: 0,
-            properties_removed: 0,
-            properties_modified: 0,
-        };
-
-        assert!(!summary.has_changes());
-        assert_eq!(summary.change_count(), 0);
-    }
-
-    #[test]
-    fn test_version_summary_multiple_changes() {
-        let summary = VersionSummary {
-            version_id: test_version_id(2),
-            version_number: 2,
-            valid_from: test_timestamp(2000),
-            transaction_time: test_timestamp(3000),
-            properties_added: 2,
-            properties_removed: 1,
-            properties_modified: 3,
-        };
-
-        assert!(summary.has_changes());
-        assert_eq!(summary.change_count(), 6); // 2 + 1 + 3
+            assert_eq!(
+                summary.has_changes(),
+                expected_has_changes,
+                "has_changes mismatch for added={}, removed={}, modified={}",
+                added,
+                removed,
+                modified
+            );
+            assert_eq!(
+                summary.change_count(),
+                expected_change_count,
+                "change_count mismatch for added={}, removed={}, modified={}",
+                added,
+                removed,
+                modified
+            );
+        }
     }
 
     #[test]
@@ -582,28 +588,87 @@ mod tests {
     }
 
     #[test]
-    fn test_version_diff_change_count_sums_all_categories() {
-        let from_props = PropertyMapBuilder::new()
-            .insert("name", "Alice")
-            .insert("age", 30i64)
-            .insert("status", "active")
-            .build();
-        let to_props = PropertyMapBuilder::new()
-            .insert("name", "Bob")
-            .insert("city", "NYC")
-            .build();
+    fn test_version_diff_change_count_and_has_changes() {
+        // Table-driven test for VersionDiff methods change_count and has_changes
+        let test_cases = vec![
+            // (from_props, to_props, expected_added, expected_removed, expected_modified)
+            // No changes
+            (
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                0,
+                0,
+                0,
+            ),
+            // Only Added
+            (
+                PropertyMapBuilder::new().build(),
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                1,
+                0,
+                0,
+            ),
+            // Only Removed
+            (
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                PropertyMapBuilder::new().build(),
+                0,
+                1,
+                0,
+            ),
+            // Only Modified
+            (
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+                0,
+                0,
+                1,
+            ),
+            // Added, Removed, and Modified
+            (
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .insert("status", "active")
+                    .build(),
+                PropertyMapBuilder::new()
+                    .insert("name", "Bob")
+                    .insert("city", "NYC")
+                    .build(),
+                1,
+                2,
+                1,
+            ),
+        ];
 
-        let diff = VersionDiff::compute(
-            &from_props,
-            &to_props,
-            test_version_id(14),
-            test_version_id(15),
-        );
+        for (from_props, to_props, exp_added, exp_removed, exp_modified) in test_cases {
+            let diff = VersionDiff::compute(
+                &from_props,
+                &to_props,
+                test_version_id(1),
+                test_version_id(2),
+            );
 
-        assert_eq!(diff.added.len(), 1);
-        assert_eq!(diff.removed.len(), 2);
-        assert_eq!(diff.modified.len(), 1);
-        assert_eq!(diff.change_count(), 4);
+            assert_eq!(diff.added.len(), exp_added);
+            assert_eq!(diff.removed.len(), exp_removed);
+            assert_eq!(diff.modified.len(), exp_modified);
+
+            let expected_count = exp_added + exp_removed + exp_modified;
+            let expected_has_changes = expected_count > 0;
+
+            assert_eq!(
+                diff.has_changes(),
+                expected_has_changes,
+                "has_changes mismatch for {:?}",
+                diff
+            );
+            assert_eq!(
+                diff.change_count(),
+                expected_count,
+                "change_count mismatch for {:?}",
+                diff
+            );
+        }
     }
 
     #[test]
