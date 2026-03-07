@@ -83,17 +83,25 @@ classDiagram
             +handle_tool_call()
         }
     }
-    namespace Core {
+    namespace DB {
         class AletheiaDB
+        class Config
+        class VectorIndexBuilder
+    }
+    namespace Core {
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+        class TxIdGenerator
     }
     namespace Storage {
         class CurrentStorage
         class HistoricalStorage
         class TieredStorage
         class RedbColdStorage
+    }
+    namespace API {
+        class Transaction
     }
     namespace Observability {
         class HoneycombClient {
@@ -102,6 +110,11 @@ classDiagram
     }
 
     MCPServer --> QueryEngine : Uses
+    DB --> Core : Uses (Direct Domain Import)
+    DB --> API : Coordinates
+    DB --> Storage : Manages
+    API --> Core : Uses
+    Storage --> Core : Uses (Traits & IDs)
     QueryEngine --> AletheiaDB : Uses
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
