@@ -42,6 +42,7 @@
 //! | [`synapse`] | **Synapse** | Adaptive Graph Hebbian Learning. "Cells that fire together, wire together." |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
 //! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
+//! | [`mirage`] | **Mirage** | Semantic Ghost Node Injection. "What if this node existed?" |
 //! | [`gestalt`] | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
 //! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
 //! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
@@ -211,6 +212,10 @@ pub mod gravity;
 #[cfg(feature = "nova")]
 /// Metaphor: Semantic Graph Alignment Engine.
 pub mod metaphor;
+
+#[cfg(feature = "nova")]
+/// Mirage: Semantic Ghost Node Injection.
+pub mod mirage;
 
 #[cfg(feature = "nova")]
 /// Mnemosyne: Semantic Memory Consolidation.
