@@ -2,10 +2,10 @@ use aletheiadb::core::vector::{SparseVec, cosine_similarity, sparse_cosine_simil
 
 #[test]
 fn test_sparse_vs_dense_cosine_consistency_small_vectors() {
-    // Vector with squared magnitude < 1e-25
-    // 1e-13 squared is 1e-26, which is < 1e-25
-    let v_dense = vec![1e-13];
-    let v_sparse = SparseVec::new(vec![0], vec![1e-13], 1).unwrap();
+    // Vector with squared magnitude < 1e-30
+    // 1e-16 squared is 1e-32, which is < 1e-30
+    let v_dense = vec![1e-16];
+    let v_sparse = SparseVec::new(vec![0], vec![1e-16], 1).unwrap();
 
     // Dense cosine similarity should treat this as zero vector and return 0.0
     let dense_sim = cosine_similarity(&v_dense, &v_dense).unwrap();

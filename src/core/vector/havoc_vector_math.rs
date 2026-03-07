@@ -44,7 +44,11 @@ fn test_havoc_simd_normalization_bug_detailed() {
     // The expected behavior is that it normalizes to a valid unit vector.
     // Each component should be 1/sqrt(100) = 1/10 = 0.1
     let expected = 0.1_f32;
-    assert!((data[0] - expected).abs() < 1e-6, "Expected valid normalization, got {}", data[0]);
+    assert!(
+        (data[0] - expected).abs() < 1e-6,
+        "Expected valid normalization, got {}",
+        data[0]
+    );
 }
 
 #[test]
