@@ -83,8 +83,14 @@ classDiagram
             +handle_tool_call()
         }
     }
-    namespace Core {
+    namespace API {
+        class TransactionAPI
+    }
+    namespace DB {
         class AletheiaDB
+    }
+    namespace Core {
+        class TxIdGenerator
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
@@ -105,6 +111,9 @@ classDiagram
     QueryEngine --> AletheiaDB : Uses
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
+    %% DB depends directly on Core primitives, not via API re-exports
+    AletheiaDB --> TxIdGenerator : Uses Primitives (Directly)
+    TransactionAPI --> TxIdGenerator : Uses Primitives
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
