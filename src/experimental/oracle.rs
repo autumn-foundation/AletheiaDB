@@ -13,9 +13,11 @@
 
 use crate::AletheiaDB;
 use crate::core::error::{Result, StorageError};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use rand::prelude::*;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 
 /// The Oracle Engine.
 pub struct Oracle<'a> {
@@ -50,7 +52,12 @@ impl<'a> Oracle<'a> {
         num_walks: usize,
         max_steps: usize,
     ) -> Result<HashMap<NodeId, f32>> {
-        let mut visits: HashMap<NodeId, usize> = HashMap::new();
+        // PERFORMANCE: Use IdentityHasher instead of the default SipHash for the `visits` map.
+        // `NodeId` is a wrapper around a unique `u64`. In a Monte Carlo simulation (random walks),
+        // we perform millions of map insertions and lookups. Bypassing SipHash eliminates
+        // unnecessary hashing overhead on already-unique integer keys, significantly improving throughput.
+        let mut visits: HashMap<NodeId, usize, BuildHasherDefault<IdentityHasher>> =
+            HashMap::default();
         let mut rng = rand::thread_rng();
 
         // Ensure seed exists
