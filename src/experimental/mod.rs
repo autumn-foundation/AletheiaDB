@@ -213,6 +213,10 @@ pub mod gravity;
 pub mod metaphor;
 
 #[cfg(feature = "nova")]
+/// Nexus: Semantic Hub Detector.
+pub mod nexus;
+
+#[cfg(feature = "nova")]
 /// Mnemosyne: Semantic Memory Consolidation.
 pub mod mnemosyne;
 
