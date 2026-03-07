@@ -227,6 +227,10 @@ pub mod omen;
 pub mod oracle;
 
 #[cfg(feature = "nova")]
+/// Parallax: Semantic Axis Projection.
+pub mod parallax;
+
+#[cfg(feature = "nova")]
 /// Luna: Semantic Subgraph Synthesis.
 pub mod luna;
 
