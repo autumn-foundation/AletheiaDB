@@ -56,6 +56,11 @@ impl ShutdownHandle {
 /// let app = App::new().configure(configure_app);
 /// ```
 pub fn configure_app(cfg: &mut web::ServiceConfig) {
+    // 🔒 Warden Defense: Prevent Deserialization DoS bombs
+    // Limit JSON payloads to 2MB (default is 2MB, but being explicit guarantees defense in depth)
+    let json_config = web::JsonConfig::default().limit(2 * 1024 * 1024);
+
+    cfg.app_data(json_config);
     configure_health_routes(cfg);
     cfg.route("/query", web::post().to(handle_query));
 }
