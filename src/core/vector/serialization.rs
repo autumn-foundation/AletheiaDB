@@ -935,4 +935,131 @@ mod tests {
             deserialize_vector(&bytes).expect("Should deserialize empty vector");
         assert!(deserialized.is_empty());
     }
+
+    #[test]
+    fn test_try_serialize_vector_into_dimension_too_large() {
+        let large_vector = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
+        let mut buffer = Vec::new();
+        let result = try_serialize_vector_into(&large_vector, &mut buffer);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::DimensionTooLarge {
+                dimension,
+                max_allowed,
+            })) => {
+                assert_eq!(dimension, MAX_VECTOR_DIMENSIONS + 1);
+                assert_eq!(max_allowed, MAX_VECTOR_DIMENSIONS);
+            }
+            _ => panic!("Expected DimensionTooLarge error"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_vector_dimension_too_large() {
+        let mut bytes = vec![TAG_VECTOR];
+        bytes.extend_from_slice(&(MAX_VECTOR_DIMENSIONS as u32 + 1).to_le_bytes()); // Dimension too large
+
+        let result = deserialize_vector(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::DimensionTooLarge {
+                dimension,
+                max_allowed,
+            })) => {
+                assert_eq!(dimension, MAX_VECTOR_DIMENSIONS + 1);
+                assert_eq!(max_allowed, MAX_VECTOR_DIMENSIONS);
+            }
+            _ => panic!("Expected DimensionTooLarge error"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_nnz_too_large() {
+        let mut bytes = vec![TAG_SPARSE_VECTOR];
+        bytes.extend_from_slice(&1000u32.to_le_bytes()); // Dimension
+        bytes.extend_from_slice(&(MAX_VECTOR_DIMENSIONS as u32 + 1).to_le_bytes()); // nnz too large
+
+        let result = deserialize_sparse_vector(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(reason))) => {
+                assert!(reason.contains("exceeds dimension"));
+            }
+            _ => panic!("Expected CorruptedData error"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_buffer_too_short_for_data() {
+        let mut bytes = vec![TAG_SPARSE_VECTOR];
+        bytes.extend_from_slice(&10u32.to_le_bytes()); // Dimension
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // nnz = 2
+
+        // Data length should be 2 * 4 (indices) + 2 * 4 (values) = 16 bytes.
+        // Provide only 4 bytes (one index).
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+
+        let result = deserialize_sparse_vector(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(reason))) => {
+                assert!(reason.contains("Buffer too short for sparse vector data"));
+            }
+            _ => panic!("Expected CorruptedData error for short buffer"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_sparse_vector_into_buffer_appending() {
+        let mut buffer = vec![0x11, 0x22, 0x33]; // Existing data
+        let sparse = SparseVec::new(vec![1, 3], vec![1.5, 2.5], 5).unwrap();
+
+        serialize_sparse_vector_into(&sparse, &mut buffer);
+
+        // Verify prefix is intact
+        assert_eq!(buffer[0], 0x11);
+        assert_eq!(buffer[1], 0x22);
+        assert_eq!(buffer[2], 0x33);
+
+        // Verify serialization starts at offset 3
+        assert_eq!(buffer[3], TAG_SPARSE_VECTOR);
+
+        // Verify deserialization works from the offset
+        let (deserialized, consumed) = deserialize_sparse_vector(&buffer[3..]).unwrap();
+        assert_eq!(deserialized.dimension(), sparse.dimension());
+        assert_eq!(deserialized.nnz(), sparse.nnz());
+        assert_eq!(deserialized.indices(), sparse.indices());
+        assert_eq!(deserialized.values(), sparse.values());
+        assert_eq!(consumed, buffer.len() - 3);
+    }
+
+    #[test]
+    fn test_sparse_vector_deserialization_unaligned() {
+        let sparse = SparseVec::new(vec![0, 2, 4], vec![1.0, 2.0, 3.0], 5).unwrap();
+        let serialized = serialize_sparse_vector(&sparse);
+
+        // Create a buffer with padding to force unaligned read
+        let mut padded_buffer = vec![0xFF]; // 1 byte padding
+        padded_buffer.extend_from_slice(&serialized);
+
+        // Deserialize from offset 1 (unaligned)
+        let (deserialized, consumed) = deserialize_sparse_vector(&padded_buffer[1..]).unwrap();
+
+        assert_eq!(deserialized.dimension(), sparse.dimension());
+        assert_eq!(deserialized.nnz(), sparse.nnz());
+        assert_eq!(deserialized.indices(), sparse.indices());
+        assert_eq!(deserialized.values(), sparse.values());
+        assert_eq!(consumed, serialized.len());
+
+        // Also test with 3-byte padding (different alignment)
+        let mut padded_buffer3 = vec![0xFF, 0xFF, 0xFF];
+        padded_buffer3.extend_from_slice(&serialized);
+
+        let (deserialized3, consumed3) = deserialize_sparse_vector(&padded_buffer3[3..]).unwrap();
+        assert_eq!(deserialized3.dimension(), sparse.dimension());
+        assert_eq!(deserialized3.nnz(), sparse.nnz());
+        assert_eq!(deserialized3.indices(), sparse.indices());
+        assert_eq!(deserialized3.values(), sparse.values());
+        assert_eq!(consumed3, serialized.len());
+    }
 }
