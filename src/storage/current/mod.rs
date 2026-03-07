@@ -1910,8 +1910,19 @@ impl CurrentStorage {
     /// Returns an iterator of (interned_label, count) pairs.
     /// Used by the query planner for cost estimation and cardinality estimation.
     pub fn label_counts(&self) -> Vec<(crate::core::interning::InternedString, usize)> {
+        use crate::core::hasher::IdentityHasher;
         use std::collections::HashMap;
-        let mut counts: HashMap<crate::core::interning::InternedString, usize> = HashMap::new();
+        use std::hash::BuildHasherDefault;
+
+        // ⚡ Bolt: Use `IdentityHasher` instead of default SipHash.
+        // `InternedString` is already a high-quality unique integer ID (u32),
+        // so computing SipHash per node (potentially millions) is pure overhead.
+        // Bypassing hashing reduces cardinality estimation time significantly.
+        let mut counts: HashMap<
+            crate::core::interning::InternedString,
+            usize,
+            BuildHasherDefault<IdentityHasher>,
+        > = HashMap::default();
         for node in self.indexes.iter_nodes() {
             *counts.entry(node.label).or_insert(0) += 1;
         }
