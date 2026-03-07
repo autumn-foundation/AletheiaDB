@@ -324,3 +324,10 @@
 ```
 This asserts only that the root became a `Sort`. It doesn't verify that the *child* of `Sort` actually became the `Filter`, or that the parameters of the `Sort` operator remain correct, or that the `Filter` actually wrapped the original `Scan`.
 **Recommendation:** Replace weak `matches!` tests with exact tree matching (using `assert_eq!`) if `LogicalOp` implements `Eq`, or exhaustively destructure the AST down to the leaf nodes and assert all fields are correct.
+
+## [Predicate Pushdown Weak Assertions Fixed]
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Verdict:** 🟢 Acquitted (Strengthened)
+**Finding:** Tests such as `test_push_filter_below_vector_rank_no_limit`, `test_push_filter_below_sort`, `test_binary_op_recursion_logic`, and `test_binary_op_partial_optimization` contained redundant `assert!(result.is_some())` checks before unwrapping. The `unwrap()` followed by `assert_eq!` directly on the explicit tree structure provides the necessary strong assertion. The weak assertions were removed.
+**Evidence:** Code inspection showed `assert!(result.is_some())` immediately followed by `unwrap()` and explicit tree equality matching.
+**Recommendation:** None, the tests now rely purely on the strong `assert_eq!` of the explicit expected plan tree.

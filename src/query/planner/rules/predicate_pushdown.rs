@@ -316,7 +316,6 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
 
         let expected_plan = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::VectorRank {
@@ -416,7 +415,6 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
 
         let expected_plan = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::Sort {
@@ -524,10 +522,6 @@ mod tests {
 
         // Expect optimization to occur on the left branch
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(
-            result.is_some(),
-            "Binary op with one changed branch should return Some"
-        );
 
         let expected_plan = LogicalPlan::new(LogicalOp::binary(
             BinaryOp::Union,
@@ -587,12 +581,6 @@ mod sentry_tests {
         let plan = LogicalPlan::new(root);
 
         let result = rule.apply(&plan, &stats).unwrap();
-
-        // Must be Some (changed)
-        assert!(
-            result.is_some(),
-            "Partial optimization (left branch) should trigger change"
-        );
 
         let expected_plan = LogicalPlan::new(LogicalOp::binary(
             BinaryOp::Union,
