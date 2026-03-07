@@ -943,6 +943,58 @@ mod tests {
         };
         assert!(format!("{}", err).contains("precedes creation"));
 
+        // Test NonMonotonicTransactionTime
+        let err = TemporalError::NonMonotonicTransactionTime {
+            previous: 100.into(),
+            attempted: 50.into(),
+        };
+        assert!(format!("{}", err).contains("monotonic"));
+        assert!(format!("{}", err).contains("100"));
+        assert!(format!("{}", err).contains("50"));
+
+        // Test InvalidTimeRange
+        let err = TemporalError::InvalidTimeRange {
+            start: 200.into(),
+            end: 100.into(),
+        };
+        assert!(format!("{}", err).contains("Invalid time range"));
+        assert!(format!("{}", err).contains("200"));
+        assert!(format!("{}", err).contains("100"));
+
+        // Test InvalidTimestamp
+        let err = TemporalError::InvalidTimestamp {
+            timestamp: 500.into(),
+            reason: "exceeds maximum".to_string(),
+        };
+        assert!(format!("{}", err).contains("Invalid timestamp"));
+        assert!(format!("{}", err).contains("500"));
+        assert!(format!("{}", err).contains("exceeds maximum"));
+
+        // Test TemporalParadox
+        let err = TemporalError::TemporalParadox {
+            reason: "delete before create".to_string(),
+        };
+        assert!(format!("{}", err).contains("Temporal paradox"));
+        assert!(format!("{}", err).contains("delete before create"));
+
+        // Test MaxDepthExceeded
+        let err = TemporalError::MaxDepthExceeded {
+            max_depth: 50,
+            entity_id: "node_x".to_string(),
+        };
+        assert!(format!("{}", err).contains("Maximum recursion depth"));
+        assert!(format!("{}", err).contains("50"));
+        assert!(format!("{}", err).contains("node_x"));
+
+        // Test LogicalCounterOverflow
+        let err = TemporalError::LogicalCounterOverflow {
+            wallclock: 10000,
+            current_logical: u32::MAX,
+        };
+        assert!(format!("{}", err).contains("logical counter overflow"));
+        assert!(format!("{}", err).contains("10000"));
+        assert!(format!("{}", err).contains(u32::MAX.to_string().as_str()));
+
         // Test VersionAlreadyClosed
         let err = TemporalError::VersionAlreadyClosed {
             version_id: VersionId::new(42).unwrap(),
@@ -985,6 +1037,13 @@ mod tests {
         };
         assert!(format!("{}", err).contains("syntax error"));
         assert!(format!("{}", err).contains("unexpected token"));
+
+        // Test ExecutionError
+        let err = QueryError::ExecutionError {
+            message: "internal state invalid".to_string(),
+        };
+        assert!(format!("{}", err).contains("Query execution error"));
+        assert!(format!("{}", err).contains("internal state invalid"));
 
         // Test InvalidParameter
         let err = QueryError::InvalidParameter {
