@@ -14,6 +14,40 @@
 //! - **Knowledge Migration**: Map concepts from one domain to another.
 //! - **Digital Twins**: Align a simulation graph with a real-world graph.
 //! - **Recommender Systems**: "You liked Movie A (Graph A). Movie B (Graph B) has a similar character dynamic."
+//!
+//! ## Examples
+//!
+//! ```rust
+//! // Requires features = ["nova"]
+//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::experimental::metaphor::Metaphor;
+//! use aletheiadb::core::property::PropertyMapBuilder;
+//! use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
+//! db.enable_vector_index("embedding", HnswConfig::new(2, DistanceMetric::Cosine))?;
+//!
+//! // Source Graph
+//! let props_a = PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build();
+//! let a = db.create_node("Concept", props_a)?;
+//!
+//! // Target Graph
+//! let props_x = PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build();
+//! let x = db.create_node("Analogue", props_x)?;
+//!
+//! let props_y = PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 1.0]).build();
+//! let y = db.create_node("Analogue", props_y)?;
+//!
+//! let metaphor = Metaphor::new(&db);
+//! let alignment = metaphor.align(&[a], &[x, y], "embedding", 0.5)?;
+//!
+//! // A perfectly aligns with X based on semantic similarity
+//! assert_eq!(alignment.mappings[0].source, a);
+//! assert_eq!(alignment.mappings[0].target, x);
+//! # Ok(())
+//! # }
+//! ```
 
 #![allow(clippy::needless_range_loop, clippy::collapsible_if)]
 
@@ -60,11 +94,45 @@ impl<'a> Metaphor<'a> {
 
     /// Align a source subgraph to a target subgraph.
     ///
+    /// This method greedily matches nodes from the source graph to the target graph.
+    /// The algorithm first evaluates the purely semantic similarity using the specified `vector_property`.
+    /// When a match is finalized, the score of the remaining neighbors is artificially boosted
+    /// by the `structural_weight`. This ensures that if node `A` maps to node `X`, the algorithm
+    /// prefers mapping `A`'s neighbors to `X`'s neighbors over mapping them to isolated nodes
+    /// that might have a slightly higher baseline semantic score.
+    ///
     /// # Arguments
     /// * `source_nodes` - The nodes in the source graph to map.
     /// * `target_nodes` - The candidate nodes in the target graph.
     /// * `vector_property` - The property name containing vector embeddings.
     /// * `structural_weight` - How much structural consistency boosts the score (e.g., 0.5).
+    ///   A higher value prioritizes preserving the shape/topology of the graph over pure vector similarity.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// // Requires features = ["nova"]
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::metaphor::Metaphor;
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// db.enable_vector_index("embedding", HnswConfig::new(2, DistanceMetric::Cosine))?;
+    ///
+    /// let a = db.create_node("A", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build())?;
+    /// let x = db.create_node("X", PropertyMapBuilder::new().insert_vector("embedding", &[1.0, 0.0]).build())?;
+    ///
+    /// let metaphor = Metaphor::new(&db);
+    /// let alignment = metaphor.align(&[a], &[x], "embedding", 0.5)?;
+    ///
+    /// assert_eq!(alignment.mappings.len(), 1);
+    /// assert_eq!(alignment.mappings[0].source, a);
+    /// assert_eq!(alignment.mappings[0].target, x);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[allow(clippy::needless_range_loop, clippy::collapsible_if)]
     pub fn align(
         &self,

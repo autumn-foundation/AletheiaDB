@@ -82,6 +82,51 @@ pub struct HindsightDiff {
 }
 
 /// The Hindsight engine wrapping the database and a scenario.
+///
+/// Hindsight is designed to let you safely "play in the sandbox" without affecting
+/// production data. By layering a virtual `Scenario` on top of a read-only view
+/// of the database, you can freely mutate the graph—adding nodes, deleting edges,
+/// and patching properties—and then run standard queries (like BFS or vector search)
+/// to see how the graph behaves under those conditions.
+///
+/// This is particularly useful for impact analysis ("If I sever this link, is the
+/// network disconnected?") and LLM reasoning ("Assume this new fact is true, does
+/// it change the path to the objective?").
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::hindsight::Hindsight;
+/// use aletheiadb::core::property::PropertyMapBuilder;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+///
+/// // Create a real node in the database
+/// let props = PropertyMapBuilder::new().insert("name", "Real Node").build();
+/// let real_node_id = db.create_node("Node", props)?;
+///
+/// // Start a simulation
+/// let mut hindsight = Hindsight::new(&db);
+///
+/// // Add a purely hypothetical node to the simulation
+/// let ghost_props = PropertyMapBuilder::new().insert("name", "Ghost Node").build();
+/// let ghost_id = hindsight.add_node("Hypothetical", ghost_props)?;
+///
+/// // You can retrieve the real node...
+/// let real = hindsight.get_node(real_node_id)?;
+/// assert_eq!(real.get_property("name").unwrap().as_str().unwrap(), "Real Node");
+///
+/// // ...and the ghost node!
+/// let ghost = hindsight.get_node(ghost_id)?;
+/// assert_eq!(ghost.get_property("name").unwrap().as_str().unwrap(), "Ghost Node");
+///
+/// // But the ghost node doesn't exist in the actual database
+/// assert!(db.get_node(ghost_id).is_err());
+/// # Ok(())
+/// # }
+/// ```
 pub struct Hindsight<'a> {
     db: &'a AletheiaDB,
     scenario: Scenario,
@@ -93,6 +138,8 @@ pub struct Hindsight<'a> {
 
 impl<'a> Hindsight<'a> {
     /// Create a new Hindsight engine.
+    ///
+    /// Initializes an empty scenario layered on top of the current state of the database.
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self {
             db,
@@ -144,7 +191,32 @@ impl<'a> Hindsight<'a> {
 
     // ==================== Mutation Methods ====================
 
-    /// Simulate adding a node.
+    /// Simulate adding a node to the virtual graph.
+    ///
+    /// This generates a temporary `NodeId` that is valid *only* within this Hindsight instance.
+    /// The actual database remains completely unmodified.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::hindsight::Hindsight;
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let mut hs = Hindsight::new(&db);
+    ///
+    /// let props = PropertyMapBuilder::new().insert("key", "value").build();
+    /// let temp_id = hs.add_node("Simulated", props)?;
+    ///
+    /// // The node exists in the simulation...
+    /// assert!(hs.get_node(temp_id).is_ok());
+    /// // ...but not in the real DB.
+    /// assert!(db.get_node(temp_id).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_node(&mut self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         let id = self.next_node_id();
         let interned_label = GLOBAL_INTERNER.intern(label)?;
@@ -158,7 +230,39 @@ impl<'a> Hindsight<'a> {
         Ok(id)
     }
 
-    /// Simulate adding an edge.
+    /// Simulate adding an edge to the virtual graph.
+    ///
+    /// This creates a temporary connection between two nodes. The endpoints can be either
+    /// real nodes in the database or temporary nodes created via [`Self::add_node`].
+    ///
+    /// The actual database remains completely unmodified.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::hindsight::Hindsight;
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let mut hs = Hindsight::new(&db);
+    ///
+    /// // Create two simulated nodes
+    /// let props = PropertyMapBuilder::new().build();
+    /// let a = hs.add_node("Simulated", props.clone())?;
+    /// let b = hs.add_node("Simulated", props)?;
+    ///
+    /// // Connect them virtually
+    /// let edge_props = PropertyMapBuilder::new().insert("weight", 5.0).build();
+    /// let edge_id = hs.add_edge(a, b, "CONNECTED_TO", edge_props)?;
+    ///
+    /// // The edge is visible in Hindsight...
+    /// let retrieved_edge = hs.get_edge(edge_id)?;
+    /// assert_eq!(retrieved_edge.get_property("weight").unwrap().as_float().unwrap(), 5.0);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_edge(
         &mut self,
         source: NodeId,
@@ -261,6 +365,38 @@ impl<'a> Hindsight<'a> {
     // ==================== Read Methods ====================
 
     /// Get a node from the virtual graph.
+    ///
+    /// This method seamlessly merges the real database state with the simulated scenario.
+    /// It applies the following logic in order:
+    /// 1. If the node was virtually removed via [`Self::remove_node`], it returns a `NodeNotFound` error.
+    /// 2. If the node was virtually added via [`Self::add_node`], it returns the simulated node.
+    /// 3. Otherwise, it fetches the real node from the database and applies any virtual property patches from [`Self::update_node`].
+    ///
+    /// ## Errors
+    /// Returns `StorageError::NodeNotFound` if the node doesn't exist in the database *and* hasn't
+    /// been virtually added, or if it *was* in the database but has been virtually removed.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::hindsight::Hindsight;
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let real_node_id = db.create_node("Node", PropertyMapBuilder::new().build())?;
+    ///
+    /// let mut hs = Hindsight::new(&db);
+    /// hs.remove_node(real_node_id); // Virtually remove the real node
+    ///
+    /// // Hindsight respects the virtual deletion
+    /// assert!(hs.get_node(real_node_id).is_err());
+    /// // But it remains in the actual DB
+    /// assert!(db.get_node(real_node_id).is_ok());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_node(&self, id: NodeId) -> Result<Node> {
         // 1. Check if removed
         if self.scenario.removed_nodes.contains(&id) {
@@ -400,6 +536,44 @@ impl<'a> Hindsight<'a> {
     // ==================== Analysis Methods ====================
 
     /// Find a path between two nodes using Breadth-First Search on the virtual graph.
+    ///
+    /// This traversal respects all simulated changes: it will follow newly added virtual edges,
+    /// and it will ignore any real edges or nodes that have been virtually removed.
+    ///
+    /// This is ideal for "what-if" connectivity analysis (e.g., "If router X goes down,
+    /// can server A still reach server B?").
+    ///
+    /// ## Returns
+    /// Returns `Some(Vec<EdgeId>)` containing the shortest path of edges from `start` to `end`.
+    /// Returns `None` if no path exists in the *virtual* graph, or if either `start` or `end`
+    /// have been virtually removed.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::hindsight::Hindsight;
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let a = db.create_node("A", PropertyMapBuilder::new().build())?;
+    /// let b = db.create_node("B", PropertyMapBuilder::new().build())?;
+    /// let c = db.create_node("C", PropertyMapBuilder::new().build())?;
+    ///
+    /// // Real graph: A -> B
+    /// db.create_edge(a, b, "LINK", PropertyMapBuilder::new().build())?;
+    ///
+    /// let mut hs = Hindsight::new(&db);
+    /// // What if B connects to C?
+    /// hs.add_edge(b, c, "VIRTUAL_LINK", PropertyMapBuilder::new().build())?;
+    ///
+    /// // Path A -> B -> C should now exist in Hindsight
+    /// let path = hs.find_path_bfs(a, c).unwrap();
+    /// assert_eq!(path.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn find_path_bfs(&self, start: NodeId, end: NodeId) -> Option<Vec<EdgeId>> {
         // Check if start or end are removed
         if self.scenario.removed_nodes.contains(&start)

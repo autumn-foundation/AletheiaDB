@@ -72,6 +72,40 @@ impl<'a> Omen<'a> {
     }
 
     /// Predict the encounter between two nodes based on their trajectories in the given window.
+    ///
+    /// ## Returns
+    /// Returns `Some(Encounter)` if both nodes have valid trajectories (vectors defined at or before
+    /// the start and end of the window). Returns `None` if either node lacks the required vector data.
+    ///
+    /// ## Errors
+    /// Returns an error if fetching historical data for the nodes fails.
+    ///
+    /// ## Panics
+    /// This method is designed to be panic-free. Dimension mismatches between vectors will safely return `None`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// // Requires features = ["nova"]
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::omen::Omen;
+    /// use aletheiadb::core::temporal::{TimeRange, time};
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let a = db.create_node("Node", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 0.0]).build())?;
+    /// let b = db.create_node("Node", PropertyMapBuilder::new().insert_vector("vec", &[10.0, 0.0]).build())?;
+    ///
+    /// let omen = Omen::new(&db);
+    /// let window = TimeRange::new(time::now() - 1000, time::now())?;
+    ///
+    /// if let Some(encounter) = omen.predict_encounter(a, b, window, "vec")? {
+    ///     println!("Time to encounter: {:?}", encounter.time_to_encounter);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn predict_encounter(
         &self,
         node_a: NodeId,
