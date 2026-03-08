@@ -235,6 +235,10 @@ pub mod luna;
 pub mod spectre;
 
 #[cfg(feature = "nova")]
+/// Doppelganger: Semantic Clone Detection.
+pub mod doppelganger;
+
+#[cfg(feature = "nova")]
 /// Voyager: Maximal Novelty Traversal Engine.
 pub mod voyager;
 
