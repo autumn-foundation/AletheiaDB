@@ -119,23 +119,23 @@ use super::{OptimizationRule, Statistics};
 /// let optimized_plan = rule.apply(&plan, &stats)?.unwrap();
 ///
 /// // 3. The rule pushed the Filter BELOW the Sort
-/// let expected_plan = LogicalPlan {
-///     root: LogicalOp::unary(
-///         UnaryOp::Sort { key: SortKey::Score, descending: true },
-///         LogicalOp::unary(
-///             UnaryOp::Filter(Predicate::Eq {
-///                 key: "active".into(),
-///                 value: PredicateValue::Bool(true)
-///             }),
-///             LogicalOp::Scan(ScanOp::NodeScan {
-///                 label: Some("Person".into()),
-///                 estimated_rows: Some(100),
-///             })
-///         )
-///     ),
-///     temporal_context: None,
-///     hints: Default::default(),
-/// };
+/// let expected_scan = LogicalOp::Scan(ScanOp::NodeScan {
+///     label: Some("Person".into()),
+///     estimated_rows: Some(100),
+/// });
+/// let expected_filter = LogicalOp::unary(
+///     UnaryOp::Filter(Predicate::Eq {
+///         key: "active".into(),
+///         value: PredicateValue::Bool(true)
+///     }),
+///     expected_scan
+/// );
+/// let expected_sort = LogicalOp::unary(
+///     UnaryOp::Sort { key: SortKey::Score, descending: true },
+///     expected_filter
+/// );
+///
+/// let expected_plan = LogicalPlan { root: expected_sort, temporal_context: None, hints: Default::default() };
 /// assert_eq!(optimized_plan, expected_plan);
 /// # Ok(())
 /// # }
