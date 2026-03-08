@@ -1122,35 +1122,48 @@ mod tests {
         // Scan with explicit count
         let scan = LogicalOp::Scan(ScanOp::NodeLookup(vec![
             crate::core::NodeId::new(1).unwrap(),
-            crate::core::NodeId::new(2).unwrap()
+            crate::core::NodeId::new(2).unwrap(),
         ]));
         assert_eq!(rule.estimate_cardinality(&scan), 2);
 
         // Filter cardinality estimation (should be 0.1 * input)
         let filter = LogicalOp::unary(
-            UnaryOp::Filter(Predicate::Eq { key: "a".into(), value: crate::query::ir::PredicateValue::Int(1) }),
-            scan.clone()
+            UnaryOp::Filter(Predicate::Eq {
+                key: "a".into(),
+                value: crate::query::ir::PredicateValue::Int(1),
+            }),
+            scan.clone(),
         );
 
         // 2 * 0.1 = 0.2 -> 0
         assert_eq!(rule.estimate_cardinality(&filter), 0);
 
         // Scan with larger count
-        let scan_1000 = LogicalOp::Scan(ScanOp::NodeScan { estimated_rows: Some(1000), label: None });
+        let scan_1000 = LogicalOp::Scan(ScanOp::NodeScan {
+            estimated_rows: Some(1000),
+            label: None,
+        });
         assert_eq!(rule.estimate_cardinality(&scan_1000), 1000);
 
         let filter_1000 = LogicalOp::unary(
-            UnaryOp::Filter(Predicate::Eq { key: "a".into(), value: crate::query::ir::PredicateValue::Int(1) }),
-            scan_1000.clone()
+            UnaryOp::Filter(Predicate::Eq {
+                key: "a".into(),
+                value: crate::query::ir::PredicateValue::Int(1),
+            }),
+            scan_1000.clone(),
         );
         // 1000 * 0.1 = 100
         assert_eq!(rule.estimate_cardinality(&filter_1000), 100);
 
         // Binary cardinality (0.1 * left * right)
-        let binary = LogicalOp::binary(BinaryOp::Join {
-            left_key: "id".to_string(),
-            right_key: "id".to_string()
-        }, scan_1000.clone(), scan_1000.clone());
+        let binary = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "id".to_string(),
+                right_key: "id".to_string(),
+            },
+            scan_1000.clone(),
+            scan_1000.clone(),
+        );
         // 1000 * 1000 * 0.1 = 100_000
         assert_eq!(rule.estimate_cardinality(&binary), 100_000);
 
@@ -1159,9 +1172,9 @@ mod tests {
             UnaryOp::Traverse {
                 label: None,
                 direction: crate::query::ir::Direction::Outgoing,
-                depth: crate::query::ir::TraversalDepth::Exact(1)
+                depth: crate::query::ir::TraversalDepth::Exact(1),
             },
-            scan_1000.clone()
+            scan_1000.clone(),
         );
         // It's a passthrough in the current implementation
         assert_eq!(rule.estimate_cardinality(&traverse), 1000);
@@ -1176,7 +1189,7 @@ mod tests {
             k: 25,
             property_key: None,
             label_filter: None,
-            metric: crate::index::vector::DistanceMetric::Cosine
+            metric: crate::index::vector::DistanceMetric::Cosine,
         });
         assert_eq!(rule.estimate_cardinality(&vector_search), 25);
 
@@ -1185,9 +1198,9 @@ mod tests {
             UnaryOp::VectorRank {
                 embedding: std::sync::Arc::from([0.1f32; 4].as_slice()),
                 top_k: None,
-                property_key: None
+                property_key: None,
             },
-            scan_1000.clone()
+            scan_1000.clone(),
         );
         assert_eq!(rule.estimate_cardinality(&vector_rank), 1000);
     }
