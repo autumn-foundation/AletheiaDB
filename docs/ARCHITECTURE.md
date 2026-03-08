@@ -88,12 +88,18 @@ classDiagram
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+        class StorageObserver
+        class VersionMetadata
     }
     namespace Storage {
         class CurrentStorage
         class HistoricalStorage
         class TieredStorage
         class RedbColdStorage
+    }
+    namespace Index {
+        class TemporalVectorIndex
+        class GraphIndex
     }
     namespace Observability {
         class HoneycombClient {
@@ -108,6 +114,10 @@ classDiagram
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
+
+    %% Unidirectional dependencies (ADR-0054)
+    Storage --> Core : Uses (TxId, VersionMetadata)
+    Index --> Core : Uses (StorageObserver)
 ```
 
 **When to Use Each:**
