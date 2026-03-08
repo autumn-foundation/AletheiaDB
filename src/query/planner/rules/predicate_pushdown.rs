@@ -338,8 +338,13 @@ mod tests {
         let rule = PredicatePushdown;
         let stats = test_stats();
 
-        // Filter(Traverse(Scan))
-        // Should NOT push down because we stop at traversals
+        // Filter(Traverse(Sort(Scan)))
+        // Should NOT push down because we stop at traversals,
+        // but the Traverse itself will push down the sort if applicable?
+        // No, PredicatePushdown only pushes down Filters.
+        // It should recurse down to optimize children.
+        // The Traverse's input (Sort(Scan)) is already optimal for Filter, but there is no Filter.
+        // What if we have Filter(Traverse(Filter(Sort(Scan))))
         let plan = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::Filter(Predicate::eq("name", "Alice")),
             LogicalOp::unary(
@@ -348,13 +353,46 @@ mod tests {
                     direction: crate::query::ir::Direction::Outgoing,
                     depth: crate::query::ir::TraversalDepth::Exact(1),
                 },
-                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                LogicalOp::unary(
+                    UnaryOp::Filter(Predicate::eq("age", 30)),
+                    LogicalOp::unary(
+                        UnaryOp::Sort {
+                            key: SortKey::Property("age".to_string()),
+                            descending: true,
+                        },
+                        LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                    ),
+                ),
             ),
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        // Should return None because pushdown was blocked
-        assert!(result.is_none());
+
+        // Pushdown should happen below Traverse, but not for the top Filter!
+        assert!(result.is_some());
+
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::unary(
+                UnaryOp::Traverse {
+                    label: None,
+                    direction: crate::query::ir::Direction::Outgoing,
+                    depth: crate::query::ir::TraversalDepth::Exact(1),
+                },
+                LogicalOp::unary(
+                    UnaryOp::Sort {
+                        key: SortKey::Property("age".to_string()),
+                        descending: true,
+                    },
+                    LogicalOp::unary(
+                        UnaryOp::Filter(Predicate::eq("age", 30)),
+                        LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                    ),
+                ),
+            ),
+        ));
+
+        assert_eq!(result.unwrap(), expected_plan);
     }
 
     #[test]
@@ -372,6 +410,11 @@ mod tests {
         let result = rule.apply(&plan, &stats).unwrap();
         // Should return None because pushdown was blocked by Scan
         assert!(result.is_none());
+
+        // Explicitly test `push_down` method to assert exact outputs
+        let (op, changed) = rule.push_down(&plan.root).unwrap();
+        assert_eq!(op, plan.root);
+        assert!(!changed);
     }
 
     #[test]
@@ -379,8 +422,7 @@ mod tests {
         let rule = PredicatePushdown;
         let stats = test_stats();
 
-        // Filter(VectorRank(top_k=Some(10), Scan))
-        // Should NOT push down because limit exists
+        // Filter(VectorRank(top_k=Some(10), Filter(Sort(Scan))))
         let plan = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::Filter(Predicate::eq("name", "Alice")),
             LogicalOp::unary(
@@ -389,13 +431,46 @@ mod tests {
                     top_k: Some(10),
                     property_key: None,
                 },
-                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                LogicalOp::unary(
+                    UnaryOp::Filter(Predicate::eq("age", 30)),
+                    LogicalOp::unary(
+                        UnaryOp::Sort {
+                            key: SortKey::Property("age".to_string()),
+                            descending: true,
+                        },
+                        LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                    ),
+                ),
             ),
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        // Should return None because pushdown was blocked
-        assert!(result.is_none());
+
+        // Pushdown should happen below VectorRank, but not for the top Filter!
+        assert!(result.is_some());
+
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::unary(
+                UnaryOp::VectorRank {
+                    embedding: Arc::from([0.1f32; 4].as_slice()),
+                    top_k: Some(10),
+                    property_key: None,
+                },
+                LogicalOp::unary(
+                    UnaryOp::Sort {
+                        key: SortKey::Property("age".to_string()),
+                        descending: true,
+                    },
+                    LogicalOp::unary(
+                        UnaryOp::Filter(Predicate::eq("age", 30)),
+                        LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                    ),
+                ),
+            ),
+        ));
+
+        assert_eq!(result.unwrap(), expected_plan);
     }
 
     #[test]
