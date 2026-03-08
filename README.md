@@ -445,6 +445,7 @@ let _doc2_id = db.create_node("Document",
 // Find similar nodes
 // Note: find_similar excludes the query node itself from results
 let similar = db.find_similar(doc_id, 10)?;
+println!("Found {} similar nodes", similar.len());
 ```
 
 ### Hybrid Queries (Graph + Vector + Temporal)
@@ -498,12 +499,16 @@ for row in results {
 }
 
 // Property-specific vector queries
-let _results = db.query()
+let results = db.query()
     .find_similar_builder(&query_embedding, 10)
     .property("embedding")  // Query specific property
     .metric(DistanceMetric::Cosine)
     .finish()
     .execute(&db)?;
+
+for row in results {
+    println!("Found property match: {:?}", row?.entity);
+}
 ```
 
 See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** for complete API reference.
@@ -629,7 +634,8 @@ let config = AletheiaDBConfig::builder()
     })
     .build();
 
-let _db = AletheiaDB::with_unified_config(config);
+let db = AletheiaDB::with_unified_config(config)?;
+println!("Started DB with persistence");
 
 // Indexes automatically persist in background
 // On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
@@ -660,7 +666,8 @@ let config = AletheiaDBConfig::builder()
         .build())
     .build();
 
-let _db = AletheiaDB::with_unified_config(config)?;
+let db = AletheiaDB::with_unified_config(config)?;
+println!("Started DB with custom WAL config");
 ```
 
 See **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for all configuration options and presets.
@@ -740,7 +747,8 @@ let config = ShardConfig::new(vec![
 let coordinator = ShardCoordinator::new(config);
 
 // Route queries to appropriate shards
-let _shard = coordinator.router().route_node("Person");
+let shard = coordinator.router().route_node("Person");
+println!("Routing 'Person' to shard: {:?}", shard);
 ```
 
 See **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** for complete guide.
@@ -767,9 +775,9 @@ let config = AletheiaDBConfig::builder()
     .build();
 
 // Cold storage automatically initialized!
-let _db = AletheiaDB::with_unified_config(config)?;
+let db = AletheiaDB::with_unified_config(config)?;
+println!("Started DB with cold storage enabled");
 ```
-
 See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** for complete guide.
 
 ### Transactions
@@ -782,9 +790,10 @@ For complex operations involving multiple updates, use explicit transactions.
 use aletheiadb::prelude::*;
 
 // Explicit read transaction
-let result = db.read(|tx| {
+let label = db.read(|tx| {
     tx.get_node(alice_id).map(|node| node.label.clone())
 })?;
+println!("Node label: {}", label);
 
 // Explicit write transaction with multiple operations
 db.write(|tx| {
