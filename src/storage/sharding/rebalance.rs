@@ -32,40 +32,12 @@
 //! It also limits the number of concurrent migrations to avoid overwhelming network
 //! and I/O resources.
 //!
-//! # Example
+//! # Setup and Usage
 //!
-//! ```rust
-//! use std::time::Duration;
-//! use aletheiadb::storage::sharding::config::RebalanceConfig;
-//! use aletheiadb::storage::sharding::rebalance::{RebalanceManager, MigrationReason};
-//! use aletheiadb::storage::sharding::types::{ShardId, ShardState};
-//!
-//! # fn make_shard(id: u16, count: u64) -> ShardState {
-//! #     let mut s = ShardState::new(ShardId::new(id).unwrap()); s.node_count = count; s
-//! # }
-//! // 1. Configure the manager
-//! let mut config = RebalanceConfig::new().with_imbalance_threshold(0.2);
-//! config.max_concurrent_migrations = 2;
-//! let mut manager = RebalanceManager::new(config);
-//!
-//! // 2. Provide the current cluster state
-//! let shard1 = make_shard(1, 10_000); // Overloaded
-//! let shard2 = make_shard(2, 2_000);  // Underloaded
-//!
-//! // 3. The manager calculates the optimal moves
-//! let plans = manager.plan_rebalance(&[shard1, shard2]).unwrap();
-//!
-//! // 4. Queue and start migrations
-//! for plan in plans {
-//!     manager.queue_migration(plan);
-//! }
-//!
-//! if let Some(id) = manager.start_next_migration().unwrap() {
-//!     println!("Started migration {}", id);
-//!     // Transition through the state machine...
-//!     manager.advance_migration(id).unwrap();
-//! }
-//! ```
+//! The rebalancing subsystem is configured via `RebalanceConfig` and coordinated
+//! by the `RebalanceManager`. When shard states are submitted to the manager,
+//! it compares their node counts against the configured thresholds to identify
+//! imbalances and generates migration plans automatically.
 
 use super::config::RebalanceConfig;
 use super::types::{ShardId, ShardState};
@@ -442,6 +414,20 @@ impl std::error::Error for RebalanceError {}
 /// - Enforcing cooldown periods to prevent cluster thrashing.
 /// - Managing the queue and concurrency limits of active migrations.
 /// - Tracking the history of completed and failed migrations.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::storage::sharding::config::RebalanceConfig;
+/// use aletheiadb::storage::sharding::rebalance::RebalanceManager;
+///
+/// // Create a manager with default configuration
+/// let config = RebalanceConfig::new();
+/// let manager = RebalanceManager::new(config);
+///
+/// assert_eq!(manager.active_count(), 0);
+/// assert_eq!(manager.queued_count(), 0);
+/// ```
 pub struct RebalanceManager {
     /// Configuration for rebalancing.
     config: RebalanceConfig,
