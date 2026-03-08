@@ -2,6 +2,71 @@
 //!
 //! Handles online data migration between shards when they become unbalanced
 //! or when new shards are added to the cluster.
+//!
+//! # Online Data Migration Architecture
+//!
+//! Rebalancing a distributed database without downtime requires a careful orchestration
+//! of states. AletheiaDB uses a **Dual-Write** approach to ensure that data being
+//! migrated remains available and consistent even as application traffic continues.
+//!
+//! ## The Migration Lifecycle
+//!
+//! A [`MigrationPlan`] moves through a strict state machine defined by [`MigrationState`]:
+//!
+//! 1. **`Planned`**: The manager has identified an imbalance and queued a migration.
+//! 2. **`DualWrite`**: The router is updated to send all *new* writes (for the migrating nodes)
+//!    to **both** the source and target shards. Reads still go to the source.
+//! 3. **`Copying`**: A background process copies the *existing* historical data from the
+//!    source to the target. Because of `DualWrite`, we don't miss new updates.
+//! 4. **`Verifying`**: Checksums and row counts are compared to ensure the target
+//!    has a perfect copy of the source data.
+//! 5. **`Cutover`**: The router is updated again. Reads and writes now go exclusively
+//!    to the target shard. The migration is logically complete.
+//! 6. **`Cleanup`**: The data on the source shard is asynchronously deleted to free space.
+//! 7. **`Completed`**: The migration is finished and recorded in history.
+//!
+//! ## Cooldown and Concurrency
+//!
+//! To prevent the cluster from thrashing (rapidly moving data back and forth), the
+//! [`RebalanceManager`] enforces a cooldown period between automated rebalance planning phases.
+//! It also limits the number of concurrent migrations to avoid overwhelming network
+//! and I/O resources.
+//!
+//! # Example
+//!
+//! ```rust
+//! use std::time::Duration;
+//! use aletheiadb::storage::sharding::config::RebalanceConfig;
+//! use aletheiadb::storage::sharding::rebalance::{RebalanceManager, MigrationReason};
+//! use aletheiadb::storage::sharding::types::{ShardId, ShardState};
+//!
+//! // 1. Configure the manager
+//! let config = RebalanceConfig::new()
+//!     .with_imbalance_threshold(0.2) // Rebalance if a shard is 20% over/under average
+//!     .with_max_concurrent_migrations(2);
+//! let mut manager = RebalanceManager::new(config);
+//!
+//! // 2. Provide the current cluster state
+//! let mut shard1 = ShardState::new(ShardId::new(1).unwrap());
+//! shard1.node_count = 10_000; // Overloaded
+//!
+//! let mut shard2 = ShardState::new(ShardId::new(2).unwrap());
+//! shard2.node_count = 2_000;  // Underloaded
+//!
+//! // 3. The manager calculates the optimal moves
+//! let plans = manager.plan_rebalance(&[shard1, shard2]).unwrap();
+//!
+//! // 4. Queue and start migrations
+//! for plan in plans {
+//!     manager.queue_migration(plan);
+//! }
+//!
+//! if let Some(id) = manager.start_next_migration().unwrap() {
+//!     println!("Started migration {}", id);
+//!     // Transition through the state machine...
+//!     manager.advance_migration(id).unwrap();
+//! }
+//! ```
 
 use super::config::RebalanceConfig;
 use super::types::{ShardId, ShardState};
@@ -10,7 +75,9 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::{Duration, Instant};
 
-/// State of a migration operation.
+/// The strict state machine phases of a migration operation.
+///
+/// See the module-level documentation for an explanation of the Dual-Write lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationState {
     /// Migration is planned but not started.
@@ -370,6 +437,12 @@ impl fmt::Display for RebalanceError {
 impl std::error::Error for RebalanceError {}
 
 /// Manager for coordinating shard rebalancing operations.
+///
+/// The `RebalanceManager` acts as the control plane for data movement. It is responsible for:
+/// - Calculating cluster imbalance and generating `MigrationPlan`s.
+/// - Enforcing cooldown periods to prevent cluster thrashing.
+/// - Managing the queue and concurrency limits of active migrations.
+/// - Tracking the history of completed and failed migrations.
 pub struct RebalanceManager {
     /// Configuration for rebalancing.
     config: RebalanceConfig,

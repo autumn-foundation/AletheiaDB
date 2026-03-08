@@ -82,3 +82,7 @@
 ## 2025-03-05 - Logical vs Physical Plans and Iterator Performance
 **Confusion:** The difference between logical plans (`LogicalOp`) and physical plans (`PhysicalOp`) in the query engine was unclear. Additionally, the iterators used for execution (`ResultIterator` implementations) lacked clarity on their streaming architecture.
 **Clarification:** Documented `PhysicalOp` to explain its 1:1 mapping with iterators. Added struct-level documentation to `ResultIterator` implementations to clarify the pull-based, lazy execution model used during query processing.
+
+## 2025-03-05 - Online Shard Rebalancing Mechanism
+**Confusion:** Users and contributors reading `src/storage/sharding/rebalance.rs` might be confused about how AletheiaDB can move data between shards without taking the database offline or losing writes during the migration. The state machine `MigrationState` existed without an architectural explanation.
+**Clarification:** Documented the "Dual-Write" architecture at the module level. Explained that the `DualWrite` state ensures new writes hit both the source and target shards simultaneously while the background `Copying` phase moves historical data, ensuring zero data loss before the final `Cutover`.
