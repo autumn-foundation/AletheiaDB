@@ -104,14 +104,11 @@ use super::{OptimizationRule, Statistics};
 ///     scan
 /// );
 /// let filter = LogicalOp::unary(
-///     UnaryOp::Filter(Predicate::Eq {
-///         key: "active".into(),
-///         value: PredicateValue::Bool(true)
-///     }),
+///     UnaryOp::Filter(Predicate::Eq { key: "active".into(), value: PredicateValue::Bool(true) }),
 ///     sort
 /// );
 ///
-/// let plan = LogicalPlan { root: filter, temporal_context: None, hints: Default::default() };
+/// let plan = LogicalPlan::new(filter);
 ///
 /// // 2. Apply the rule
 /// let rule = PredicatePushdown;
@@ -119,23 +116,15 @@ use super::{OptimizationRule, Statistics};
 /// let optimized_plan = rule.apply(&plan, &stats)?.unwrap();
 ///
 /// // 3. The rule pushed the Filter BELOW the Sort
-/// let expected_scan = LogicalOp::Scan(ScanOp::NodeScan {
-///     label: Some("Person".into()),
-///     estimated_rows: Some(100),
-/// });
-/// let expected_filter = LogicalOp::unary(
-///     UnaryOp::Filter(Predicate::Eq {
-///         key: "active".into(),
-///         value: PredicateValue::Bool(true)
-///     }),
-///     expected_scan
+/// let expected_plan = LogicalPlan::new(
+///     LogicalOp::unary(
+///         UnaryOp::Sort { key: SortKey::Score, descending: true },
+///         LogicalOp::unary(
+///             UnaryOp::Filter(Predicate::Eq { key: "active".into(), value: PredicateValue::Bool(true) }),
+///             LogicalOp::Scan(ScanOp::NodeScan { label: Some("Person".into()), estimated_rows: Some(100) })
+///         )
+///     )
 /// );
-/// let expected_sort = LogicalOp::unary(
-///     UnaryOp::Sort { key: SortKey::Score, descending: true },
-///     expected_filter
-/// );
-///
-/// let expected_plan = LogicalPlan { root: expected_sort, temporal_context: None, hints: Default::default() };
 /// assert_eq!(optimized_plan, expected_plan);
 /// # Ok(())
 /// # }
@@ -330,7 +319,6 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
 
         let expected_plan = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::VectorRank {
@@ -344,7 +332,7 @@ mod tests {
             ),
         ));
 
-        assert_eq!(result.unwrap(), expected_plan);
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -430,7 +418,6 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
 
         let expected_plan = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::Sort {
@@ -443,7 +430,7 @@ mod tests {
             ),
         ));
 
-        assert_eq!(result.unwrap(), expected_plan);
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -538,10 +525,6 @@ mod tests {
 
         // Expect optimization to occur on the left branch
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(
-            result.is_some(),
-            "Binary op with one changed branch should return Some"
-        );
 
         let expected_plan = LogicalPlan::new(LogicalOp::binary(
             BinaryOp::Union,
@@ -558,7 +541,11 @@ mod tests {
             LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
         ));
 
-        assert_eq!(result.unwrap(), expected_plan);
+        assert_eq!(
+            result,
+            Some(expected_plan),
+            "Binary op with one changed branch should return Some"
+        );
     }
 }
 
@@ -602,12 +589,6 @@ mod sentry_tests {
 
         let result = rule.apply(&plan, &stats).unwrap();
 
-        // Must be Some (changed)
-        assert!(
-            result.is_some(),
-            "Partial optimization (left branch) should trigger change"
-        );
-
         let expected_plan = LogicalPlan::new(LogicalOp::binary(
             BinaryOp::Union,
             LogicalOp::unary(
@@ -626,6 +607,10 @@ mod sentry_tests {
             ),
         ));
 
-        assert_eq!(result.unwrap(), expected_plan);
+        assert_eq!(
+            result,
+            Some(expected_plan),
+            "Partial optimization (left branch) should trigger change"
+        );
     }
 }
