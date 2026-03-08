@@ -41,17 +41,13 @@
 //! use aletheiadb::storage::sharding::types::{ShardId, ShardState};
 //!
 //! // 1. Configure the manager
-//! let config = RebalanceConfig::new()
-//!     .with_imbalance_threshold(0.2) // Rebalance if a shard is 20% over/under average
-//!     .with_max_concurrent_migrations(2);
+//! let mut config = RebalanceConfig::new().with_imbalance_threshold(0.2);
+//! config.max_concurrent_migrations = 2;
 //! let mut manager = RebalanceManager::new(config);
 //!
 //! // 2. Provide the current cluster state
-//! let mut shard1 = ShardState::new(ShardId::new(1).unwrap());
-//! shard1.node_count = 10_000; // Overloaded
-//!
-//! let mut shard2 = ShardState::new(ShardId::new(2).unwrap());
-//! shard2.node_count = 2_000;  // Underloaded
+//! let mut shard1 = ShardState::new(ShardId::new(1).unwrap()); shard1.node_count = 10_000;
+//! let mut shard2 = ShardState::new(ShardId::new(2).unwrap()); shard2.node_count = 2_000;
 //!
 //! // 3. The manager calculates the optimal moves
 //! let plans = manager.plan_rebalance(&[shard1, shard2]).unwrap();
