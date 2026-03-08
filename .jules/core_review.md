@@ -1,3 +1,13 @@
+## 🦀 Core Review: Empty Scope
+
+No high-severity findings.
+
+### Test gaps
+- No missing tests were identified because no specific diff or scope was provided for review.
+
+### Residual risks
+- Unknown risks exist outside the boundaries of this review since no explicit scope was specified. Ensure all modifications follow standard review procedures when actual diffs are provided.
+
 No high-severity findings.
 
 ### Test gaps
