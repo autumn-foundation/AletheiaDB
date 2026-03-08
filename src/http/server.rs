@@ -56,6 +56,9 @@ impl ShutdownHandle {
 /// let app = App::new().configure(configure_app);
 /// ```
 pub fn configure_app(cfg: &mut web::ServiceConfig) {
+    // Defense in depth against deserialization DoS bombs
+    cfg.app_data(web::JsonConfig::default().limit(2 * 1024 * 1024)); // 2MB limit
+
     configure_health_routes(cfg);
     cfg.route("/query", web::post().to(handle_query));
 }

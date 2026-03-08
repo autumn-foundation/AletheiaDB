@@ -33,3 +33,11 @@
 2024-XX-XX - [Warden: CSR Adjacency Index Vulnerability]
 **Threat:** `AdjacencyIndex::import_csr` did not validate that `node_ids` is sorted, and did not validate that `offsets` is monotonically increasing. It also didn't validate that the first offset is `0`. This allows a maliciously constructed CSR payload to cause OOB reads (Denial of Service) when `get_adjacency` is called, due to `start > end` or `end > edges.len()` when slicing the `edges` array.
 **Defense:** Added rigorous validation in `validate_csr_invariants` to ensure `node_ids` is strictly sorted (no duplicates), `offsets` begins with `0`, and is monotonically increasing.
+
+**2024-05-18 - Unbounded Actix-Web JSON Deserialization**
+**Threat:** The Actix-Web server did not enforce a strict payload limit for JSON deserialization on its API endpoints. This is a potential Denial of Service (DoS) vector where an attacker could send massive JSON payloads, exhausting memory and crashing the service (Deserialization Bombs).
+**Defense:** Explicitly configured `web::JsonConfig::default().limit(2 * 1024 * 1024)` in `src/http/server.rs` via `cfg.app_data` to limit incoming JSON payloads to a safe size (2MB).
+
+**2024-05-18 - Unsafe Vector Transmutation**
+**Threat:** A generic homegrown `unsafe fn transmute_vec<T, U>(v: Vec<T>) -> Vec<U>` in `src/index/adjacency.rs` was used for zero-copy conversions. Although correctly asserting size and alignment, it lacked compile-time guarantees (like `AnyBitPattern`) to ensure that arbitrary bit patterns from `T` are actually valid for `U`. This allowed potential Undefined Behavior (UB) if misused elsewhere in the codebase.
+**Defense:** Replaced the unsafe block and generic implementation with `bytemuck::cast_vec`, enforcing `bytemuck::AnyBitPattern` and `bytemuck::NoUninit` trait bounds. Derived `Pod` and `Zeroable` for `NodeId` so it can be safely cast to/from integer arrays at zero cost, entirely removing the `unsafe` block.
