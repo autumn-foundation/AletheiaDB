@@ -189,7 +189,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         // we perform thousands of map insertions and lookups. Bypassing SipHash eliminates
         // unnecessary hashing overhead on already-unique integer keys.
         let mut dist: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> = HashMap::default();
-        let mut came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>> = HashMap::default();
+        let mut came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>> =
+            HashMap::default();
 
         // Initialize start node
         dist.insert(start, 0.0);
@@ -319,7 +320,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         // we perform thousands of map insertions and lookups. Bypassing SipHash eliminates
         // unnecessary hashing overhead on already-unique integer keys.
         let mut dist: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> = HashMap::default();
-        let mut came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>> = HashMap::default();
+        let mut came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>> =
+            HashMap::default();
 
         // Verify start node existed
         if self.db.get_node_at_time(start, time, time).is_err() {
@@ -446,7 +448,11 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         }
     }
 
-    fn reconstruct_path(&self, came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>>, current: NodeId) -> Vec<NodeId> {
+    fn reconstruct_path(
+        &self,
+        came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>>,
+        current: NodeId,
+    ) -> Vec<NodeId> {
         let mut path = vec![current];
         let mut curr = current;
         while let Some(&prev) = came_from.get(&curr) {
