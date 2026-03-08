@@ -29,3 +29,13 @@ No high-severity findings.
 
 ### Residual risks
 - `IdGenerator::current_approximate()` operates with `Ordering::Relaxed` memory synchronization to achieve extreme performance (~1ns). This makes it unsuitable for any critical snapshot isolation logic and strictly limits its safe usage to non-critical metrics and logging, which is well-documented but represents a slight structural misuse risk.
+
+## 🦀 Core Review: Empty Scope Review
+
+No high-severity findings.
+
+### Test gaps
+- No scope was provided for review, hence no test gaps were evaluated.
+
+### Residual risks
+- Operating without a specific review scope leaves general system risks unassessed in this pass.
