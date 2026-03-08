@@ -60,12 +60,16 @@
 //! it treats the cost as infinite (effectively blocking the path) instead of panicking.
 
 use crate::core::error::Result;
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::core::vector::cosine_similarity;
 use crate::query::traits::GraphView;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::hash::BuildHasherDefault;
+
+type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
 
 /// State for priority queue (min-heap based on cost).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -182,8 +186,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         bidirectional: bool,
     ) -> Result<Option<Vec<NodeId>>> {
         let mut pq = BinaryHeap::new();
-        let mut dist = HashMap::new();
-        let mut came_from = HashMap::new();
+        let mut dist: FastHashMap<NodeId, f32> = FastHashMap::default();
+        let mut came_from: FastHashMap<NodeId, NodeId> = FastHashMap::default();
 
         // Initialize start node
         dist.insert(start, 0.0);
@@ -308,8 +312,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         bidirectional: bool,
     ) -> Result<Option<Vec<NodeId>>> {
         let mut pq = BinaryHeap::new();
-        let mut dist = HashMap::new();
-        let mut came_from = HashMap::new();
+        let mut dist: FastHashMap<NodeId, f32> = FastHashMap::default();
+        let mut came_from: FastHashMap<NodeId, NodeId> = FastHashMap::default();
 
         // Verify start node existed
         if self.db.get_node_at_time(start, time, time).is_err() {
@@ -436,7 +440,11 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         }
     }
 
-    fn reconstruct_path(&self, came_from: HashMap<NodeId, NodeId>, current: NodeId) -> Vec<NodeId> {
+    fn reconstruct_path(
+        &self,
+        came_from: FastHashMap<NodeId, NodeId>,
+        current: NodeId,
+    ) -> Vec<NodeId> {
         let mut path = vec![current];
         let mut curr = current;
         while let Some(&prev) = came_from.get(&curr) {
