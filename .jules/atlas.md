@@ -71,3 +71,7 @@
 ## 2026-05-24 - Unwinding API/Core Dependency
 **Tangle:** `db` module imported `TxIdGenerator` through `api::transaction`. This caused a layering violation where `db` skipped `core` to rely on an `api` re-export for a domain primitive, creating coupling between `api` and `core`'s ID generation responsibilities.
 **Blueprint:** Removed `TxIdGenerator` re-export from `api::transaction::types` and `api::transaction::mod`. Updated `db::mod`, `db::config`, and all transaction tests to explicitly import `TxIdGenerator` directly from `core::id::TxIdGenerator`.
+
+## 2026-03-08 - The Blob in Temporal Index
+**Tangle:** `src/index/temporal.rs` was a 4200-line "Blob" containing both core temporal index logic and over 2800 lines of tests.
+**Blueprint:** Refactored into `src/index/temporal/` directory. Moved tests to `tests.rs` (~2800 lines), leaving the core logic in `mod.rs` (~1300 lines). This separates concerns and reduces the size of a single file drastically.
