@@ -84,10 +84,20 @@ classDiagram
         }
     }
     namespace Core {
-        class AletheiaDB
+        class TxIdGenerator
+        class TxId
+        class Error
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+    }
+    namespace DB {
+        class AletheiaDB
+        class VectorIndexBuilder
+    }
+    namespace API {
+        class WriteTransaction
+        class ReadTransaction
     }
     namespace Storage {
         class CurrentStorage
@@ -103,7 +113,10 @@ classDiagram
 
     MCPServer --> QueryEngine : Uses
     QueryEngine --> AletheiaDB : Uses
+    AletheiaDB --> API : Starts Transactions
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
+    API --> Core : Uses Types
+    Storage --> Core : Uses Types
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
