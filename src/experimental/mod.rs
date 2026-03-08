@@ -27,29 +27,29 @@
 //! | Module | Code Name | Description |
 //! |--------|-----------|-------------|
 //! | [`sherlock`] | **Sherlock** | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
-//! | [`dreamer`] | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
-//! | [`aura`] | **Aura** | Semantic Essence over Time. "What is your long-term identity?" |
-//! | [`thermos`] | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
-//! | [`hindsight`] | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
-//! | [`janus`] | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
-//! | [`prism`] | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
+//! | `dreamer` | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
+//! | `aura` | **Aura** | Semantic Essence over Time. "What is your long-term identity?" |
+//! | `thermos` | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
+//! | `hindsight` | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
+//! | `janus` | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
+//! | `prism` | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
 //! | [`chronos`] | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
-//! | [`ariadne`] | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
+//! | `ariadne` | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
 //! | [`echo`] | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
-//! | [`kaleidoscope`] | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
-//! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
-//! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
-//! | [`synapse`] | **Synapse** | Adaptive Graph Hebbian Learning. "Cells that fire together, wire together." |
+//! | `kaleidoscope` | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
+//! | `sentinel` | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
+//! | `sybil` | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
+//! | `synapse` | **Synapse** | Adaptive Graph Hebbian Learning. "Cells that fire together, wire together." |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
-//! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
-//! | [`gestalt`] | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
-//! | [`mnemosyne`] | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
-//! | [`chimera`] | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
-//! | [`oracle`] | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
-//! | [`spectre`] | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
-//! | [`luna`] | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
-//! | [`serendipity`] | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
-//! | [`tremor`] | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! | `gravity` | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
+//! | `gestalt` | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
+//! | `mnemosyne` | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
+//! | `chimera` | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
+//! | `oracle` | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
+//! | `spectre` | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
+//! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
+//! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
+//! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
