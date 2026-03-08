@@ -78,3 +78,7 @@
 ## 2025-03-05 - Doctests with Feature Flags
 **Confusion:** When writing doctests for modules behind a feature flag (like `nova`), wrapping the test block in `# #[cfg(feature = "nova")] \n # { ... }` causes `rustdoc` to generate invalid syntax when the test is extracted. It creates an anonymous block at the root level which is an expression, not an item, breaking `cargo test`. If the feature flag is disabled, it leaves an empty file causing a `main function not found` error.
 **Clarification:** To properly feature-gate doctests, conditionally compile the imports and the `main` function itself: `# #[cfg(feature = "nova")] \n fn main() { ... }`, and crucially, provide an empty fallback `main` function for when the feature is disabled: `# #[cfg(not(feature = "nova"))] \n # fn main() {}`.
+
+## 2025-03-05 - Logical vs Physical Plans and Iterator Performance
+**Confusion:** The difference between logical plans (`LogicalOp`) and physical plans (`PhysicalOp`) in the query engine was unclear. Additionally, the iterators used for execution (`ResultIterator` implementations) lacked clarity on their streaming architecture.
+**Clarification:** Documented `PhysicalOp` to explain its 1:1 mapping with iterators. Added struct-level documentation to `ResultIterator` implementations to clarify the pull-based, lazy execution model used during query processing.
