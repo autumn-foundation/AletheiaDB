@@ -177,7 +177,6 @@ mod integration_tests {
     use crate::api::WriteOps;
     use crate::core::property::PropertyMapBuilder;
 
-
     #[test]
     fn test_dejavu_integration() {
         let db = AletheiaDB::new().unwrap();
