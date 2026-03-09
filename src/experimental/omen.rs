@@ -42,9 +42,10 @@
 //! ```
 
 use crate::AletheiaDB;
+
 use crate::core::error::Result;
 use crate::core::id::NodeId;
-use crate::core::temporal::{TimeRange, time};
+use crate::core::temporal::TimeRange;
 use std::time::Duration;
 
 /// The predicted outcome of two trajectories.
@@ -80,7 +81,8 @@ impl<'a> Omen<'a> {
         vector_property: &str,
     ) -> Result<Option<Encounter>> {
         // Fix transaction time to "now" for consistent view
-        let tx_time = time::now();
+        let tx = self.db.read_transaction()?;
+        let tx_time = tx.metadata().start_timestamp;
 
         // 1. Calculate Trajectories
         // We need Position (at window end) and Velocity (change over window)
@@ -150,7 +152,7 @@ impl<'a> Omen<'a> {
         node_id: NodeId,
         window: TimeRange,
         property: &str,
-        _tx_time: crate::core::temporal::Timestamp,
+        tx_time: crate::core::temporal::Timestamp,
     ) -> Result<Option<(Vec<f32>, Vec<f32>)>> {
         // Fetch full history directly to bypass potential temporal index issues in tests.
         // In real usage, `get_node_at_time` is preferred, but for unit tests with simulated time,
@@ -161,9 +163,9 @@ impl<'a> Omen<'a> {
         let history = self.db.get_node_history(node_id)?;
 
         // Find vector at or immediately before window.start
-        let start_vec = self.find_vector_at(&history, window.start(), property);
+        let start_vec = self.find_vector_at(&history, window.start(), property, tx_time);
         // Find vector at or immediately before window.end
-        let end_vec = self.find_vector_at(&history, window.end(), property);
+        let end_vec = self.find_vector_at(&history, window.end(), property, tx_time);
 
         match (start_vec, end_vec) {
             (Some(start), Some(end)) => {
@@ -198,6 +200,7 @@ impl<'a> Omen<'a> {
         history: &crate::core::history::EntityHistory,
         time: crate::core::temporal::Timestamp,
         property: &str,
+        tx_time: crate::core::temporal::Timestamp,
     ) -> Option<Vec<f32>> {
         // Iterate history to find the latest version valid at `time`.
         // History is typically sorted by version ID. We want the latest version where valid_time.start <= time.
@@ -207,7 +210,9 @@ impl<'a> Omen<'a> {
 
         for v in &history.versions {
             let vt_start = v.temporal.valid_time().start().wallclock();
-            if vt_start <= time.wallclock()
+            let tt_start = v.temporal.transaction_time().start().wallclock();
+            if tt_start <= tx_time.wallclock()
+                && vt_start <= time.wallclock()
                 && vt_start >= best_time
                 && let Some(val) = v.properties.get(property)
                 && let Some(vec) = val.as_vector()
@@ -225,6 +230,7 @@ mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     #[test]
