@@ -50,10 +50,12 @@
 
 use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::vector::cosine_similarity;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::hash::BuildHasherDefault;
 
 /// A navigator that finds semantically meaningful paths through the graph.
 ///
@@ -157,11 +159,17 @@ impl<'a> SemanticNavigator<'a> {
             node: start,
         });
 
-        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
-        let mut g_score: HashMap<NodeId, f32> = HashMap::new();
+        // ⚡ Bolt: Use `IdentityHasher` instead of the default SipHash.
+        // `NodeId` is already a unique wrapper over `u64`. In performance-critical pathfinding (like A*),
+        // bypassing SipHash eliminates unnecessary hashing overhead on already-unique integer keys.
+        let mut came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>> =
+            HashMap::default();
+        let mut g_score: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
+            HashMap::default();
         g_score.insert(start, 0.0);
 
-        let mut f_score: HashMap<NodeId, f32> = HashMap::new();
+        let mut f_score: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
+            HashMap::default();
         // h(start) = 1.0 - sim(start, end)
         // We know start has a vector.
         let h_start = 1.0 - cosine_similarity(&_start_vec, &end_vec)?;
@@ -238,7 +246,7 @@ impl<'a> SemanticNavigator<'a> {
 
     fn reconstruct_path(
         &self,
-        came_from: HashMap<NodeId, NodeId>,
+        came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>>,
         mut current: NodeId,
     ) -> Vec<NodeId> {
         let mut total_path = vec![current];
