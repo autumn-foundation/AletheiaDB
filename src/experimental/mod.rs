@@ -39,6 +39,7 @@
 //! | [`kaleidoscope`] | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
 //! | [`sentinel`] | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
 //! | [`sybil`] | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
+//! | [`catalyst`] | **Catalyst** | Semantic Chain Reaction Engine. "Triggering global paradigm shifts." |
 //! | [`synapse`] | **Synapse** | Adaptive Graph Hebbian Learning. "Cells that fire together, wire together." |
 //! | [`temporal_narrative`] | **Bard** | Generate natural language histories of graph entities. |
 //! | [`gravity`] | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
@@ -112,6 +113,9 @@ pub mod aura;
 #[cfg(feature = "nova")]
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
+#[cfg(feature = "nova")]
+/// Catalyst: The Semantic Chain Reaction Engine.
+pub mod catalyst;
 #[cfg(feature = "nova")]
 /// Chameleon: Context-Aware Faceted Search.
 pub mod chameleon;
