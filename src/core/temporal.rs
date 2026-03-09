@@ -1945,3 +1945,111 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_temporal_tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+
+    #[test]
+    fn test_sentinel_timerange_from_exact() {
+        let ts = HybridTimestamp::new_unchecked(100, 0);
+        let range = TimeRange::from(ts);
+
+        // Kill `replace TimeRange::from -> Self with Default::default()`
+        // Default::default() would give start = 0, end = 0
+        assert_eq!(range.start(), ts);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+        assert!(!range.is_empty());
+
+        // Kill logic mutants like replacing `&&` with `||` and bounds checks `>`
+        // by verifying max valid bounds
+        let max_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let max_range = TimeRange::from(max_ts);
+        assert_eq!(max_range.start(), max_ts);
+    }
+
+    #[test]
+    fn test_sentinel_timerange_at_exact() {
+        let ts = HybridTimestamp::new_unchecked(100, 0);
+        let range = TimeRange::at(ts);
+
+        // Kill `replace TimeRange::at -> Self with Default::default()`
+        assert_eq!(range.start(), ts);
+        assert_eq!(range.end(), ts);
+        assert!(range.is_empty());
+
+        let max_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let max_range = TimeRange::at(max_ts);
+        assert_eq!(max_range.start(), max_ts);
+        assert_eq!(max_range.end(), max_ts);
+    }
+
+    #[test]
+    fn test_sentinel_time_to_secs() {
+        // time::to_secs(timestamp: Timestamp) -> i64 returns timestamp.wallclock() / 1_000_000
+        // We want to kill mutants that replace / with % or *
+        // Example: 1_234_567_000_000
+        let wallclock = 1_234_567_000_000;
+        let ts = HybridTimestamp::new_unchecked(wallclock, 0);
+        let secs = time::to_secs(ts);
+
+        // If / is replaced with *: 1_234_567_000_000 * 1_000_000 = 1_234_567_000_000_000_000
+        // If / is replaced with %: 1_234_567_000_000 % 1_000_000 = 0
+        // Also kills returning 0, 1, -1 defaults
+        assert_eq!(secs, 1_234_567);
+    }
+
+    #[test]
+    fn test_sentinel_time_to_millis() {
+        // time::to_millis returns timestamp.wallclock() / 1_000
+        let wallclock = 1_234_567_000_000;
+        let ts = HybridTimestamp::new_unchecked(wallclock, 0);
+        let millis = time::to_millis(ts);
+
+        // If / replaced with *: 1_234_567_000_000 * 1_000 = 1_234_567_000_000_000
+        // If / replaced with %: 1_234_567_000_000 % 1_000 = 0
+        assert_eq!(millis, 1_234_567_000);
+    }
+
+    #[test]
+    fn test_sentinel_timerange_is_closed() {
+        let ts_start = HybridTimestamp::new_unchecked(100, 0);
+        let ts_end = HybridTimestamp::new_unchecked(200, 0);
+        let closed_range = TimeRange::new(ts_start, ts_end).unwrap();
+
+        let open_range = TimeRange::from(ts_start);
+
+        // self.end < TIMESTAMP_MAX
+        // Kills replacing < with ==, >, <=
+        assert!(closed_range.is_closed());
+        assert!(!open_range.is_closed());
+
+        // Test right at the boundary. MAX_VALID_TIMESTAMP
+        let almost_max = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let almost_open = TimeRange::new(ts_start, almost_max).unwrap();
+        assert!(almost_open.is_closed());
+    }
+
+    #[test]
+    fn test_sentinel_timerange_contains() {
+        // self.start <= timestamp && timestamp < self.end
+        let ts_start = HybridTimestamp::new_unchecked(100, 0);
+        let ts_end = HybridTimestamp::new_unchecked(200, 0);
+        let range = TimeRange::new(ts_start, ts_end).unwrap();
+
+        // Kills replacing `<` with `<=` on end
+        let exactly_end = HybridTimestamp::new_unchecked(200, 0);
+        assert!(!range.contains(exactly_end));
+
+        // Kills replacing `>=` with `<` on start
+        let exactly_start = HybridTimestamp::new_unchecked(100, 0);
+        assert!(range.contains(exactly_start));
+
+        let just_before_start = HybridTimestamp::new_unchecked(99, 0);
+        assert!(!range.contains(just_before_start));
+
+        let just_before_end = HybridTimestamp::new_unchecked(199, 0);
+        assert!(range.contains(just_before_end));
+    }
+}
