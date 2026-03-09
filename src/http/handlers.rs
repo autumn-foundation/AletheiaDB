@@ -294,8 +294,7 @@ async fn handle_create_node(
         let node_id = db.create_node(&label, props).map_err(|e| e.to_string())?;
         let node = db.get_node(node_id).map_err(|e| e.to_string())?;
 
-        let props_json =
-            property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
+        let props_json = property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
         let node_json = json!({
             "id": node.id.as_u64(),
             "label": interned_to_string(node.label),
@@ -377,7 +376,10 @@ async fn handle_find_node(
             builder = builder.skip(skip);
         }
 
-        let results = builder.limit(limit_val).execute(&db).map_err(|e| e.to_string())?;
+        let results = builder
+            .limit(limit_val)
+            .execute(&db)
+            .map_err(|e| e.to_string())?;
         let mut nodes = Vec::new();
         for row in results.flatten() {
             if let crate::query::executor::EntityResult::Node(node) = row.entity {
@@ -458,8 +460,7 @@ async fn handle_find_neighbors(
             // Node ID found in edge but not in node index? Should be impossible unless corrupted.
             // Propagating error if it occurs.
             let node = db.get_node(neighbor_id).map_err(|e| e.to_string())?;
-            let props_json =
-                property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
+            let props_json = property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
             neighbors.push(json!({
                 "id": node.id.as_u64(),
                 "label": interned_to_string(node.label),
@@ -471,7 +472,9 @@ async fn handle_find_neighbors(
     .await;
 
     match result {
-        Ok(Ok::<Vec<serde_json::Value>, String>(neighbors)) => HttpResponse::Ok().json(ApiResponse::success(json!(neighbors))),
+        Ok(Ok::<Vec<serde_json::Value>, String>(neighbors)) => {
+            HttpResponse::Ok().json(ApiResponse::success(json!(neighbors)))
+        }
         Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse::error(e)),
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string())),
     }
