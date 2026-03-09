@@ -245,3 +245,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Pulse: Semantic Rhythm & Frequency Analysis.
+pub mod pulse;
