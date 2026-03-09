@@ -86,7 +86,7 @@ impl AdjacencyIndex {
     ///
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label)
+    ///     (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(100).unwrap(), label)
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
@@ -139,7 +139,7 @@ impl AdjacencyIndex {
     ///
     /// let mut edge_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-    /// edge_map.insert(EdgeId::new_unchecked(100), (NodeId::new_unchecked(2), label));
+    /// edge_map.insert(EdgeId::new(100).unwrap(), (NodeId::new(2).unwrap(), label));
     ///
     /// let index = AdjacencyIndex::import_csr(nodes, offsets, edge_ids, &edge_map);
     /// assert_eq!(index.edge_count(), 1);
@@ -180,7 +180,7 @@ impl AdjacencyIndex {
                 // Edge not found - this shouldn't happen with valid data
                 // Use a placeholder to maintain CSR structure integrity
                 adjacency_entries.push(AdjacencyEntry::new(
-                    NodeId::new_unchecked(0),
+                    NodeId::new(0).unwrap(),
                     edge_id,
                     InternedString::from_raw(0),
                 ));
@@ -240,12 +240,12 @@ impl AdjacencyIndex {
     ///
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label),
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(3), EdgeId::new_unchecked(101), label),
+    ///     (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(100).unwrap(), label),
+    ///     (NodeId::new(1).unwrap(), NodeId::new(3).unwrap(), EdgeId::new(101).unwrap(), label),
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
-    /// assert_eq!(index.degree(NodeId::new_unchecked(1)), 2);
+    /// assert_eq!(index.degree(NodeId::new(1).unwrap()), 2);
     /// ```
     pub fn build(mut edges: Vec<(NodeId, NodeId, EdgeId, InternedString)>) -> Self {
         if edges.is_empty() {
@@ -324,14 +324,14 @@ impl AdjacencyIndex {
     ///
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label)
+    ///     (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(100).unwrap(), label)
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
-    /// let adj = index.get_adjacency(NodeId::new_unchecked(1));
+    /// let adj = index.get_adjacency(NodeId::new(1).unwrap());
     ///
     /// assert_eq!(adj.len(), 1);
-    /// assert_eq!(adj[0].target, NodeId::new_unchecked(2));
+    /// assert_eq!(adj[0].target, NodeId::new(2).unwrap());
     /// ```
     #[inline]
     pub fn get_adjacency(&self, node: NodeId) -> &[AdjacencyEntry] {
@@ -365,15 +365,15 @@ impl AdjacencyIndex {
     /// let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let follows = GLOBAL_INTERNER.intern("FOLLOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), knows),
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(3), EdgeId::new_unchecked(101), follows),
+    ///     (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(100).unwrap(), knows),
+    ///     (NodeId::new(1).unwrap(), NodeId::new(3).unwrap(), EdgeId::new(101).unwrap(), follows),
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
-    /// let knows_edges: Vec<_> = index.get_adjacency_with_label(NodeId::new_unchecked(1), knows).collect();
+    /// let knows_edges: Vec<_> = index.get_adjacency_with_label(NodeId::new(1).unwrap(), knows).collect();
     ///
     /// assert_eq!(knows_edges.len(), 1);
-    /// assert_eq!(knows_edges[0].target, NodeId::new_unchecked(2));
+    /// assert_eq!(knows_edges[0].target, NodeId::new(2).unwrap());
     /// ```
     pub fn get_adjacency_with_label(
         &self,
@@ -399,12 +399,12 @@ impl AdjacencyIndex {
     ///
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label)
+    ///     (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(100).unwrap(), label)
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
-    /// assert_eq!(index.degree(NodeId::new_unchecked(1)), 1);
-    /// assert_eq!(index.degree(NodeId::new_unchecked(99)), 0);
+    /// assert_eq!(index.degree(NodeId::new(1).unwrap()), 1);
+    /// assert_eq!(index.degree(NodeId::new(99).unwrap()), 0);
     /// ```
     #[inline]
     pub fn degree(&self, node: NodeId) -> usize {
@@ -425,12 +425,12 @@ impl AdjacencyIndex {
     ///
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label)
+    ///     (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(100).unwrap(), label)
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
-    /// assert!(index.has_edges(NodeId::new_unchecked(1)));
-    /// assert!(!index.has_edges(NodeId::new_unchecked(99)));
+    /// assert!(index.has_edges(NodeId::new(1).unwrap()));
+    /// assert!(!index.has_edges(NodeId::new(99).unwrap()));
     /// ```
     #[inline]
     pub fn has_edges(&self, node: NodeId) -> bool {
@@ -470,7 +470,7 @@ impl AdjacencyIndex {
     ///
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(500), EdgeId::new_unchecked(100), label)
+    ///     (NodeId::new(1).unwrap(), NodeId::new(500).unwrap(), EdgeId::new(100).unwrap(), label)
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
@@ -498,15 +498,15 @@ impl AdjacencyIndex {
     ///
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(10), NodeId::new_unchecked(20), EdgeId::new_unchecked(100), label),
-    ///     (NodeId::new_unchecked(99), NodeId::new_unchecked(20), EdgeId::new_unchecked(101), label),
+    ///     (NodeId::new(10).unwrap(), NodeId::new(20).unwrap(), EdgeId::new(100).unwrap(), label),
+    ///     (NodeId::new(99).unwrap(), NodeId::new(20).unwrap(), EdgeId::new(101).unwrap(), label),
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
     /// let nodes: Vec<_> = index.iter_nodes().collect();
     ///
     /// // Only nodes with outgoing edges are yielded!
-    /// assert_eq!(nodes, vec![NodeId::new_unchecked(10), NodeId::new_unchecked(99)]);
+    /// assert_eq!(nodes, vec![NodeId::new(10).unwrap(), NodeId::new(99).unwrap()]);
     /// ```
     #[inline]
     pub fn iter_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
@@ -528,8 +528,8 @@ impl AdjacencyIndex {
     ///
     /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     /// let edges = vec![
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label),
-    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(3), EdgeId::new_unchecked(101), label),
+    ///     (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(100).unwrap(), label),
+    ///     (NodeId::new(1).unwrap(), NodeId::new(3).unwrap(), EdgeId::new(101).unwrap(), label),
     /// ];
     ///
     /// let index = AdjacencyIndex::build(edges);
