@@ -94,25 +94,16 @@ pub struct QueryPlanner {
 impl QueryPlanner {
     /// Create a new query planner with the given statistics and storage.
     ///
-    /// The query planner uses `Statistics` to estimate the cost of different
-    /// execution strategies, and `CurrentStorage` to validate that required
-    /// indices (like vector or temporal indices) exist before planning an operation
-    /// that depends on them. This ensures queries fail fast during planning
-    /// rather than during execution.
+    /// Uses `Statistics` to estimate query costs and `CurrentStorage` to validate
+    /// required indices exist before execution.
     ///
     /// # Examples
     ///
     /// ```rust
     /// # use std::sync::Arc;
     /// # use aletheiadb::query::planner::{QueryPlanner, Statistics};
-    /// # use aletheiadb::storage::CurrentStorage;
-    /// # fn main() {
-    /// let storage = Arc::new(CurrentStorage::new());
-    /// let stats = Arc::new(Statistics::default());
-    ///
-    /// // Initialize the planner with statistics and storage references
-    /// let planner = QueryPlanner::new(stats, storage);
-    /// # }
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// let planner = QueryPlanner::new(Arc::new(Statistics::default()), Arc::new(CurrentStorage::new()));
     /// ```
     #[must_use]
     pub fn new(stats: Arc<Statistics>, storage: Arc<CurrentStorage>) -> Self {
@@ -150,7 +141,7 @@ impl QueryPlanner {
     /// ```rust
     /// use std::sync::Arc;
     /// use aletheiadb::query::planner::{QueryPlanner, Statistics};
-    /// use aletheiadb::storage::CurrentStorage;
+    /// use aletheiadb::storage::current::CurrentStorage;
     /// use aletheiadb::query::builder::QueryBuilder;
     /// use aletheiadb::core::NodeId;
     ///

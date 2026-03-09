@@ -108,23 +108,17 @@ pub struct QueryExecutor {
 impl QueryExecutor {
     /// Create a new query executor
     ///
-    /// The `QueryExecutor` requires references to both `CurrentStorage` (for live indices
-    /// and recent data) and `HistoricalStorage` (for temporal queries like "AS OF").
-    ///
     /// # Examples
     ///
     /// ```rust
     /// # use std::sync::Arc;
     /// # use parking_lot::RwLock;
-    /// # use aletheiadb::storage::CurrentStorage;
+    /// # use aletheiadb::storage::current::CurrentStorage;
     /// # use aletheiadb::storage::historical::HistoricalStorage;
-    /// # use aletheiadb::query::executor::QueryExecutor;
-    /// # fn main() {
+    /// # use aletheiadb::query::QueryExecutor;
     /// let current = Arc::new(CurrentStorage::new());
     /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-    ///
     /// let executor = QueryExecutor::new(current, historical);
-    /// # }
     /// ```
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
@@ -149,28 +143,12 @@ impl QueryExecutor {
 
     /// Execute a physical plan and return results.
     ///
-    /// This method recursively transforms the operator tree starting at `plan.root`
-    /// into a chain of iterators based on the volcano iterator model. The execution
-    /// is lazy: no data is evaluated or fetched from storage until the returned
-    /// [`QueryResults`] iterator is actively pulled (consumed).
-    ///
-    /// Because execution happens lazily, this method only parses the layout of the
-    /// query execution tree; any runtime exceptions during iteration (like corrupted
-    /// disk reads) will be yielded within the resulting `Iterator<Item = Result<QueryRow>>`.
-    ///
-    /// # Arguments
-    ///
-    /// * `plan` - The physical query plan to execute.
-    ///
-    /// # Panics
-    ///
-    /// This method does not panic under normal execution.
+    /// Converts a physical plan into a chain of lazy iterators. Data is not
+    /// fetched until the resulting `QueryResults` iterator is consumed.
     ///
     /// # Errors
     ///
-    /// Returns a [`Result`] containing the lazy [`QueryResults`] iterator on success.
-    /// Returns an error if initializing an iterator node fails (e.g. asking for a
-    /// search index algorithm not supported by the current build).
+    /// Returns a [`Result`] containing the lazy [`QueryResults`] iterator.
     ///
     /// # Examples
     ///
@@ -181,13 +159,9 @@ impl QueryExecutor {
     /// # use aletheiadb::storage::historical::HistoricalStorage;
     /// # use aletheiadb::query::{QueryExecutor, PhysicalPlan};
     /// # use aletheiadb::query::planner::PhysicalOp;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// // 1. Setup storage and executor
     /// let current = Arc::new(CurrentStorage::new());
     /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
     /// let executor = QueryExecutor::new(current, historical);
-    ///
-    /// // 2. Create a physical plan (Using Empty for example simplicity)
     /// let plan = PhysicalPlan {
     ///     root: PhysicalOp::Empty,
     ///     estimated_cost: Default::default(),
@@ -195,14 +169,9 @@ impl QueryExecutor {
     ///     parallel: false,
     ///     include_provenance: true,
     /// };
-    ///
-    /// // 3. Execute and iterate
-    /// let results = executor.execute(plan)?;
-    /// for row in results {
-    ///     println!("Got row: {:?}", row);
+    /// if let Ok(results) = executor.execute(plan) {
+    ///     for _row in results {}
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;
