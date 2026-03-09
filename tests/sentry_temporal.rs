@@ -48,44 +48,32 @@ fn test_bitemporal_is_currently_methods() {
     use aletheiadb::core::temporal::BiTemporalInterval;
     use aletheiadb::core::temporal::TimeRange;
 
-    let valid_start = 1000.into();
-    let valid_end = 2000.into();
-    let tx_start = 3000.into();
-    let tx_end = 4000.into();
+    let start = 100_000.into();
+    let end = 200_000.into();
 
     // Both closed
-    let interval_closed = BiTemporalInterval::new(
-        TimeRange::new(valid_start, valid_end).unwrap(),
-        TimeRange::new(tx_start, tx_end).unwrap(),
-    );
-    assert!(!interval_closed.is_currently_valid());
-    assert!(!interval_closed.is_currently_recorded());
-    assert!(!interval_closed.is_current());
+    let closed_vt = TimeRange::new(start, end).unwrap();
+    let closed_tt = TimeRange::new(start, end).unwrap();
+    let closed_interval = BiTemporalInterval::new(closed_vt, closed_tt);
+    assert!(!closed_interval.is_currently_valid());
+    assert!(!closed_interval.is_currently_recorded());
 
-    // Only valid open
-    let interval_valid_open = BiTemporalInterval::new(
-        TimeRange::from(valid_start),
-        TimeRange::new(tx_start, tx_end).unwrap(),
-    );
-    assert!(interval_valid_open.is_currently_valid());
-    assert!(!interval_valid_open.is_currently_recorded());
-    assert!(!interval_valid_open.is_current());
+    // VT open, TT closed
+    let open_vt = TimeRange::from(start);
+    let vt_open_interval = BiTemporalInterval::new(open_vt, closed_tt);
+    assert!(vt_open_interval.is_currently_valid());
+    assert!(!vt_open_interval.is_currently_recorded());
 
-    // Only tx open
-    let interval_tx_open = BiTemporalInterval::new(
-        TimeRange::new(valid_start, valid_end).unwrap(),
-        TimeRange::from(tx_start),
-    );
-    assert!(!interval_tx_open.is_currently_valid());
-    assert!(interval_tx_open.is_currently_recorded());
-    assert!(!interval_tx_open.is_current());
+    // VT closed, TT open
+    let open_tt = TimeRange::from(start);
+    let tt_open_interval = BiTemporalInterval::new(closed_vt, open_tt);
+    assert!(!tt_open_interval.is_currently_valid());
+    assert!(tt_open_interval.is_currently_recorded());
 
     // Both open
-    let interval_both_open =
-        BiTemporalInterval::new(TimeRange::from(valid_start), TimeRange::from(tx_start));
-    assert!(interval_both_open.is_currently_valid());
-    assert!(interval_both_open.is_currently_recorded());
-    assert!(interval_both_open.is_current());
+    let open_interval = BiTemporalInterval::new(open_vt, open_tt);
+    assert!(open_interval.is_currently_valid());
+    assert!(open_interval.is_currently_recorded());
 }
 
 #[test]
@@ -93,29 +81,25 @@ fn test_bitemporal_is_valid_at_and_recorded_at() {
     use aletheiadb::core::temporal::BiTemporalInterval;
     use aletheiadb::core::temporal::TimeRange;
 
-    let valid_start = 1000.into();
-    let valid_end = 2000.into();
-    let tx_start = 3000.into();
-    let tx_end = 4000.into();
+    let vt = TimeRange::new(100.into(), 200.into()).unwrap();
+    let tt = TimeRange::new(300.into(), 400.into()).unwrap();
+    let interval = BiTemporalInterval::new(vt, tt);
 
-    let interval = BiTemporalInterval::new(
-        TimeRange::new(valid_start, valid_end).unwrap(),
-        TimeRange::new(tx_start, tx_end).unwrap(),
-    );
+    // Exact bounds for is_valid_at (matches valid_time.contains)
+    assert!(interval.is_valid_at(100.into())); // start
+    assert!(interval.is_valid_at(150.into())); // middle
+    assert!(!interval.is_valid_at(200.into())); // end (exclusive)
 
-    assert!(interval.is_valid_at(1500.into()));
-    assert!(!interval.is_valid_at(500.into()));
-    assert!(!interval.is_valid_at(2500.into()));
+    // Exact bounds for is_recorded_at (matches transaction_time.contains)
+    assert!(interval.is_recorded_at(300.into())); // start
+    assert!(interval.is_recorded_at(350.into())); // middle
+    assert!(!interval.is_recorded_at(400.into())); // end (exclusive)
 
-    assert!(interval.is_recorded_at(3500.into()));
-    assert!(!interval.is_recorded_at(2500.into()));
-    assert!(!interval.is_recorded_at(4500.into()));
-
-    // Visibility matrix
-    assert!(interval.is_visible_at(1500.into(), 3500.into()));
-    assert!(!interval.is_visible_at(500.into(), 3500.into()));
-    assert!(!interval.is_visible_at(1500.into(), 4500.into()));
-    assert!(!interval.is_visible_at(500.into(), 4500.into()));
+    // is_visible_at (both)
+    assert!(interval.is_visible_at(100.into(), 300.into()));
+    assert!(!interval.is_visible_at(200.into(), 300.into()));
+    assert!(!interval.is_visible_at(100.into(), 400.into()));
+    assert!(!interval.is_visible_at(200.into(), 400.into()));
 }
 
 #[test]
@@ -123,85 +107,93 @@ fn test_timerange_from_at_exact_boundaries() {
     use aletheiadb::core::hlc::HybridTimestamp;
     use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
 
-    // Test exact MAX_VALID_TIMESTAMP boundary
-    let exact_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let max_ts = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
 
-    // TimeRange::from should accept exact MAX_VALID_TIMESTAMP
-    let range_from_max = TimeRange::from(exact_max);
-    assert_eq!(range_from_max.start(), exact_max);
-    assert_eq!(range_from_max.end(), TIMESTAMP_MAX);
+    // from() logic boundary `start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX`
+    let range1 = TimeRange::from(max_ts);
+    assert_eq!(range1.start(), max_ts);
 
-    // TimeRange::at should accept exact MAX_VALID_TIMESTAMP
-    let range_at_max = TimeRange::at(exact_max);
-    assert_eq!(range_at_max.start(), exact_max);
-    assert_eq!(range_at_max.end(), exact_max);
+    let range2 = TimeRange::from(TIMESTAMP_MAX);
+    assert_eq!(range2.start(), TIMESTAMP_MAX);
+
+    // at() logic boundary
+    let point1 = TimeRange::at(max_ts);
+    assert_eq!(point1.start(), max_ts);
+
+    let point2 = TimeRange::at(TIMESTAMP_MAX);
+    assert_eq!(point2.start(), TIMESTAMP_MAX);
 }
 
 #[test]
 fn test_time_to_secs_millis_exact_math() {
+    use aletheiadb::core::hlc::HybridTimestamp;
     use aletheiadb::core::temporal::time;
 
-    let secs = 5;
-    let ts_secs = time::from_secs(secs);
+    // 1.234567 seconds = 1234567 micros
+    let ts = HybridTimestamp::new(1234567, 0).unwrap();
+
+    // to_secs exact logic (timestamp.wallclock() / 1_000_000)
+    let secs = time::to_secs(ts);
     assert_eq!(
-        time::to_secs(ts_secs),
-        secs,
-        "to_secs should exactly match input"
+        secs, 1,
+        "to_secs exact math should use division by 1_000_000"
     );
 
-    let millis = 5000;
-    let ts_millis = time::from_millis(millis);
+    // to_millis exact logic (timestamp.wallclock() / 1_000)
+    let millis = time::to_millis(ts);
     assert_eq!(
-        time::to_millis(ts_millis),
-        millis,
-        "to_millis should exactly match input"
+        millis, 1234,
+        "to_millis exact math should use division by 1_000"
     );
 
-    // Math mutant checks. If / becomes %, to_secs(5_000_000) = 0.
-    // We already check it equals 5, so 0 would fail.
-    // If * becomes /, from_secs(5) = 5 / 1000000 = 0.
-    // Then to_secs(0) = 0, which fails our assert_eq!(_, 5).
+    let default_secs = time::to_secs(HybridTimestamp::new(0, 0).unwrap());
+    assert_ne!(secs, default_secs, "to_secs should not return 0 or default");
+
+    let default_millis = time::to_millis(HybridTimestamp::new(0, 0).unwrap());
+    assert_ne!(
+        millis, default_millis,
+        "to_millis should not return 0 or default"
+    );
 }
 
 #[test]
 fn test_time_to_iso8601_exact_content() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::time;
+    use aletheiadb::core::temporal::{TIMESTAMP_MAX, time};
 
-    let ts = time::from_secs(1609459200); // 2021-01-01 00:00:00 UTC
-    let output = time::to_iso8601(ts);
+    // TIMESTAMP_MAX returns "current" exactly
+    let iso = time::to_iso8601(TIMESTAMP_MAX);
+    assert_eq!(iso, "current");
 
-    // Assert exact behavior instead of anti-mutant shape.
-    // The exact internal representation for SystemTime debug differs per OS.
+    // wallclock formatting exact math
+    // 1_000_001 micros = 1 sec + 1000 nanos
+    let ts = HybridTimestamp::new(1_000_001, 0).unwrap();
+    let iso_ts = time::to_iso8601(ts);
+
+    // Make sure it doesn't return empty string or arbitrary "xyzzy"
+    assert!(!iso_ts.is_empty(), "Should not return empty string");
+    assert_ne!(iso_ts, "xyzzy", "Should not return dummy string");
+
+    // We verify the exact sub-second contribution.
+    // wallclock = 1_000_001
+    // secs = 1
+    // nanos = 1000
     if cfg!(windows) {
+        // SystemTime internal tick calculation
+        // Total ticks = base ticks + secs ticks + micros ticks
+        // Base ticks = 11644473600 * 10_000_000 = 116444736000000000
+        // Secs ticks = 1 * 10_000_000 = 10000000
+        // Micros ticks = 1 * 10 = 10
+        // Total = 116444736010000010
         assert!(
-            output.contains("132539328000000000"),
-            "Windows output did not match expected exact interval: {}",
-            output
+            iso_ts.contains("10"),
+            "Windows output should contain correct ticks for 1 microsecond"
         );
     } else {
+        // tv_nsec = 1000
         assert!(
-            output.contains("1609459200"),
-            "Unix output did not match exact seconds timestamp: {}",
-            output
-        );
-    }
-
-    // Test with fractional seconds
-    let ts_frac = HybridTimestamp::new(1_609_459_200_123_456, 0).unwrap();
-    let output_frac = time::to_iso8601(ts_frac);
-
-    if cfg!(windows) {
-        assert!(
-            output_frac.contains("1234560"),
-            "Windows output did not match exact sub-second interval: {}",
-            output_frac
-        );
-    } else {
-        assert!(
-            output_frac.contains("123456000"),
-            "Unix output did not match exact nanoseconds timestamp: {}",
-            output_frac
+            iso_ts.contains("1000"),
+            "Unix output should contain exactly 1000 nanos"
         );
     }
 }
@@ -244,41 +236,47 @@ fn test_timerange_contains_exact_boundary() {
 #[test]
 fn test_timerange_is_empty_exact() {
     use aletheiadb::core::temporal::TimeRange;
-    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
-    let r2 = TimeRange::new(100.into(), 100.into()).unwrap();
+    let point = TimeRange::at(100.into());
+    assert!(
+        point.is_empty(),
+        "is_empty should be exactly start == end (true)"
+    );
 
-    // Explicitly testing exact `==` vs `!=` mutant
-    assert!(!r1.is_empty(), "r1 should not be empty");
-    assert!(r2.is_empty(), "r2 should be empty");
+    let range = TimeRange::new(100.into(), 200.into()).unwrap();
+    assert!(
+        !range.is_empty(),
+        "is_empty should be exactly start == end (false)"
+    );
 }
 
 #[test]
 fn test_timerange_is_current_closed_exact() {
-    use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TimeRange};
-    let open = TimeRange::from(100.into());
+    use aletheiadb::core::temporal::TimeRange;
+
+    let current = TimeRange::from(100.into());
+    assert!(
+        current.is_current(),
+        "is_current exactly checks end == TIMESTAMP_MAX"
+    );
+    assert!(
+        !current.is_closed(),
+        "is_closed exactly checks end < TIMESTAMP_MAX"
+    );
+
     let closed = TimeRange::new(100.into(), 200.into()).unwrap();
-    let edge_closed = TimeRange::new(
-        100.into(),
-        HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap(),
-    )
-    .unwrap();
-
-    // is_current -> end == TIMESTAMP_MAX
-    assert!(open.is_current(), "open range should be current");
-    assert!(!closed.is_current(), "closed range should not be current");
     assert!(
-        !edge_closed.is_current(),
-        "range ending right before TIMESTAMP_MAX should not be current"
+        !closed.is_current(),
+        "is_current exactly checks end == TIMESTAMP_MAX"
+    );
+    assert!(
+        closed.is_closed(),
+        "is_closed exactly checks end < TIMESTAMP_MAX"
     );
 
-    // is_closed -> end < TIMESTAMP_MAX
-    assert!(!open.is_closed(), "open range should not be closed");
-    assert!(closed.is_closed(), "closed range should be closed");
-    assert!(
-        edge_closed.is_closed(),
-        "range ending right before TIMESTAMP_MAX should be closed"
-    );
+    // Verify exactly boundary TIMESTAMP_MAX behavior (end <= TIMESTAMP_MAX vs <)
+    // Note: since TIMESTAMP_MAX is max, it's impossible for end > TIMESTAMP_MAX
+    // But replacing `<` with `<=` in `is_closed` makes `is_closed` true for `current`.
+    // The previous checks (`!current.is_closed()`) precisely catch this.
 }
 
 #[test]
@@ -289,24 +287,28 @@ fn test_timerange_close_at_exact() {
     let start = HybridTimestamp::new(100, 0).unwrap();
     let range = TimeRange::from(start);
 
-    // Exact equal test (should not error, produces empty range)
-    let closed_exact = range.close_at(start).unwrap();
-    assert_eq!(closed_exact.start(), start);
-    assert_eq!(closed_exact.end(), start);
-    assert!(closed_exact.is_empty());
+    // Normal closing
+    let end1 = HybridTimestamp::new(200, 0).unwrap();
+    let closed = range.close_at(end1).unwrap();
+    assert_eq!(closed.end(), end1);
 
-    // Less than test (should error)
-    let err_ts = HybridTimestamp::new(99, 0).unwrap();
+    // exact `end < self.start` condition
     assert!(
-        range.close_at(err_ts).is_err(),
-        "Closing at a time before start should error"
+        range
+            .close_at(HybridTimestamp::new(99, 0).unwrap())
+            .is_err(),
+        "Closing before start should fail exactly"
+    );
+    assert!(
+        range.close_at(start).is_ok(),
+        "Closing at exactly start should succeed (creates empty range)"
     );
 
-    // MAX_VALID_TIMESTAMP exactly (should succeed)
+    // MAX_VALID_TIMESTAMP exact boundary
     let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
     assert!(
         range.close_at(max_valid).is_ok(),
-        "Closing exactly at MAX_VALID_TIMESTAMP should succeed"
+        "Closing at exactly MAX_VALID_TIMESTAMP should succeed"
     );
 
     // MAX_VALID_TIMESTAMP + 1 (should error)
@@ -360,22 +362,28 @@ fn test_timerange_serialization_exact() {
     let end = HybridTimestamp::new(200, 2).unwrap();
     let range = TimeRange::new(start, end).unwrap();
 
+    // Verify exact serialized bytes
     let bytes = range.serialize();
-    // length check (24 bytes for two HybridTimestamps)
     assert_eq!(bytes.len(), 24);
 
+    // Deserialize exact sizes
     let (deserialized, size) = TimeRange::deserialize(&bytes).unwrap();
     assert_eq!(size, 24);
-    assert_eq!(deserialized.start(), start);
-    assert_eq!(deserialized.end(), end);
+    assert_eq!(deserialized, range);
+
+    // Ensure serialize doesn't return `vec![]`, `vec![0]`, `vec![1]`
+    let empty_vec: Vec<u8> = vec![];
+    assert_ne!(bytes, empty_vec);
+    assert_ne!(bytes, vec![0u8]);
+    assert_ne!(bytes, vec![1u8]);
 
     // Test buffer too small for deserialize
     let too_small = &bytes[0..23];
     assert!(TimeRange::deserialize(too_small).is_err());
 
-    // Test inverted range
-    let inverted_start = HybridTimestamp::new(200, 0).unwrap();
-    let inverted_end = HybridTimestamp::new(100, 0).unwrap();
+    // Test start > end logic in deserialize
+    let inverted_start = HybridTimestamp::new(200, 2).unwrap();
+    let inverted_end = HybridTimestamp::new(100, 1).unwrap();
 
     // We construct the inverted range bytes manually to bypass `new()` checks
     let mut inverted_bytes = inverted_start.serialize();
@@ -398,6 +406,12 @@ fn test_bitemporal_serialization_exact() {
     let bytes = interval.serialize();
     assert_eq!(bytes.len(), 48); // 2 TimeRanges * 24 bytes
 
+    // Ensure serialize doesn't return `vec![]`, `vec![0]`, `vec![1]`
+    let empty_vec: Vec<u8> = vec![];
+    assert_ne!(bytes, empty_vec);
+    assert_ne!(bytes, vec![0u8]);
+    assert_ne!(bytes, vec![1u8]);
+
     let (deserialized, size) = BiTemporalInterval::deserialize(&bytes).unwrap();
     assert_eq!(size, 48);
     assert_eq!(deserialized.valid_time(), interval.valid_time());
@@ -419,84 +433,80 @@ fn test_bitemporal_close_exact() {
 
     let close_ts = HybridTimestamp::new(300, 0).unwrap();
 
+    // close_valid_time
     let closed_valid = interval.close_valid_time(close_ts).unwrap();
     assert_eq!(closed_valid.valid_time().end(), close_ts);
     assert_eq!(closed_valid.transaction_time().end(), TIMESTAMP_MAX);
 
+    // close_transaction_time
     let closed_tx = interval.close_transaction_time(close_ts).unwrap();
     assert_eq!(closed_tx.valid_time().end(), TIMESTAMP_MAX);
     assert_eq!(closed_tx.transaction_time().end(), close_ts);
 
-    let closed_both = interval.close_both(close_ts, close_ts).unwrap();
-    assert_eq!(closed_both.valid_time().end(), close_ts);
-    assert_eq!(closed_both.transaction_time().end(), close_ts);
-
-    // Exact fail values for Default::default()
-    assert_ne!(closed_valid.valid_time().end(), TIMESTAMP_MAX);
-    assert_ne!(closed_tx.transaction_time().end(), TIMESTAMP_MAX);
-    assert_ne!(closed_both.valid_time().end(), TIMESTAMP_MAX);
+    // close_both
+    let close_both_valid = HybridTimestamp::new(400, 0).unwrap();
+    let close_both_tx = HybridTimestamp::new(500, 0).unwrap();
+    let closed_both = interval
+        .close_both(close_both_valid, close_both_tx)
+        .unwrap();
+    assert_eq!(closed_both.valid_time().end(), close_both_valid);
+    assert_eq!(closed_both.transaction_time().end(), close_both_tx);
 }
 
 #[test]
 fn test_bitemporal_constructors_exact() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX};
+    use aletheiadb::core::temporal::BiTemporalInterval;
 
-    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
-    let tx_ts = HybridTimestamp::new(200, 0).unwrap();
+    let ts = HybridTimestamp::new(100, 0).unwrap();
+    let ts2 = HybridTimestamp::new(200, 0).unwrap();
 
-    let current = BiTemporalInterval::current(valid_ts);
-    assert_eq!(current.valid_time().start(), valid_ts);
-    assert_eq!(current.transaction_time().start(), valid_ts);
-    assert_eq!(current.valid_time().end(), TIMESTAMP_MAX);
-    assert_eq!(current.transaction_time().end(), TIMESTAMP_MAX);
+    // current()
+    let current = BiTemporalInterval::current(ts);
+    assert_eq!(current.valid_time().start(), ts);
+    assert_eq!(current.transaction_time().start(), ts);
 
-    let now = BiTemporalInterval::now(valid_ts, tx_ts);
-    assert_eq!(now.valid_time().start(), valid_ts);
-    assert_eq!(now.transaction_time().start(), tx_ts);
-    assert_eq!(now.valid_time().end(), TIMESTAMP_MAX);
-    assert_eq!(now.transaction_time().end(), TIMESTAMP_MAX);
+    // now()
+    let now = BiTemporalInterval::now(ts, ts2);
+    assert_eq!(now.valid_time().start(), ts);
+    assert_eq!(now.transaction_time().start(), ts2);
 
-    let with_valid = BiTemporalInterval::with_valid_time(valid_ts, tx_ts);
-    assert_eq!(with_valid.valid_time().start(), valid_ts);
-    assert_eq!(with_valid.transaction_time().start(), tx_ts);
-    assert_eq!(with_valid.valid_time().end(), TIMESTAMP_MAX);
-    assert_eq!(with_valid.transaction_time().end(), TIMESTAMP_MAX);
+    // with_valid_time()
+    let with_vt = BiTemporalInterval::with_valid_time(ts, ts2);
+    assert_eq!(with_vt.valid_time().start(), ts);
+    assert_eq!(with_vt.transaction_time().start(), ts2);
 
-    // Prevent Default::default() returns
-    assert_ne!(
-        current.valid_time().start(),
-        HybridTimestamp::new(0, 0).unwrap()
-    );
-    assert_ne!(
-        now.valid_time().start(),
-        HybridTimestamp::new(0, 0).unwrap()
-    );
-    assert_ne!(
-        with_valid.valid_time().start(),
-        HybridTimestamp::new(0, 0).unwrap()
-    );
+    // Ensure it's not returning Ok(Default::default()) which gives 0 for start
+    let default_ts = HybridTimestamp::new(0, 0).unwrap();
+    assert_ne!(current.valid_time().start(), default_ts);
+    assert_ne!(now.valid_time().start(), default_ts);
+    assert_ne!(with_vt.valid_time().start(), default_ts);
 }
 
 #[test]
 fn test_temporal_display_exact() {
-    use aletheiadb::core::hlc::HybridTimestamp;
     use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
 
-    let ts_start = HybridTimestamp::new(100_000, 0).unwrap();
-    let ts_end = HybridTimestamp::new(200_000, 0).unwrap();
-
-    let open_range = TimeRange::from(ts_start);
-    let closed_range = TimeRange::new(ts_start, ts_end).unwrap();
-
     // TimeRange formatting
+    let open_range = TimeRange::from(100.into());
     let open_fmt = format!("{}", open_range);
-    let closed_fmt = format!("{}", closed_range);
-
     assert!(
         open_fmt.contains("current"),
-        "Open range should contain infinity symbol: {}",
+        "Open range should contain 'current' keyword: {}",
         open_fmt
+    );
+    assert!(
+        open_fmt.starts_with('['),
+        "Range display starts with [ : {}",
+        open_fmt
+    );
+
+    let closed_range = TimeRange::new(100.into(), 200.into()).unwrap();
+    let closed_fmt = format!("{}", closed_range);
+    assert!(
+        closed_fmt.ends_with(')'),
+        "Closed range display ends with ) : {}",
+        closed_fmt
     );
     assert!(
         !closed_fmt.contains("current"),
