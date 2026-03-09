@@ -341,6 +341,13 @@ impl ShardCoordinator {
     }
 
     fn next_commit_timestamp(&self) -> Result<HybridTimestamp, DistributedTxError> {
+        self.next_commit_timestamp_internal(Instant::now())
+    }
+
+    fn next_commit_timestamp_internal(
+        &self,
+        observed_at: Instant,
+    ) -> Result<HybridTimestamp, DistributedTxError> {
         let mut frontier = self
             .commit_clock
             .lock()
@@ -350,7 +357,6 @@ impl ShardCoordinator {
 
         let current_wallclock = time::now();
         let self_heal_clock_skew = is_clock_skew_self_heal_enabled();
-        let observed_at = Instant::now();
         let adaptive_forward_limit_us = self.adaptive_forward_jump_limit_us(observed_at)?;
         let skew_decision = evaluate_clock_skew(
             current_wallclock.wallclock(),
@@ -1572,19 +1578,12 @@ mod tests {
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            // Fix for CI environments with < 1 hour uptime
-            match Instant::now().checked_sub(Duration::from_micros(idle_gap_us as u64)) {
-                Some(past_instant) => *observed_at = past_instant,
-                None => {
-                    println!(
-                        "Skipping test_next_commit_timestamp_allows_idle_forward_drift: System uptime insufficient for testing 1h+ idle gap."
-                    );
-                    return;
-                }
-            }
+            *observed_at = Instant::now();
         }
 
-        let result = coordinator.next_commit_timestamp();
+        let result = coordinator.next_commit_timestamp_internal(
+            Instant::now() + Duration::from_micros(idle_gap_us as u64),
+        );
         assert!(
             result.is_ok(),
             "normal idle time should not be treated as forward clock skew"
