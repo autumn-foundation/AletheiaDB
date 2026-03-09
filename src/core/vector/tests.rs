@@ -3078,7 +3078,9 @@ fn test_sparse_squared_euclidean_distance_edge_cases() {
         assert!(
             (dist_sq - case.expected).abs() < 1e-6 || (dist_sq == case.expected),
             "Test '{}' failed: expected {}, got {}",
-            case.name, case.expected, dist_sq
+            case.name,
+            case.expected,
+            dist_sq
         );
     }
 }
