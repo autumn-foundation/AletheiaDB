@@ -1872,9 +1872,7 @@ fn show_influences(demo: &DemoData, author_name: &str) -> Result<()> {
                     .db
                     .query()
                     .scan_label("Author")
-                    .rank_by_similarity_builder(style_vec, 6)
-                    .property("style_embedding")
-                    .finish()
+                    .rank_by_similarity_advanced(style_vec, 6, Some("style_embedding"))
                     .execute(&demo.db)?;
                 results.collect_nodes_with_scores()
             })?;

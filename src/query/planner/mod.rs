@@ -1695,9 +1695,12 @@ mod tests {
         let embedding = [0.1f32; 4];
         let query = QueryBuilder::new()
             .as_of(1000.into(), 2000.into())
-            .find_similar_builder(&embedding, 10)
-            .property("title_embedding")
-            .finish()
+            .find_similar_advanced(
+                &embedding,
+                10,
+                crate::index::vector::DistanceMetric::Cosine,
+                Some("title_embedding"),
+            )
             .build();
 
         let plan = planner.plan(query).unwrap();
