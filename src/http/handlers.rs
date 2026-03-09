@@ -290,21 +290,18 @@ async fn handle_create_node(
         None => crate::core::PropertyMap::new(),
     };
 
-    let result = web::block(move || match db.create_node(&label, props) {
-        Ok(node_id) => match db.get_node(node_id) {
-            Ok(node) => {
-                let props_json =
-                    property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
-                let node_json = json!({
-                    "id": node.id.as_u64(),
-                    "label": interned_to_string(node.label),
-                    "properties": props_json
-                });
-                Ok(node_json)
-            }
-            Err(e) => Err::<serde_json::Value, String>(e.to_string()),
-        },
-        Err(e) => Err::<serde_json::Value, String>(e.to_string()),
+    let result = web::block(move || {
+        let node_id = db.create_node(&label, props).map_err(|e| e.to_string())?;
+        let node = db.get_node(node_id).map_err(|e| e.to_string())?;
+
+        let props_json =
+            property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
+        let node_json = json!({
+            "id": node.id.as_u64(),
+            "label": interned_to_string(node.label),
+            "properties": props_json
+        });
+        Ok::<serde_json::Value, String>(node_json)
     })
     .await;
 
@@ -380,24 +377,20 @@ async fn handle_find_node(
             builder = builder.skip(skip);
         }
 
-        match builder.limit(limit_val).execute(&db) {
-            Ok(results) => {
-                let mut nodes = Vec::new();
-                for row in results.flatten() {
-                    if let crate::query::executor::EntityResult::Node(node) = row.entity {
-                        let props_json =
-                            property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
-                        nodes.push(json!({
-                            "id": node.id.as_u64(),
-                            "label": interned_to_string(node.label),
-                            "properties": props_json
-                        }));
-                    }
-                }
-                Ok(nodes)
+        let results = builder.limit(limit_val).execute(&db).map_err(|e| e.to_string())?;
+        let mut nodes = Vec::new();
+        for row in results.flatten() {
+            if let crate::query::executor::EntityResult::Node(node) = row.entity {
+                let props_json =
+                    property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
+                nodes.push(json!({
+                    "id": node.id.as_u64(),
+                    "label": interned_to_string(node.label),
+                    "properties": props_json
+                }));
             }
-            Err(e) => Err::<Vec<serde_json::Value>, String>(e.to_string()),
         }
+        Ok::<Vec<serde_json::Value>, String>(nodes)
     })
     .await;
 
@@ -462,28 +455,23 @@ async fn handle_find_neighbors(
             .take(limit_val);
 
         for neighbor_id in combined_iter {
-            match db.get_node(neighbor_id) {
-                Ok(node) => {
-                    let props_json =
-                        property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
-                    neighbors.push(json!({
-                        "id": node.id.as_u64(),
-                        "label": interned_to_string(node.label),
-                        "properties": props_json
-                    }));
-                }
-                Err(e) => {
-                    // Node ID found in edge but not in node index? Should be impossible unless corrupted
-                    return Err::<Vec<serde_json::Value>, String>(e.to_string());
-                }
-            }
+            // Node ID found in edge but not in node index? Should be impossible unless corrupted.
+            // Propagating error if it occurs.
+            let node = db.get_node(neighbor_id).map_err(|e| e.to_string())?;
+            let props_json =
+                property_map_to_json(&node.properties).map_err(|e| e.to_string())?;
+            neighbors.push(json!({
+                "id": node.id.as_u64(),
+                "label": interned_to_string(node.label),
+                "properties": props_json
+            }));
         }
-        Ok(neighbors)
+        Ok::<Vec<serde_json::Value>, String>(neighbors)
     })
     .await;
 
     match result {
-        Ok(Ok(neighbors)) => HttpResponse::Ok().json(ApiResponse::success(json!(neighbors))),
+        Ok(Ok::<Vec<serde_json::Value>, String>(neighbors)) => HttpResponse::Ok().json(ApiResponse::success(json!(neighbors))),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse::error(e)),
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string())),
     }
@@ -514,23 +502,18 @@ async fn handle_execute_query(
         };
 
         // 2. Execute the query
-        match db.execute_query(parsed_query) {
-            Ok(results) => {
-                // 3. Serialize results
-                let mut json_results = Vec::new();
-                for row_result in results {
-                    match row_result {
-                        Ok(row) => match query_row_to_json(row) {
-                            Ok(json) => json_results.push(json),
-                            Err(e) => return Err(e),
-                        },
-                        Err(e) => return Err(e.to_string()),
-                    }
-                }
-                Ok(json_results)
-            }
-            Err(e) => Err::<Vec<serde_json::Value>, String>(e.to_string()),
-        }
+        let results = db.execute_query(parsed_query).map_err(|e| e.to_string())?;
+
+        // 3. Serialize results with a strict limit to prevent OOM DOS
+        let max_results_limit = 10_000;
+
+        results
+            .take(max_results_limit)
+            .map(|row_result| {
+                let row = row_result.map_err(|e| e.to_string())?;
+                query_row_to_json(row)
+            })
+            .collect::<Result<Vec<_>, String>>()
     })
     .await;
 
