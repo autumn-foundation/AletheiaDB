@@ -99,9 +99,6 @@ impl<'a> Omen<'a> {
             None => return Ok(None),
         };
 
-        // Keep the read transaction alive for the duration of the historical scan
-        let _ = tx;
-
         // 2. Physics Math
         // Relative Position P = Pb - Pa (at t=0, which is window.end)
         let rel_pos: Vec<f32> = pos_b.iter().zip(pos_a.iter()).map(|(b, a)| b - a).collect();

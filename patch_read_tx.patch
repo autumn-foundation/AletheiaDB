@@ -1,0 +1,11 @@
+--- src/api/transaction/read_tx.rs
++++ src/api/transaction/read_tx.rs
+@@ -67,7 +67,7 @@
+     ) -> Self {
+         ReadTransaction {
+             tx_id,
+-            start_timestamp: time::now(),
++            start_timestamp: snapshot.snapshot_timestamp,
+             snapshot,
+             current,
+             visibility_manager,
