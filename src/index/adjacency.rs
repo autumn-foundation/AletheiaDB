@@ -106,7 +106,7 @@ impl AdjacencyIndex {
 
         // Zero-copy conversion: NodeId(u64) has same layout as u64
         // SAFETY: NodeId is #[repr(transparent)] wrapper around u64.
-        let node_ids_typed: Vec<NodeId> = unsafe { Self::transmute_vec(node_ids) };
+        let node_ids_typed: Vec<NodeId> = bytemuck::cast_vec(node_ids);
 
         // Convert offsets (zero-copy on 64-bit, allocating on 32-bit)
         let offsets_usize = Self::convert_offsets(offsets);
@@ -350,29 +350,13 @@ impl AdjacencyIndex {
         #[cfg(target_pointer_width = "64")]
         {
             // SAFETY: usize == u64 on 64-bit platforms, so layout is compatible.
-            unsafe { Self::transmute_vec(offsets) }
+            bytemuck::cast_vec(offsets)
         }
 
         #[cfg(not(target_pointer_width = "64"))]
         {
             offsets.iter().map(|&x| x as usize).collect()
         }
-    }
-
-    /// Helper for zero-copy Vec conversion
-    ///
-    /// # Safety
-    /// T and U must have same layout, size, and alignment.
-    unsafe fn transmute_vec<T, U>(v: Vec<T>) -> Vec<U> {
-        // Enforce safety invariants at compile time/runtime
-        assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<U>());
-        assert_eq!(std::mem::align_of::<T>(), std::mem::align_of::<U>());
-
-        let mut v = std::mem::ManuallyDrop::new(v);
-        // SAFETY: Caller ensures T and U layout compatibility.
-        // from_raw_parts is unsafe, but we are inside an unsafe function.
-        // In Rust 2024 (and newer editions), unsafe blocks are required inside unsafe functions.
-        unsafe { Vec::from_raw_parts(v.as_mut_ptr() as *mut U, v.len(), v.capacity()) }
     }
 }
 
@@ -785,7 +769,7 @@ mod tests {
 
         // Use NodeId which is transparent wrapper around u64
         // SAFETY: NodeId is repr(transparent) and same size/align as u64
-        let transmuted: Vec<NodeId> = unsafe { AdjacencyIndex::transmute_vec(original) };
+        let transmuted: Vec<NodeId> = bytemuck::cast_vec(original);
 
         assert_eq!(transmuted.len(), 3);
         assert_eq!(transmuted.capacity(), cap);

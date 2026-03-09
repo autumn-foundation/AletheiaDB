@@ -33,3 +33,7 @@
 2024-XX-XX - [Warden: CSR Adjacency Index Vulnerability]
 **Threat:** `AdjacencyIndex::import_csr` did not validate that `node_ids` is sorted, and did not validate that `offsets` is monotonically increasing. It also didn't validate that the first offset is `0`. This allows a maliciously constructed CSR payload to cause OOB reads (Denial of Service) when `get_adjacency` is called, due to `start > end` or `end > edges.len()` when slicing the `edges` array.
 **Defense:** Added rigorous validation in `validate_csr_invariants` to ensure `node_ids` is strictly sorted (no duplicates), `offsets` begins with `0`, and is monotonically increasing.
+
+**2026-03-09 - Replaced unsafe Vec transmutation with bytemuck**
+**Threat:** `AdjacencyIndex::transmute_vec` used `unsafe` `Vec::from_raw_parts` for zero-copy conversions between `u64` and `NodeId`/`usize`. Incorrect usage or type changes could lead to severe memory safety issues like Undefined Behavior (UB), dangling pointers, or buffer overflows.
+**Defense:** Added `bytemuck::Pod` and `bytemuck::Zeroable` to `NodeId`, replacing the custom `unsafe fn transmute_vec` with the community-standard `bytemuck::cast_vec`. This guarantees memory-safe zero-copy transmutations at compile time/runtime and removes unnecessary `unsafe` code.
