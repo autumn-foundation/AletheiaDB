@@ -3015,3 +3015,70 @@ fn test_simd_mismatched_lengths_safety() {
         );
     }
 }
+
+#[test]
+fn test_sparse_squared_euclidean_distance_edge_cases() {
+    struct TestCase {
+        name: &'static str,
+        a_indices: Vec<u32>,
+        a_values: Vec<f32>,
+        b_indices: Vec<u32>,
+        b_values: Vec<f32>,
+        expected: f32,
+    }
+
+    let cases = vec![
+        TestCase {
+            name: "Both zero vectors",
+            a_indices: vec![],
+            a_values: vec![],
+            b_indices: vec![],
+            b_values: vec![],
+            expected: 0.0,
+        },
+        TestCase {
+            name: "Negative overlapping values",
+            a_indices: vec![0, 2],
+            a_values: vec![-1.0, -2.0],
+            b_indices: vec![0, 2],
+            b_values: vec![-1.0, -2.0],
+            expected: 0.0,
+        },
+        TestCase {
+            name: "Orthogonal vectors",
+            a_indices: vec![0, 1],
+            a_values: vec![1.0, 2.0],
+            b_indices: vec![2, 3],
+            b_values: vec![3.0, 4.0],
+            expected: 1.0 + 4.0 + 9.0 + 16.0, // 30.0
+        },
+        TestCase {
+            name: "Negative and positive vectors",
+            a_indices: vec![0, 1],
+            a_values: vec![1.0, -1.0],
+            b_indices: vec![0, 1],
+            b_values: vec![-1.0, 1.0],
+            expected: 4.0 + 4.0, // 8.0
+        },
+        TestCase {
+            name: "Subnormal values",
+            a_indices: vec![0],
+            a_values: vec![f32::MIN_POSITIVE],
+            b_indices: vec![0],
+            b_values: vec![-f32::MIN_POSITIVE],
+            expected: (2.0 * f32::MIN_POSITIVE) * (2.0 * f32::MIN_POSITIVE),
+        },
+    ];
+
+    for case in cases {
+        let a = SparseVec::new(case.a_indices, case.a_values, 10).unwrap();
+        let b = SparseVec::new(case.b_indices, case.b_values, 10).unwrap();
+
+        let dist_sq = sparse_squared_euclidean_distance(&a, &b).unwrap();
+        assert!(
+            (dist_sq - case.expected).abs() < 1e-6 || (dist_sq == case.expected),
+            "Test '{}' failed: expected {}, got {}",
+            case.name, case.expected, dist_sq
+        );
+    }
+}
