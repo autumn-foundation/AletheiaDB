@@ -67,10 +67,35 @@ pub struct AdjacencyIndex {
 impl AdjacencyIndex {
     /// Export CSR data for persistence.
     ///
-    /// Returns (node_ids, offsets, edge_ids) where:
-    /// - node_ids: sorted array of node IDs that have outgoing edges
-    /// - offsets: offset array for CSR format
-    /// - edge_ids: flat array of edge IDs
+    /// The CSR structure is decomposed into three raw arrays suitable for fast
+    /// binary serialization to disk. This is heavily utilized by the persistence
+    /// engine to avoid serializing rust-specific enum wrappers or iterating over
+    /// complex graphs.
+    ///
+    /// Returns a tuple `(node_ids, offsets, edge_ids)` where:
+    /// - `node_ids`: Sorted array of `NodeId`s that have outgoing edges.
+    /// - `offsets`: The CSR offset array defining edge boundaries per node.
+    /// - `edge_ids`: Flat array of all outgoing `EdgeId`s in traversal order.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label)
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// let (nodes, offsets, edges_out) = index.export_csr();
+    ///
+    /// assert_eq!(nodes, vec![1]);
+    /// assert_eq!(offsets, vec![0, 1]);
+    /// assert_eq!(edges_out, vec![100]);
+    /// ```
     pub fn export_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         let node_ids = self.node_ids.iter().map(|n| n.as_u64()).collect();
         let offsets = self.offsets.iter().map(|&x| x as u64).collect();
@@ -80,11 +105,45 @@ impl AdjacencyIndex {
 
     /// Import CSR data from persistence, reconstructing adjacency entries from edges.
     ///
+    /// Re-hydrates a CSR structure from its raw binary components. This reconstructs
+    /// the full `AdjacencyEntry` data by looking up the edge metadata (target, label)
+    /// in the provided `edges_map`.
+    ///
+    /// This method is highly optimized and performs zero-copy vector transmutations
+    /// where possible (such as on 64-bit systems converting `u64` to `usize`).
+    ///
     /// # Arguments
-    /// * `node_ids` - Sorted array of node IDs that have outgoing edges
-    /// * `offsets` - CSR offset array
-    /// * `edge_ids` - Flat array of edge IDs
-    /// * `edges_map` - Map from edge ID to (target, label) for reconstruction
+    /// * `node_ids` - Sorted array of node IDs that have outgoing edges.
+    /// * `offsets` - CSR offset array defining edge boundaries per node.
+    /// * `edge_ids` - Flat array of edge IDs corresponding to the offsets.
+    /// * `edges_map` - Map from `EdgeId` to `(target, label)` for full reconstruction.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if the provided CSR invariants are violated (e.g., offsets array length mismatch,
+    /// non-monotonic sequences, or invalid bounds) to prevent corrupted database state.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::hasher::IdentityHasher;
+    /// use std::collections::HashMap;
+    /// use std::hash::BuildHasherDefault;
+    ///
+    /// let nodes = vec![1];
+    /// let offsets = vec![0, 1];
+    /// let edge_ids = vec![100];
+    ///
+    /// let mut edge_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// edge_map.insert(EdgeId::new_unchecked(100), (NodeId::new_unchecked(2), label));
+    ///
+    /// let index = AdjacencyIndex::import_csr(nodes, offsets, edge_ids, &edge_map);
+    /// assert_eq!(index.edge_count(), 1);
+    /// ```
     pub fn import_csr(
         node_ids: Vec<u64>,
         offsets: Vec<u64>,
@@ -139,6 +198,19 @@ impl AdjacencyIndex {
 
 impl AdjacencyIndex {
     /// Create a new empty adjacency index.
+    ///
+    /// Initializes an empty CSR structure that allocates no heap memory until
+    /// edges are explicitly added via building or importing.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::index::AdjacencyIndex;
+    ///
+    /// let index = AdjacencyIndex::new();
+    /// assert_eq!(index.node_count(), 0);
+    /// assert_eq!(index.edge_count(), 0);
+    /// ```
     pub fn new() -> Self {
         AdjacencyIndex {
             node_ids: Vec::new(),
@@ -150,10 +222,31 @@ impl AdjacencyIndex {
 
     /// Build an adjacency index from a list of edges.
     ///
-    /// Edges should be provided as (source, target, edge_id, label) tuples.
+    /// Accepts a flat list of edges and dynamically constructs the sparse CSR representation.
+    /// The input is automatically sorted in parallel by `(source, target, edge_id)` to ensure
+    /// deterministic adjacency lists and correct offset calculation.
     ///
-    /// This uses a sparse representation: only nodes with outgoing edges are stored,
-    /// making it efficient even with large gaps in node IDs (O(num_nodes) instead of O(max_node_id)).
+    /// Edges should be provided as `(source, target, edge_id, label)` tuples.
+    ///
+    /// This uses a sparse representation: only nodes with outgoing edges are stored. This makes
+    /// it extremely memory efficient even with large gaps in node IDs (O(num_nodes) instead of O(max_node_id)).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label),
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(3), EdgeId::new_unchecked(101), label),
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// assert_eq!(index.degree(NodeId::new_unchecked(1)), 2);
+    /// ```
     pub fn build(mut edges: Vec<(NodeId, NodeId, EdgeId, InternedString)>) -> Self {
         if edges.is_empty() {
             return Self::new();
@@ -213,11 +306,33 @@ impl AdjacencyIndex {
 
     /// Get the adjacency list for a node.
     ///
-    /// Returns a slice of adjacency entries for the given node.
+    /// Returns a sequential, cache-friendly slice of all outgoing edges originating
+    /// from the specified node. Because the CSR edges are stored contiguously, iterating
+    /// through this slice ensures near-zero cache misses during graph traversal.
+    ///
     /// Returns an empty slice if the node has no outgoing edges.
     ///
-    /// This uses binary search to locate the node, providing O(log n) lookup
-    /// where n is the number of nodes with outgoing edges.
+    /// This uses a fast binary search over the sparse `node_ids` array to locate the node,
+    /// providing O(log n) lookup time where `n` is the number of nodes with outgoing edges.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label)
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// let adj = index.get_adjacency(NodeId::new_unchecked(1));
+    ///
+    /// assert_eq!(adj.len(), 1);
+    /// assert_eq!(adj[0].target, NodeId::new_unchecked(2));
+    /// ```
     #[inline]
     pub fn get_adjacency(&self, node: NodeId) -> &[AdjacencyEntry] {
         // Binary search to find the node's index in node_ids
@@ -236,7 +351,30 @@ impl AdjacencyIndex {
 
     /// Get outgoing edges for a node with a specific label.
     ///
-    /// Returns an iterator over adjacency entries that match the label.
+    /// Performs an `O(log N) + O(E)` traversal where `N` is the number of nodes with
+    /// outgoing edges, and `E` is the degree of the given node. It yields an iterator
+    /// over only the adjacency entries that possess the specified `InternedString` label.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let follows = GLOBAL_INTERNER.intern("FOLLOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), knows),
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(3), EdgeId::new_unchecked(101), follows),
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// let knows_edges: Vec<_> = index.get_adjacency_with_label(NodeId::new_unchecked(1), knows).collect();
+    ///
+    /// assert_eq!(knows_edges.len(), 1);
+    /// assert_eq!(knows_edges[0].target, NodeId::new_unchecked(2));
+    /// ```
     pub fn get_adjacency_with_label(
         &self,
         node: NodeId,
@@ -248,24 +386,96 @@ impl AdjacencyIndex {
     }
 
     /// Get the number of outgoing edges for a node (out-degree).
+    ///
+    /// Determines how many edges originate from this node. This relies on the
+    /// same O(log N) binary search as `get_adjacency` to calculate the slice length.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label)
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// assert_eq!(index.degree(NodeId::new_unchecked(1)), 1);
+    /// assert_eq!(index.degree(NodeId::new_unchecked(99)), 0);
+    /// ```
     #[inline]
     pub fn degree(&self, node: NodeId) -> usize {
         self.get_adjacency(node).len()
     }
 
     /// Check if a node has any outgoing edges.
+    ///
+    /// Fast boolean check to see if traversing out of this node is possible.
+    /// This is equivalent to `degree(node) > 0`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label)
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// assert!(index.has_edges(NodeId::new_unchecked(1)));
+    /// assert!(!index.has_edges(NodeId::new_unchecked(99)));
+    /// ```
     #[inline]
     pub fn has_edges(&self, node: NodeId) -> bool {
         self.degree(node) > 0
     }
 
     /// Get total number of edges in the index.
+    ///
+    /// Returns the exact size of the underlying flat CSR edges array.
+    /// Because the array is flat, this is an O(1) operation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::index::AdjacencyIndex;
+    ///
+    /// let index = AdjacencyIndex::new();
+    /// assert_eq!(index.edge_count(), 0);
+    /// ```
     #[inline]
     pub fn edge_count(&self) -> usize {
         self.edges.len()
     }
 
     /// Get the maximum node ID in this index.
+    ///
+    /// Returns the highest numerical `NodeId` encountered across both edge
+    /// sources and targets during construction. This is an O(1) operation
+    /// heavily utilized by the execution engine for query bounds checking.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(500), EdgeId::new_unchecked(100), label)
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// assert_eq!(index.max_node_id(), 500);
+    /// ```
     #[inline]
     pub fn max_node_id(&self) -> u64 {
         self.max_node_id
@@ -273,14 +483,60 @@ impl AdjacencyIndex {
 
     /// Iterate over all nodes that have outgoing edges.
     ///
-    /// This is efficient for sparse graphs as it only yields nodes
-    /// that actually have edges, not all possible node IDs.
+    /// Yields a stream of `NodeId`s representing every unique source node in the graph.
+    ///
+    /// This is extremely efficient for sparse graphs as it only yields nodes
+    /// that actually have outgoing edges, completely bypassing "gaps" or deleted nodes
+    /// that would otherwise be traversed if checking `0..max_node_id`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(10), NodeId::new_unchecked(20), EdgeId::new_unchecked(100), label),
+    ///     (NodeId::new_unchecked(99), NodeId::new_unchecked(20), EdgeId::new_unchecked(101), label),
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// let nodes: Vec<_> = index.iter_nodes().collect();
+    ///
+    /// // Only nodes with outgoing edges are yielded!
+    /// assert_eq!(nodes, vec![NodeId::new_unchecked(10), NodeId::new_unchecked(99)]);
+    /// ```
     #[inline]
     pub fn iter_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.node_ids.iter().copied()
     }
 
     /// Get the number of nodes with outgoing edges.
+    ///
+    /// Returns the exact size of the underlying CSR `node_ids` array.
+    /// Because the array only stores source nodes, this reflects the number
+    /// of unique nodes with an out-degree > 0. This is an O(1) operation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::id::{NodeId, EdgeId};
+    /// use aletheiadb::index::AdjacencyIndex;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    /// let edges = vec![
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(2), EdgeId::new_unchecked(100), label),
+    ///     (NodeId::new_unchecked(1), NodeId::new_unchecked(3), EdgeId::new_unchecked(101), label),
+    /// ];
+    ///
+    /// let index = AdjacencyIndex::build(edges);
+    /// // Even though there are 2 edges and 3 total unique nodes involved,
+    /// // only 1 node is a source node!
+    /// assert_eq!(index.node_count(), 1);
+    /// ```
     #[inline]
     pub fn node_count(&self) -> usize {
         self.node_ids.len()
