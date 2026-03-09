@@ -1211,7 +1211,7 @@ mod coverage_misc_tests {
                 return Ok(0);
             }
 
-            // Fix: buffer might be larger than data source, so verify bounds
+            // buffer might be larger than data source, so verify bounds
             buf[..to_read].copy_from_slice(&self.data[self.cursor..self.cursor + to_read]);
             self.cursor += to_read;
             Ok(to_read)
