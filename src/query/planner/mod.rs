@@ -103,12 +103,16 @@ impl QueryPlanner {
     /// # Examples
     ///
     /// ```rust
-    /// use std::sync::Arc;
-    /// use aletheiadb::query::planner::{QueryPlanner, Statistics};
-    /// use aletheiadb::storage::CurrentStorage;
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::query::planner::{QueryPlanner, Statistics};
+    /// # use aletheiadb::storage::CurrentStorage;
+    /// # fn main() {
+    /// let storage = Arc::new(CurrentStorage::new());
+    /// let stats = Arc::new(Statistics::default());
     ///
     /// // Initialize the planner with statistics and storage references
-    /// let _planner = QueryPlanner::new(Arc::new(Statistics::default()), Arc::new(CurrentStorage::new()));
+    /// let planner = QueryPlanner::new(stats, storage);
+    /// # }
     /// ```
     #[must_use]
     pub fn new(stats: Arc<Statistics>, storage: Arc<CurrentStorage>) -> Self {
@@ -154,7 +158,11 @@ impl QueryPlanner {
     /// let planner = QueryPlanner::new(Arc::new(Statistics::default()), Arc::new(CurrentStorage::new()));
     ///
     /// // 2. Build a query
-    /// let query = QueryBuilder::new().start(NodeId::new(1).unwrap()).traverse("KNOWS").filter(aletheiadb::query::ir::Predicate::eq("name", "Alice")).build();
+    /// let query = QueryBuilder::new()
+    ///     .start(NodeId::new(1).unwrap())
+    ///     .traverse("KNOWS")
+    ///     .filter(aletheiadb::query::ir::Predicate::eq("name", "Alice"))
+    ///     .build();
     ///
     /// // 3. Plan the query
     /// if let Ok(physical_plan) = planner.plan(query) {

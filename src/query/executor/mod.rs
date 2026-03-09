@@ -114,13 +114,17 @@ impl QueryExecutor {
     /// # Examples
     ///
     /// ```rust
-    /// use std::sync::Arc;
-    /// use parking_lot::RwLock;
-    /// use aletheiadb::storage::CurrentStorage;
-    /// use aletheiadb::storage::historical::HistoricalStorage;
-    /// use aletheiadb::query::executor::QueryExecutor;
+    /// # use std::sync::Arc;
+    /// # use parking_lot::RwLock;
+    /// # use aletheiadb::storage::CurrentStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::query::executor::QueryExecutor;
+    /// # fn main() {
+    /// let current = Arc::new(CurrentStorage::new());
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
     ///
-    /// let _executor = QueryExecutor::new(Arc::new(CurrentStorage::new()), Arc::new(RwLock::new(HistoricalStorage::new())));
+    /// let executor = QueryExecutor::new(current, historical);
+    /// # }
     /// ```
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
@@ -171,17 +175,19 @@ impl QueryExecutor {
     /// # Examples
     ///
     /// ```rust
-    /// use std::sync::Arc;
-    /// use parking_lot::RwLock;
-    /// use aletheiadb::storage::current::CurrentStorage;
-    /// use aletheiadb::storage::historical::HistoricalStorage;
-    /// use aletheiadb::query::{QueryExecutor, PhysicalPlan};
-    /// use aletheiadb::query::planner::PhysicalOp;
-    ///
+    /// # use std::sync::Arc;
+    /// # use parking_lot::RwLock;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+    /// # use aletheiadb::query::planner::PhysicalOp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // 1. Setup storage and executor
-    /// let executor = QueryExecutor::new(Arc::new(CurrentStorage::new()), Arc::new(RwLock::new(HistoricalStorage::new())));
+    /// let current = Arc::new(CurrentStorage::new());
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let executor = QueryExecutor::new(current, historical);
     ///
-    /// // 2. Create a physical plan
+    /// // 2. Create a physical plan (Using Empty for example simplicity)
     /// let plan = PhysicalPlan {
     ///     root: PhysicalOp::Empty,
     ///     estimated_cost: Default::default(),
@@ -191,9 +197,12 @@ impl QueryExecutor {
     /// };
     ///
     /// // 3. Execute and iterate
-    /// for row in executor.execute(plan).unwrap() {
+    /// let results = executor.execute(plan)?;
+    /// for row in results {
     ///     println!("Got row: {:?}", row);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;
