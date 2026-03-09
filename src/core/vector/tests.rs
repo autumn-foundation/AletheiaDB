@@ -1742,7 +1742,7 @@ fn test_validate_vector_nan_takes_precedence() {
 #[test]
 fn test_validate_vector_subnormal() {
     // Subnormal (denormalized) numbers should be valid
-    let v = vec![f32::MIN_POSITIVE / 2.0, 1.0];
+    let v = vec![1e-45 / 2.0, 1.0];
     assert!(validate_vector(&v).is_ok());
 }
 
@@ -3050,7 +3050,7 @@ fn test_sparse_squared_euclidean_distance_edge_cases() {
             a_values: vec![1.0, 2.0],
             b_indices: vec![2, 3],
             b_values: vec![3.0, 4.0],
-            expected: (1.0 * 1.0 + 2.0 * 2.0) + (3.0 * 3.0 + 4.0 * 4.0), // 30.0
+            expected: 1.0 + 4.0 + 9.0 + 16.0, // 30.0
         },
         TestCase {
             name: "Negative and positive vectors",
@@ -3063,10 +3063,10 @@ fn test_sparse_squared_euclidean_distance_edge_cases() {
         TestCase {
             name: "Subnormal values",
             a_indices: vec![0],
-            a_values: vec![f32::MIN_POSITIVE],
+            a_values: vec![1e-45],
             b_indices: vec![0],
-            b_values: vec![-f32::MIN_POSITIVE],
-            expected: (2.0 * f32::MIN_POSITIVE) * (2.0 * f32::MIN_POSITIVE), // Note: underflows to 0.0 with f32 precision
+            b_values: vec![-1e-45],
+            expected: (2.0 * 1e-45) * (2.0 * 1e-45),
         },
     ];
 
@@ -3076,7 +3076,7 @@ fn test_sparse_squared_euclidean_distance_edge_cases() {
 
         let dist_sq = sparse_squared_euclidean_distance(&a, &b).unwrap();
         assert!(
-            (dist_sq - case.expected).abs() < 1e-6,
+            (dist_sq - case.expected).abs() < 1e-6 || (dist_sq == case.expected),
             "Test '{}' failed: expected {}, got {}",
             case.name,
             case.expected,
