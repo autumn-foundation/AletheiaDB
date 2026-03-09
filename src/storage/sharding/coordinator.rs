@@ -1573,17 +1573,17 @@ mod tests {
             *frontier = crate::core::hlc::HybridTimestamp::new(old_wallclock, 0).unwrap();
         }
 
+        let now = Instant::now();
         {
             let mut observed_at = coordinator
                 .commit_clock_observed_at
                 .lock()
                 .expect("commit_clock_observed_at lock should be available");
-            *observed_at = Instant::now();
+            *observed_at = now;
         }
 
-        let result = coordinator.next_commit_timestamp_internal(
-            Instant::now() + Duration::from_micros(idle_gap_us as u64),
-        );
+        let result = coordinator
+            .next_commit_timestamp_internal(now + Duration::from_micros(idle_gap_us as u64));
         assert!(
             result.is_ok(),
             "normal idle time should not be treated as forward clock skew"
