@@ -80,3 +80,4 @@ test_output_*.txt
 mutants.out/
 mutants.out.old/
 echo_project/
+temp_echo_test

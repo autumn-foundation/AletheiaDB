@@ -427,7 +427,7 @@ let embedding = vec![0.1f32; 384];
 
 // Store node with embedding - automatically indexed!
 // Note: We convert the vector to a slice for the properties! macro
-let doc_id = db.create_node("Document",
+let _doc_id = db.create_node("Document",
     properties! {
         "title" => "Introduction to Rust",
         "embedding" => &embedding[..],
@@ -513,8 +513,7 @@ See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** f
 ```rust
 use aletheiadb::prelude::*;
 use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-use aletheiadb::index::vector::temporal::{DriftMetric, TemporalVectorConfig, SnapshotStrategy};
-use aletheiadb::core::temporal::TimeRange;
+use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
 
 let db = AletheiaDB::new().unwrap();
 
@@ -782,7 +781,7 @@ For complex operations involving multiple updates, use explicit transactions.
 use aletheiadb::prelude::*;
 
 // Explicit read transaction
-let result = db.read(|tx| {
+let _result = db.read(|tx| {
     tx.get_node(alice_id).map(|node| node.label.clone())
 })?;
 
@@ -872,7 +871,7 @@ fn main() {
     let config = observability::Config::from_env();
     observability::init(config);
 
-    let db = aletheiadb::AletheiaDB::new().unwrap();
+    let _db = aletheiadb::AletheiaDB::new().unwrap();
 
     // Metrics automatically collected
     // Check for critical errors
