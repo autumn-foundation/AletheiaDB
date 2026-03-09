@@ -11,7 +11,7 @@ use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyValue;
-use crate::core::temporal::time;
+
 use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
@@ -67,7 +67,7 @@ impl ReadTransaction {
     ) -> Self {
         ReadTransaction {
             tx_id,
-            start_timestamp: time::now(),
+            start_timestamp: snapshot.snapshot_timestamp,
             snapshot,
             current,
             visibility_manager,
@@ -317,6 +317,7 @@ mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
+
     use parking_lot::RwLock;
     use std::collections::HashSet;
     use std::sync::Arc;
