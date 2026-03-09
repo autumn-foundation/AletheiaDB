@@ -120,10 +120,7 @@ impl QueryExecutor {
     /// use aletheiadb::storage::historical::HistoricalStorage;
     /// use aletheiadb::query::executor::QueryExecutor;
     ///
-    /// let current = Arc::new(CurrentStorage::new());
-    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-    ///
-    /// let executor = QueryExecutor::new(current, historical);
+    /// let _executor = QueryExecutor::new(Arc::new(CurrentStorage::new()), Arc::new(RwLock::new(HistoricalStorage::new())));
     /// ```
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
@@ -168,7 +165,7 @@ impl QueryExecutor {
     /// # Errors
     ///
     /// Returns a [`Result`] containing the lazy [`QueryResults`] iterator on success.
-    /// Returns an [`Error`] if initializing an iterator node fails (e.g. asking for a
+    /// Returns an error if initializing an iterator node fails (e.g. asking for a
     /// search index algorithm not supported by the current build).
     ///
     /// # Examples
@@ -182,24 +179,19 @@ impl QueryExecutor {
     /// use aletheiadb::query::planner::PhysicalOp;
     ///
     /// // 1. Setup storage and executor
-    /// let current = Arc::new(CurrentStorage::new());
-    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-    /// let executor = QueryExecutor::new(current, historical);
+    /// let executor = QueryExecutor::new(Arc::new(CurrentStorage::new()), Arc::new(RwLock::new(HistoricalStorage::new())));
     ///
-    /// // 2. Create a physical plan (usually done by planner)
+    /// // 2. Create a physical plan
     /// let plan = PhysicalPlan {
-    ///     root: PhysicalOp::Empty, // Using Empty for example simplicity
+    ///     root: PhysicalOp::Empty,
     ///     estimated_cost: Default::default(),
     ///     temporal_context: None,
     ///     parallel: false,
     ///     include_provenance: true,
     /// };
     ///
-    /// // 3. Execute
-    /// let results = executor.execute(plan).unwrap();
-    ///
-    /// // 4. Iterate
-    /// for row in results {
+    /// // 3. Execute and iterate
+    /// for row in executor.execute(plan).unwrap() {
     ///     println!("Got row: {:?}", row);
     /// }
     /// ```

@@ -107,11 +107,8 @@ impl QueryPlanner {
     /// use aletheiadb::query::planner::{QueryPlanner, Statistics};
     /// use aletheiadb::storage::CurrentStorage;
     ///
-    /// let storage = Arc::new(CurrentStorage::new());
-    /// let stats = Arc::new(Statistics::default());
-    ///
     /// // Initialize the planner with statistics and storage references
-    /// let planner = QueryPlanner::new(stats, storage);
+    /// let _planner = QueryPlanner::new(Arc::new(Statistics::default()), Arc::new(CurrentStorage::new()));
     /// ```
     #[must_use]
     pub fn new(stats: Arc<Statistics>, storage: Arc<CurrentStorage>) -> Self {
@@ -154,30 +151,20 @@ impl QueryPlanner {
     /// use aletheiadb::core::NodeId;
     ///
     /// // 1. Setup dependencies
-    /// let storage = Arc::new(CurrentStorage::new());
-    /// let stats = Arc::new(Statistics::default());
-    /// let planner = QueryPlanner::new(stats, storage);
+    /// let planner = QueryPlanner::new(Arc::new(Statistics::default()), Arc::new(CurrentStorage::new()));
     ///
     /// // 2. Build a query
-    /// let query = QueryBuilder::new()
-    ///     .start(NodeId::new(1).unwrap())
-    ///     .traverse("KNOWS")
-    ///     .filter(aletheiadb::query::ir::Predicate::eq("name", "Alice"))
-    ///     .build();
+    /// let query = QueryBuilder::new().start(NodeId::new(1).unwrap()).traverse("KNOWS").filter(aletheiadb::query::ir::Predicate::eq("name", "Alice")).build();
     ///
     /// // 3. Plan the query
-    /// match planner.plan(query) {
-    ///     Ok(physical_plan) => {
-    ///         println!("Plan created with cost: {:?}", physical_plan.estimated_cost);
-    ///         // Pass physical_plan to Executor...
-    ///     }
-    ///     Err(e) => eprintln!("Planning failed: {}", e),
+    /// if let Ok(physical_plan) = planner.plan(query) {
+    ///     println!("Plan created with cost: {:?}", physical_plan.estimated_cost);
     /// }
     /// ```
     ///
     /// # Errors
     ///
-    /// Returns a [`Result`] containing the [`PhysicalPlan`] on success, or an [`Error`] if:
+    /// Returns a [`Result`] containing the [`PhysicalPlan`] on success, or an error if:
     /// - **Validation Error:** The query contains invalid syntax or references non-existent entities.
     /// - **Missing Index:** A required index is missing (e.g., attempting a vector search without an enabled vector index).
     /// - **Internal Error:** An internal planning error occurs during optimization.
