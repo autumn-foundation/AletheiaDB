@@ -29,3 +29,12 @@ No high-severity findings.
 
 ### Residual risks
 - `IdGenerator::current_approximate()` operates with `Ordering::Relaxed` memory synchronization to achieve extreme performance (~1ns). This makes it unsuitable for any critical snapshot isolation logic and strictly limits its safe usage to non-critical metrics and logging, which is well-documented but represents a slight structural misuse risk.
+No high-severity findings.
+
+### Test gaps
+- While tests ensure that dimension mismatches and cycles are handled, there are no tests specifically covering very deep paths (approaching `max_depth` limits) and checking for correct early termination behavior based *solely* on `max_depth` when a valid path might otherwise exist further down.
+- No tests cover `IdentityHasher` edge-case interactions when extremely large or colliding IDs (e.g., from `u64::MAX` to `u64::MAX - 10`) are explicitly inserted into the `HashMap` to verify there are no hidden hash collisions inside the A* queue itself.
+
+### Residual risks
+- By switching from `SipHash` to `BuildHasherDefault<IdentityHasher>`, the `HashMap` becomes technically vulnerable to `HashDoS` if an attacker can predict `NodeId` distribution and submit a crafted sequence of node lookups during the query execution. However, `NodeId`s in AletheiaDB are sequentially or predictably generated internal identifiers, and not strictly untrusted string keys, mitigating this practically.
+- Using `0.1` as a hardcoded structural penalty coefficient in A* (`let new_cost = cost + semantic_cost + 0.1;`) is a heuristic. In large graphs with high semantic similarity, the lack of configurability may lead to suboptimal pathfinding choices where users might want to prioritize structure over semantics, or vice-versa.
