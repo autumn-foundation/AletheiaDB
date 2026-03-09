@@ -210,9 +210,9 @@ impl<'a> Omen<'a> {
 
         for v in &history.versions {
             let vt_start = v.temporal.valid_time().start().wallclock();
-            let tt_start = v.temporal.transaction_time().start().wallclock();
-            if tt_start <= tx_time.wallclock()
-                && vt_start <= time.wallclock()
+            let tt_start = v.temporal.transaction_time().start();
+            if tt_start <= tx_time
+                && v.temporal.valid_time().start() <= time
                 && vt_start >= best_time
                 && let Some(val) = v.properties.get(property)
                 && let Some(vec) = val.as_vector()
