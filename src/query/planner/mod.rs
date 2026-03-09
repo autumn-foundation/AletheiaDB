@@ -100,10 +100,11 @@ impl QueryPlanner {
     /// # Examples
     ///
     /// ```rust
-    /// # use std::sync::Arc;
-    /// # use aletheiadb::query::planner::{QueryPlanner, Statistics};
-    /// # use aletheiadb::storage::current::CurrentStorage;
-    /// let planner = QueryPlanner::new(Arc::new(Statistics::default()), Arc::new(CurrentStorage::new()));
+    /// use std::sync::Arc;
+    /// use aletheiadb::query::planner::{QueryPlanner, Statistics};
+    /// use aletheiadb::storage::current::CurrentStorage;
+    ///
+    /// let _planner = QueryPlanner::new(Arc::new(Statistics::default()), Arc::new(CurrentStorage::new()));
     /// ```
     #[must_use]
     pub fn new(stats: Arc<Statistics>, storage: Arc<CurrentStorage>) -> Self {

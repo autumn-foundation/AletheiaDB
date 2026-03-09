@@ -111,11 +111,12 @@ impl QueryExecutor {
     /// # Examples
     ///
     /// ```rust
-    /// # use std::sync::Arc;
-    /// # use parking_lot::RwLock;
-    /// # use aletheiadb::storage::current::CurrentStorage;
-    /// # use aletheiadb::storage::historical::HistoricalStorage;
-    /// # use aletheiadb::query::QueryExecutor;
+    /// use std::sync::Arc;
+    /// use parking_lot::RwLock;
+    /// use aletheiadb::storage::current::CurrentStorage;
+    /// use aletheiadb::storage::historical::HistoricalStorage;
+    /// use aletheiadb::query::QueryExecutor;
+    ///
     /// let current = Arc::new(CurrentStorage::new());
     /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
     /// let executor = QueryExecutor::new(current, historical);
@@ -153,12 +154,13 @@ impl QueryExecutor {
     /// # Examples
     ///
     /// ```rust
-    /// # use std::sync::Arc;
-    /// # use parking_lot::RwLock;
-    /// # use aletheiadb::storage::current::CurrentStorage;
-    /// # use aletheiadb::storage::historical::HistoricalStorage;
-    /// # use aletheiadb::query::{QueryExecutor, PhysicalPlan};
-    /// # use aletheiadb::query::planner::PhysicalOp;
+    /// use std::sync::Arc;
+    /// use parking_lot::RwLock;
+    /// use aletheiadb::storage::current::CurrentStorage;
+    /// use aletheiadb::storage::historical::HistoricalStorage;
+    /// use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+    /// use aletheiadb::query::planner::PhysicalOp;
+    ///
     /// let current = Arc::new(CurrentStorage::new());
     /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
     /// let executor = QueryExecutor::new(current, historical);
