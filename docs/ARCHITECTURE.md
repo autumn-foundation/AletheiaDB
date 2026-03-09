@@ -73,6 +73,48 @@ C4Context
 
 ## Design Patterns
 
+### Module Layering Architecture
+
+To avoid circular dependencies and enforce strict architectural boundaries, AletheiaDB implements a unidirectional dependency graph across its core modules:
+
+```mermaid
+classDiagram
+    class DB {
+        +AletheiaDB
+        +VectorIndexBuilder
+    }
+    class API {
+        +transaction
+        +types
+    }
+    class Storage {
+        +CurrentStorage
+        +HistoricalStorage
+        +WAL
+    }
+    class Core {
+        +id::TxId
+        +id::TxIdGenerator
+        +error::Error
+        +version::VersionMetadata
+    }
+
+    DB --> API : Uses
+    DB --> Core : Uses (Direct Imports)
+    API --> Storage : Uses
+    Storage --> Core : Uses
+
+    %% Removed Circular Dependencies
+    %% Storage --> API (Removed: Storage uses core::id::TxId directly)
+    %% API --> DB (Removed: VectorIndexBuilder moved to DB)
+    %% Core --> Utils (Removed: Utils consolidated into Core)
+```
+
+**Key Principles:**
+- **Unidirectional Flow:** Higher-level modules depend on lower-level modules (`DB` -> `API` -> `Storage` -> `Core`).
+- **No Transitive Re-exports:** Modules must directly import domain primitives from their source (e.g., `DB` imports `TxIdGenerator` directly from `Core`, not via an `API` re-export).
+- **Consolidated Domain:** Domain primitives (IDs, Errors, Version Metadata) are centralized in `Core`.
+
 ### Hybrid Storage Architecture
 
 ```mermaid
