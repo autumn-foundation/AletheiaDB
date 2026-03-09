@@ -94,8 +94,25 @@ pub struct QueryPlanner {
 impl QueryPlanner {
     /// Create a new query planner with the given statistics and storage.
     ///
-    /// The storage reference is used to validate that required indexes exist during
-    /// query planning, providing earlier and more informative error messages.
+    /// The query planner uses `Statistics` to estimate the cost of different
+    /// execution strategies, and `CurrentStorage` to validate that required
+    /// indices (like vector or temporal indices) exist before planning an operation
+    /// that depends on them. This ensures queries fail fast during planning
+    /// rather than during execution.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use aletheiadb::query::planner::{QueryPlanner, Statistics};
+    /// use aletheiadb::storage::CurrentStorage;
+    ///
+    /// let storage = Arc::new(CurrentStorage::new());
+    /// let stats = Arc::new(Statistics::default());
+    ///
+    /// // Initialize the planner with statistics and storage references
+    /// let planner = QueryPlanner::new(stats, storage);
+    /// ```
     #[must_use]
     pub fn new(stats: Arc<Statistics>, storage: Arc<CurrentStorage>) -> Self {
         QueryPlanner {
@@ -160,10 +177,10 @@ impl QueryPlanner {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The query is invalid (e.g., empty, syntax error).
-    /// - A required index is missing (e.g., vector search without enabled index).
-    /// - An internal planning error occurs.
+    /// Returns a [`Result`] containing the [`PhysicalPlan`] on success, or an [`Error`] if:
+    /// - **Validation Error:** The query contains invalid syntax or references non-existent entities.
+    /// - **Missing Index:** A required index is missing (e.g., attempting a vector search without an enabled vector index).
+    /// - **Internal Error:** An internal planning error occurs during optimization.
     pub fn plan(&self, query: Query) -> Result<PhysicalPlan> {
         // 1. Convert query to logical plan
         let logical = self.to_logical_plan(&query)?;

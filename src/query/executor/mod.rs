@@ -107,6 +107,24 @@ pub struct QueryExecutor {
 
 impl QueryExecutor {
     /// Create a new query executor
+    ///
+    /// The `QueryExecutor` requires references to both `CurrentStorage` (for live indices
+    /// and recent data) and `HistoricalStorage` (for temporal queries like "AS OF").
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use parking_lot::RwLock;
+    /// use aletheiadb::storage::CurrentStorage;
+    /// use aletheiadb::storage::historical::HistoricalStorage;
+    /// use aletheiadb::query::executor::QueryExecutor;
+    ///
+    /// let current = Arc::new(CurrentStorage::new());
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    ///
+    /// let executor = QueryExecutor::new(current, historical);
+    /// ```
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
             current,
@@ -131,18 +149,29 @@ impl QueryExecutor {
     /// Execute a physical plan and return results.
     ///
     /// This method recursively transforms the operator tree starting at `plan.root`
-    /// into a chain of iterators. The execution is lazy: no data is fetched until
-    /// the returned `QueryResults` iterator is consumed.
+    /// into a chain of iterators based on the volcano iterator model. The execution
+    /// is lazy: no data is evaluated or fetched from storage until the returned
+    /// [`QueryResults`] iterator is actively pulled (consumed).
+    ///
+    /// Because execution happens lazily, this method only parses the layout of the
+    /// query execution tree; any runtime exceptions during iteration (like corrupted
+    /// disk reads) will be yielded within the resulting `Iterator<Item = Result<QueryRow>>`.
     ///
     /// # Arguments
     ///
     /// * `plan` - The physical query plan to execute.
     ///
-    /// # Returns
+    /// # Panics
     ///
-    /// Returns a `QueryResults` iterator that produces `Result<QueryRow>`.
+    /// This method does not panic under normal execution.
     ///
-    /// # Example
+    /// # Errors
+    ///
+    /// Returns a [`Result`] containing the lazy [`QueryResults`] iterator on success.
+    /// Returns an [`Error`] if initializing an iterator node fails (e.g. asking for a
+    /// search index algorithm not supported by the current build).
+    ///
+    /// # Examples
     ///
     /// ```rust
     /// use std::sync::Arc;
