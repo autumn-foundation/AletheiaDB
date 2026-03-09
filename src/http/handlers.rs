@@ -315,10 +315,7 @@ async fn handle_create_node(
     }
 }
 
-async fn handle_get_node(
-    db: std::sync::Arc<crate::AletheiaDB>,
-    node_id: u64,
-) -> HttpResponse {
+async fn handle_get_node(db: std::sync::Arc<crate::AletheiaDB>, node_id: u64) -> HttpResponse {
     match NodeId::new(node_id) {
         Ok(nid) => match db.get_node(nid) {
             Ok(node) => {
