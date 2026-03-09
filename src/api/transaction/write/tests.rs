@@ -24,7 +24,7 @@ mod tombstone_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
 
         let tx = WriteTransaction::new(
@@ -103,7 +103,7 @@ mod general_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
 
         let tx = WriteTransaction::new(
@@ -1021,7 +1021,7 @@ mod general_tests {
         // Create initial transaction to set up nodes and one edge
         let snapshot1 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
         let mut tx1 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1053,7 +1053,7 @@ mod general_tests {
         // Create second transaction with interleaved operations
         let snapshot2 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
         let mut tx2 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1479,7 +1479,7 @@ mod general_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
 
         let tx = WriteTransaction::new(
@@ -1562,7 +1562,7 @@ mod conflict_detection_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
             };
 
             WriteTransaction::new(
@@ -2712,7 +2712,7 @@ mod timestamp_ordering_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
             };
 
             WriteTransaction::new(
@@ -3204,7 +3204,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
 
         let tx = WriteTransaction::new(
@@ -3255,7 +3255,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
 
         let tx = WriteTransaction::new(
@@ -3320,7 +3320,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
 
         let mut tx = WriteTransaction::new(
@@ -3371,7 +3371,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: Arc::new(crate::core::version::FastHashSet::default()),
         };
 
         let mut tx = WriteTransaction::new(

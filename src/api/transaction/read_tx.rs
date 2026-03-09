@@ -317,8 +317,8 @@ mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
+    use crate::core::version::FastHashSet;
     use parking_lot::RwLock;
-    use std::collections::HashSet;
     use std::sync::Arc;
 
     // Helper to create a test ReadTransaction with snapshot
@@ -327,7 +327,7 @@ mod tests {
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(HashSet::new()),
+            active_transactions: Arc::new(FastHashSet::default()),
         };
         ReadTransaction::new(tx_id, snapshot, current, visibility_manager, historical)
     }
@@ -495,7 +495,7 @@ mod tests {
             let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: time::now(),
-                active_transactions: Arc::new(HashSet::new()),
+                active_transactions: Arc::new(FastHashSet::default()),
             };
             let _tx = ReadTransaction::new(
                 tx_id,

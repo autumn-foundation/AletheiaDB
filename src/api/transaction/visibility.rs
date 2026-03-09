@@ -6,7 +6,8 @@
 
 use crate::api::transaction::types::TxId;
 use crate::core::temporal::Timestamp;
-use std::collections::{BTreeMap, HashSet};
+use crate::core::version::FastHashSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 /// Snapshot of transaction visibility at a point in time.
@@ -30,7 +31,7 @@ pub struct TransactionSnapshot {
     /// (not yet committed or aborted).
     ///
     /// Wrapped in Arc to enable efficient snapshot capture without full HashSet cloning.
-    pub active_transactions: Arc<HashSet<TxId>>,
+    pub active_transactions: Arc<FastHashSet<TxId>>,
 }
 
 impl TransactionSnapshot {
@@ -481,7 +482,7 @@ pub struct TxVisibilityManager {
     ///
     /// Uses copy-on-write: mutations create a new HashSet, update it, and replace the Arc.
     /// Snapshots just clone the Arc (cheap), avoiding full HashSet clones.
-    active: Mutex<Arc<HashSet<TxId>>>,
+    active: Mutex<Arc<FastHashSet<TxId>>>,
 
     /// Committed transactions with epoch-based compression (Issue #237).
     ///
@@ -501,7 +502,7 @@ impl TxVisibilityManager {
     /// Create a new visibility manager.
     pub fn new() -> Self {
         TxVisibilityManager {
-            active: Mutex::new(Arc::new(HashSet::new())),
+            active: Mutex::new(Arc::new(FastHashSet::default())),
             committed: RwLock::new(CompressedCommitLog::new()),
         }
     }
@@ -776,7 +777,7 @@ mod tests {
     fn test_snapshot_visibility_committed_before() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100.into(),
-            active_transactions: Arc::new(HashSet::new()),
+            active_transactions: Arc::new(FastHashSet::default()),
         };
 
         // Version committed before snapshot - visible
@@ -787,7 +788,7 @@ mod tests {
     fn test_snapshot_visibility_committed_after() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100.into(),
-            active_transactions: Arc::new(HashSet::new()),
+            active_transactions: Arc::new(FastHashSet::default()),
         };
 
         // Version committed after snapshot - not visible
@@ -798,7 +799,7 @@ mod tests {
     fn test_snapshot_visibility_uncommitted() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100.into(),
-            active_transactions: Arc::new(HashSet::new()),
+            active_transactions: Arc::new(FastHashSet::default()),
         };
 
         // Uncommitted version - not visible
@@ -807,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_visibility_active_transaction() {
-        let mut active = HashSet::new();
+        let mut active = FastHashSet::default();
         active.insert(TxId::new(1));
 
         let snapshot = TransactionSnapshot {
