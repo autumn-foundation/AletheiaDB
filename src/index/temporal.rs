@@ -90,25 +90,25 @@ impl Default for TemporalIndexConfig {
 /// Previously, `VersionId` was stored in both valid and tx timelines,
 /// causing 8 bytes of duplication per version. With consolidated storage:
 /// - Timeline entries store a 4-byte index instead of 8-byte `VersionId`
-/// - Version metadata is stored once in a central `Vec<VersionMetadata>`
+/// - Version metadata is stored once in a central `Vec<TimelineVersionMetadata>`
 ///
 /// # Key Benefit
 ///
 /// While the net memory savings for VersionId alone is minimal, this architecture
 /// enables storing additional metadata (BiTemporalInterval, provenance, etc.)
 /// without proportional cost increase per timeline entry. Each additional field
-/// in `VersionMetadata` is stored once, not twice.
-pub type VersionMetadataIndex = u32;
+/// in `TimelineVersionMetadata` is stored once, not twice.
+pub type TimelineVersionMetadataIndex = u32;
 
 /// Optimization: Use SmallVec for index lists to avoid heap allocations for common small queries.
 /// 16 * 4 bytes = 64 bytes, fits well on stack.
-pub type IndexVec = SmallVec<[VersionMetadataIndex; 16]>;
+pub type IndexVec = SmallVec<[TimelineVersionMetadataIndex; 16]>;
 
 /// Consolidated version metadata storage.
 ///
 /// Stores version information in a single authoritative location,
 /// eliminating duplication between valid-time and transaction-time indexes.
-/// Both timelines reference this metadata via `VersionMetadataIndex`.
+/// Both timelines reference this metadata via `TimelineVersionMetadataIndex`.
 ///
 /// # Size
 ///
@@ -123,12 +123,12 @@ pub type IndexVec = SmallVec<[VersionMetadataIndex; 16]>;
 /// - BiTemporalInterval (for interval queries, see Issue #194)
 /// - Provenance/audit information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VersionMetadata {
+pub struct TimelineVersionMetadata {
     /// The unique identifier for this version.
     version_id: VersionId,
 }
 
-impl VersionMetadata {
+impl TimelineVersionMetadata {
     /// Create new version metadata.
     #[inline]
     pub const fn new(version_id: VersionId) -> Self {
@@ -145,14 +145,14 @@ impl VersionMetadata {
 /// Entry in the timeline index.
 ///
 /// Stores temporal bounds and a reference to version metadata.
-/// The actual `VersionId` is stored in the consolidated `VersionMetadata`
+/// The actual `VersionId` is stored in the consolidated `TimelineVersionMetadata`
 /// storage, eliminating duplication between valid and tx timelines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TimelineEntry {
     start: Timestamp,
     end: Timestamp,
     /// Index into the consolidated version metadata storage.
-    metadata_idx: VersionMetadataIndex,
+    metadata_idx: TimelineVersionMetadataIndex,
 }
 
 impl TimelineEntry {
@@ -161,7 +161,7 @@ impl TimelineEntry {
     /// Used by tests to verify consolidated storage behavior.
     #[inline]
     #[cfg(test)]
-    pub const fn metadata_index(&self) -> VersionMetadataIndex {
+    pub const fn metadata_index(&self) -> TimelineVersionMetadataIndex {
         self.metadata_idx
     }
 }
@@ -180,7 +180,7 @@ struct EntityTimeline {
     /// Fast lookup: metadata_idx -> position in versions vec.
     /// Enables O(1) updates instead of O(n) linear search.
     metadata_to_position: std::collections::HashMap<
-        VersionMetadataIndex,
+        TimelineVersionMetadataIndex,
         usize,
         std::hash::BuildHasherDefault<crate::core::hasher::IdentityHasher>,
     >,
@@ -194,7 +194,12 @@ impl EntityTimeline {
     /// * `start` - Start timestamp (inclusive)
     /// * `end` - End timestamp (exclusive)
     /// * `metadata_idx` - Index into the consolidated version metadata storage
-    fn insert(&mut self, start: Timestamp, end: Timestamp, metadata_idx: VersionMetadataIndex) {
+    fn insert(
+        &mut self,
+        start: Timestamp,
+        end: Timestamp,
+        metadata_idx: TimelineVersionMetadataIndex,
+    ) {
         let entry = TimelineEntry {
             start,
             end,
@@ -253,7 +258,11 @@ impl EntityTimeline {
     ///
     /// This method is O(1) thanks to the metadata_to_position HashMap. Without it,
     /// we'd need O(n) linear search, partially defeating the query optimization.
-    fn update_end_time(&mut self, metadata_idx: VersionMetadataIndex, new_end: Timestamp) -> bool {
+    fn update_end_time(
+        &mut self,
+        metadata_idx: TimelineVersionMetadataIndex,
+        new_end: Timestamp,
+    ) -> bool {
         // O(1) lookup via HashMap
         if let Some(&position) = self.metadata_to_position.get(&metadata_idx)
             && let Some(entry) = self.versions.get_mut(position)
@@ -386,7 +395,7 @@ impl EntityTimeline {
     fn find_indices_in_range_iter(
         &self,
         range: TimeRange,
-    ) -> impl Iterator<Item = VersionMetadataIndex> + '_ {
+    ) -> impl Iterator<Item = TimelineVersionMetadataIndex> + '_ {
         // Find versions starting before the query range ends.
         let cutoff = self.versions.partition_point(|e| e.start < range.end());
         let range_start = range.start();
@@ -436,7 +445,7 @@ impl EntityTimeline {
     fn find_indices_at_point_iter(
         &self,
         timestamp: Timestamp,
-    ) -> impl Iterator<Item = VersionMetadataIndex> + '_ {
+    ) -> impl Iterator<Item = TimelineVersionMetadataIndex> + '_ {
         // Find all entries where start <= timestamp (these could potentially contain T)
         let cutoff = self.versions.partition_point(|e| e.start <= timestamp);
 
@@ -476,7 +485,7 @@ impl EntityTimeline {
 /// This structure implements a centralized version metadata storage that
 /// eliminates duplication between valid-time and transaction-time indexes.
 /// Instead of storing `VersionId` directly in each `TimelineEntry`, entries
-/// store a `VersionMetadataIndex` that references the consolidated storage.
+/// store a `TimelineVersionMetadataIndex` that references the consolidated storage.
 ///
 /// ## Memory Layout
 ///
@@ -493,8 +502,8 @@ impl EntityTimeline {
 #[derive(Debug, Clone, Default)]
 struct EntityTimelines {
     /// Consolidated version metadata storage.
-    /// Both valid and tx timelines reference this via `VersionMetadataIndex`.
-    version_metadata: Vec<VersionMetadata>,
+    /// Both valid and tx timelines reference this via `TimelineVersionMetadataIndex`.
+    version_metadata: Vec<TimelineVersionMetadata>,
     /// Valid-time timeline index.
     valid: EntityTimeline,
     /// Transaction-time timeline index.
@@ -516,8 +525,8 @@ impl EntityTimelines {
     #[cfg(test)]
     pub(crate) fn get_version_metadata(
         &self,
-        index: VersionMetadataIndex,
-    ) -> Option<&VersionMetadata> {
+        index: TimelineVersionMetadataIndex,
+    ) -> Option<&TimelineVersionMetadata> {
         self.version_metadata.get(index as usize)
     }
 
@@ -526,7 +535,10 @@ impl EntityTimelines {
     /// Returns an error if the number of versions exceeds `u32::MAX`.
     /// This is a DoS protection measure aligned with max_versions_per_entity checks.
     #[inline]
-    fn add_version_metadata(&mut self, metadata: VersionMetadata) -> Result<VersionMetadataIndex> {
+    fn add_version_metadata(
+        &mut self,
+        metadata: TimelineVersionMetadata,
+    ) -> Result<TimelineVersionMetadataIndex> {
         let index = self.version_metadata.len();
         if index > u32::MAX as usize {
             return Err(StorageError::CapacityExceeded {
@@ -537,7 +549,7 @@ impl EntityTimelines {
             .into());
         }
         self.version_metadata.push(metadata);
-        Ok(index as VersionMetadataIndex)
+        Ok(index as TimelineVersionMetadataIndex)
     }
 
     /// Resolve a metadata index to a `VersionId`.
@@ -545,7 +557,7 @@ impl EntityTimelines {
     /// Uses safe indexing to prevent panics in production.
     /// An invalid index indicates internal inconsistency.
     #[inline]
-    fn resolve_version_id(&self, index: VersionMetadataIndex) -> VersionId {
+    fn resolve_version_id(&self, index: TimelineVersionMetadataIndex) -> VersionId {
         // SAFETY: Indices are generated by add_version_metadata and stored in TimelineEntry.
         // An invalid index would indicate a bug in our own code (internal invariant).
         // Using expect() provides a clear error message if this ever happens.
@@ -564,7 +576,7 @@ impl EntityTimelines {
     #[inline]
     fn resolve_version_ids_iter<'a>(
         &'a self,
-        indices: &'a [VersionMetadataIndex],
+        indices: &'a [TimelineVersionMetadataIndex],
     ) -> impl Iterator<Item = VersionId> + 'a {
         indices.iter().map(|&idx| self.resolve_version_id(idx))
     }
@@ -573,7 +585,7 @@ impl EntityTimelines {
     ///
     /// Convenience method that collects the iterator results.
     #[inline]
-    fn resolve_version_ids(&self, indices: &[VersionMetadataIndex]) -> Vec<VersionId> {
+    fn resolve_version_ids(&self, indices: &[TimelineVersionMetadataIndex]) -> Vec<VersionId> {
         self.resolve_version_ids_iter(indices).collect()
     }
 
@@ -581,11 +593,11 @@ impl EntityTimelines {
     ///
     /// Returns `None` if the VersionId is not found in this entity's metadata.
     #[inline]
-    fn find_metadata_index(&self, version_id: VersionId) -> Option<VersionMetadataIndex> {
+    fn find_metadata_index(&self, version_id: VersionId) -> Option<TimelineVersionMetadataIndex> {
         self.version_metadata
             .iter()
             .position(|m| m.version_id() == version_id)
-            .map(|idx| idx as VersionMetadataIndex)
+            .map(|idx| idx as TimelineVersionMetadataIndex)
     }
 
     /// Update the valid time end timestamp for a version.
@@ -848,7 +860,7 @@ impl TemporalIndexes {
         }
 
         // Store version metadata once in consolidated storage
-        let metadata = VersionMetadata::new(version_id);
+        let metadata = TimelineVersionMetadata::new(version_id);
         let metadata_idx = timelines.add_version_metadata(metadata)?;
 
         // Both timelines reference the same metadata via index
@@ -914,7 +926,7 @@ impl TemporalIndexes {
                 v_id_to_idx.insert(v_id, idx);
                 idx
             } else {
-                let metadata = VersionMetadata::new(v_id);
+                let metadata = TimelineVersionMetadata::new(v_id);
                 let idx = timelines.add_version_metadata(metadata)?;
                 v_id_to_idx.insert(v_id, idx);
                 idx
@@ -1282,8 +1294,8 @@ impl TemporalIndexes {
     /// - Small K (< 16): O(K²) but with low constant factor
     /// - Large K (>= 16): O(K) using HashSet
     fn intersect_metadata_indices(
-        a: &[VersionMetadataIndex],
-        b: &[VersionMetadataIndex],
+        a: &[TimelineVersionMetadataIndex],
+        b: &[TimelineVersionMetadataIndex],
     ) -> IndexVec {
         // Threshold for switching to HashSet-based intersection.
         // Below this, linear scan is faster due to cache locality and no allocation.
@@ -1772,7 +1784,7 @@ mod tests {
         // Add a new metadata entry for the new version (idx=2)
         let v3 = VersionId::new(102).unwrap();
         let new_metadata_idx = timelines
-            .add_version_metadata(VersionMetadata::new(v3))
+            .add_version_metadata(TimelineVersionMetadata::new(v3))
             .unwrap();
 
         let duplicate_entries = vec![
@@ -1857,7 +1869,7 @@ mod tests {
         let mut timelines = indexes.index.get_mut(&EntityId::Node(node_id)).unwrap();
         let v3 = VersionId::new(202).unwrap();
         let new_metadata_idx = timelines
-            .add_version_metadata(VersionMetadata::new(v3))
+            .add_version_metadata(TimelineVersionMetadata::new(v3))
             .unwrap();
 
         timelines
@@ -3222,7 +3234,7 @@ mod tests {
             );
         }
 
-        /// Test memory efficiency: VersionMetadata storage should be smaller
+        /// Test memory efficiency: TimelineVersionMetadata storage should be smaller
         /// than storing duplicate data in both timelines.
         #[test]
         fn test_memory_layout_efficiency() {
@@ -3230,11 +3242,11 @@ mod tests {
             // consolidated storage approach.
 
             // TimelineEntry should store an index (u32 or usize), not VersionId directly
-            // VersionMetadata should be stored separately
+            // TimelineVersionMetadata should be stored separately
 
             // Size of consolidated approach:
             // - TimelineEntry: start (16 bytes) + end (16 bytes) + index (4 bytes) = 36 bytes
-            // - VersionMetadata: version_id (8 bytes) = 8 bytes per unique version
+            // - TimelineVersionMetadata: version_id (8 bytes) = 8 bytes per unique version
             // - Total for N versions: N * 36 * 2 (both timelines) + N * 8 = 80N bytes
 
             // Size of old approach:
@@ -3242,7 +3254,7 @@ mod tests {
             // - Total for N versions: N * 40 * 2 = 80N bytes
 
             // With additional metadata, consolidated approach saves more:
-            // - If we add more fields to VersionMetadata (e.g., entity_id, temporal),
+            // - If we add more fields to TimelineVersionMetadata (e.g., entity_id, temporal),
             //   it's stored once vs twice
 
             // For now, verify the structural change is in place

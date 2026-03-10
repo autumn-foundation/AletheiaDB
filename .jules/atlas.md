@@ -71,3 +71,7 @@
 ## 2026-05-24 - Unwinding API/Core Dependency
 **Tangle:** `db` module imported `TxIdGenerator` through `api::transaction`. This caused a layering violation where `db` skipped `core` to rely on an `api` re-export for a domain primitive, creating coupling between `api` and `core`'s ID generation responsibilities.
 **Blueprint:** Removed `TxIdGenerator` re-export from `api::transaction::types` and `api::transaction::mod`. Updated `db::mod`, `db::config`, and all transaction tests to explicitly import `TxIdGenerator` directly from `core::id::TxIdGenerator`.
+
+## 2025-03-10 - Breaking VersionMetadata Dependency Cycle
+**Tangle:** Both `src/index/temporal.rs` and `src/core/version.rs` contained structs named `VersionMetadata`, causing naming collisions and semantic ambiguity ("The Leak" architectural smell).
+**Blueprint:** Renamed `src/index/temporal.rs::VersionMetadata` to `TimelineVersionMetadata` (and the associated index alias) to strictly enforce domain boundaries and clarify that the index-level struct serves temporal timelines, whereas `core` defines the global domain version primitive.
