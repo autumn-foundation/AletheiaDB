@@ -41,7 +41,6 @@ pub mod service;
 #[cfg(any(
     feature = "embedding-openai",
     feature = "embedding-huggingface",
-    feature = "embedding-onnx",
     feature = "embedding-ollama"
 ))]
 pub mod providers;

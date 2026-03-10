@@ -9,8 +9,5 @@ pub mod openai;
 #[cfg(feature = "embedding-huggingface")]
 pub mod huggingface;
 
-#[cfg(feature = "embedding-onnx")]
-pub mod onnx;
-
 #[cfg(feature = "embedding-ollama")]
 pub mod ollama;
