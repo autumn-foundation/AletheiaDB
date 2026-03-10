@@ -29,3 +29,13 @@ No high-severity findings.
 
 ### Residual risks
 - `IdGenerator::current_approximate()` operates with `Ordering::Relaxed` memory synchronization to achieve extreme performance (~1ns). This makes it unsuitable for any critical snapshot isolation logic and strictly limits its safe usage to non-critical metrics and logging, which is well-documented but represents a slight structural misuse risk.
+
+## 🦀 Core Review: `src/query/planner/rules/predicate_pushdown.rs` Tests Update
+
+No high-severity findings.
+
+### Test gaps
+- None identified in the updated scope. The modifications explicitly strengthen test coverage by replacing weak `matches!` verifications with exact tree structural checks using `assert_eq!` across the doc test and relevant unit tests.
+
+### Residual risks
+- Minor stylistic risk of hardcoding AST structures inside the `assert_eq!` blocks in the tests, potentially causing maintenance overhead if the AST representation of `LogicalOp` or `UnaryOp` changes in the future, as tests will broadly fail and require verbose rewrites.
