@@ -486,14 +486,18 @@ impl HybridTimestamp {
 
         // Use split_at and try_into for cleaner, safer byte array conversion
         let (wallclock_bytes, rest) = bytes.split_at(std::mem::size_of::<i64>());
-        let wallclock = i64::from_le_bytes(wallclock_bytes.try_into().map_err(|_| {
-            StorageError::CorruptedData("Invalid byte array length for wallclock".to_string())
-        })?);
+        let wallclock = i64::from_le_bytes(
+            wallclock_bytes
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("wallclock_bytes is exactly 8 bytes")),
+        );
 
         let (logical_bytes, _) = rest.split_at(std::mem::size_of::<u32>());
-        let logical = u32::from_le_bytes(logical_bytes.try_into().map_err(|_| {
-            StorageError::CorruptedData("Invalid byte array length for logical".to_string())
-        })?);
+        let logical = u32::from_le_bytes(
+            logical_bytes
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("logical_bytes is exactly 4 bytes")),
+        );
 
         // Validate wallclock to prevent corrupted data from injecting invalid timestamps
         // Allow i64::MAX as a special sentinel value for TIMESTAMP_MAX (represents infinity/"still current")

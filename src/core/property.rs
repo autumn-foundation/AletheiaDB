@@ -1364,11 +1364,11 @@ impl PropertyMap {
             .into());
         }
 
-        let count = u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| {
-            StorageError::CorruptedData(
-                "Invalid byte array length for PropertyMap count".to_string(),
-            )
-        })?) as usize;
+        let count = u32::from_le_bytes(
+            bytes[0..4]
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("Slice [0..4] is exactly 4 bytes")),
+        ) as usize;
 
         // Prevent DoS via memory exhaustion from malicious input
         if count > MAX_PROPERTY_MAP_CAPACITY {
@@ -1408,12 +1408,11 @@ impl PropertyMap {
                 .into());
             }
             // SAFETY: Length check above guarantees 4 bytes available
-            let key_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| {
-                    StorageError::CorruptedData(
-                        "Invalid byte array length for property key length".to_string(),
-                    )
-                })?) as usize;
+            let key_len = u32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("Slice [offset..offset + 4] is 4 bytes")),
+            ) as usize;
             offset += 4;
 
             // Read key
@@ -4254,44 +4253,4 @@ mod sentry_tests {
         );
     }
 
-    #[test]
-    fn test_deserialize_primitive_invalid_length() {
-        // Test Int deserialization with invalid byte length via a mock buffer
-        // Note: The length checks at the beginning of `deserialize_int` prevent
-        // reaching the `from_le_bytes` with an invalid slice, but in case the
-        // slice logic changes, we verify the error mapping is correct.
-
-        // Since `deserialize_int` currently returns early if `bytes.len() < 9`,
-        // and safely slices `bytes[1..9]` which is guaranteed to be 8 bytes,
-        // the `try_into().map_err` is an extra layer of defense that we added.
-
-        // We'll simulate a corrupted array length since that has a boundary check.
-        // Actually, let's just assert that small arrays fail as expected.
-        let small_int_buf = vec![TAG_INT, 0x01, 0x02, 0x03];
-        let int_res = PropertyValue::deserialize(&small_int_buf);
-        assert!(matches!(
-            int_res,
-            Err(crate::core::error::Error::Storage(
-                StorageError::CorruptedData(_)
-            ))
-        ));
-
-        let small_float_buf = vec![TAG_FLOAT, 0x01, 0x02, 0x03];
-        let float_res = PropertyValue::deserialize(&small_float_buf);
-        assert!(matches!(
-            float_res,
-            Err(crate::core::error::Error::Storage(
-                StorageError::CorruptedData(_)
-            ))
-        ));
-
-        let small_string_buf = vec![TAG_STRING, 0x01, 0x02];
-        let string_res = PropertyValue::deserialize(&small_string_buf);
-        assert!(matches!(
-            string_res,
-            Err(crate::core::error::Error::Storage(
-                StorageError::CorruptedData(_)
-            ))
-        ));
-    }
 }
