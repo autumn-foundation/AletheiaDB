@@ -14,6 +14,14 @@ fn test_timerange_duration_micros_exact() {
     // Test current range
     let current = aletheiadb::core::temporal::TimeRange::from(start_ts);
     assert_eq!(current.duration_micros(), None);
+
+    // Test a specific mutant that returns Some(0) or Some(1) instead of exact calculation
+    let start_ts2 = 5_000_000.into();
+    let end_ts2 = 8_000_000.into();
+    let range2 = aletheiadb::core::temporal::TimeRange::new(start_ts2, end_ts2).unwrap();
+    assert_eq!(range2.duration_micros(), Some(3_000_000));
+    assert_ne!(range2.duration_micros(), Some(0));
+    assert_ne!(range2.duration_micros(), Some(1));
 }
 
 #[test]
@@ -248,8 +256,16 @@ fn test_timerange_is_empty_exact() {
     let r2 = TimeRange::new(100.into(), 100.into()).unwrap();
 
     // Explicitly testing exact `==` vs `!=` mutant
-    assert!(!r1.is_empty(), "r1 should not be empty");
-    assert!(r2.is_empty(), "r2 should be empty");
+    let r1_empty = r1.is_empty();
+    assert!(
+        !r1_empty,
+        "r1 should not be empty (specifically preventing mutant returning true)"
+    );
+    let r2_empty = r2.is_empty();
+    assert!(
+        r2_empty,
+        "r2 should be empty (specifically preventing mutant returning false)"
+    );
 }
 
 #[test]
@@ -265,15 +281,25 @@ fn test_timerange_is_current_closed_exact() {
     .unwrap();
 
     // is_current -> end == TIMESTAMP_MAX
-    assert!(open.is_current(), "open range should be current");
-    assert!(!closed.is_current(), "closed range should not be current");
+    let open_curr = open.is_current();
     assert!(
-        !edge_closed.is_current(),
+        open_curr,
+        "open range should be current (prevent false mutant)"
+    );
+    let closed_curr = closed.is_current();
+    assert!(
+        !closed_curr,
+        "closed range should not be current (prevent true mutant)"
+    );
+    let edge_curr = edge_closed.is_current();
+    assert!(
+        !edge_curr,
         "range ending right before TIMESTAMP_MAX should not be current"
     );
 
     // is_closed -> end < TIMESTAMP_MAX
-    assert!(!open.is_closed(), "open range should not be closed");
+    let open_closed = open.is_closed();
+    assert!(!open_closed, "open range should not be closed");
     assert!(closed.is_closed(), "closed range should be closed");
     assert!(
         edge_closed.is_closed(),

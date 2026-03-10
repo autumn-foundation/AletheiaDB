@@ -768,6 +768,45 @@ mod tests {
     }
 
     #[test]
+    fn test_timerange_from_at_reject_over_boundary_exact() {
+        use std::panic::catch_unwind;
+
+        // Use unchecked constructor to bypass `HybridTimestamp::new` validation
+        let over_max = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+
+        // Test TimeRange::from panic
+        let result_from = catch_unwind(|| {
+            TimeRange::from(over_max);
+        });
+        assert!(
+            result_from.is_err(),
+            "TimeRange::from should panic when start wallclock exceeds MAX_VALID_TIMESTAMP"
+        );
+
+        // Test TimeRange::at panic
+        let result_at = catch_unwind(|| {
+            TimeRange::at(over_max);
+        });
+        assert!(
+            result_at.is_err(),
+            "TimeRange::at should panic when start wallclock exceeds MAX_VALID_TIMESTAMP"
+        );
+
+        // Test TimeRange::new Error
+        let result_new = TimeRange::new(over_max, TIMESTAMP_MAX);
+        assert!(
+            result_new.is_err(),
+            "TimeRange::new should error when start wallclock exceeds MAX_VALID_TIMESTAMP"
+        );
+
+        let result_new2 = TimeRange::new(100.into(), over_max);
+        assert!(
+            result_new2.is_err(),
+            "TimeRange::new should error when end wallclock exceeds MAX_VALID_TIMESTAMP"
+        );
+    }
+
+    #[test]
     fn test_time_range_contains_range() {
         let outer = TimeRange::new(100.into(), 300.into()).unwrap();
         let inner = TimeRange::new(150.into(), 250.into()).unwrap();
