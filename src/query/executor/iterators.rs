@@ -1358,7 +1358,10 @@ impl ResultIterator for ProjectIterator {
                     let mut new_props = crate::core::PropertyMapBuilder::new();
                     for prop in &self.properties {
                         if let Some(val) = node.properties.get(prop) {
-                            new_props = new_props.try_insert(prop, val.clone()).unwrap();
+                            new_props = match new_props.try_insert(prop, val.clone()) {
+                                Ok(props) => props,
+                                Err(e) => return Some(Err(e)),
+                            };
                         }
                     }
                     let new_node = crate::core::graph::Node::new(
@@ -2266,6 +2269,50 @@ mod tests {
             "Paris"
         );
         assert!(projected_node.properties.get("age").is_none());
+    }
+
+    #[test]
+    fn test_project_iterator_try_insert_error_handling() {
+        use crate::core::property::{MAX_RECURSION_DEPTH, PropertyValue};
+        use std::sync::Arc;
+
+        let mut value = PropertyValue::Int(42);
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            value = PropertyValue::Array(Arc::new(vec![value]));
+        }
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Construct a PropertyMap without hitting the try_insert limitation of PropertyMapBuilder
+        // by exploiting the fact that from_iter avoids the recursion depth panic (as tested in test_property_map_from_iter_no_panic_on_deep_recursion)
+        let deep_key = GLOBAL_INTERNER.intern("deep").unwrap();
+        let props: crate::core::property::PropertyMap =
+            vec![(deep_key, value)].into_iter().collect();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        let input = MockIterator::from_nodes(vec![node]);
+        let mut project = ProjectIterator::new(Box::new(input), vec!["deep".to_string()]);
+
+        let result = project.next().unwrap();
+        // Since we are projecting a property that exceeds the max recursion depth,
+        // it should return an error, not panic.
+        assert!(
+            result.is_err(),
+            "Expected an error due to max recursion depth, but got {:?}",
+            result
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth limit exceeded"),
+            "Unexpected error message: {}",
+            err
+        );
     }
 
     #[test]
