@@ -549,7 +549,8 @@ impl QueryResults {
     /// the streaming iterator directly for result sets exceeding 100K rows.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
         // First pass: collect all rows
-        let mut rows = Vec::new();
+        let (lower, _) = self.iterator.size_hint();
+        let mut rows = Vec::with_capacity(lower);
         while let Some(row) = self.iterator.next() {
             rows.push(row?);
         }
@@ -561,24 +562,25 @@ impl QueryResults {
         let has_any_nodes = rows.iter().any(|r| r.entity.as_node().is_some());
 
         // Second pass: extract data with padding
-        let mut nodes = Vec::new();
+        let capacity = rows.len();
+        let mut nodes = Vec::with_capacity(capacity);
         let mut properties = if has_any_nodes {
-            Some(Vec::new())
+            Some(Vec::with_capacity(capacity))
         } else {
             None
         };
         let mut scores = if has_any_scores {
-            Some(Vec::new())
+            Some(Vec::with_capacity(capacity))
         } else {
             None
         };
         let mut paths = if has_any_paths {
-            Some(Vec::new())
+            Some(Vec::with_capacity(capacity))
         } else {
             None
         };
         let mut versions = if has_any_versions {
-            Some(Vec::new())
+            Some(Vec::with_capacity(capacity))
         } else {
             None
         };
