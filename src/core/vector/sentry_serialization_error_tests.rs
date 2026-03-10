@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::vector::serialization::{deserialize_vector, deserialize_sparse_vector};
     use crate::core::error::Error;
+    use crate::core::vector::serialization::{deserialize_sparse_vector, deserialize_vector};
 
     #[test]
     fn test_deserialize_vector_short_buffer() {
@@ -50,7 +50,7 @@ mod tests {
         // Provide only 15 bytes (short on indices)
         let mut bytes = vec![crate::core::property::TAG_SPARSE_VECTOR];
         bytes.extend_from_slice(&10u32.to_le_bytes()); // dim
-        bytes.extend_from_slice(&2u32.to_le_bytes());  // nnz
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // nnz
         bytes.extend_from_slice(&[0, 0, 0, 0]); // one index, missing second
 
         let result = deserialize_sparse_vector(&bytes);
@@ -68,10 +68,10 @@ mod tests {
         // Provide enough for indices, but short on values
         let mut bytes = vec![crate::core::property::TAG_SPARSE_VECTOR];
         bytes.extend_from_slice(&10u32.to_le_bytes()); // dim
-        bytes.extend_from_slice(&2u32.to_le_bytes());  // nnz
-        bytes.extend_from_slice(&0u32.to_le_bytes());  // index 1
-        bytes.extend_from_slice(&1u32.to_le_bytes());  // index 2
-        bytes.extend_from_slice(&1.0f32.to_le_bytes());// value 1, missing value 2
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // nnz
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // index 1
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // index 2
+        bytes.extend_from_slice(&1.0f32.to_le_bytes()); // value 1, missing value 2
 
         let result = deserialize_sparse_vector(&bytes);
         assert!(result.is_err());

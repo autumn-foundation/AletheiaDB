@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::property::{PropertyValue, PropertyMap};
     use crate::core::error::Error;
-    use crate::core::property::{TAG_INT, TAG_FLOAT, TAG_STRING, TAG_BYTES, TAG_ARRAY};
+    use crate::core::property::{PropertyMap, PropertyValue};
+    use crate::core::property::{TAG_ARRAY, TAG_BYTES, TAG_FLOAT, TAG_INT, TAG_STRING};
 
     #[test]
     fn test_deserialize_int_short_buffer() {
@@ -119,7 +119,10 @@ mod tests {
         assert!(result.is_err());
         if let Err(Error::Storage(crate::core::error::StorageError::CorruptedData(msg))) = result {
             // It could hit the min_required_bytes check first, or the key length check
-            assert!(msg.contains("Insufficient buffer size for PropertyMap entries") || msg.contains("Buffer too short for property key length"));
+            assert!(
+                msg.contains("Insufficient buffer size for PropertyMap entries")
+                    || msg.contains("Buffer too short for property key length")
+            );
         } else {
             panic!("Expected CorruptedData error");
         }
