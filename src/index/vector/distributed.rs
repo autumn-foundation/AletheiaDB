@@ -1140,11 +1140,16 @@ impl MockVectorNodeClient {
 
     /// Make the next operation fail.
     pub fn fail_next(&self, error: impl Into<String>) {
-        *self.fail_next.write().unwrap() = Some(error.into());
+        *self.fail_next.write().unwrap_or_else(|e| e.into_inner()) = Some(error.into());
     }
 
     fn check_fail(&self) -> Result<()> {
-        if let Some(err) = self.fail_next.write().unwrap().take() {
+        if let Some(err) = self
+            .fail_next
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             return Err(Error::Vector(VectorError::IndexError(err)));
         }
         Ok(())
@@ -1206,7 +1211,10 @@ impl VectorNodeClient for MockVectorNodeClient {
             }));
         }
 
-        self.vectors.write().unwrap().insert(id, vector.to_vec());
+        self.vectors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, vector.to_vec());
         Ok(())
     }
 
@@ -1220,7 +1228,10 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        self.vectors.write().unwrap().remove(&id);
+        self.vectors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         Ok(())
     }
 
@@ -1234,7 +1245,7 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        let vectors = self.vectors.read().unwrap();
+        let vectors = self.vectors.read().unwrap_or_else(|e| e.into_inner());
         let mut results: Vec<(NodeId, f32)> = vectors
             .iter()
             .map(|(id, vec)| (*id, self.compute_similarity(query, vec)))
@@ -1256,7 +1267,7 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        Ok(self.vectors.read().unwrap().len())
+        Ok(self.vectors.read().unwrap_or_else(|e| e.into_inner()).len())
     }
 
     fn health_check(&self) -> Result<()> {
