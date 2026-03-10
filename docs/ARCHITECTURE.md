@@ -1116,6 +1116,46 @@ sequenceDiagram
 
 ### Cognitive Dynamics
 
+**Paradox Engine (Semantic-Structural Divergence)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class ParadoxDetector {
+            +calculate_paradox(subject, target, prop, t1, t2)
+            -get_semantic_similarity(node, target, prop, time)
+            -get_structural_affinity(node, target, prop, time)
+        }
+    }
+    class AletheiaDB
+
+    ParadoxDetector --> AletheiaDB : Uses (Temporal & Vector)
+```
+
+**Sequence: Detect Paradox**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Paradox as ParadoxDetector
+    participant DB as AletheiaDB
+
+    User->>Paradox: calculate_paradox(node, concept, t1, t2)
+    Paradox->>DB: get_semantic_similarity(node, t1)
+    DB-->>Paradox: sem_t1
+    Paradox->>DB: get_semantic_similarity(node, t2)
+    DB-->>Paradox: sem_t2
+
+    Paradox->>DB: get_structural_affinity(node, t1)
+    DB-->>Paradox: struct_t1
+    Paradox->>DB: get_structural_affinity(node, t2)
+    DB-->>Paradox: struct_t2
+
+    Paradox->>Paradox: Calculate Deltas
+    Paradox->>Paradox: Score = -(sem_delta * struct_delta) * 4.0
+    Paradox-->>User: Paradox Score
+```
+
 **Ripple (Semantic Causality)**
 
 ```mermaid
