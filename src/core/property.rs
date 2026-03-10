@@ -4252,5 +4252,4 @@ mod sentry_tests {
             "semantically_equal should treat NaN as equal"
         );
     }
-
 }

@@ -239,11 +239,9 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         let mut values = Vec::with_capacity(dimension);
         for chunk in data_slice.chunks_exact(4) {
             // SAFETY: chunks_exact guarantees exactly 4 bytes per chunk
-            values.push(f32::from_le_bytes(
-                chunk
-                    .try_into()
-                    .unwrap_or_else(|_| unreachable!("chunks_exact(4) yields exactly 4 bytes")),
-            ));
+            values.push(f32::from_le_bytes(chunk.try_into().unwrap_or_else(|_| {
+                unreachable!("chunks_exact(4) yields exactly 4 bytes")
+            })));
         }
         values
     };
@@ -417,11 +415,9 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     let indices = {
         let mut indices = Vec::with_capacity(nnz);
         for chunk in indices_slice.chunks_exact(4) {
-            indices.push(u32::from_le_bytes(
-                chunk
-                    .try_into()
-                    .unwrap_or_else(|_| unreachable!("chunks_exact(4) yields exactly 4 bytes")),
-            ));
+            indices.push(u32::from_le_bytes(chunk.try_into().unwrap_or_else(|_| {
+                unreachable!("chunks_exact(4) yields exactly 4 bytes")
+            })));
         }
         indices
     };
@@ -456,11 +452,9 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     let values = {
         let mut values = Vec::with_capacity(nnz);
         for chunk in values_slice.chunks_exact(4) {
-            values.push(f32::from_le_bytes(
-                chunk
-                    .try_into()
-                    .unwrap_or_else(|_| unreachable!("chunks_exact(4) yields exactly 4 bytes")),
-            ));
+            values.push(f32::from_le_bytes(chunk.try_into().unwrap_or_else(|_| {
+                unreachable!("chunks_exact(4) yields exactly 4 bytes")
+            })));
         }
         values
     };
