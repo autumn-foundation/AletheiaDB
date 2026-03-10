@@ -386,3 +386,9 @@ required-features = []
 [[example]]
 name = "story_demo"
 required-features = ["nova"]
+
+[[bench]]
+name = "alchemy_bench"
+harness = false
+path = "benches/alchemy_bench.rs"
+required-features = ["nova"]

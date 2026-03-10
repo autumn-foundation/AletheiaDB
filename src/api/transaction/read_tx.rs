@@ -253,6 +253,33 @@ impl ReadOps for ReadTransaction {
         result.record_error_metric()
     }
 
+    fn get_edges(&self, ids: &[EdgeId]) -> Result<Vec<Edge>> {
+        let mut edges = Vec::with_capacity(ids.len());
+        let mut historical_ids = Vec::new();
+
+        for &id in ids {
+            if let Ok(current_edge) = self.current.get_edge(id) {
+                if self
+                    .visibility_manager
+                    .is_visible(&self.snapshot, current_edge.metadata.created_by_tx)
+                {
+                    edges.push(current_edge);
+                } else {
+                    historical_ids.push(id);
+                }
+            } else {
+                historical_ids.push(id);
+            }
+        }
+
+        for id in historical_ids {
+            if let Ok(historical_edge) = self.get_edge_from_historical(id) {
+                edges.push(historical_edge);
+            }
+        }
+        Ok(edges)
+    }
+
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         // Filter edges to only return those visible in our snapshot
         // This prevents phantom reads where we see edges created after our snapshot

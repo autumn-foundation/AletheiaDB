@@ -108,6 +108,20 @@ pub trait ReadOps {
     /// of this transaction (Snapshot Isolation).
     fn get_edge(&self, id: EdgeId) -> Result<Edge>;
 
+    /// Get multiple edges by ID.
+    ///
+    /// This provides a batch-fetching mechanism that can be significantly more
+    /// efficient than calling `get_edge` in a loop, especially for historical storage.
+    fn get_edges(&self, ids: &[EdgeId]) -> Result<Vec<Edge>> {
+        let mut edges = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if let Ok(edge) = self.get_edge(id) {
+                edges.push(edge);
+            }
+        }
+        Ok(edges)
+    }
+
     /// Get outgoing edges from a node.
     ///
     /// Returns all edges where `source == node_id` that are visible in the current snapshot.

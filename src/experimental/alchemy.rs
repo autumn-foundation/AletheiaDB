@@ -171,9 +171,8 @@ impl<'a> Alchemist<'a> {
                 // Collect edge data first to avoid borrow issues while mutating
                 // Actually ReadOps allows reading while WriteTx is active
                 let outgoing = tx.get_outgoing_edges(victim);
-                for edge_id in outgoing {
-                    // Safe to unwrap here because get_outgoing_edges returns existing edges
-                    if let Ok(edge) = tx.get_edge(edge_id) {
+                if let Ok(edges) = tx.get_edges(&outgoing) {
+                    for edge in edges {
                         // Resolve label to string for creation
                         let label_str = GLOBAL_INTERNER
                             .resolve_with(edge.label, |s| s.to_string())
@@ -194,8 +193,8 @@ impl<'a> Alchemist<'a> {
 
                 // 2b. Move Incoming Edges
                 let incoming = tx.get_incoming_edges(victim);
-                for edge_id in incoming {
-                    if let Ok(edge) = tx.get_edge(edge_id) {
+                if let Ok(edges) = tx.get_edges(&incoming) {
+                    for edge in edges {
                         let label_str = GLOBAL_INTERNER
                             .resolve_with(edge.label, |s| s.to_string())
                             .unwrap_or_else(|| "UNKNOWN".to_string());
