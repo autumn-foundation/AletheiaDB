@@ -14,7 +14,7 @@
 //! sequential access to a contiguous region of memory.
 
 use crate::core::hasher::IdentityHasher;
-use crate::core::id::{EdgeId, NodeId};
+use crate::core::id::{EdgeId, MAX_VALID_ID, NodeId};
 use crate::core::interning::InternedString;
 use rayon::prelude::*;
 use std::hash::BuildHasherDefault;
@@ -595,6 +595,26 @@ impl AdjacencyIndex {
             }
         }
 
+        #[allow(clippy::collapsible_if)]
+        if let Some(&max_node) = node_ids.last() {
+            if max_node > MAX_VALID_ID {
+                return Err(format!(
+                    "CSR node_ids contains ID {} exceeding MAX_VALID_ID {}",
+                    max_node, MAX_VALID_ID
+                ));
+            }
+        }
+
+        #[allow(clippy::collapsible_if)]
+        if let Some(&max_edge) = edge_ids.iter().max() {
+            if max_edge > MAX_VALID_ID {
+                return Err(format!(
+                    "CSR edge_ids contains ID {} exceeding MAX_VALID_ID {}",
+                    max_edge, MAX_VALID_ID
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -1166,5 +1186,33 @@ mod sentry_tests {
         assert_eq!(index.edge_count(), 2);
         assert_eq!(index.node_count(), 2);
         assert_eq!(index.max_node_id(), 20);
+    }
+}
+
+#[cfg(test)]
+mod additional_warden_tests {
+    use super::*;
+    use crate::core::id::MAX_VALID_ID;
+
+    #[test]
+    fn test_validate_csr_invariants_rejects_large_node_ids() {
+        let node_ids = vec![MAX_VALID_ID + 10];
+        let offsets = vec![0, 1];
+        let edge_ids = vec![100];
+
+        let result = AdjacencyIndex::validate_csr_invariants(&node_ids, &offsets, &edge_ids);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeding MAX_VALID_ID"));
+    }
+
+    #[test]
+    fn test_validate_csr_invariants_rejects_large_edge_ids() {
+        let node_ids = vec![10];
+        let offsets = vec![0, 1];
+        let edge_ids = vec![MAX_VALID_ID + 10];
+
+        let result = AdjacencyIndex::validate_csr_invariants(&node_ids, &offsets, &edge_ids);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeding MAX_VALID_ID"));
     }
 }
