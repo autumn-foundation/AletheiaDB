@@ -1664,3 +1664,83 @@ mod sentinel_id_generator_tests {
         assert_ne!(unchecked.as_u64(), 0);
     }
 }
+
+#[cfg(test)]
+mod sentinel_mutant_tests {
+    use super::*;
+
+    #[test]
+    fn test_current_approximate_mutant() {
+        let generator = IdGenerator::new();
+        assert_eq!(generator.current_approximate(), 0);
+
+        let _ = generator.next().unwrap();
+        assert_eq!(generator.current_approximate(), 1);
+
+        generator.reset_to(42);
+        assert_eq!(generator.current_approximate(), 42);
+    }
+
+    #[test]
+    fn test_ensure_at_least_mutant() {
+        let generator = IdGenerator::new();
+        generator.ensure_at_least(0);
+        assert_eq!(generator.current(), 0);
+
+        generator.ensure_at_least(10);
+        assert_eq!(generator.current(), 10);
+
+        // This targets the replacing `>` with `>=` mutant
+        generator.ensure_at_least(10);
+        assert_eq!(generator.current(), 10);
+
+        // Ensure it doesn't go backwards
+        generator.ensure_at_least(5);
+        assert_eq!(generator.current(), 10);
+    }
+
+    #[test]
+    fn test_tx_id_generator_next_mutants() {
+        let tx_gen = TxIdGenerator::new();
+
+        // Check initial state before calling next
+        assert_eq!(tx_gen.current().as_u64(), 0);
+
+        // Initial next
+        let id1 = tx_gen.next();
+        assert_eq!(id1.as_u64(), 1);
+
+        // Subsequent next
+        let id2 = tx_gen.next();
+        assert_eq!(id2.as_u64(), 2);
+
+        // Ensure increment is exactly +1
+        let id3 = tx_gen.next();
+        assert_eq!(id3.as_u64(), 3);
+    }
+}
+
+#[cfg(test)]
+mod sentinel_mutant_tests_2 {
+    use super::*;
+
+    #[test]
+    fn test_tx_id_generator_loop_conditions() {
+        let tx_gen = TxIdGenerator::new();
+        // Since TxIdGenerator initializes internal counter to 1, current is 0
+        assert_eq!(tx_gen.current().as_u64(), 0);
+
+        // Next fetches 1 and sets next_id to 2.
+        assert_eq!(tx_gen.next().as_u64(), 1);
+
+        // Let's set the counter directly to simulate the loop executing
+        // when the current count is large
+        tx_gen.set_counter(100);
+        assert_eq!(tx_gen.next().as_u64(), 100); // Because it compares and then increments 100 to 101.
+
+        // This implicitly checks that `current + 1` wasn't `current * 1` (which would loop forever or return 100 but not advance)
+        // or `current - 1` (which would go backward).
+        assert_eq!(tx_gen.current().as_u64(), 100);
+        assert_eq!(tx_gen.next().as_u64(), 101);
+    }
+}

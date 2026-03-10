@@ -125,3 +125,12 @@
 **Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`.
 **Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, and exact exclusion of boundaries inside interval intersections.
 **Kill Shot:** Appended explicit exact boundary tests `test_timerange_from_at_exact_boundaries`, `test_time_to_secs_millis_exact_math`, `test_time_to_iso8601_exact_content`, and `test_timerange_contains_exact_boundary` directly to `tests/sentry_temporal.rs`.
+
+**Sentinel: Test Gaps in `src/core/id.rs`**
+**Module:** `src/core/id.rs`
+**Summary:** Identified and killed surviving mutants in `IdGenerator` and `TxIdGenerator`.
+**Diagnosis:**
+- `IdGenerator::current_approximate` returned 0 or 1 instead of actual counter value, revealing missing assertion.
+- `IdGenerator::ensure_at_least`'s loop condition `>` could be replaced with `>=` and function could be deleted, revealing missing testing on boundary updates and lack of side-effect testing.
+- `TxIdGenerator::next` increment logic could be changed to `-` or `*`, and overflow check `==` could be changed to `!=`.
+**Kill Shot:** Created targeted test suites in `mod sentinel_mutant_tests` and `mod sentinel_mutant_tests_2` in `src/core/id.rs` testing boundary conditions, exact numerical increments, and looping behavior of ID generation.
