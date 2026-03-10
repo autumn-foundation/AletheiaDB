@@ -1664,3 +1664,31 @@ mod sentinel_id_generator_tests {
         assert_ne!(unchecked.as_u64(), 0);
     }
 }
+
+#[cfg(test)]
+mod sentinel_id_generator_txid_tests {
+    use super::{TxId, TxIdGenerator};
+
+    #[test]
+    fn test_tx_id_generator_math_and_logic() {
+        let generator = TxIdGenerator::new(); // Starts at 1
+
+        let first = generator.next();
+        assert_eq!(first, TxId::new(1));
+
+        let second = generator.next();
+        assert_eq!(second, TxId::new(2));
+
+        let generator_current = generator.current();
+        assert_eq!(generator_current, TxId::new(2));
+
+        let third = generator.next();
+        assert_eq!(third, TxId::new(3));
+
+        let txid_as_u64 = third.as_u64();
+        assert_eq!(txid_as_u64, 3);
+
+        let txid_string = format!("{}", third);
+        assert_eq!(txid_string, "TxId(3)");
+    }
+}
