@@ -75,7 +75,27 @@ impl ReadTransaction {
         }
     }
 
-    /// Get transaction metadata
+    /// Get transaction metadata.
+    ///
+    /// This metadata provides information about the transaction's lifecycle,
+    /// such as its unique ID, start timestamp, and current state. Since this
+    /// is a read-only transaction, the state will always be `Active` until dropped,
+    /// and the commit timestamp will be `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let tx = db.read_transaction()?;
+    /// let meta = tx.metadata();
+    ///
+    /// assert!(meta.is_read_only);
+    /// assert_eq!(meta.tx_id, tx.tx_id());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn metadata(&self) -> TxMetadata {
         TxMetadata {
             tx_id: self.tx_id,
@@ -86,7 +106,23 @@ impl ReadTransaction {
         }
     }
 
-    /// Get transaction ID
+    /// Get transaction ID.
+    ///
+    /// Returns the unique identifier assigned to this transaction when it was created.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let tx = db.read_transaction()?;
+    /// let id = tx.tx_id();
+    ///
+    /// println!("Running in transaction context: {:?}", id);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn tx_id(&self) -> TxId {
         self.tx_id
     }

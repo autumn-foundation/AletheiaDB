@@ -98,6 +98,14 @@ impl Default for CheckpointConfig {
 
 impl CheckpointConfig {
     /// Create configuration with a specific data directory.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::storage::checkpoint::CheckpointConfig;
+    /// let config = CheckpointConfig::with_data_dir("my_data/mydb");
+    /// assert_eq!(config.data_dir.to_str().unwrap(), "my_data/mydb");
+    /// ```
     pub fn with_data_dir(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
@@ -181,6 +189,17 @@ impl CheckpointManager {
     /// Returns an error if:
     /// - The data directory cannot be created
     /// - The compression level is invalid (must be 1-22 for zstd)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::storage::checkpoint::{CheckpointManager, CheckpointConfig};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = CheckpointConfig::default();
+    /// let manager = CheckpointManager::new(config)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(config: CheckpointConfig) -> Result<Self> {
         // Validate compression level (zstd supports 1-22)
         if config.enable_compression && !(1..=22).contains(&config.compression_level) {
