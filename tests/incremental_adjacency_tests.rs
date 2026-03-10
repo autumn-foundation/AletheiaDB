@@ -870,7 +870,7 @@ mod phase5_background_compaction {
         // A loose check because of potential race condition between reading frozen_edge_count and delta_edge_count
         let total = index.frozen_edge_count() + index.delta_edge_count();
         assert!(
-            total >= 10 && total <= 30,
+            (10..=30).contains(&total),
             "Total edges roughly preserved during concurrent compaction"
         );
 
