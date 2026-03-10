@@ -243,5 +243,9 @@ pub mod voyager;
 pub mod serendipity;
 
 #[cfg(feature = "nova")]
+/// Echolocation: Probing the Semantic Substrate.
+pub mod echolocation;
+
+#[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
