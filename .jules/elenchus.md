@@ -307,20 +307,7 @@
 
 ## [Predicate Pushdown Weak Assertions]
 **Module:** `src/query/planner/rules/predicate_pushdown.rs`
-**Severity:** 🟡 Suspect
-**Finding:** Tests such as `test_push_filter_below_vector_rank_no_limit`, `test_push_filter_below_sort`, `test_binary_op_recursion_logic`, and `test_binary_op_partial_optimization` use weak assertions. They verify `result.is_some()` but only use generic `matches!` on the top level or a few levels of the resulting tree.
-**Evidence:** In `test_push_filter_below_sort`:
-```rust
-        let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
-        let new_plan = result.unwrap();
-        assert!(matches!(
-            new_plan.root,
-            LogicalOp::Unary {
-                op: UnaryOp::Sort { .. },
-                ..
-            }
-        ));
-```
-This asserts only that the root became a `Sort`. It doesn't verify that the *child* of `Sort` actually became the `Filter`, or that the parameters of the `Sort` operator remain correct, or that the `Filter` actually wrapped the original `Scan`.
-**Recommendation:** Replace weak `matches!` tests with exact tree matching (using `assert_eq!`) if `LogicalOp` implements `Eq`, or exhaustively destructure the AST down to the leaf nodes and assert all fields are correct.
+**Verdict:** 🟢 Acquitted (Strengthened)
+**Finding:** Tests such as `test_push_filter_below_vector_rank_no_limit`, `test_push_filter_below_sort`, `test_binary_op_recursion_logic`, and `test_binary_op_partial_optimization` used weak assertions. They verified `result.is_some()` but only used generic destructuring on the top level or a few levels of the resulting tree, failing to fully verify the structural integrity of the optimized abstract syntax tree.
+**Evidence:** Weak assertions like `if let LogicalOp::Unary { op: UnaryOp::Sort { key, descending }, input: sort_input } = root` missed intermediate or nested structural validation compared to exact comparison.
+**Resolution:** Replaced all deep destructuring and partial AST assertions with exact `assert_eq!` assertions comparing the produced `LogicalOp` against the fully constructed expected `LogicalOp` tree.
