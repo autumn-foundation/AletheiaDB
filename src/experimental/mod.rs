@@ -63,13 +63,12 @@
 //! // aletheiadb = { version = "0.1", features = ["nova"] }
 //!
 //! # #[cfg(feature = "nova")]
-//! # {
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
 //! use aletheiadb::core::property::PropertyValue;
 //! use std::time::Duration;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! # let node_id = db.create_node("User", Default::default())?;
 //!
@@ -91,7 +90,6 @@
 //!     println!("🕵️ Sherlock found {} suspicious sequences!", detections.len());
 //! }
 //! # Ok(())
-//! # }
 //! # }
 //! # #[cfg(not(feature = "nova"))]
 //! # fn main() {}
