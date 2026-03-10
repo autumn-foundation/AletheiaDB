@@ -173,7 +173,9 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         .into());
     }
 
-    let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+    let dimension = u32::from_le_bytes(bytes[1..5].try_into().map_err(|_| {
+        StorageError::CorruptedData("Invalid byte array length for dimension".to_string())
+    })?) as usize;
 
     // Prevent DoS via memory exhaustion from malicious input
     validate_vector_dimensions(dimension)?;
@@ -235,7 +237,9 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         let mut values = Vec::with_capacity(dimension);
         for chunk in data_slice.chunks_exact(4) {
             // SAFETY: chunks_exact guarantees exactly 4 bytes per chunk
-            values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            values.push(f32::from_le_bytes(chunk.try_into().map_err(|_| {
+                StorageError::CorruptedData("Invalid byte array length for value chunk".to_string())
+            })?));
         }
         values
     };
@@ -331,8 +335,12 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
         .into());
     }
 
-    let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
-    let nnz = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+    let dimension = u32::from_le_bytes(bytes[1..5].try_into().map_err(|_| {
+        StorageError::CorruptedData("Invalid byte array length for sparse dimension".to_string())
+    })?);
+    let nnz = u32::from_le_bytes(bytes[5..9].try_into().map_err(|_| {
+        StorageError::CorruptedData("Invalid byte array length for sparse nnz".to_string())
+    })?) as usize;
 
     // Validate nnz doesn't exceed dimension
     if nnz > dimension as usize {
@@ -401,7 +409,11 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     let indices = {
         let mut indices = Vec::with_capacity(nnz);
         for chunk in indices_slice.chunks_exact(4) {
-            indices.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+            indices.push(u32::from_le_bytes(chunk.try_into().map_err(|_| {
+                StorageError::CorruptedData(
+                    "Invalid byte array length for sparse indices chunk".to_string(),
+                )
+            })?));
         }
         indices
     };
@@ -436,7 +448,11 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     let values = {
         let mut values = Vec::with_capacity(nnz);
         for chunk in values_slice.chunks_exact(4) {
-            values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            values.push(f32::from_le_bytes(chunk.try_into().map_err(|_| {
+                StorageError::CorruptedData(
+                    "Invalid byte array length for sparse values chunk".to_string(),
+                )
+            })?));
         }
         values
     };
