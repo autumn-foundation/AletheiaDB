@@ -1480,6 +1480,30 @@ wal_dir = "/custom/path/to/wal"
     }
 
     #[test]
+    #[should_panic(expected = "cold_storage_path must be set when enable_cold_storage is true")]
+    fn test_historical_config_build_panics_without_path() {
+        HistoricalConfigBuilder::new()
+            .enable_cold_storage(true)
+            .build();
+    }
+
+    #[test]
+    fn test_historical_config_enable_cold_storage() {
+        let builder = HistoricalConfigBuilder::new().enable_cold_storage(true);
+        assert!(builder.config.enable_cold_storage);
+
+        let builder = builder.enable_cold_storage(false);
+        assert!(!builder.config.enable_cold_storage);
+    }
+
+    #[test]
+    fn test_historical_config_cold_storage_path() {
+        let path = std::path::PathBuf::from("/test/path");
+        let builder = HistoricalConfigBuilder::new().cold_storage_path(path.clone());
+        assert_eq!(builder.config.cold_storage_path, Some(path));
+    }
+
+    #[test]
     fn test_vector_config_zero_max_k() {
         let result = VectorIndexConfigBuilder::new().max_k(0);
         assert!(result.is_err());
