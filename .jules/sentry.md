@@ -22,3 +22,10 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+**Mutation Escapes in Logic Equality Checks**
+**Learning:** Manual implementations of deep equality checks (like `predicates_equal` in `operation_reordering.rs`) often contain exhaustive `match` arms that are lightly tested for the "happy path" (true equality). However, `cargo-mutants` reveals that modifying boolean operators (`&&` to `||`) or condition operators (`==` to `!=`) within those arms can survive if tests do not explicitly check permutations where only one side or one property mismatches.
+**Action:** When testing manual equality or deep structural comparison functions, always include an "exhaustive mismatches" test suite that validates `false` is returned for every possible structural divergence (e.g., same keys/different values, different keys/same values).
+
+**Unreachable Code in AST Parsers**
+**Learning:** Missing branch logic or default `unreachable!()` calls in AST converter patterns (like resolving inline property IDs in `convert_node_pattern`) can lead to missed optimizations if they're not explicitly verified.
+**Action:** Always write explicit test cases to ensure that complex query parsing logic hits intended optimizations, like `StartNode`, avoiding reliance on implicit pass-throughs.

@@ -1806,6 +1806,26 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_node_pattern_inline_id() {
+        // 🎯 Target: convert_node_pattern optimization for inline id lookup
+        // 💣 Risk: Optimization missed -> full scan
+        // 🧪 Strategy: Parse inline ID and check for QueryOp::StartNode
+        let ast = Parser::parse("MATCH (n {id: 123}) RETURN n").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let has_start_node = query.ops.iter().any(|op| match op {
+            QueryOp::StartNode(id) => id.as_u64() == 123,
+            _ => false,
+        });
+
+        assert!(
+            has_start_node,
+            "Query should be optimized to use StartNode when inline id is provided."
+        );
+    }
+
+    #[test]
     fn test_duplicate_property_keys() {
         // 🎯 Target: convert_node_pattern property handling
         // 💣 Risk: Ambiguous behavior

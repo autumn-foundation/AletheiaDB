@@ -214,10 +214,10 @@ impl<'a> ChimeraEngine<'a> {
                 }
                 PropertyMergeStrategy::Sum => self.merge_numeric(a, b, |x, y| x + y, config),
                 PropertyMergeStrategy::Min => {
-                    self.merge_comparable(a, b, |x, y| if x < y { x } else { y })
+                    self.merge_comparable(a, b, |x, y| if x < y { x } else { y }, true)
                 }
                 PropertyMergeStrategy::Max => {
-                    self.merge_comparable(a, b, |x, y| if x > y { x } else { y })
+                    self.merge_comparable(a, b, |x, y| if x > y { x } else { y }, false)
                 }
                 PropertyMergeStrategy::Concatenate => {
                     if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
@@ -283,16 +283,27 @@ impl<'a> ChimeraEngine<'a> {
         a: &PropertyValue,
         b: &PropertyValue,
         op: F,
+        is_min: bool,
     ) -> Option<PropertyValue>
     where
         F: Fn(f64, f64) -> f64,
     {
         // For Min/Max, we can reuse numeric logic if both are numbers.
         // If they are strings, we can compare strings.
-        if let (Some(_sa), Some(_sb)) = (a.as_str(), b.as_str()) {
-            // String comparison - fallback to A for now as 'op' is numeric only.
-            // TODO: Implement string comparison logic if needed.
-            return Some(a.clone());
+        if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
+            if is_min {
+                if sa < sb {
+                    return Some(a.clone());
+                } else {
+                    return Some(b.clone());
+                }
+            } else {
+                if sa > sb {
+                    return Some(a.clone());
+                } else {
+                    return Some(b.clone());
+                }
+            }
         }
         self.merge_numeric(a, b, op, &SynthesisConfig::default())
     }
@@ -327,6 +338,36 @@ mod tests {
             .build();
 
         (AletheiaDB::with_unified_config(config).unwrap(), dir)
+    }
+
+    #[test]
+    fn test_chimera_string_comparison() {
+        let (db, _dir) = create_test_db();
+        let engine = ChimeraEngine::new(&db);
+        let config = SynthesisConfig::default();
+
+        let str_a = PropertyValue::String(std::sync::Arc::from("apple"));
+        let str_b = PropertyValue::String(std::sync::Arc::from("banana"));
+
+        let min_result = engine
+            .merge_value(
+                Some(&str_a),
+                Some(&str_b),
+                PropertyMergeStrategy::Min,
+                &config,
+            )
+            .unwrap();
+        assert_eq!(min_result.as_str().unwrap(), "apple");
+
+        let max_result = engine
+            .merge_value(
+                Some(&str_a),
+                Some(&str_b),
+                PropertyMergeStrategy::Max,
+                &config,
+            )
+            .unwrap();
+        assert_eq!(max_result.as_str().unwrap(), "banana");
     }
 
     #[test]

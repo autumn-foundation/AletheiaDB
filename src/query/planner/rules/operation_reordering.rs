@@ -1121,14 +1121,17 @@ mod tests {
         // Eq mismatches
         assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("b", 1)));
         assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("a", 2)));
+        assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("b", 2)));
 
         // Ne mismatches
         assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("b", 1)));
         assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("a", 2)));
+        assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("b", 2)));
 
         // Gt mismatches
         assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("b", 1)));
         assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("a", 2)));
+        assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("b", 2)));
 
         // Gte mismatches
         assert!(!rule.predicates_equal(
@@ -1151,10 +1154,21 @@ mod tests {
                 value: crate::query::ir::PredicateValue::Int(2)
             }
         ));
+        assert!(!rule.predicates_equal(
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Gte {
+                key: "b".to_string(),
+                value: crate::query::ir::PredicateValue::Int(2)
+            }
+        ));
 
         // Lt mismatches
         assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("b", 1)));
         assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("a", 2)));
+        assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("b", 2)));
 
         // Lte mismatches
         assert!(!rule.predicates_equal(
@@ -1174,6 +1188,16 @@ mod tests {
             },
             &Predicate::Lte {
                 key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(2)
+            }
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Lte {
+                key: "b".to_string(),
                 value: crate::query::ir::PredicateValue::Int(2)
             }
         ));
@@ -1199,6 +1223,16 @@ mod tests {
                 values: vec![crate::query::ir::PredicateValue::Int(2)]
             }
         ));
+        assert!(!rule.predicates_equal(
+            &Predicate::In {
+                key: "a".to_string(),
+                values: vec![crate::query::ir::PredicateValue::Int(1)]
+            },
+            &Predicate::In {
+                key: "b".to_string(),
+                values: vec![crate::query::ir::PredicateValue::Int(2)]
+            }
+        ));
 
         // Contains mismatches
         assert!(!rule.predicates_equal(
@@ -1208,6 +1242,10 @@ mod tests {
         assert!(!rule.predicates_equal(
             &Predicate::contains("a", "abc"),
             &Predicate::contains("a", "xyz")
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::contains("a", "abc"),
+            &Predicate::contains("b", "xyz")
         ));
 
         // StartsWith mismatches
@@ -1231,6 +1269,16 @@ mod tests {
                 prefix: "xyz".to_string()
             }
         ));
+        assert!(!rule.predicates_equal(
+            &Predicate::StartsWith {
+                key: "a".to_string(),
+                prefix: "abc".to_string()
+            },
+            &Predicate::StartsWith {
+                key: "b".to_string(),
+                prefix: "xyz".to_string()
+            }
+        ));
 
         // EndsWith mismatches
         assert!(!rule.predicates_equal(
@@ -1250,6 +1298,16 @@ mod tests {
             },
             &Predicate::EndsWith {
                 key: "a".to_string(),
+                suffix: "xyz".to_string()
+            }
+        ));
+        assert!(!rule.predicates_equal(
+            &Predicate::EndsWith {
+                key: "a".to_string(),
+                suffix: "abc".to_string()
+            },
+            &Predicate::EndsWith {
+                key: "b".to_string(),
                 suffix: "xyz".to_string()
             }
         ));
