@@ -1663,4 +1663,15 @@ mod sentinel_id_generator_tests {
         assert_eq!(unchecked.as_u64(), 42);
         assert_ne!(unchecked.as_u64(), 0);
     }
+
+    #[test]
+    fn test_max_valid_id_behavior_exact() {
+        // Test exact bounds explicitly for u64::MAX - 1000
+        let exact_valid = u64::MAX - 1000;
+        let exact_invalid = u64::MAX - 999;
+
+        // Ensure ID logic strictly adheres to these values as boundaries
+        assert!(NodeId::new(exact_valid).is_ok());
+        assert!(NodeId::new(exact_invalid).is_err());
+    }
 }

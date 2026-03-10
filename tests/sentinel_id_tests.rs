@@ -231,3 +231,32 @@ fn test_entity_id_as_edge_exhaustive() {
     // Check node case returns None
     assert_eq!(entity_node.as_edge(), None);
 }
+
+#[test]
+fn test_fmt_display_not_empty_or_default() {
+    let node_id = NodeId::new(42).unwrap();
+    let edge_id = EdgeId::new(42).unwrap();
+    let version_id = VersionId::new(42).unwrap();
+    let entity_node: EntityId = node_id.into();
+    let tx_id = TxId::new(42);
+
+    let n_str = format!("{}", node_id);
+    assert!(!n_str.is_empty());
+    assert_eq!(n_str, "Node(42)");
+
+    let e_str = format!("{}", edge_id);
+    assert!(!e_str.is_empty());
+    assert_eq!(e_str, "Edge(42)");
+
+    let v_str = format!("{}", version_id);
+    assert!(!v_str.is_empty());
+    assert_eq!(v_str, "Version(42)");
+
+    let en_str = format!("{}", entity_node);
+    assert!(!en_str.is_empty());
+    assert_eq!(en_str, "Node(42)");
+
+    let t_str = format!("{}", tx_id);
+    assert!(!t_str.is_empty());
+    assert_eq!(t_str, "TxId(42)");
+}
