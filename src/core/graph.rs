@@ -306,6 +306,7 @@ mod tests {
             Some("Alice")
         );
         assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+        assert_eq!(node.get_property("missing_prop"), None);
         assert_eq!(node.metadata, VersionMetadata::default());
     }
 
@@ -348,6 +349,7 @@ mod tests {
             edge.get_property("since").and_then(|v| v.as_int()),
             Some(2020)
         );
+        assert_eq!(edge.get_property("missing_prop"), None);
         assert_eq!(edge.metadata, VersionMetadata::default());
     }
 
@@ -464,6 +466,10 @@ mod tests {
             debug_str.contains("Alice"),
             "Debug output should contain property value"
         );
+        assert!(
+            debug_str.contains("current_version"),
+            "Debug output should contain current version"
+        );
     }
 
     #[test]
@@ -506,6 +512,10 @@ mod tests {
         assert!(
             debug_str.contains("2024"),
             "Debug output should contain property value"
+        );
+        assert!(
+            debug_str.contains("source") && debug_str.contains("target"),
+            "Debug output should contain source and target nodes"
         );
     }
 

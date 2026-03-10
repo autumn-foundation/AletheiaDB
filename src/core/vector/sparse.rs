@@ -832,4 +832,26 @@ mod tests {
             "squared_euclidean_distance should fail on mismatched dimensions"
         );
     }
+
+    #[test]
+    fn test_sparse_squared_euclidean_distance_disjoint() {
+        let a = SparseVec::new(vec![0], vec![2.0], 5).unwrap();
+        let b = SparseVec::new(vec![1], vec![3.0], 5).unwrap();
+
+        // Distance from [2, 0, 0, 0, 0] to [0, 3, 0, 0, 0]
+        // Expected squared distance = (2-0)^2 + (0-3)^2 = 4 + 9 = 13.0
+        let dist_sq = sparse_squared_euclidean_distance(&a, &b).unwrap();
+        assert_eq!(dist_sq, 13.0);
+    }
+
+    #[test]
+    fn test_sparse_squared_euclidean_distance_zero_vector() {
+        let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
+        let b = SparseVec::new(vec![], vec![], 5).unwrap();
+
+        // Distance from [3, 0, 0, 0, 0] to [0, 0, 0, 0, 0]
+        // Expected squared distance = (3-0)^2 = 9.0
+        let dist_sq = sparse_squared_euclidean_distance(&a, &b).unwrap();
+        assert_eq!(dist_sq, 9.0);
+    }
 }

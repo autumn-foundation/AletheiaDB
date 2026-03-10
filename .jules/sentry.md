@@ -22,3 +22,11 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+
+## Missing Property Retrieval Coverage
+**Learning:** Checking for edge-cases during data structure manipulation should include cases explicitly testing property lookup behaviors for missing keys.
+**Action:** Enhance tests for Edge and Node getters.
+
+## Sparse Vector Distance Metric Verification
+**Learning:** `sparse_squared_euclidean_distance` needs explicit tests validating its logic against edge cases like disjoint vector components and comparing against zero vectors to ensure algorithm updates don't silently corrupt calculations.
+**Action:** Always add basic unit tests with hand-calculated math answers for sparse vector metrics alongside property or generative tests.
