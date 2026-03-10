@@ -122,3 +122,5 @@ pub use validation::*;
 
 #[cfg(test)]
 mod havoc_vector_math;
+#[cfg(test)]
+pub(crate) mod sentry_serialization_error_tests;

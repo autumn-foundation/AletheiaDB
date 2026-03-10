@@ -22,3 +22,6 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+## Auditability and Defensive Deserialization
+**Learning:** Calls to `unwrap()` during `try_into()` conversions from byte slices in core deserialization paths (`property.rs` and `vector/serialization.rs`) were technically safe because the slice lengths were validated immediately prior to the conversion. However, using `unwrap()` triggers tools (and human reviewers) searching for panic risks, degrading confidence in safety and masking real panic risks.
+**Action:** Always replace `unwrap()` with `expect("descriptive message about prior length checks")` when converting slices with proven sizes to ensure the code is auditable and correctly demonstrates defensive programming in the face of potentially corrupt disk data.
