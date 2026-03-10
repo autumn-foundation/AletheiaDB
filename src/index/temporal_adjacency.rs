@@ -74,9 +74,9 @@ impl TemporalAdjacencyEntry {
 
 /// Temporal adjacency index for graph traversal at specific points in time.
 pub struct TemporalAdjacencyIndex {
-    /// Outgoing edges: source_node -> `[entries]`
+    /// Outgoing edges: source_node -> [entries]
     pub(crate) outgoing: DashMap<NodeId, Vec<TemporalAdjacencyEntry>>,
-    /// Incoming edges: target_node -> `[entries]`
+    /// Incoming edges: target_node -> [entries]
     pub(crate) incoming: DashMap<NodeId, Vec<TemporalAdjacencyEntry>>,
     /// Configuration
     config: TemporalAdjacencyConfig,

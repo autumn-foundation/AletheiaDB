@@ -11,22 +11,6 @@ use thiserror::Error;
 /// Result type alias using AletheiaDB's Error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Extension methods for [`Result`] values using AletheiaDB's error type.
-pub trait ResultExt<T> {
-    /// Record an error metric (if this is `Err`) and return the original result.
-    fn record_error_metric(self) -> Self;
-}
-
-impl<T> ResultExt<T> for Result<T> {
-    #[inline]
-    fn record_error_metric(self) -> Self {
-        if let Err(ref err) = self {
-            err.record_metric();
-        }
-        self
-    }
-}
-
 /// Main error type for all AletheiaDB operations.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -62,36 +46,23 @@ pub enum Error {
 }
 
 impl Error {
-    /// Record an error metric for this error's category.
-    ///
-    /// This is intentionally explicit and side-effect free for constructors and
-    /// conversions. Callers should record at API boundaries when returning errors.
-    #[inline]
-    pub fn record_metric(&self) {
-        #[cfg(feature = "observability")]
-        {
-            let counter = match self {
-                Error::Storage(_) => &crate::observability::METRICS.error_storage_total,
-                Error::Temporal(_) => &crate::observability::METRICS.error_temporal_total,
-                Error::Query(_) => &crate::observability::METRICS.error_query_total,
-                Error::Transaction(_) => &crate::observability::METRICS.error_transaction_total,
-                Error::Vector(_) => &crate::observability::METRICS.error_vector_total,
-                Error::Io(_) => &crate::observability::METRICS.error_io_total,
-                Error::NotImplemented { .. } | Error::Other(_) => {
-                    &crate::observability::METRICS.error_other_total
-                }
-            };
-            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
     /// Create a new error from a message.
     pub fn other<S: Into<String>>(msg: S) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_other_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Other(msg.into())
     }
 
     /// Create a new NotImplemented error.
     pub fn not_implemented<S: Into<String>, R: Into<String>>(feature: S, reason: R) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_other_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::NotImplemented {
             feature: feature.into(),
             reason: reason.into(),
@@ -99,46 +70,81 @@ impl Error {
     }
 }
 
-// Manual From impls are explicit to keep category conversions easy to audit.
+// Manual From impls preserved because they have observability counter side effects.
 
 impl From<StorageError> for Error {
     fn from(e: StorageError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_storage_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Storage(e)
     }
 }
 
 impl From<TemporalError> for Error {
     fn from(e: TemporalError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_temporal_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Temporal(e)
     }
 }
 
 impl From<QueryError> for Error {
     fn from(e: QueryError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_query_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Query(e)
     }
 }
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_io_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Io(e)
     }
 }
 
 impl From<TransactionError> for Error {
     fn from(e: TransactionError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_transaction_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Transaction(e)
     }
 }
 
 impl From<VectorError> for Error {
     fn from(e: VectorError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_vector_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Vector(e)
     }
 }
 
 impl From<crate::config::ConfigError> for Error {
     fn from(e: crate::config::ConfigError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_other_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Other(e.to_string())
     }
 }
@@ -146,113 +152,14 @@ impl From<crate::config::ConfigError> for Error {
 #[cfg(feature = "sql")]
 impl From<crate::sql::SqlError> for Error {
     fn from(e: crate::sql::SqlError) -> Self {
-        let query_error = match e {
-            crate::sql::SqlError::ParseError(message) => QueryError::SyntaxError { message },
-            crate::sql::SqlError::UnsupportedFeature(feature) => {
-                QueryError::UnsupportedFeature { feature }
-            }
-            crate::sql::SqlError::InvalidTable(table) => QueryError::InvalidParameter {
-                parameter: "table".to_string(),
-                reason: format!("invalid table '{}': expected 'nodes' or 'edges'", table),
-            },
-            crate::sql::SqlError::InvalidColumn(column) => QueryError::InvalidParameter {
-                parameter: "column".to_string(),
-                reason: format!("invalid column reference: {}", column),
-            },
-            crate::sql::SqlError::InvalidTemporalClause(clause) => QueryError::InvalidParameter {
-                parameter: "temporal_clause".to_string(),
-                reason: format!("invalid temporal clause: {}", clause),
-            },
-            crate::sql::SqlError::InvalidTimestamp(timestamp) => QueryError::InvalidParameter {
-                parameter: "timestamp".to_string(),
-                reason: format!("invalid timestamp: {}", timestamp),
-            },
-            crate::sql::SqlError::MissingClause(clause) => QueryError::InvalidParameter {
-                parameter: "clause".to_string(),
-                reason: format!("missing required clause: {}", clause),
-            },
-            crate::sql::SqlError::TypeError(actual) => QueryError::TypeMismatch {
-                expected: "compatible SQL type".to_string(),
-                actual,
-            },
-            crate::sql::SqlError::ParameterError(reason) => QueryError::InvalidParameter {
-                parameter: "parameter".to_string(),
-                reason,
-            },
-        };
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_query_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        Error::Query(query_error)
-    }
-}
-
-/// Structured categories for persistence failures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PersistenceErrorKind {
-    /// Corrupted index data.
-    Corrupted,
-    /// String interner mismatch while restoring persisted state.
-    InternerMismatch,
-    /// Unsupported persisted manifest/index version.
-    UnsupportedVersion,
-    /// Required persisted index file is missing.
-    MissingIndex,
-    /// Invalid file magic bytes.
-    InvalidMagic,
-    /// Size-limit violation (DoS protection).
-    SizeLimitExceeded,
-    /// I/O failure while reading/writing persisted data.
-    Io,
-    /// Serialization/deserialization failure.
-    Serialization,
-    /// Unknown or unclassified persistence failure.
-    Unknown,
-}
-
-impl std::fmt::Display for PersistenceErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kind = match self {
-            PersistenceErrorKind::Corrupted => "corrupted",
-            PersistenceErrorKind::InternerMismatch => "interner_mismatch",
-            PersistenceErrorKind::UnsupportedVersion => "unsupported_version",
-            PersistenceErrorKind::MissingIndex => "missing_index",
-            PersistenceErrorKind::InvalidMagic => "invalid_magic",
-            PersistenceErrorKind::SizeLimitExceeded => "size_limit_exceeded",
-            PersistenceErrorKind::Io => "io",
-            PersistenceErrorKind::Serialization => "serialization",
-            PersistenceErrorKind::Unknown => "unknown",
-        };
-        write!(f, "{}", kind)
-    }
-}
-
-impl From<&crate::storage::index_persistence::IndexPersistenceError> for PersistenceErrorKind {
-    fn from(e: &crate::storage::index_persistence::IndexPersistenceError) -> Self {
-        match e {
-            crate::storage::index_persistence::IndexPersistenceError::Corrupted { .. } => {
-                PersistenceErrorKind::Corrupted
-            }
-            crate::storage::index_persistence::IndexPersistenceError::InternerMismatch {
-                ..
-            } => PersistenceErrorKind::InternerMismatch,
-            crate::storage::index_persistence::IndexPersistenceError::UnsupportedVersion {
-                ..
-            } => PersistenceErrorKind::UnsupportedVersion,
-            crate::storage::index_persistence::IndexPersistenceError::MissingIndex { .. } => {
-                PersistenceErrorKind::MissingIndex
-            }
-            crate::storage::index_persistence::IndexPersistenceError::InvalidMagic { .. } => {
-                PersistenceErrorKind::InvalidMagic
-            }
-            crate::storage::index_persistence::IndexPersistenceError::SizeLimitExceeded {
-                ..
-            } => PersistenceErrorKind::SizeLimitExceeded,
-            crate::storage::index_persistence::IndexPersistenceError::Io(_) => {
-                PersistenceErrorKind::Io
-            }
-            crate::storage::index_persistence::IndexPersistenceError::Serialization(_) => {
-                PersistenceErrorKind::Serialization
-            }
-        }
+        Error::Query(QueryError::SyntaxError {
+            message: e.to_string(),
+        })
     }
 }
 
@@ -308,18 +215,10 @@ pub enum StorageError {
     /// Corrupted data detected.
     #[error("Corrupted data: {0}")]
     CorruptedData(String),
-    /// Index persistence error with structured category information.
-    #[error("Persistence error [{kind}]: {message}")]
-    PersistenceErrorWithKind {
-        /// Persistence error category.
-        kind: PersistenceErrorKind,
-        /// Human-readable error message.
-        message: String,
-    },
-    /// Legacy index persistence error message.
+    /// Index persistence error.
     ///
-    /// This variant stores only a formatted message and does not retain structured
-    /// persistence error category information.
+    /// This variant preserves the original IndexPersistenceError information
+    /// for better debugging and error handling of persistence operations.
     #[error("Persistence error: {0}")]
     PersistenceError(String),
     /// Property with the given key was not found.
@@ -371,24 +270,6 @@ impl StorageError {
     /// Create a persistence error with a message.
     pub fn persistence<S: Into<String>>(msg: S) -> Self {
         StorageError::PersistenceError(msg.into())
-    }
-
-    /// Create a persistence error with explicit category information.
-    pub fn persistence_with_kind<S: Into<String>>(kind: PersistenceErrorKind, msg: S) -> Self {
-        StorageError::PersistenceErrorWithKind {
-            kind,
-            message: msg.into(),
-        }
-    }
-}
-
-impl From<crate::storage::index_persistence::IndexPersistenceError> for StorageError {
-    fn from(e: crate::storage::index_persistence::IndexPersistenceError) -> Self {
-        let kind = PersistenceErrorKind::from(&e);
-        StorageError::PersistenceErrorWithKind {
-            kind,
-            message: e.to_string(),
-        }
     }
 }
 
@@ -537,12 +418,6 @@ pub enum QueryError {
     SyntaxError {
         /// The error message
         message: String,
-    },
-    /// Query uses a feature that is not currently supported.
-    #[error("Unsupported query feature: {feature}")]
-    UnsupportedFeature {
-        /// The unsupported feature description.
-        feature: String,
     },
     /// Invalid query parameter.
     #[error("Invalid query parameter '{parameter}': {reason}")]
@@ -912,14 +787,6 @@ mod tests {
         assert!(format!("{}", err).contains("Persistence error"));
         assert!(format!("{}", err).contains("failed to save index"));
 
-        // Test PersistenceErrorWithKind
-        let err = StorageError::PersistenceErrorWithKind {
-            kind: PersistenceErrorKind::InvalidMagic,
-            message: "bad header".to_string(),
-        };
-        assert!(format!("{}", err).contains("invalid_magic"));
-        assert!(format!("{}", err).contains("bad header"));
-
         // Test PropertyNotFound
         let err = StorageError::PropertyNotFound("embedding".to_string());
         assert_eq!(format!("{}", err), "Property not found: embedding");
@@ -1029,51 +896,6 @@ mod tests {
         assert!(display.contains("vector index"));
         assert!(display.contains("embedding"));
         assert!(display.contains("vector_index(\"embedding\").hnsw"));
-    }
-
-    #[test]
-    fn test_index_persistence_error_conversion_preserves_kind() {
-        let io_err = crate::storage::index_persistence::IndexPersistenceError::Serialization(
-            "decode failed".to_string(),
-        );
-        let converted: StorageError = io_err.into();
-        match converted {
-            StorageError::PersistenceErrorWithKind { kind, message } => {
-                assert_eq!(kind, PersistenceErrorKind::Serialization);
-                assert!(message.contains("decode failed"));
-            }
-            other => panic!("expected PersistenceErrorWithKind, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "sql")]
-    #[test]
-    fn test_sql_error_conversion_preserves_semantics() {
-        let converted: Error = crate::sql::SqlError::UnsupportedFeature("MATCH".to_string()).into();
-        assert!(matches!(
-            converted,
-            Error::Query(QueryError::UnsupportedFeature { feature }) if feature == "MATCH"
-        ));
-
-        let converted: Error = crate::sql::SqlError::InvalidColumn("foo".to_string()).into();
-        assert!(matches!(
-            converted,
-            Error::Query(QueryError::InvalidParameter { parameter, .. }) if parameter == "column"
-        ));
-    }
-
-    #[cfg(feature = "observability")]
-    #[test]
-    fn test_result_ext_records_storage_metric_once() {
-        crate::observability::METRICS.reset();
-
-        let err: Result<()> = Err(StorageError::NodeNotFound(NodeId::new(1).unwrap()).into());
-        let snapshot = crate::observability::METRICS.snapshot();
-        assert_eq!(snapshot.error_storage_total, 0);
-
-        let _ = err.record_error_metric();
-        let snapshot = crate::observability::METRICS.snapshot();
-        assert_eq!(snapshot.error_storage_total, 1);
     }
 
     #[test]

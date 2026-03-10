@@ -7,17 +7,6 @@
 //! Every graph element (node/edge version) has a BiTemporalInterval that tracks
 //! both dimensions of time.
 //!
-//! # The Bi-Temporal Story
-//!
-//! Imagine a company updates an employee's salary retroactively.
-//! The `Valid Time` captures *when* that raise actually goes into effect
-//! in the real world. But what if someone queries the database asking,
-//! "What was their salary reported *yesterday*?"
-//!
-//! By tracking `Transaction Time`, the database knows *when* it learned the fact.
-//! This allows AletheiaDB to accurately reconstruct what the database "knew"
-//! at any arbitrary point in history, protecting against overwritten realities.
-//!
 //! # Gotchas & Corner Cases ⚠️
 //!
 //! Temporal logic is tricky. Here are common pitfalls to avoid:

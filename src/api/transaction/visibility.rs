@@ -577,15 +577,18 @@ impl TxVisibilityManager {
     /// Initially adds to exceptions. Call `compress_commit_log()` periodically
     /// to compress sequential runs into epochs.
     pub fn register_commit(&self, tx_id: TxId, commit_timestamp: Timestamp) {
-        let mut active_guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        // Drop active lock before acquiring committed write lock to reduce contention
+        {
+            let mut active_guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+
+            // Use Arc::make_mut for idiomatic copy-on-write.
+            Arc::make_mut(&mut *active_guard).remove(&tx_id);
+        } // active lock released here
 
         let mut committed = self
             .committed
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-
-        // Use Arc::make_mut for idiomatic copy-on-write.
-        Arc::make_mut(&mut *active_guard).remove(&tx_id);
         committed.insert(tx_id, commit_timestamp);
     }
 

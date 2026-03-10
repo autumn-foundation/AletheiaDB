@@ -30,10 +30,3 @@
 1.  **Update `tokenizers`:** Updated `tokenizers` to version `0.22` in `Cargo.toml`. This version drops the dependency on `number_prefix` and includes fixes for known vulnerabilities.
 2.  **Update Dependencies:** Ran `cargo update` to pull in the latest compatible versions of all dependencies, resolving the yanked `bumpalo` issue in `wasm-bindgen`.
 3.  **Verification:** Ran `cargo audit` to confirm the vulnerabilities are resolved. Ran tests (`cargo test --features embedding-onnx`) to ensure no regressions.
-
-**2026-02-15 - Prevented Deserialization Panics in Binary Parsers**
-**Threat:** A malicious actor with access to the on-disk storage or network payloads could supply truncated binary data containing valid headers but insufficient payloads. The `deserialize_node_id`, `deserialize_edge_id`, and `deserialize_version_id` functions in `src/storage/wal/segment_reader.rs` and vector deserialization functions in `src/core/vector/serialization.rs` were using `.unwrap()` during `try_into()` conversion of byte slices to fixed-size arrays. If the source slice was smaller than expected, this would trigger an immediate thread panic and result in a Denial of Service (DoS) across the database.
-**Defense:** Replaced `try_into().unwrap()` calls with safe, mapped `Result` evaluations across `src/storage/wal/segment_reader.rs` and `src/core/vector/serialization.rs` to ensure graceful `StorageError::CorruptedData` error propagation instead of a process crash.
-2024-XX-XX - [Warden: CSR Adjacency Index Vulnerability]
-**Threat:** `AdjacencyIndex::import_csr` did not validate that `node_ids` is sorted, and did not validate that `offsets` is monotonically increasing. It also didn't validate that the first offset is `0`. This allows a maliciously constructed CSR payload to cause OOB reads (Denial of Service) when `get_adjacency` is called, due to `start > end` or `end > edges.len()` when slicing the `edges` array.
-**Defense:** Added rigorous validation in `validate_csr_invariants` to ensure `node_ids` is strictly sorted (no duplicates), `offsets` begins with `0`, and is monotonically increasing.

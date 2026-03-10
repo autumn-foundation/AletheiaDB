@@ -12,18 +12,6 @@
 //! - **[`vector`]**: Vector embeddings and similarity metrics.
 //! - **[`interning`]**: String interning for memory-efficient storage of labels and keys.
 //! - **[`hlc`]**: Hybrid Logical Clock implementation for distributed timekeeping.
-//!
-//! # Why Interning?
-//! Strings like graph labels ("Person", "KNOWS") and property keys often repeat millions of times.
-//! Storing them as raw `String`s would be highly memory inefficient.
-//! Instead, the [`interning`] module maps these repeating strings to integers (IDs), reducing overhead
-//! and making comparisons as fast as an integer check.
-//!
-//! # Why Hybrid Logical Clocks (HLC)?
-//! In distributed systems, relying solely on wall-clock time can lead to ordering issues due to clock drift.
-//! Using purely logical clocks loses the human-readable concept of "when" something happened.
-//! The [`hlc`] module combines both: ensuring causal ordering for events while remaining tightly bound
-//! to the physical wall clock, bridging the gap between machines and human expectations.
 
 pub mod error;
 pub mod graph;

@@ -68,6 +68,14 @@ pub const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
 ///   Still provides DoS protection (~1MB per node maximum).
 pub const MAX_PROPERTY_MAP_CAPACITY: usize = 100_000;
 
+/// Maximum size in bytes for a deserialized string property.
+/// 64MB allows for large document storage while preventing DoS via excessive allocations.
+pub const MAX_STRING_LENGTH: usize = 64 * 1024 * 1024;
+
+/// Maximum size in bytes for a deserialized byte array property.
+/// 64MB allows for large blob storage while preventing DoS via excessive allocations.
+pub const MAX_BYTES_LENGTH: usize = 64 * 1024 * 1024;
+
 /// Maximum recursion depth for nested properties (e.g., arrays of arrays).
 /// Set to 100 to prevent stack overflow from malicious input.
 pub const MAX_RECURSION_DEPTH: usize = 100;
@@ -710,6 +718,15 @@ impl PropertyValue {
             .into());
         }
         let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+
+        if len > MAX_STRING_LENGTH {
+            return Err(StorageError::CorruptedData(format!(
+                "String length {} exceeds maximum allowed {}",
+                len, MAX_STRING_LENGTH
+            ))
+            .into());
+        }
+
         let offset = 5usize;
 
         let required_len = offset
@@ -740,6 +757,15 @@ impl PropertyValue {
             .into());
         }
         let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+
+        if len > MAX_BYTES_LENGTH {
+            return Err(StorageError::CorruptedData(format!(
+                "Bytes length {} exceeds maximum allowed {}",
+                len, MAX_BYTES_LENGTH
+            ))
+            .into());
+        }
+
         let offset = 5usize;
 
         let required_len = offset
@@ -3803,6 +3829,38 @@ mod sentry_tests {
     /// 💣 Risk: Deserialization should consume exactly what is needed and return the count, ignoring trailing data.
     /// 🧪 Strategy: Serialize a valid map, append garbage, deserialize.
     /// 🔬 Verification: Check consumed bytes matches map size, not buffer size.
+    #[test]
+    fn test_deserialize_string_max_length() {
+        let mut bytes = vec![TAG_STRING];
+        let len = (MAX_STRING_LENGTH + 1) as u32;
+        bytes.extend_from_slice(&len.to_le_bytes());
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds maximum allowed")
+        );
+    }
+
+    #[test]
+    fn test_deserialize_bytes_max_length() {
+        let mut bytes = vec![TAG_BYTES];
+        let len = (MAX_BYTES_LENGTH + 1) as u32;
+        bytes.extend_from_slice(&len.to_le_bytes());
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds maximum allowed")
+        );
+    }
+
     #[test]
     fn test_property_map_deserialize_trailing_bytes() {
         let map = PropertyMapBuilder::new().insert("key", "value").build();

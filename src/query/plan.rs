@@ -13,7 +13,7 @@ use crate::index::vector::DistanceMetric;
 use super::ir::{Direction, Predicate, TraversalDepth};
 
 /// A logical query plan represented as a tree of operations.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct LogicalPlan {
     /// Root operation of the plan tree
     pub root: LogicalOp,
@@ -68,7 +68,7 @@ impl LogicalPlan {
 }
 
 /// Logical operation nodes in the query plan tree.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum LogicalOp {
     /// Leaf operation: data source (scan, lookup, search)
     Scan(ScanOp),
@@ -147,7 +147,7 @@ impl LogicalOp {
 /// Scan operations (leaf nodes in the plan tree).
 ///
 /// These represent data sources - the starting points for query execution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ScanOp {
     /// Direct node lookup by ID(s) - O(1) per node
     NodeLookup(Vec<NodeId>),
@@ -225,7 +225,7 @@ pub enum ScanOp {
 }
 
 /// Unary operations that transform a single input.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum UnaryOp {
     /// Filter rows by predicate
     Filter(Predicate),
@@ -281,7 +281,7 @@ pub enum UnaryOp {
 }
 
 /// Binary operations that combine two inputs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum BinaryOp {
     /// Set union of results
     Union,
@@ -302,7 +302,7 @@ pub enum BinaryOp {
 }
 
 /// Key for sorting results.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum SortKey {
     /// Sort by a property value
     Property(String),
@@ -502,7 +502,7 @@ impl TemporalContext {
 }
 
 /// Hints for query optimization.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct QueryHints {
     /// User-provided cardinality estimate
     pub estimated_cardinality: Option<usize>,

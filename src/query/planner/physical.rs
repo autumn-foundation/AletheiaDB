@@ -1,29 +1,7 @@
 //! Physical Query Plan
 //!
-//! The physical query plan represents the explicit strategy the query engine will use
-//! to fulfill a request. It maps directly to execution primitives.
-//!
-//! # Logical vs Physical
-//!
-//! While a *Logical Plan* describes **what** data to retrieve (e.g., "Join these two tables"),
-//! the *Physical Plan* describes **how** to execute it (e.g., "Use a HashJoin, building the table on the smaller side").
-//!
-//! The optimizer in the query planner converts a logical plan into a physical plan by:
-//! 1. Choosing the right algorithm (e.g., `NodeScan` vs `PropertyScan`).
-//! 2. Evaluating costs (`EstimatedCost`).
-//! 3. Utilizing indexes where available.
-//!
-//! Each `PhysicalOp` implementation typically defines an exact execution flow over the underlying
-//! graph data and indexes.
-//!
-//! # Examples
-//!
-//! To see how physical plans are structured, you can call `.explain()` on a plan:
-//!
-//! ```rust,ignore
-//! let plan = planner.plan(&db, query)?;
-//! println!("{}", plan.explain());
-//! ```
+//! Physical operators that directly map to execution primitives.
+//! These are the "instructions" that the query executor runs.
 
 use std::sync::Arc;
 
@@ -35,33 +13,6 @@ use super::super::plan::{SortKey, TemporalContext};
 use super::cost::Cost;
 
 /// A physical query plan ready for execution.
-///
-/// This structure represents a compiled, optimized query plan that maps
-/// directly to execution operators. It contains the root operator tree,
-/// cost estimates, and execution context.
-///
-/// ## Examples
-///
-/// ```rust
-/// # use aletheiadb::core::NodeId;
-/// # use aletheiadb::query::planner::physical::{PhysicalPlan, PhysicalOp};
-/// # use aletheiadb::query::planner::cost::Cost;
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create a simple plan that looks up a node by ID
-/// let plan = PhysicalPlan {
-///     root: PhysicalOp::NodeLookup { node_ids: vec![NodeId::new(1)?] },
-///     estimated_cost: Cost { cpu: 0.5, io: 1.0, memory: 1024, network: 0.0 },
-///     temporal_context: None,
-///     parallel: false,
-///     include_provenance: false,
-/// };
-///
-/// assert!(!plan.is_temporal());
-/// assert_eq!(plan.cpu_cost(), 0.5);
-/// assert_eq!(plan.memory_cost(), 1024);
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug, Clone)]
 pub struct PhysicalPlan {
     /// Root physical operator
