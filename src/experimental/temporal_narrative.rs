@@ -309,8 +309,8 @@ mod stub_tests {
     )]
     fn test_stub_panic_on_generate() {
         // Construct a fake NarrativeGenerator to test method panic
-        // Safety: NarrativeGenerator is a ZST with PhantomData, so it's valid to transmute from unit or zeroed.
-        // We just need it to call the method.
+
+
         let generator: NarrativeGenerator<'_> = NarrativeGenerator {
             _marker: std::marker::PhantomData,
         };
