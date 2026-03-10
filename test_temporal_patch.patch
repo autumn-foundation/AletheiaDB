@@ -1,0 +1,27 @@
+<<<<<<< SEARCH
+    #[test]
+    fn test_time_now() {
+        let timestamp = time::now();
+        // Should be after 2020-01-01 and before 2100-01-01
+        assert!(timestamp > time::from_secs(1577836800));
+        assert!(timestamp < time::from_secs(4102444800));
+    }
+=======
+    #[test]
+    fn test_time_now() {
+        let timestamp = time::now();
+        // Should be after 2020-01-01 and before 2100-01-01
+        assert!(timestamp > time::from_secs(1577836800));
+        assert!(timestamp < time::from_secs(4102444800));
+    }
+
+    #[test]
+    fn test_try_now_returns_ok() {
+        let result = time::try_now();
+        assert!(result.is_ok());
+        let timestamp = result.unwrap();
+        // Should be after 2020-01-01 and before 2100-01-01
+        assert!(timestamp > time::from_secs(1577836800));
+        assert!(timestamp < time::from_secs(4102444800));
+    }
+>>>>>>> REPLACE
