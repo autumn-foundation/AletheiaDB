@@ -186,6 +186,8 @@ fn test_tx_id_generator_current() {
     let _ = generator.next();
     let current = generator.current();
     assert_eq!(current, TxId::new(1));
+    let _ = generator.next();
+    assert_eq!(generator.current(), TxId::new(2));
 }
 
 #[test]
