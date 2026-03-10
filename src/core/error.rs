@@ -822,17 +822,60 @@ mod tests {
     fn test_error_conversions() {
         let storage_err = StorageError::NodeNotFound(NodeId::new(1).unwrap());
         let err: Error = storage_err.clone().into();
-        assert!(matches!(err, Error::Storage(_)));
+        assert!(matches!(err, Error::Storage(e) if e == storage_err));
 
         let temporal_err = TemporalError::TemporalParadox {
             reason: "test".to_string(),
         };
         let err: Error = temporal_err.clone().into();
-        assert!(matches!(err, Error::Temporal(_)));
+        assert!(matches!(err, Error::Temporal(e) if e == temporal_err));
 
         let query_err = QueryError::Timeout { duration_ms: 1000 };
         let err: Error = query_err.clone().into();
-        assert!(matches!(err, Error::Query(_)));
+        assert!(matches!(err, Error::Query(e) if e == query_err));
+
+        let tx_err = TransactionError::WriteConflict {
+            entity_id: "e1".into(),
+            reason: "r".into(),
+        };
+        let err: Error = tx_err.clone().into();
+        assert!(matches!(err, Error::Transaction(e) if e == tx_err));
+
+        let vec_err = VectorError::DimensionMismatch {
+            expected: 1,
+            actual: 2,
+        };
+        let err: Error = vec_err.clone().into();
+        assert!(matches!(err, Error::Vector(e) if e == vec_err));
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound));
+
+        let cfg_err = crate::config::ConfigError::IoError("test".to_string());
+        let err: Error = cfg_err.clone().into();
+        assert!(matches!(err, Error::Other(ref m) if *m == format!("{}", cfg_err)));
+
+        #[cfg(feature = "sql")]
+        {
+            let sql_err = crate::sql::SqlError::UnsupportedFeature("test".to_string());
+            let err: Error = sql_err.clone().into();
+            assert!(
+                matches!(err, Error::Query(QueryError::UnsupportedFeature { feature }) if feature == "test")
+            );
+        }
+    }
+
+    #[test]
+    fn test_error_factory_functions() {
+        let err = Error::other("test");
+        assert!(matches!(err, Error::Other(ref m) if m == "test"));
+
+        let err = Error::not_implemented("feature", "reason");
+        assert!(matches!(
+            err,
+            Error::NotImplemented { feature, reason } if feature == "feature" && reason == "reason"
+        ));
     }
 
     #[test]
@@ -1033,10 +1076,10 @@ mod tests {
 
     #[test]
     fn test_index_persistence_error_conversion_preserves_kind() {
-        let io_err = crate::storage::index_persistence::IndexPersistenceError::Serialization(
+        let ser_err = crate::storage::index_persistence::IndexPersistenceError::Serialization(
             "decode failed".to_string(),
         );
-        let converted: StorageError = io_err.into();
+        let converted: StorageError = ser_err.into();
         match converted {
             StorageError::PersistenceErrorWithKind { kind, message } => {
                 assert_eq!(kind, PersistenceErrorKind::Serialization);
@@ -1044,6 +1087,61 @@ mod tests {
             }
             other => panic!("expected PersistenceErrorWithKind, got {other:?}"),
         }
+
+        let io_err = crate::storage::index_persistence::IndexPersistenceError::Io(
+            std::io::Error::new(std::io::ErrorKind::NotFound, "test"),
+        );
+        let kind = PersistenceErrorKind::from(&io_err);
+        assert_eq!(kind, PersistenceErrorKind::Io);
+    }
+
+    #[test]
+    fn test_storage_error_factory_functions() {
+        let err = StorageError::io_error("test");
+        assert!(matches!(err, StorageError::IoError(ref m) if m == "test"));
+
+        let err = StorageError::corruption("test");
+        assert!(matches!(err, StorageError::CorruptedData(ref m) if m == "test"));
+
+        let err = StorageError::persistence("test");
+        assert!(matches!(err, StorageError::PersistenceError(ref m) if m == "test"));
+
+        let err = StorageError::persistence_with_kind(PersistenceErrorKind::Io, "test");
+        assert!(matches!(
+            err,
+            StorageError::PersistenceErrorWithKind { kind: PersistenceErrorKind::Io, message } if message == "test"
+        ));
+    }
+
+    #[test]
+    fn test_persistence_error_kind_display() {
+        assert_eq!(PersistenceErrorKind::Corrupted.to_string(), "corrupted");
+        assert_eq!(
+            PersistenceErrorKind::InternerMismatch.to_string(),
+            "interner_mismatch"
+        );
+        assert_eq!(
+            PersistenceErrorKind::UnsupportedVersion.to_string(),
+            "unsupported_version"
+        );
+        assert_eq!(
+            PersistenceErrorKind::MissingIndex.to_string(),
+            "missing_index"
+        );
+        assert_eq!(
+            PersistenceErrorKind::InvalidMagic.to_string(),
+            "invalid_magic"
+        );
+        assert_eq!(
+            PersistenceErrorKind::SizeLimitExceeded.to_string(),
+            "size_limit_exceeded"
+        );
+        assert_eq!(PersistenceErrorKind::Io.to_string(), "io");
+        assert_eq!(
+            PersistenceErrorKind::Serialization.to_string(),
+            "serialization"
+        );
+        assert_eq!(PersistenceErrorKind::Unknown.to_string(), "unknown");
     }
 
     #[cfg(feature = "sql")]
@@ -1071,9 +1169,20 @@ mod tests {
         let snapshot = crate::observability::METRICS.snapshot();
         assert_eq!(snapshot.error_storage_total, 0);
 
-        let _ = err.record_error_metric();
+        let res = err.record_error_metric();
+        assert!(res.is_err());
         let snapshot = crate::observability::METRICS.snapshot();
         assert_eq!(snapshot.error_storage_total, 1);
+
+        let ok_res: Result<()> = Ok(());
+        let snapshot = crate::observability::METRICS.snapshot();
+        let res = ok_res.record_error_metric();
+        assert!(res.is_ok());
+        let new_snapshot = crate::observability::METRICS.snapshot();
+        assert_eq!(
+            snapshot.error_storage_total,
+            new_snapshot.error_storage_total
+        );
     }
 
     #[test]
@@ -1298,12 +1407,11 @@ mod tests {
         };
 
         let msg = err.to_string();
-        assert!(msg.contains("Clock skew too large"));
-        assert!(msg.contains("backward"));
-        assert!(msg.contains("100"));
-        assert!(msg.contains("max allowed: 50"));
-        assert!(msg.contains("Wallclock: 1000"));
-        assert!(msg.contains("Previous: 1100"));
+        assert_eq!(
+            msg,
+            "Clock skew too large: system clock jumped backward by 100 \u{b5}s (max allowed: 50 \u{b5}s). \
+             Wallclock: 1000, Previous: 1100. This may indicate NTP adjustment or manual clock change."
+        );
     }
 
     #[test]
@@ -1316,9 +1424,27 @@ mod tests {
         };
 
         let msg = err.to_string();
-        assert!(msg.contains("Clock skew too large"));
-        assert!(msg.contains("forward"));
-        assert!(!msg.contains("backward"));
-        assert!(msg.contains("by 0"));
+        assert_eq!(
+            msg,
+            "Clock skew too large: system clock jumped forward by 0 \u{b5}s (max allowed: 25 \u{b5}s). \
+             Wallclock: 500, Previous: 500. This may indicate NTP adjustment or manual clock change."
+        );
+    }
+
+    #[test]
+    fn test_clock_skew_display_positive_drift_is_forward() {
+        let err = TransactionError::ClockSkew {
+            wallclock: 500,
+            previous: 400,
+            drift_us: 100,
+            max_allowed: 25,
+        };
+
+        let msg = err.to_string();
+        assert_eq!(
+            msg,
+            "Clock skew too large: system clock jumped forward by 100 \u{b5}s (max allowed: 25 \u{b5}s). \
+             Wallclock: 500, Previous: 400. This may indicate NTP adjustment or manual clock change."
+        );
     }
 }
