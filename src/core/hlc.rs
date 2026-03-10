@@ -1001,6 +1001,16 @@ mod tests {
     }
 
     #[test]
+    fn test_hybrid_timestamp_new_unchecked_exhaustive() {
+        // Kill `replace HybridTimestamp::new_unchecked -> Self with Default::default()` mutant
+        let ts = HybridTimestamp::new_unchecked(42, 10);
+        assert_eq!(ts.wallclock(), 42);
+        assert_eq!(ts.logical(), 10);
+        assert_ne!(ts.wallclock(), 0);
+        assert_ne!(ts.logical(), 0);
+    }
+
+    #[test]
     fn test_hybrid_timestamp_receive_exact_wallclock_logic() {
         // Targets the complex `receive` `if/else if` chain specifically `>` and `==` boundaries.
         // `if new_wallclock > self.wallclock && new_wallclock > msg.wallclock` -> reset to 0

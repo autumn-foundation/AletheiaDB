@@ -125,3 +125,8 @@
 **Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`.
 **Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, and exact exclusion of boundaries inside interval intersections.
 **Kill Shot:** Appended explicit exact boundary tests `test_timerange_from_at_exact_boundaries`, `test_time_to_secs_millis_exact_math`, `test_time_to_iso8601_exact_content`, and `test_timerange_contains_exact_boundary` directly to `tests/sentry_temporal.rs`.
+**[Weak Test Coverage in HLC Unchecked Constructor]**
+**Module:** `aletheiadb::core::hlc`
+**Summary:** Mutation testing indicated a surviving mutant in `HybridTimestamp::new_unchecked` replacing its logic with a default return `Default::default()`.
+**Diagnosis:** MISSING_TEST - There were no direct exhaustive tests executing `HybridTimestamp::new_unchecked` ensuring internal struct layout is explicitly mapped from input bounds rather than failing softly via tests passing with empty defaults.
+**Kill Shot:** Appended targeted boundary test `test_hybrid_timestamp_new_unchecked_exhaustive` within `src/core/hlc.rs` directly explicitly validating field mappings from inputs.
