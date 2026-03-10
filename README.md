@@ -564,6 +564,8 @@ for (node_id, drift_score) in drifted_nodes {
 
 > ⚠️ **IMPORTANT: REQUIRES FEATURE 'NOVA'**
 >
+> **REQUIRES FEATURE NOVA**
+>
 > Experimental features like **Narrative Generation** require the `nova` feature flag.
 > **You MUST add this to your `Cargo.toml` or the code will not compile:**
 >
@@ -807,6 +809,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
+    // Requires OPENAI_API_KEY environment variable
 
     // 1. Create embedding service
     let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
