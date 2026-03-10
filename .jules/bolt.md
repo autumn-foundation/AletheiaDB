@@ -41,3 +41,6 @@
 ## 2026-11-20 - Avoid `min_by` on DashMap
 **Learning:** `DashMap::iter().min_by(...)` and `max_by(...)` hold onto `RefMulti` read guards across loop iterations, which can cause deadlocks if a concurrent writer is waiting for a lock on the same shard.
 **Action:** Use `.fold(None, |min, current| ...)` to extract and clone only the necessary minimum/maximum value while immediately dropping the reference guard for each element. This prevents deadlocks and improves concurrency performance.
+## 2026-11-20 - Eliminate collect::<Vec<_>>().join(" ")
+**Learning:** Chaining `split_whitespace().collect::<Vec<_>>().join(" ")` to remove redundant whitespace creates an unnecessary intermediate heap allocation for the `Vec` of string slices. In hot paths like the temporal SQL parser, this introduces needless allocator pressure.
+**Action:** Pre-allocate a `String::with_capacity(original.len())` and use a `for` loop to push words and spaces directly into the pre-allocated string, eliminating the intermediate vector allocation.
