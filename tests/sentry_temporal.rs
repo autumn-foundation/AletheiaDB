@@ -240,3 +240,71 @@ fn test_timerange_contains_exact_boundary() {
         "Touching ranges should NOT overlap (exact boundary check reverse)"
     );
 }
+
+#[test]
+fn test_timerange_overlaps_one_empty() {
+    use aletheiadb::core::temporal::TimeRange;
+    // 🛡️ Sentry Test: Verify overlaps handles partially empty correctly.
+    let empty = TimeRange::at(150.into());
+    let full = TimeRange::new(100.into(), 200.into()).unwrap();
+    // This prevents `||` changing to `&&` in `is_empty()` checks inside overlaps.
+    assert!(!empty.overlaps(&full));
+    assert!(!full.overlaps(&empty));
+}
+
+#[test]
+fn test_bitemporal_is_visible_at_mixed() {
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+    // 🛡️ Sentry Test: Verify `is_visible_at` correctly handles mixed containment states.
+    let valid_start = 1000.into();
+    let valid_end = 2000.into();
+    let tx_start = 3000.into();
+    let tx_end = 4000.into();
+
+    let interval = BiTemporalInterval::new(
+        TimeRange::new(valid_start, valid_end).unwrap(),
+        TimeRange::new(tx_start, tx_end).unwrap(),
+    );
+
+    // Mixed: valid contains, tx doesn't
+    assert!(!interval.is_visible_at(1500.into(), 5000.into()));
+    // Mixed: tx contains, valid doesn't
+    assert!(!interval.is_visible_at(500.into(), 3500.into()));
+}
+
+#[test]
+fn test_timerange_serialize_into_exact() {
+    use aletheiadb::core::temporal::TimeRange;
+    // 🛡️ Sentry Test: Verify serialize_into appends exactly and prevents `replace with ()` mutant.
+    let mut buffer = vec![0xFF; 4]; // Pre-filled with some data
+    let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+    range.serialize_into(&mut buffer);
+
+    assert_eq!(
+        buffer.len(),
+        28,
+        "buffer should have exactly 24 bytes appended"
+    );
+    assert_eq!(buffer[0], 0xFF, "existing data should not be overwritten");
+}
+
+#[test]
+fn test_timerange_new_close_at_boundaries() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+    // 🛡️ Sentry Test: Verify boundaries of `start > end` and `end < start`.
+    // We want to verify `start == end` is correctly accepted.
+    let t1 = HybridTimestamp::new(100, 0).unwrap();
+
+    // TimeRange::new where start == end
+    let r = TimeRange::new(t1, t1).expect("Should accept start == end");
+    assert!(r.is_empty());
+
+    // TimeRange::close_at where close == start
+    let r_open = TimeRange::from(t1);
+    let closed = r_open
+        .close_at(t1)
+        .expect("Should accept close_at == start");
+    assert!(closed.is_empty());
+}
