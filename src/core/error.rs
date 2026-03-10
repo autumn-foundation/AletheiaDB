@@ -1321,4 +1321,219 @@ mod tests {
         assert!(!msg.contains("backward"));
         assert!(msg.contains("by 0"));
     }
+
+    #[test]
+    fn test_error_other() {
+        let err = Error::other("something went wrong");
+        match err {
+            Error::Other(msg) => assert_eq!(msg, "something went wrong"),
+            _ => panic!("expected Error::Other"),
+        }
+    }
+
+    #[test]
+    fn test_error_not_implemented() {
+        let err = Error::not_implemented("feature X", "reason Y");
+        match err {
+            Error::NotImplemented { feature, reason } => {
+                assert_eq!(feature, "feature X");
+                assert_eq!(reason, "reason Y");
+            }
+            _ => panic!("expected Error::NotImplemented"),
+        }
+    }
+
+    #[test]
+    fn test_storage_error_constructors() {
+        let err = StorageError::io_error("io err");
+        assert_eq!(err, StorageError::IoError("io err".to_string()));
+
+        let err = StorageError::corruption("bad bytes");
+        assert_eq!(err, StorageError::CorruptedData("bad bytes".to_string()));
+
+        let err = StorageError::persistence("db dead");
+        assert_eq!(err, StorageError::PersistenceError("db dead".to_string()));
+
+        let err = StorageError::persistence_with_kind(PersistenceErrorKind::InvalidMagic, "magic");
+        assert_eq!(err, StorageError::PersistenceErrorWithKind {
+            kind: PersistenceErrorKind::InvalidMagic,
+            message: "magic".to_string(),
+        });
+    }
+
+    #[test]
+    fn test_error_from_conversions_exact() {
+        // StorageError
+        let se = StorageError::NodeNotFound(NodeId::new(1).unwrap());
+        let e: Error = se.clone().into();
+        assert!(matches!(e, Error::Storage(s) if s == se));
+
+        // TemporalError
+        let te = TemporalError::VersionNotFound(VersionId::new(1).unwrap());
+        let e: Error = te.clone().into();
+        assert!(matches!(e, Error::Temporal(t) if t == te));
+
+        // QueryError
+        let qe = QueryError::Timeout { duration_ms: 10 };
+        let e: Error = qe.clone().into();
+        assert!(matches!(e, Error::Query(q) if q == qe));
+
+        // TransactionError
+        let tre = TransactionError::Aborted { tx_id: 1 };
+        let e: Error = tre.clone().into();
+        assert!(matches!(e, Error::Transaction(t) if t == tre));
+
+        // VectorError
+        let ve = VectorError::ContainsNaN { count: 1 };
+        let e: Error = ve.clone().into();
+        assert!(matches!(e, Error::Vector(v) if v == ve));
+
+        // io::Error
+        let ioe = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let e: Error = ioe.into();
+        assert!(matches!(e, Error::Io(i) if i.kind() == std::io::ErrorKind::NotFound));
+
+        // ConfigError
+        let ce = crate::config::ConfigError::IoError("bad config".to_string());
+        let ce_msg = ce.to_string();
+        let e: Error = ce.into();
+        assert!(matches!(e, Error::Other(msg) if msg == ce_msg));
+    }
+
+    #[test]
+    fn test_persistence_error_kind_display_all() {
+        assert_eq!(PersistenceErrorKind::Corrupted.to_string(), "corrupted");
+        assert_eq!(PersistenceErrorKind::InternerMismatch.to_string(), "interner_mismatch");
+        assert_eq!(PersistenceErrorKind::UnsupportedVersion.to_string(), "unsupported_version");
+        assert_eq!(PersistenceErrorKind::MissingIndex.to_string(), "missing_index");
+        assert_eq!(PersistenceErrorKind::InvalidMagic.to_string(), "invalid_magic");
+        assert_eq!(PersistenceErrorKind::SizeLimitExceeded.to_string(), "size_limit_exceeded");
+        assert_eq!(PersistenceErrorKind::Io.to_string(), "io");
+        assert_eq!(PersistenceErrorKind::Serialization.to_string(), "serialization");
+        assert_eq!(PersistenceErrorKind::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn test_persistence_error_kind_from_index_persistence_error() {
+        use crate::storage::index_persistence::IndexPersistenceError;
+
+        assert_eq!(PersistenceErrorKind::from(&IndexPersistenceError::Corrupted { path: std::path::PathBuf::from(""), source: Box::new(std::io::Error::other("")) }), PersistenceErrorKind::Corrupted);
+        assert_eq!(PersistenceErrorKind::from(&IndexPersistenceError::InternerMismatch { expected: 1, got: 2 }), PersistenceErrorKind::InternerMismatch);
+        assert_eq!(PersistenceErrorKind::from(&IndexPersistenceError::UnsupportedVersion { found: 1, supported: 2 }), PersistenceErrorKind::UnsupportedVersion);
+        assert_eq!(PersistenceErrorKind::from(&IndexPersistenceError::MissingIndex { name: "".into() }), PersistenceErrorKind::MissingIndex);
+        assert_eq!(PersistenceErrorKind::from(&IndexPersistenceError::InvalidMagic { path: std::path::PathBuf::from(""), got: [0; 4], expected: [1; 4] }), PersistenceErrorKind::InvalidMagic);
+        assert_eq!(PersistenceErrorKind::from(&IndexPersistenceError::SizeLimitExceeded { message: "".into() }), PersistenceErrorKind::SizeLimitExceeded);
+        assert_eq!(PersistenceErrorKind::from(&IndexPersistenceError::Io(std::io::Error::other(""))), PersistenceErrorKind::Io);
+        assert_eq!(PersistenceErrorKind::from(&IndexPersistenceError::Serialization("".into())), PersistenceErrorKind::Serialization);
+    }
+
+    #[test]
+    fn test_storage_error_from_index_persistence_error_exact() {
+        use crate::storage::index_persistence::IndexPersistenceError;
+        let e = IndexPersistenceError::Corrupted { path: std::path::PathBuf::from(""), source: Box::new(std::io::Error::other("")) };
+        let e_str = e.to_string();
+        let se: StorageError = e.into();
+        assert_eq!(se, StorageError::PersistenceErrorWithKind {
+            kind: PersistenceErrorKind::Corrupted,
+            message: e_str,
+        });
+    }
+
+    #[cfg(feature = "observability")]
+    #[test]
+    fn test_result_ext_records_storage_metric_returns_original_error() {
+        crate::observability::METRICS.reset();
+
+        let err: Result<()> = Err(StorageError::NodeNotFound(NodeId::new(42).unwrap()).into());
+        let res = err.record_error_metric();
+
+        match res {
+            Err(Error::Storage(StorageError::NodeNotFound(id))) => assert_eq!(id.as_u64(), 42),
+            _ => panic!("Expected the original error back"),
+        }
+
+        // test for Ok case
+        let ok_res: Result<i32> = Ok(100);
+        assert_eq!(ok_res.record_error_metric().unwrap(), 100);
+    }
+
+    #[cfg(feature = "observability")]
+    #[test]
+    fn test_error_record_metric_all_categories() {
+        let cases = vec![
+            (Error::Storage(StorageError::NodeNotFound(NodeId::new(1).unwrap())), 0),
+            (Error::Temporal(TemporalError::VersionNotFound(VersionId::new(1).unwrap())), 1),
+            (Error::Query(QueryError::Timeout { duration_ms: 1 }), 2),
+            (Error::Transaction(TransactionError::Aborted { tx_id: 1 }), 3),
+            (Error::Vector(VectorError::ContainsNaN { count: 1 }), 4),
+            (Error::Io(std::io::Error::other("")), 5),
+            (Error::not_implemented("a", "b"), 6),
+            (Error::other("c"), 6),
+        ];
+
+        for (err, idx) in cases {
+            crate::observability::METRICS.reset();
+            err.record_metric();
+            let snap = crate::observability::METRICS.snapshot();
+            let counts = [
+                snap.error_storage_total,
+                snap.error_temporal_total,
+                snap.error_query_total,
+                snap.error_transaction_total,
+                snap.error_vector_total,
+                snap.error_io_total,
+                snap.error_other_total,
+            ];
+            for (i, count) in counts.iter().enumerate() {
+                if i == idx {
+                    assert_eq!(*count, 1, "Expected metric {} to be 1", i);
+                } else {
+                    assert_eq!(*count, 0, "Expected metric {} to be 0", i);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_index_not_found_exact() {
+        let msg = format_index_not_found("vector", "embedding", &None);
+        assert_eq!(msg, "Query requires vector index on 'embedding' property which is not enabled");
+
+        let msg = format_index_not_found("vector", "embedding", &Some("Try harder".into()));
+        assert_eq!(msg, "Query requires vector index on 'embedding' property which is not enabled. Hint: Try harder");
+    }
+
+    #[test]
+    fn test_format_clock_skew_exact() {
+        let msg = format_clock_skew(100, 200, -50, 20);
+        assert_eq!(msg, "Clock skew too large: system clock jumped backward by 50 \u{b5}s (max allowed: 20 \u{b5}s). Wallclock: 100, Previous: 200. This may indicate NTP adjustment or manual clock change.");
+
+        let msg = format_clock_skew(100, 200, 0, 20);
+        assert_eq!(msg, "Clock skew too large: system clock jumped forward by 0 \u{b5}s (max allowed: 20 \u{b5}s). Wallclock: 100, Previous: 200. This may indicate NTP adjustment or manual clock change.");
+
+        let msg = format_clock_skew(100, 200, 50, 20);
+        assert_eq!(msg, "Clock skew too large: system clock jumped forward by 50 \u{b5}s (max allowed: 20 \u{b5}s). Wallclock: 100, Previous: 200. This may indicate NTP adjustment or manual clock change.");
+    }
+
+    #[cfg(feature = "sql")]
+    #[test]
+    fn test_sql_error_conversion_exhaustive() {
+        use crate::sql::SqlError;
+        let cases = vec![
+            (SqlError::ParseError("bad syntax".into()), QueryError::SyntaxError { message: "bad syntax".into() }),
+            (SqlError::UnsupportedFeature("MATCH".into()), QueryError::UnsupportedFeature { feature: "MATCH".into() }),
+            (SqlError::InvalidTable("foo".into()), QueryError::InvalidParameter { parameter: "table".into(), reason: "invalid table 'foo': expected 'nodes' or 'edges'".into() }),
+            (SqlError::InvalidColumn("bar".into()), QueryError::InvalidParameter { parameter: "column".into(), reason: "invalid column reference: bar".into() }),
+            (SqlError::InvalidTemporalClause("AS OF".into()), QueryError::InvalidParameter { parameter: "temporal_clause".into(), reason: "invalid temporal clause: AS OF".into() }),
+            (SqlError::InvalidTimestamp("yesterday".into()), QueryError::InvalidParameter { parameter: "timestamp".into(), reason: "invalid timestamp: yesterday".into() }),
+            (SqlError::MissingClause("FROM".into()), QueryError::InvalidParameter { parameter: "clause".into(), reason: "missing required clause: FROM".into() }),
+            (SqlError::TypeError("float".into()), QueryError::TypeMismatch { expected: "compatible SQL type".into(), actual: "float".into() }),
+            (SqlError::ParameterError("bad param".into()), QueryError::InvalidParameter { parameter: "parameter".into(), reason: "bad param".into() }),
+        ];
+
+        for (sql_err, expected_query_err) in cases {
+            let e: Error = sql_err.into();
+            assert!(matches!(e, Error::Query(q) if q == expected_query_err), "failed for {:?}", expected_query_err);
+        }
+    }
 }
