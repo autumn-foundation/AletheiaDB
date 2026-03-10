@@ -1,0 +1,327 @@
+   Compiling aletheiadb v0.1.0 (/app)
+error[E0080]: attempt to compute `i64::MAX + 1000_i64`, which would overflow
+   --> src/core/temporal.rs:116:38
+    |
+116 | pub const MAX_VALID_TIMESTAMP: i64 = i64::MAX + 1000;
+    |                                      ^^^^^^^^^^^^^^^ evaluation of `core::temporal::MAX_VALID_TIMESTAMP` failed here
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:245:24
+    |
+245 |         if wallclock > MAX_VALID_TIMESTAMP {
+    |                        ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:252:32
+    |
+252 |                     wallclock, MAX_VALID_TIMESTAMP
+    |                                ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:252:32
+    |
+252 |                     wallclock, MAX_VALID_TIMESTAMP
+    |                                ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:325:28
+    |
+325 |         if new_wallclock > MAX_VALID_TIMESTAMP {
+    |                            ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:333:36
+    |
+333 |                     new_wallclock, MAX_VALID_TIMESTAMP
+    |                                    ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:333:36
+    |
+333 |                     new_wallclock, MAX_VALID_TIMESTAMP
+    |                                    ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:415:28
+    |
+415 |         if new_wallclock > MAX_VALID_TIMESTAMP {
+    |                            ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:423:36
+    |
+423 |                     new_wallclock, MAX_VALID_TIMESTAMP
+    |                                    ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:423:36
+    |
+423 |                     new_wallclock, MAX_VALID_TIMESTAMP
+    |                                    ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:499:28
+    |
+499 |                 wallclock, MAX_VALID_TIMESTAMP
+    |                            ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:496:24
+    |
+496 |         if wallclock > MAX_VALID_TIMESTAMP && wallclock != i64::MAX {
+    |                        ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:499:28
+    |
+499 |                 wallclock, MAX_VALID_TIMESTAMP
+    |                            ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:555:38
+    |
+555 |         assert!(HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).is_ok());
+    |                                      ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:558:43
+    |
+558 |         let result = HybridTimestamp::new(MAX_VALID_TIMESTAMP + 1, 0);
+    |                                           ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:688:53
+    |
+688 |         let err = send_with_overflow_self_heal(&ts, MAX_VALID_TIMESTAMP, true, |error| error)
+    |                                                     ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:763:57
+    |
+763 |         let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+    |                                                         ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:873:49
+    |
+873 |         let ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, u32::MAX);
+    |                                                 ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/hlc.rs:875:53
+    |
+875 |         let err = send_with_overflow_self_heal(&ts, MAX_VALID_TIMESTAMP, true, |error| error)
+    |                                                     ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/core/hlc.rs:1052:13
+     |
+1052 |         0..=MAX_VALID_TIMESTAMP
+     |             ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/core/hlc.rs:1136:28
+     |
+1136 |             invalid_wc in (MAX_VALID_TIMESTAMP + 1)..i64::MAX
+     |                            ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/core/hlc.rs:1148:29
+     |
+1148 |             invalid_phy in (MAX_VALID_TIMESTAMP + 1)..i64::MAX
+     |                             ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:141:32
+    |
+141 |         if start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX {
+    |                                ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:146:21
+    |
+146 |                     MAX_VALID_TIMESTAMP
+    |                     ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:156:21
+    |
+156 |                     MAX_VALID_TIMESTAMP
+    |                     ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:146:21
+    |
+146 |                     MAX_VALID_TIMESTAMP
+    |                     ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:151:30
+    |
+151 |         if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
+    |                              ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:156:21
+    |
+156 |                     MAX_VALID_TIMESTAMP
+    |                     ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:170:32
+    |
+170 |         if start.wallclock() > MAX_VALID_TIMESTAMP && start != TIMESTAMP_MAX {
+    |                                ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:173:17
+    |
+173 |                 MAX_VALID_TIMESTAMP
+    |                 ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:194:36
+    |
+194 |         if timestamp.wallclock() > MAX_VALID_TIMESTAMP && timestamp != TIMESTAMP_MAX {
+    |                                    ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:197:17
+    |
+197 |                 MAX_VALID_TIMESTAMP
+    |                 ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:290:30
+    |
+290 |         if end.wallclock() > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX {
+    |                              ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:295:21
+    |
+295 |                     MAX_VALID_TIMESTAMP
+    |                     ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/core/temporal.rs:295:21
+    |
+295 |                     MAX_VALID_TIMESTAMP
+    |                     ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+    --> src/core/temporal.rs:1148:46
+     |
+1148 |         let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+     |                                              ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/core/temporal.rs:1158:47
+     |
+1158 |         let almost_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP - 100, 0).unwrap();
+     |                                               ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/core/temporal.rs:1241:57
+     |
+1241 |         let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+     |                                                         ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/core/temporal.rs:1272:14
+     |
+1272 |         0..=(MAX_VALID_TIMESTAMP / 2)
+     |              ^^^^^^^^^^^^^^^^^^^
+
+error: this arithmetic operation will overflow
+    --> src/core/temporal.rs:1829:13
+     |
+1829 |             i64::MAX + 1000,
+     |             ^^^^^^^^^^^^^^^ attempt to compute `i64::MAX + 1000_i64`, which would overflow
+     |
+     = note: `#[deny(arithmetic_overflow)]` on by default
+
+note: erroneous constant encountered
+    --> src/core/temporal.rs:1828:13
+     |
+1828 |             MAX_VALID_TIMESTAMP,
+     |             ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/core/temporal.rs:1827:9
+     |
+1827 | /         assert_eq!(
+1828 | |             MAX_VALID_TIMESTAMP,
+1829 | |             i64::MAX + 1000,
+1830 | |             "MAX_VALID_TIMESTAMP must be exactly i64::MAX + 1000 to preserve sentinel space"
+1831 | |         );
+     | |_________^
+     |
+     = note: this note originates in the macro `assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+    --> src/core/temporal.rs:1872:50
+     |
+1872 |         let end = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+     |                                                  ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/index/vector/temporal/mod.rs:207:36
+    |
+207 |         if timestamp.wallclock() > crate::core::temporal::MAX_VALID_TIMESTAMP {
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/index/vector/temporal/mod.rs:213:21
+    |
+213 |                     crate::core::temporal::MAX_VALID_TIMESTAMP
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+   --> src/index/vector/temporal/mod.rs:213:21
+    |
+213 |                     crate::core::temporal::MAX_VALID_TIMESTAMP
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+    --> src/index/vector/temporal/mod.rs:3585:53
+     |
+3585 |         let result = index.add(node_id, &vec_valid, MAX_VALID_TIMESTAMP.into());
+     |                                                     ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/index/vector/temporal/mod.rs:3589:54
+     |
+3589 |         let result = index.add(node_id, &vec_valid, (MAX_VALID_TIMESTAMP + 1).into());
+     |                                                      ^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/storage/sharding/coordinator.rs:1604:17
+     |
+1604 |                 crate::core::temporal::MAX_VALID_TIMESTAMP,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+    --> src/storage/sharding/coordinator.rs:1634:17
+     |
+1634 |                 crate::core::temporal::MAX_VALID_TIMESTAMP,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `aletheiadb` (lib test) due to 2 previous errors

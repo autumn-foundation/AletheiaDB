@@ -1,0 +1,48 @@
+   Compiling aletheiadb v0.1.0 (/app)
+    Finished `test` profile [optimized + debuginfo] target(s) in 19.19s
+     Running tests/sentry_temporal.rs (target/debug/deps/sentry_temporal-bda809dde24cf320)
+
+running 21 tests
+test test_bitemporal_is_valid_at_and_recorded_at ... ok
+test test_bitemporal_is_currently_methods ... ok
+test test_bitemporal_methods_exact ... ok
+test test_bitemporal_constructors_exact ... ok
+test test_bitemporal_close_exact ... ok
+test test_bitemporal_serialization_exact ... ok
+test test_sentry_max_valid_timestamp_mutants ... FAILED
+test test_temporal_display_exact ... ok
+test test_time_to_iso8601_exact_content ... ok
+test test_time_try_now_exact ... ok
+test test_timerange_close_at_exact ... ok
+test test_timerange_contains_exact_boundary ... ok
+test test_timerange_contains_range_exact ... ok
+test test_timerange_duration_micros_exact ... ok
+test test_timerange_from_at_exact_boundaries ... ok
+test test_timerange_is_current_closed_exact ... ok
+test test_timerange_is_empty_exact ... ok
+test test_timerange_serialization_exact ... ok
+test test_serialization_endianness ... FAILED
+test test_time_from_secs_millis_exact ... ok
+test test_time_to_secs_millis_exact_math ... ok
+
+failures:
+
+---- test_sentry_max_valid_timestamp_mutants stdout ----
+
+thread 'test_sentry_max_valid_timestamp_mutants' (238986) panicked at tests/sentry_temporal.rs:587:49:
+called `Result::unwrap()` on an `Err` value: InvalidTimestamp { timestamp: HybridTimestamp { wallclock: 9223372036854773807, logical: 0 }, reason: "Wallclock 9223372036854773807 exceeds MAX_VALID_TIMESTAMP (9223372036854775)" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_serialization_endianness stdout ----
+
+thread 'test_serialization_endianness' (238987) panicked at tests/sentry_temporal.rs:602:59:
+called `Result::unwrap()` on an `Err` value: InvalidTimestamp { timestamp: HybridTimestamp { wallclock: 72623859790382856, logical: 0 }, reason: "Wallclock 72623859790382856 exceeds MAX_VALID_TIMESTAMP (9223372036854775)" }
+
+
+failures:
+    test_sentry_max_valid_timestamp_mutants
+    test_serialization_endianness
+
+test result: FAILED. 19 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--test sentry_temporal`

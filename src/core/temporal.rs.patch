@@ -1,0 +1,41 @@
+--- src/core/temporal.rs
++++ src/core/temporal.rs
+@@ -1763,6 +1763,8 @@
+         // This targets mutants that drastically reduce MAX_VALID_TIMESTAMP (e.g. replace - with /).
+
+         // i64::MAX is ~9e18. i64::MAX / 1000 is ~9e15.
++        // If we mutate to i64::MAX / 1000, we limit to ~292 years.
++        // The current tests might pass if the value we check is within the valid range for both.
++        // But we want to explicitly test a value that is valid for `i64::MAX - 1000` but invalid for `i64::MAX / 1000`.
++
++        // Using a value just below MAX_VALID_TIMESTAMP
++        let large_val = i64::MAX - 2000;
++        let ts = HybridTimestamp::new_unchecked(large_val, 0);
++
++        // This value should be valid (<= MAX_VALID_TIMESTAMP).
++        let result = TimeRange::new(ts, ts);
++        assert!(result.is_ok(), "Should accept large timestamp close to i64::MAX");
++
++        // The addition test:
++        // If MAX_VALID_TIMESTAMP is i64::MAX + 1000, it would overflow.
++        // But wait, the overflow happens during compilation or constant evaluation.
++        // We don't need a specific test for the `+` mutant because it fails to compile/run.
++        // Wait, does it? `MAX_VALID_TIMESTAMP` is evaluated at runtime or compile time? It's a `const`.
++        // If it's a `const`, `i64::MAX + 1000` will fail compilation.
++        // cargo mutants might skip it if it fails to compile ("unviable").
++        // But the mutant `replace - with /` is viable.
++
++        // Wait, why did the mutant `replace - with /` survive?
++        // If MAX_VALID_TIMESTAMP is `i64::MAX / 1000`, what fails?
++        // Let's check `large_val = i64::MAX - 2000`.
++        // If MAX_VALID_TIMESTAMP = i64::MAX / 1000 (~9e15), then `large_val` (~9e18) > MAX_VALID_TIMESTAMP.
++        // `TimeRange::new` will return an Err! So `assert!(result.is_ok())` will FAIL!
++        // Thus, `large_val` SHOULD catch the `/` mutant!
++
++        // Wait, if it should catch it, why did it survive?
++        // Let's look at `sentry_tests` in `src/core/temporal.rs`.
++        // Are they run by `cargo mutants --test sentry_temporal`?
++        // No! `cargo mutants --test sentry_temporal` only runs the tests in `tests/sentry_temporal.rs`!
++        // Ah!!! The tests inside `src/core/temporal.rs` inside `mod sentry_tests` are NOT run if we filter by `--test sentry_temporal`!
++        // `--test sentry_temporal` means "run the integration test binary named sentry_temporal".
++        // To run the unit tests inside `src/core/temporal.rs`, we need `--lib`!
