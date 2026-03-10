@@ -1342,7 +1342,10 @@ impl ResultIterator for ProjectIterator {
                     let mut new_props = crate::core::PropertyMapBuilder::new();
                     for prop in &self.properties {
                         if let Some(val) = node.properties.get(prop) {
-                            new_props = new_props.try_insert(prop, val.clone()).unwrap();
+                            new_props = match new_props.try_insert(prop, val.clone()) {
+                                Ok(p) => p,
+                                Err(e) => return Some(Err(e.into())),
+                            };
                         }
                     }
                     let new_node = crate::core::graph::Node::new(
@@ -2285,6 +2288,21 @@ mod tests {
 
         let result = project.next().unwrap().unwrap();
         assert!(matches!(result.entity, EntityResult::NodeId(_)));
+    }
+
+    #[test]
+    fn test_project_iterator_upstream_error_propagation() {
+        let input = MockIterator::from_results(vec![Err(crate::core::error::Error::Query(
+            crate::core::error::QueryError::SyntaxError {
+                message: "upstream error".to_string(),
+            },
+        ))]);
+
+        let mut project = ProjectIterator::new(Box::new(input), vec!["name".to_string()]);
+
+        let result = project.next().unwrap();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("upstream error"));
     }
 
     // ==================== MockIterator Tests ====================

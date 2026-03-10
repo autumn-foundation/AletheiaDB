@@ -414,11 +414,12 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let label_id = u32::from_le_bytes(
-                buffer[current_offset..current_offset + 4]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            );
+            let label_id = u32::from_le_bytes([
+                buffer[current_offset],
+                buffer[current_offset + 1],
+                buffer[current_offset + 2],
+                buffer[current_offset + 3],
+            ]);
             add_offset!(4);
 
             // Reconstruct InternedString from ID
@@ -657,11 +658,16 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let cp_lsn = LSN(u64::from_le_bytes(
-                buffer[current_offset..current_offset + 8]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            ));
+            let cp_lsn = LSN(u64::from_le_bytes([
+                buffer[current_offset],
+                buffer[current_offset + 1],
+                buffer[current_offset + 2],
+                buffer[current_offset + 3],
+                buffer[current_offset + 4],
+                buffer[current_offset + 5],
+                buffer[current_offset + 6],
+                buffer[current_offset + 7],
+            ]));
             add_offset!(8);
 
             // Phase 2: Deserialize HybridTimestamp (12 bytes: 8 wallclock + 4 logical)
@@ -779,7 +785,8 @@ fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<No
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    // bytes is guaranteed to be 8 bytes long by the get() call above
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_else(|_| unreachable!()));
     NodeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid node ID in WAL {}: {}",
@@ -797,7 +804,8 @@ fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<Ed
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    // bytes is guaranteed to be 8 bytes long by the get() call above
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_else(|_| unreachable!()));
     EdgeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid edge ID in WAL {}: {}",
@@ -815,7 +823,8 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    // bytes is guaranteed to be 8 bytes long by the get() call above
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_else(|_| unreachable!()));
     VersionId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid version ID in WAL {}: {}",
@@ -831,6 +840,33 @@ mod tests {
     use crate::core::temporal::time;
     use crate::storage::wal::serialization::serialize_entry_into;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_deserialize_node_id_insufficient_buffer() {
+        let buffer = vec![1, 2, 3, 4]; // Only 4 bytes
+        let result = deserialize_node_id(&buffer, 0, "TestNode");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Insufficient buffer size for NodeId in TestNode"));
+    }
+
+    #[test]
+    fn test_deserialize_edge_id_insufficient_buffer() {
+        let buffer = vec![1, 2, 3, 4]; // Only 4 bytes
+        let result = deserialize_edge_id(&buffer, 0, "TestEdge");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Insufficient buffer size for EdgeId in TestEdge"));
+    }
+
+    #[test]
+    fn test_deserialize_version_id_insufficient_buffer() {
+        let buffer = vec![1, 2, 3, 4]; // Only 4 bytes
+        let result = deserialize_version_id(&buffer, 0, "TestVersion");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Insufficient buffer size for VersionId in TestVersion"));
+    }
 
     #[test]
     fn test_read_empty_directory() {
