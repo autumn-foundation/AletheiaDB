@@ -206,10 +206,10 @@ pub(crate) fn load_mappings_with_integrity(
             })?;
             hasher.update(&buf);
 
-            let dims = u64::from_le_bytes(buf[0..8].try_into().unwrap()) as usize;
+            let dims = u64::from_le_bytes(buf[0..8].try_into().unwrap_or_default()) as usize;
             let quant = Quantization::from_u8(buf[8])?;
             let metric = DistanceMetric::from_u8(buf[9])?;
-            let count = u64::from_le_bytes(buf[10..18].try_into().unwrap()) as usize;
+            let count = u64::from_le_bytes(buf[10..18].try_into().unwrap_or_default()) as usize;
 
             let meta = IndexMetadata {
                 dimensions: dims,
@@ -280,8 +280,8 @@ pub(crate) fn load_mappings_with_integrity(
         hasher.update(slice);
 
         for chunk in slice.chunks_exact(16) {
-            let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-            let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+            let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default());
+            let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default());
 
             if let Ok(node_id) = NodeId::new(node_id_raw) {
                 id_mapping.insert(node_id, key);
@@ -341,7 +341,7 @@ pub(crate) fn verify_index_header(
     })?;
 
     // Extract vector_byte_size from bytes 4-7 (little-endian u32)
-    let vector_byte_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+    let vector_byte_size = u32::from_le_bytes(header[4..8].try_into().unwrap_or_default()) as usize;
 
     let scalar_size = match quantization {
         Quantization::F32 => 4,

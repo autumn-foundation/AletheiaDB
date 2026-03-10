@@ -685,7 +685,7 @@ impl PropertyValue {
             );
         }
         // SAFETY: Length check above guarantees slice has 8 bytes
-        let value = i64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        let value = i64::from_le_bytes(bytes[1..9].try_into().unwrap_or_default());
         Ok((PropertyValue::Int(value), 9))
     }
 
@@ -697,7 +697,7 @@ impl PropertyValue {
             .into());
         }
         // SAFETY: Length check above guarantees slice has 8 bytes
-        let value = f64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        let value = f64::from_le_bytes(bytes[1..9].try_into().unwrap_or_default());
         Ok((PropertyValue::Float(value), 9))
     }
 
@@ -709,7 +709,7 @@ impl PropertyValue {
             )
             .into());
         }
-        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap_or_default()) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -739,7 +739,7 @@ impl PropertyValue {
             )
             .into());
         }
-        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap_or_default()) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -766,7 +766,7 @@ impl PropertyValue {
             )
             .into());
         }
-        let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap_or_default()) as usize;
         let mut offset: usize = 5;
 
         // Prevent DoS via memory exhaustion from malicious input
@@ -1354,7 +1354,7 @@ impl PropertyMap {
             .into());
         }
 
-        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap_or_default()) as usize;
 
         // Prevent DoS via memory exhaustion from malicious input
         if count > MAX_PROPERTY_MAP_CAPACITY {
@@ -1395,7 +1395,7 @@ impl PropertyMap {
             }
             // SAFETY: Length check above guarantees 4 bytes available
             let key_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default()) as usize;
             offset += 4;
 
             // Read key

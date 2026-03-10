@@ -779,7 +779,7 @@ fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<No
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
     NodeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid node ID in WAL {}: {}",
@@ -797,7 +797,7 @@ fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<Ed
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
     EdgeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid edge ID in WAL {}: {}",
@@ -815,7 +815,7 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
     VersionId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid version ID in WAL {}: {}",
