@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn test_read_transaction_creation() {
         let current = Arc::new(CurrentStorage::new());
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current.clone());
 
         assert_eq!(tx.tx_id(), TxId::new(1));
         let metadata = tx.metadata();
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn test_read_transaction_get_node_not_found() {
         let current = Arc::new(CurrentStorage::new());
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current.clone());
 
         let result = tx.get_node(NodeId::new(999).unwrap());
         assert!(result.is_err());
@@ -414,7 +414,7 @@ mod tests {
         current.create_node("Person", props.clone()).unwrap();
         current.create_node("Person", props).unwrap();
 
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current.clone());
         assert_eq!(tx.node_count(), 3);
     }
 
@@ -428,7 +428,7 @@ mod tests {
         let node2 = current.create_node("Person", props.clone()).unwrap();
         let edge_id = current.create_edge(node1, node2, "KNOWS", props).unwrap();
 
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current.clone());
 
         // Get edge
         let edge = tx.get_edge(edge_id).unwrap();
@@ -471,7 +471,7 @@ mod tests {
             .unwrap();
 
         // Create a test read transaction that can only see TxId <= 1
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current.clone());
 
         let non_existent_edge = EdgeId::new(99).unwrap();
         let ids = vec![edge1, edge2, edge3, non_existent_edge];
@@ -484,8 +484,12 @@ mod tests {
         assert!(edges.iter().any(|e| e.id == edge2));
         assert!(edges.iter().any(|e| e.id == edge3));
 
-        // The branches falling back to historical storage are best tested in integration tests
-        // where we have full historical data setups. We've verified the basic logic.
+        // Test branches falling back to historical storage
+        // Since we can't easily mock the internal state of historical storage here,
+        // we'll rely on the integration tests for full coverage, but we can verify the function doesn't panic.
+
+        let tx2 = create_test_read_tx(TxId::new(0), current);
+        let _ = tx2.get_edges(&[edge3]); // Should trigger the fallback path because edge3 is newer
     }
 
     #[test]
@@ -503,7 +507,7 @@ mod tests {
             .unwrap();
         let _edge2 = current.create_edge(node1, node3, "FOLLOWS", props).unwrap();
 
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current.clone());
 
         // Get only KNOWS edges
         let knows_edges = tx.get_outgoing_edges_with_label(node1, "KNOWS");
@@ -608,7 +612,7 @@ mod tests {
             )
             .unwrap();
 
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current.clone());
 
         let results = tx.find_nodes_by_property(
             "Person",
@@ -621,7 +625,7 @@ mod tests {
     #[test]
     fn test_read_transaction_find_nodes_by_property_empty() {
         let current = Arc::new(CurrentStorage::new());
-        let tx = create_test_read_tx(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current.clone());
 
         let results = tx.find_nodes_by_property(
             "Person",

@@ -721,4 +721,105 @@ mod tests {
         let mut tx = db.write_transaction().unwrap();
         assert_write_ops(&mut tx);
     }
+
+    #[test]
+    fn test_read_ops_default_get_edges() {
+        struct MockReadOps {
+            edges: std::collections::HashMap<crate::core::id::EdgeId, crate::core::graph::Edge>,
+        }
+
+        impl ReadOps for MockReadOps {
+            fn get_node(
+                &self,
+                _id: crate::core::id::NodeId,
+            ) -> crate::core::error::Result<crate::core::graph::Node> {
+                unimplemented!()
+            }
+            fn get_edge(
+                &self,
+                id: crate::core::id::EdgeId,
+            ) -> crate::core::error::Result<crate::core::graph::Edge> {
+                self.edges
+                    .get(&id)
+                    .cloned()
+                    .ok_or(crate::core::error::Error::Storage(
+                        crate::core::error::StorageError::EdgeNotFound(id),
+                    ))
+            }
+            fn get_outgoing_edges(
+                &self,
+                _node_id: crate::core::id::NodeId,
+            ) -> Vec<crate::core::id::EdgeId> {
+                unimplemented!()
+            }
+            fn get_incoming_edges(
+                &self,
+                _node_id: crate::core::id::NodeId,
+            ) -> Vec<crate::core::id::EdgeId> {
+                unimplemented!()
+            }
+            fn get_outgoing_edges_with_label(
+                &self,
+                _node_id: crate::core::id::NodeId,
+                _label: &str,
+            ) -> Vec<crate::core::id::EdgeId> {
+                unimplemented!()
+            }
+            fn node_count(&self) -> usize {
+                unimplemented!()
+            }
+            fn edge_count(&self) -> usize {
+                unimplemented!()
+            }
+            fn find_nodes_by_property(
+                &self,
+                _label: &str,
+                _property_key: &str,
+                _property_value: &crate::core::property::PropertyValue,
+            ) -> Vec<crate::core::id::NodeId> {
+                unimplemented!()
+            }
+        }
+
+        let mut edges = std::collections::HashMap::new();
+        let e1_id = crate::core::id::EdgeId::new(1).unwrap();
+        let e2_id = crate::core::id::EdgeId::new(2).unwrap();
+
+        let e1 = crate::core::graph::Edge::with_metadata(
+            e1_id,
+            crate::core::interning::GLOBAL_INTERNER.intern("L").unwrap(),
+            crate::core::id::NodeId::new(1).unwrap(),
+            crate::core::id::NodeId::new(2).unwrap(),
+            Default::default(),
+            crate::core::id::VersionId::new(1).unwrap(),
+            crate::core::version::VersionMetadata {
+                created_by_tx: crate::api::transaction::TxId::new(1),
+                commit_timestamp: None,
+            },
+        );
+        let e2 = crate::core::graph::Edge::with_metadata(
+            e2_id,
+            crate::core::interning::GLOBAL_INTERNER.intern("L").unwrap(),
+            crate::core::id::NodeId::new(2).unwrap(),
+            crate::core::id::NodeId::new(3).unwrap(),
+            Default::default(),
+            crate::core::id::VersionId::new(2).unwrap(),
+            crate::core::version::VersionMetadata {
+                created_by_tx: crate::api::transaction::TxId::new(1),
+                commit_timestamp: None,
+            },
+        );
+
+        edges.insert(e1_id, e1.clone());
+        edges.insert(e2_id, e2.clone());
+
+        let mock = MockReadOps { edges };
+
+        let result = mock
+            .get_edges(&[e1_id, e2_id, crate::core::id::EdgeId::new(99).unwrap()])
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|e| e.id == e1_id));
+        assert!(result.iter().any(|e| e.id == e2_id));
+    }
 }
