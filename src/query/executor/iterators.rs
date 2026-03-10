@@ -24,6 +24,20 @@ use crate::storage::historical::HistoricalStorage;
 use super::results::{EntityId, EntityResult, QueryRow};
 
 /// Trait for result iteration (pull-based).
+///
+/// Query operators implement this trait to allow the executor to process
+/// results one row at a time. The pull-based paradigm means operators
+/// only compute as much data as requested by downstream iterators.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::executor::ResultIterator;
+/// use aletheiadb::query::executor::EmptyIterator;
+///
+/// let mut iterator = EmptyIterator;
+/// assert!(iterator.next().is_none());
+/// ```
 pub trait ResultIterator: Send {
     /// Get the next result row
     fn next(&mut self) -> Option<Result<QueryRow>>;
