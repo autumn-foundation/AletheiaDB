@@ -1,7 +1,7 @@
+use aletheiadb::storage::wal::LSN;
+use aletheiadb::storage::wal::ring_buffer::{PendingEntry, WalRingBuffer};
 use loom::sync::Arc;
 use loom::thread;
-use aletheiadb::storage::wal::ring_buffer::{WalRingBuffer, PendingEntry};
-use aletheiadb::storage::wal::LSN;
 
 #[test]
 fn test_ring_buffer_loom_append_drain() {

@@ -1,5 +1,5 @@
+use aletheiadb::storage::wal::ring_buffer::{BackpressureConfig, WalRingBuffer};
 use proptest::prelude::*;
-use aletheiadb::storage::wal::ring_buffer::{WalRingBuffer, BackpressureConfig};
 
 proptest! {
     #[test]
