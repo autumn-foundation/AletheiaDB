@@ -1663,4 +1663,107 @@ mod sentinel_id_generator_tests {
         assert_eq!(unchecked.as_u64(), 42);
         assert_ne!(unchecked.as_u64(), 0);
     }
+
+    #[test]
+    fn test_id_generator_with_start_exhaustive() {
+        let generator = IdGenerator::with_start(100);
+        assert_eq!(generator.current(), 100);
+    }
+
+    #[test]
+    fn test_id_generator_next_zero_one() {
+        let generator = IdGenerator::with_start(2);
+        assert_eq!(generator.next(), Ok(2));
+        assert_eq!(generator.next(), Ok(3));
+    }
+
+    #[test]
+    fn test_id_generator_current_zero_one() {
+        let generator = IdGenerator::with_start(42);
+        assert_eq!(generator.current(), 42);
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least_empty() {
+        let generator = IdGenerator::with_start(42);
+        generator.ensure_at_least(50);
+        assert_eq!(generator.current(), 50);
+    }
+
+    #[test]
+    fn test_entity_id_variants_exhaustive() {
+        let node_id = NodeId::new_unchecked(42);
+        let entity_node = EntityId::from(node_id);
+        assert!(entity_node.is_node());
+        assert!(!entity_node.is_edge());
+        assert_eq!(entity_node.as_node(), Some(node_id));
+        assert_eq!(entity_node.as_edge(), None);
+        // Ensure From trait doesn't return default (Node(0))
+        assert_ne!(entity_node, EntityId::from(NodeId::new_unchecked(0)));
+
+        let edge_id = EdgeId::new_unchecked(42);
+        let entity_edge = EntityId::from(edge_id);
+        assert!(!entity_edge.is_node());
+        assert!(entity_edge.is_edge());
+        assert_eq!(entity_edge.as_node(), None);
+        assert_eq!(entity_edge.as_edge(), Some(edge_id));
+        // Ensure From trait doesn't return default (Node(0))
+        assert_ne!(entity_edge, EntityId::from(NodeId::new_unchecked(0)));
+    }
+
+    #[test]
+    fn test_id_displays_exhaustive() {
+        let node_id = NodeId::new_unchecked(42);
+        assert!(!node_id.to_string().is_empty());
+        assert_eq!(node_id.to_string(), "Node(42)");
+
+        let edge_id = EdgeId::new_unchecked(42);
+        assert!(!edge_id.to_string().is_empty());
+        assert_eq!(edge_id.to_string(), "Edge(42)");
+
+        let version_id = VersionId::new_unchecked(42);
+        assert!(!version_id.to_string().is_empty());
+        assert_eq!(version_id.to_string(), "Version(42)");
+    }
+
+    #[test]
+    fn test_node_edge_version_as_u64_exhaustive() {
+        let node_id = NodeId::new_unchecked(42);
+        assert_eq!(node_id.as_u64(), 42);
+        assert_ne!(node_id.as_u64(), 0);
+        assert_ne!(node_id.as_u64(), 1);
+
+        let edge_id = EdgeId::new_unchecked(42);
+        assert_eq!(edge_id.as_u64(), 42);
+        assert_ne!(edge_id.as_u64(), 0);
+        assert_ne!(edge_id.as_u64(), 1);
+
+        let version_id = VersionId::new_unchecked(42);
+        assert_eq!(version_id.as_u64(), 42);
+        assert_ne!(version_id.as_u64(), 0);
+        assert_ne!(version_id.as_u64(), 1);
+    }
+
+    #[test]
+    fn test_entity_id_display_exhaustive() {
+        let node_id = NodeId::new_unchecked(42);
+        let entity_node = EntityId::from(node_id);
+        assert!(!entity_node.to_string().is_empty());
+        assert_eq!(entity_node.to_string(), "Node(42)");
+    }
+
+    #[test]
+    fn test_tx_id_generator_next_exhaustive2() {
+        let generator = TxIdGenerator::new();
+        let next_id = generator.next();
+        assert_eq!(next_id.as_u64(), 1); // should not be 0/default
+    }
+
+    #[test]
+    fn test_tx_id_as_u64_exhaustive() {
+        let tx_id = TxId::new(42);
+        assert_eq!(tx_id.as_u64(), 42);
+        assert_ne!(tx_id.as_u64(), 0);
+        assert_ne!(tx_id.as_u64(), 1);
+    }
 }
