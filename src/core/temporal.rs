@@ -1934,3 +1934,33 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_temporal_generator_tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+
+    #[test]
+    fn test_timerange_from_at_exact_boundaries_neg() {
+        let over_max = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+
+        let result_from = std::panic::catch_unwind(|| TimeRange::from(over_max));
+        assert!(
+            result_from.is_err(),
+            "TimeRange::from should panic for exactly MAX_VALID_TIMESTAMP + 1"
+        );
+
+        let result_at = std::panic::catch_unwind(|| TimeRange::at(over_max));
+        assert!(
+            result_at.is_err(),
+            "TimeRange::at should panic for exactly MAX_VALID_TIMESTAMP + 1"
+        );
+
+        // TIMESTAMP_MAX is a special value that shouldn't panic
+        let result_from_max = std::panic::catch_unwind(|| TimeRange::from(TIMESTAMP_MAX));
+        assert!(
+            result_from_max.is_ok(),
+            "TimeRange::from should not panic for exactly TIMESTAMP_MAX"
+        );
+    }
+}
