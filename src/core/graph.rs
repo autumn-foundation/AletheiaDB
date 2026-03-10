@@ -530,6 +530,65 @@ mod tests {
     }
 
     #[test]
+    fn test_node_get_property_exact() {
+        // 🛡️ Sentry Test: Verify exact hit and miss for Node properties to kill
+        // mutants that replace underlying Map::get with default None.
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Bob")
+            .insert("age", 42)
+            .build();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // Exact match
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Bob"),
+            "Node::get_property must return exactly the matching property value"
+        );
+        // Miss match
+        assert!(
+            node.get_property("missing_prop").is_none(),
+            "Node::get_property must return None for missing properties"
+        );
+    }
+
+    #[test]
+    fn test_edge_get_property_exact() {
+        // 🛡️ Sentry Test: Verify exact hit and miss for Edge properties to kill
+        // mutants that replace underlying Map::get with default None.
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().insert("weight", 0.95).build();
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // Exact match
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_float()),
+            Some(0.95),
+            "Edge::get_property must return exactly the matching property value"
+        );
+        // Miss match
+        assert!(
+            edge.get_property("missing_prop").is_none(),
+            "Edge::get_property must return None for missing properties"
+        );
+    }
+
+    #[test]
     fn test_node_with_metadata() {
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let props = PropertyMapBuilder::new().build();
@@ -636,6 +695,55 @@ mod sentry_tests {
         assert!(
             !node.has_label_str("Admin"),
             "matches_label should return false when checking against a different label"
+        );
+    }
+
+    #[test]
+    fn test_node_has_label_exact() {
+        // 🛡️ Sentry Test: explicitly test has_label with exact equality and exact negation.
+        // Kills mutants changing `self.label == label` to `self.label != label` or returning const true/false.
+        let label_a = GLOBAL_INTERNER.intern("LabelA").unwrap();
+        let label_b = GLOBAL_INTERNER.intern("LabelB").unwrap();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label_a,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            node.has_label(label_a),
+            "has_label must return true for exact label match"
+        );
+        assert!(
+            !node.has_label(label_b),
+            "has_label must return false for different label"
+        );
+    }
+
+    #[test]
+    fn test_edge_has_label_exact() {
+        // 🛡️ Sentry Test: explicitly test has_label for edges with exact equality and exact negation.
+        let label_a = GLOBAL_INTERNER.intern("RelA").unwrap();
+        let label_b = GLOBAL_INTERNER.intern("RelB").unwrap();
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label_a,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            edge.has_label(label_a),
+            "has_label must return true for exact label match"
+        );
+        assert!(
+            !edge.has_label(label_b),
+            "has_label must return false for different label"
         );
     }
 
