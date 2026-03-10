@@ -63,3 +63,35 @@ fn test_builder_dos_limits() {
         .build();
     assert!(res.is_err());
 }
+
+#[test]
+fn test_import_csr_invalid_id() {
+    let label = aletheiadb::core::interning::GLOBAL_INTERNER
+        .intern("KNOWS")
+        .unwrap();
+
+    // We create a node ID larger than MAX_VALID_ID
+    let invalid_id: u64 = aletheiadb::core::id::MAX_VALID_ID + 1;
+
+    let nodes = vec![invalid_id];
+    let offsets = vec![0, 1];
+    let edge_ids = vec![100];
+    let mut edge_map = std::collections::HashMap::default();
+    edge_map.insert(
+        aletheiadb::core::id::EdgeId::new(100).unwrap(),
+        (aletheiadb::core::id::NodeId::new(2).unwrap(), label),
+    );
+
+    // This should panic or return an error because it violates the MAX_VALID_ID invariant.
+    // If it succeeds, the unsafe transmute bypassed the checks, which is a bug.
+
+    // We expect a panic, since validate_csr_invariants returns a Result, and import_csr unwraps it.
+    let result = std::panic::catch_unwind(|| {
+        aletheiadb::index::AdjacencyIndex::import_csr(nodes, offsets, edge_ids, &edge_map)
+    });
+
+    assert!(
+        result.is_err(),
+        "Expected import_csr to panic due to invalid NodeId"
+    );
+}
