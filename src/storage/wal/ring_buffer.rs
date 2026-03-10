@@ -52,9 +52,19 @@
 //! growth, which breaks after u64 wraparound. For systems requiring true
 //! infinite operation, a restart-based reset mechanism would be needed.
 
+#[cfg(loom)]
+use loom::cell::UnsafeCell;
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(not(loom))]
 use std::cell::UnsafeCell;
+#[cfg(not(loom))]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+
+#[cfg(loom)]
+pub use loom::sync::{Arc, Condvar, Mutex};
+#[cfg(not(loom))]
+pub use std::sync::{Arc, Condvar, Mutex};
 
 use super::LSN;
 
@@ -325,12 +335,20 @@ impl CompletionNotifier {
         }
 
         // Wait for notification
+        #[cfg(not(loom))]
         let _guard = self
             .condvar
             .wait_while(guard, |_| {
                 self.state.load(Ordering::Acquire) == CompletionState::Pending as u64
             })
             .unwrap_or_else(|e| e.into_inner());
+
+        #[cfg(loom)]
+        let mut _guard = guard;
+        #[cfg(loom)]
+        while self.state.load(Ordering::Acquire) == CompletionState::Pending as u64 {
+            _guard = self.condvar.wait(_guard).unwrap_or_else(|e| e.into_inner());
+        }
 
         // Check final state
         let state = self.state.load(Ordering::Acquire);
@@ -586,9 +604,14 @@ impl WalRingBuffer {
                         // SAFETY: We have exclusive access to this slot after successful CAS.
                         // The sequence protocol ensures the consumer won't read until we
                         // update the sequence number.
+                        #[cfg(not(loom))]
                         unsafe {
                             *slot.entry.get() = Some(entry);
                         }
+                        #[cfg(loom)]
+                        slot.entry.with_mut(|e| unsafe {
+                            *e = Some(entry);
+                        });
 
                         // Signal that the slot is ready for reading
                         // Use wrapping_add to handle u64 wraparound gracefully
@@ -630,7 +653,10 @@ impl WalRingBuffer {
                         spin_count = 0;
                     }
 
+                    #[cfg(not(loom))]
                     std::hint::spin_loop();
+                    #[cfg(loom)]
+                    loom::hint::spin_loop();
                 } else {
                     // current_seq > expected_seq: Another producer already claimed and finished this slot.
                     // Retry with fresh position.
@@ -740,7 +766,10 @@ impl WalRingBuffer {
                         //
                         // 4. The Acquire in the CAS establishes happens-before with
                         //    the producer's Release store of the entry data.
+                        #[cfg(not(loom))]
                         let entry = unsafe { (*slot.entry.get()).take() };
+                        #[cfg(loom)]
+                        let entry = slot.entry.with_mut(|e| unsafe { (*e).take() });
 
                         // Mark slot as available for writing again
                         // New sequence = pos + capacity (next write cycle)
@@ -1297,9 +1326,14 @@ mod tests {
                     .store(slot_pos, Ordering::Relaxed);
 
                 // Clear entries
+                #[cfg(not(loom))]
                 unsafe {
                     *self.slots[slot_idx].entry.get() = None;
                 }
+                #[cfg(loom)]
+                self.slots[slot_idx].entry.with_mut(|e| unsafe {
+                    *e = None;
+                });
             }
         }
     }
@@ -1565,18 +1599,28 @@ mod sentry_tests {
         // We set seq=0 (initial state), so 0 < 1. This is a true "behind" gap.
         buf.slots[0].sequence.store(0, Ordering::Relaxed);
         let (entry0, _) = PendingEntry::new_sync(LSN(0), vec![0]);
+        #[cfg(not(loom))]
         unsafe {
             *buf.slots[0].entry.get() = Some(entry0);
         }
+        #[cfg(loom)]
+        buf.slots[0].entry.with_mut(|e| unsafe {
+            *e = Some(entry0);
+        });
 
         // Manually overwrite Slot 1 to simulate READY (write completed).
         // For read_pos=1, expected_seq is 2.
         // We set seq=2 (ready state).
         buf.slots[1].sequence.store(2, Ordering::Relaxed);
         let (entry1, _) = PendingEntry::new_sync(LSN(1), vec![1]);
+        #[cfg(not(loom))]
         unsafe {
             *buf.slots[1].entry.get() = Some(entry1);
         }
+        #[cfg(loom)]
+        buf.slots[1].entry.with_mut(|e| unsafe {
+            *e = Some(entry1);
+        });
 
         // Attempt drain
         let drained = buf.drain();
@@ -1660,5 +1704,42 @@ mod sentry_tests {
         // Logic: store(expected_seq.wrapping_add(1)) -> MAX + 1 -> 0.
         let seq = buf.slots[slot_idx].sequence.load(Ordering::Relaxed);
         assert_eq!(seq, 0, "Sequence should wrap to 0 after write at boundary");
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use crate::storage::wal::ring_buffer::{LSN, PendingEntry, WalRingBuffer};
+    use loom::sync::Arc;
+    use loom::thread;
+
+    #[test]
+    fn test_loom_ring_buffer() {
+        loom::model(|| {
+            use crate::storage::wal::ring_buffer::BackpressureConfig;
+            let config = BackpressureConfig {
+                initial_spins: 1,
+                max_spins: 1,
+                base_sleep_us: 1,
+                max_sleep_us: 1,
+            };
+            let buf = Arc::new(WalRingBuffer::with_config(2, config));
+
+            let b1 = buf.clone();
+            let t1 = thread::spawn(move || {
+                let _ = b1.try_append(PendingEntry::new_async(LSN(1), vec![1]));
+            });
+
+            let b2 = buf.clone();
+            let t2 = thread::spawn(move || {
+                let _ = b2.try_append(PendingEntry::new_async(LSN(2), vec![2]));
+            });
+
+            t1.join().unwrap();
+            t2.join().unwrap();
+
+            let entries = buf.drain();
+            assert!(entries.len() <= 2);
+        });
     }
 }
