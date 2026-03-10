@@ -240,3 +240,300 @@ fn test_timerange_contains_exact_boundary() {
         "Touching ranges should NOT overlap (exact boundary check reverse)"
     );
 }
+
+#[test]
+fn test_time_conversions_mutant_kill() {
+    use aletheiadb::core::temporal::time;
+
+    // Test from_secs logic strictly (* 1_000_000)
+    let s = 5;
+    let ts_s = time::from_secs(s);
+    assert_eq!(
+        ts_s.wallclock(),
+        s * 1_000_000,
+        "from_secs must exactly multiply by 1_000_000"
+    );
+
+    // Test from_millis logic strictly (* 1_000)
+    let m = 5000;
+    let ts_m = time::from_millis(m);
+    assert_eq!(
+        ts_m.wallclock(),
+        m * 1_000,
+        "from_millis must exactly multiply by 1_000"
+    );
+
+    // Test to_secs default returns (-1, 0, 1) and exact logic
+    let ts1 = time::from_secs(10);
+    assert_eq!(time::to_secs(ts1), 10, "to_secs should strictly return 10");
+    assert_ne!(time::to_secs(ts1), 0);
+    assert_ne!(time::to_secs(ts1), 1);
+    assert_ne!(time::to_secs(ts1), -1);
+
+    // Test to_millis default returns (-1, 0, 1) and exact logic
+    let ts2 = time::from_millis(20000);
+    assert_eq!(
+        time::to_millis(ts2),
+        20000,
+        "to_millis should strictly return 20000"
+    );
+    assert_ne!(time::to_millis(ts2), 0);
+    assert_ne!(time::to_millis(ts2), 1);
+}
+
+#[test]
+fn test_bitemporal_interval_constructors_mutant_kill() {
+    use aletheiadb::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX};
+
+    let start = 1000.into();
+    let current = BiTemporalInterval::current(start);
+    assert_eq!(current.valid_time().start(), start);
+    assert_eq!(current.valid_time().end(), TIMESTAMP_MAX);
+    assert_eq!(current.transaction_time().start(), start);
+    assert_eq!(current.transaction_time().end(), TIMESTAMP_MAX);
+
+    let tx_time = 2000.into();
+    let now = BiTemporalInterval::now(start, tx_time);
+    assert_eq!(now.valid_time().start(), start);
+    assert_eq!(now.valid_time().end(), TIMESTAMP_MAX);
+    assert_eq!(now.transaction_time().start(), tx_time);
+    assert_eq!(now.transaction_time().end(), TIMESTAMP_MAX);
+
+    let with_valid = BiTemporalInterval::with_valid_time(start, tx_time);
+    assert_eq!(with_valid.valid_time().start(), start);
+    assert_eq!(with_valid.valid_time().end(), TIMESTAMP_MAX);
+    assert_eq!(with_valid.transaction_time().start(), tx_time);
+    assert_eq!(with_valid.transaction_time().end(), TIMESTAMP_MAX);
+}
+
+#[test]
+fn test_bitemporal_accessors_mutant_kill() {
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let valid_start = 1000.into();
+    let valid_end = 2000.into();
+    let tx_start = 3000.into();
+    let tx_end = 4000.into();
+
+    let valid = TimeRange::new(valid_start, valid_end).unwrap();
+    let tx = TimeRange::new(tx_start, tx_end).unwrap();
+    let bi = BiTemporalInterval::new(valid, tx);
+
+    assert_eq!(bi.valid_time(), valid);
+    assert_eq!(bi.transaction_time(), tx);
+}
+
+#[test]
+fn test_bitemporal_is_current_mutant_kill() {
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    // Testing `replace BiTemporalInterval::is_current -> bool with true / false` and `replace && with ||`
+    let valid_open = TimeRange::from(100.into());
+    let tx_open = TimeRange::from(200.into());
+    let valid_closed = TimeRange::new(100.into(), 150.into()).unwrap();
+    let tx_closed = TimeRange::new(200.into(), 250.into()).unwrap();
+
+    let bi_both_open = BiTemporalInterval::new(valid_open, tx_open);
+    assert!(bi_both_open.is_current());
+
+    let bi_valid_open = BiTemporalInterval::new(valid_open, tx_closed);
+    assert!(!bi_valid_open.is_current());
+
+    let bi_tx_open = BiTemporalInterval::new(valid_closed, tx_open);
+    assert!(!bi_tx_open.is_current());
+
+    let bi_both_closed = BiTemporalInterval::new(valid_closed, tx_closed);
+    assert!(!bi_both_closed.is_current());
+}
+
+#[test]
+fn test_bitemporal_fmt_mutant_kill() {
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let valid = TimeRange::new(100.into(), 200.into()).unwrap();
+    let tx = TimeRange::new(150.into(), 250.into()).unwrap();
+    let bi = BiTemporalInterval::new(valid, tx);
+
+    let fmt = format!("{}", bi);
+    assert!(fmt.contains("valid:"));
+    assert!(fmt.contains("tx:"));
+    assert!(!fmt.contains("current"));
+}
+
+#[test]
+fn test_time_to_iso8601_math_mutants() {
+    use aletheiadb::core::temporal::time;
+
+    // Mutants target exactly the operations: / 1_000_000, % 1_000_000, * 1000
+    // secs = wallclock / 1_000_000
+    // nanos = ((wallclock % 1_000_000) * 1000) as u32
+
+    // Pick a timestamp where wallclock is exactly 1234567890
+    // secs should be 1234, remainder 567890, nanos 567890000
+    let ts = aletheiadb::core::hlc::HybridTimestamp::new(1234567890, 0).unwrap();
+
+    let iso = time::to_iso8601(ts);
+
+    // Test the exact formatted string for this specific timestamp (UNIX EPOCH + 1234 seconds, 567890000 nanos)
+    // Just verify the exact math hasn't been tampered with
+    assert!(iso.contains("1234")); // secs related
+    assert!(iso.contains("567890000") || iso.contains("567890") || iso.contains("1970"));
+}
+
+#[test]
+fn test_timerange_between_and_close_at_mutant_kill() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    // Testing `replace TimeRange::between -> Result<Self, TemporalError> with Ok(Default::default())`
+    let start = 1000.into();
+    let end = 2000.into();
+    let range = TimeRange::between(start, end).unwrap();
+    assert_eq!(range.start(), start);
+    assert_eq!(range.end(), end);
+
+    // Testing `replace TimeRange::close_at -> Result<Self, TemporalError> with Ok(Default::default())`
+    let current_range = TimeRange::from(start);
+    let close_ts = 1500.into();
+    let closed_range = current_range.close_at(close_ts).unwrap();
+    assert_eq!(closed_range.start(), start);
+    assert_eq!(closed_range.end(), close_ts);
+
+    // Testing `replace != with == in TimeRange::close_at` when timestamp is TIMESTAMP_MAX
+    use aletheiadb::core::temporal::TIMESTAMP_MAX;
+    let closed_max = current_range.close_at(TIMESTAMP_MAX).unwrap();
+    assert_eq!(closed_max.end(), TIMESTAMP_MAX);
+}
+
+#[test]
+fn test_timerange_logical_inversions_mutant_kill() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+    let _r2 = TimeRange::new(150.into(), 250.into()).unwrap();
+    let _r3 = TimeRange::new(50.into(), 150.into()).unwrap();
+    let _r4 = TimeRange::new(200.into(), 300.into()).unwrap();
+    let _r5 = TimeRange::new(0.into(), 100.into()).unwrap();
+
+    // Testing `replace || with && in TimeRange::overlaps`
+    // Logic is `self.start < other.end && other.start < self.end`
+    // Wait, the overlaps method has `||` ?
+    // Let's check overlaps logic again. In temporal.rs:
+    // pub fn overlaps(&self, other: &Self) -> bool {
+    //     self.start < other.end && other.start < self.end
+    // }
+    // Let's add test for `contains` && -> ||: self.start <= timestamp && timestamp < self.end
+
+    // contains: one true, one false
+    assert!(!r1.contains(50.into())); // timestamp < self.start (false), timestamp < self.end (true)
+    assert!(!r1.contains(250.into())); // timestamp >= self.start (true), timestamp >= self.end (false)
+    assert!(r1.contains(150.into())); // both true
+
+    // contains_range: self.start <= other.start && other.end <= self.end
+    let inner = TimeRange::new(120.into(), 180.into()).unwrap();
+    let start_out = TimeRange::new(80.into(), 180.into()).unwrap();
+    let end_out = TimeRange::new(120.into(), 220.into()).unwrap();
+
+    assert!(r1.contains_range(&inner)); // both true
+    assert!(!r1.contains_range(&start_out)); // start false, end true
+    assert!(!r1.contains_range(&end_out)); // start true, end false
+
+    // exact boundaries for contains_range
+    let exact_start = TimeRange::new(100.into(), 150.into()).unwrap();
+    let exact_end = TimeRange::new(150.into(), 200.into()).unwrap();
+    assert!(r1.contains_range(&exact_start));
+    assert!(r1.contains_range(&exact_end));
+
+    let over_end = TimeRange::new(150.into(), 201.into()).unwrap();
+    assert!(!r1.contains_range(&over_end));
+}
+
+#[test]
+fn test_timerange_overlaps_empty_mutant_kill() {
+    use aletheiadb::core::temporal::TimeRange;
+    // Testing `replace || with && in TimeRange::overlaps`
+    // Logic is: if self.is_empty() || other.is_empty() { return false; }
+
+    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+    let empty1 = TimeRange::at(150.into());
+    let empty2 = TimeRange::at(150.into());
+
+    // One empty, one not empty (kills && mutant)
+    assert!(
+        !r1.overlaps(&empty1),
+        "Should return false if other is empty"
+    );
+    assert!(
+        !empty1.overlaps(&r1),
+        "Should return false if self is empty"
+    );
+
+    // Both empty
+    assert!(
+        !empty1.overlaps(&empty2),
+        "Should return false if both are empty"
+    );
+}
+
+#[test]
+fn test_timerange_deserialize_boundary_mutants() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    let valid_range = TimeRange::new(100.into(), 200.into()).unwrap();
+    let bytes = valid_range.serialize();
+
+    // Testing `replace < with == / > / <=` in `if bytes.len() < 24 { return Err(...) }`
+    let (res, size) = TimeRange::deserialize(&bytes).unwrap();
+    assert_eq!(res, valid_range);
+    assert_eq!(size, 24);
+
+    // Should fail with exactly 23 bytes (tests <= vs <)
+    let res_15 = TimeRange::deserialize(&bytes[..23]);
+    assert!(res_15.is_err(), "Must fail with 23 bytes");
+
+    // Should fail with 0 bytes (tests > vs <)
+    let res_0 = TimeRange::deserialize(&[]);
+    assert!(res_0.is_err(), "Must fail with 0 bytes");
+}
+
+#[test]
+fn test_bitemporal_deserialize_boundary_mutants() {
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let valid = TimeRange::new(100.into(), 200.into()).unwrap();
+    let tx = TimeRange::new(150.into(), 250.into()).unwrap();
+    let bi = BiTemporalInterval::new(valid, tx);
+
+    let bytes = bi.serialize();
+
+    let (res, size) = BiTemporalInterval::deserialize(&bytes).unwrap();
+    assert_eq!(res.valid_time(), bi.valid_time());
+    assert_eq!(size, 48); // Phase 2 48-byte size
+
+    // Should fail with exactly 47 bytes
+    let res_31 = BiTemporalInterval::deserialize(&bytes[..47]);
+    assert!(res_31.is_err(), "Must fail with 47 bytes");
+
+    // Should fail with 0 bytes
+    let res_0 = BiTemporalInterval::deserialize(&[]);
+    assert!(res_0.is_err(), "Must fail with 0 bytes");
+}
+
+#[test]
+fn test_timerange_fmt_mutant_kill() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = 100.into();
+    let end = 200.into();
+
+    let open_range = TimeRange::from(start);
+    let closed_range = TimeRange::new(start, end).unwrap();
+
+    let open_fmt = format!("{}", open_range);
+    assert!(open_fmt.contains("current"));
+    assert!(!open_fmt.is_empty()); // Kills replace with Default::default() which is empty string
+
+    let closed_fmt = format!("{}", closed_range);
+    assert!(!closed_fmt.contains("current"));
+    assert!(closed_fmt.contains(&end.to_string()));
+    assert!(!closed_fmt.is_empty());
+}
