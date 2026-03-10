@@ -131,3 +131,14 @@
 **Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`. Also, mutants returning arbitrary Option/Result values or defaults (`Default::default()`) survived in formatting (`fmt::Display`), duration (`duration_micros`), closures (`close_valid_time`, `close_transaction_time`), constructors (`now`, `current`), and bounds evaluation methods (`is_empty`, `is_closed`, `is_current`, `contains`, `contains_or_after`, `contains_range`, `is_valid_at`, `is_recorded_at`).
 **Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, exact exclusion of boundaries inside interval intersections, and robust exact type-checks (like testing that `TimeRange::at()` does not yield an empty string or default timestamp).
 **Kill Shot:** Appended explicit exact boundary tests `test_timerange_is_empty_exact`, `test_timerange_is_current_closed_exact`, `test_timerange_contains_range_exact`, `test_timerange_close_at_exact`, `test_timerange_serialization_exact`, `test_bitemporal_serialization_exact`, `test_bitemporal_close_exact`, `test_bitemporal_constructors_exact`, `test_temporal_display_exact`, `test_time_try_now_exact`, and `test_time_from_secs_millis_exact` directly to `tests/sentry_temporal.rs`.
+**[PredicatePushdown Fallback Mutants]**
+**Module:** src/query/planner/rules/predicate_pushdown.rs
+**Summary:** Deleting the `LogicalOp::Scan(_)` and `LogicalOp::Unary { op: UnaryOp::Traverse { .. }, .. }` match arms inside `push_down`.
+**Diagnosis:** EQUIVALENT_MUTANT - Removing these arms causes the flow to fall through to the default arm `_ => Ok((LogicalOp::unary(UnaryOp::Filter(predicate.clone()), optimized_input), input_changed))`. Since this default arm returns exactly the same output as the deleted arms, the mutated code is semantically identical to the original code, and these mutants can never be killed.
+**Kill Shot:** None (Equivalent Mutant). To be skipped.
+
+**[Rule Name Empty Mutants]**
+**Module:** src/query/planner/rules/predicate_pushdown.rs and src/query/planner/rules/operation_reordering.rs
+**Summary:** Mutating `name()` to return `""` or `"xyzzy"`.
+**Diagnosis:** MISSING_COVERAGE - The test suite did not explicitly check the return value of `name()` for optimization rules.
+**Kill Shot:** Added test `test_rule_name` to ensure the exact string is returned.

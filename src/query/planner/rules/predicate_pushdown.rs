@@ -614,3 +614,14 @@ mod sentry_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sentinel_name_tests {
+    use super::*;
+
+    #[test]
+    fn test_rule_name() {
+        let rule = PredicatePushdown;
+        assert_eq!(rule.name(), "predicate-pushdown");
+    }
+}

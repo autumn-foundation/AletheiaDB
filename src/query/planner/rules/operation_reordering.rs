@@ -1274,3 +1274,14 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod sentinel_name_tests {
+    use super::*;
+
+    #[test]
+    fn test_rule_name() {
+        let rule = OperationReordering;
+        assert_eq!(rule.name(), "operation-reordering");
+    }
+}
