@@ -41,3 +41,9 @@
 ## 2026-11-20 - Avoid `min_by` on DashMap
 **Learning:** `DashMap::iter().min_by(...)` and `max_by(...)` hold onto `RefMulti` read guards across loop iterations, which can cause deadlocks if a concurrent writer is waiting for a lock on the same shard.
 **Action:** Use `.fold(None, |min, current| ...)` to extract and clone only the necessary minimum/maximum value while immediately dropping the reference guard for each element. This prevents deadlocks and improves concurrency performance.
+**[Avoid unused doc comments on statements]
+**Learning:** Adding doc comments (///) to local statements inside functions triggers the  lint under .
+**Action:** Use plain comments (//) instead of doc comments for inline logic optimization explanations.
+**[Avoid unused doc comments on statements]
+**Learning:** Adding doc comments (///) to local statements inside functions triggers the `clippy::unused_doc_comments` lint under `-D warnings`.
+**Action:** Use plain comments (//) instead of doc comments for inline logic optimization explanations.

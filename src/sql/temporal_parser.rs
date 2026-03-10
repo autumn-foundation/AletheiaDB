@@ -588,7 +588,19 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
     }
 
     // Clean up extra whitespace
-    cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    // OPTIMIZATION: Replaced `.split_whitespace().collect::<Vec<_>>().join(" ")` with an allocation-free loop
+    // that pushes directly into a pre-allocated `String`. This avoids an intermediate `Vec` allocation and
+    // improves performance on the hot path of SQL parsing.
+    let mut optimized_cleaned = String::with_capacity(cleaned.len());
+    let mut first = true;
+    for word in cleaned.split_whitespace() {
+        if !first {
+            optimized_cleaned.push(' ');
+        }
+        optimized_cleaned.push_str(word);
+        first = false;
+    }
+    cleaned = optimized_cleaned;
 
     Ok(ExtractedTemporal {
         cleaned_sql: cleaned,
