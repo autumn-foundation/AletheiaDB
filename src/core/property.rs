@@ -1623,10 +1623,28 @@ impl PropertyMapBuilder {
     /// The key is automatically interned. If interning fails (capacity exceeded),
     /// returns self unchanged.
     ///
-    /// Panics if recursion depth limit is exceeded.
-    pub fn insert<V: Into<PropertyValue>>(self, key: &str, value: V) -> Self {
-        self.try_insert(key, value)
-            .expect("Property insertion failed (recursion depth limit exceeded)")
+    /// Instead of panicking if recursion depth limit is exceeded (which allows DoS),
+    /// it silently ignores the property and returns self.
+    pub fn insert<V: Into<PropertyValue>>(mut self, key: &str, value: V) -> Self {
+        // We replicate try_insert to avoid move semantics issues without panicking
+        if let Ok(interned_key) = GLOBAL_INTERNER.intern(key) {
+            let val = value.into();
+            if let Ok(val_size) = val.serialized_size() {
+                if let Some(old_val) = self.map.insert(interned_key, val) {
+                    self.current_size = self
+                        .current_size
+                        .saturating_sub(old_val.serialized_size().unwrap_or(0))
+                        .saturating_add(val_size);
+                } else {
+                    let key_size = 4 + key.len(); // Length prefix (4) + string bytes
+                    self.current_size = self
+                        .current_size
+                        .saturating_add(key_size)
+                        .saturating_add(val_size);
+                }
+            }
+        }
+        self
     }
 
     /// Insert a property (fallible).
@@ -1657,10 +1675,27 @@ impl PropertyMapBuilder {
 
     /// Insert a property with an already-interned key.
     ///
-    /// Panics if recursion depth limit is exceeded.
-    pub fn insert_by_key(self, key: PropertyKey, value: PropertyValue) -> Self {
-        self.try_insert_by_key(key, value)
-            .expect("Property insertion failed (recursion depth limit exceeded)")
+    /// Instead of panicking if recursion depth limit is exceeded (which allows DoS),
+    /// it silently ignores the property and returns self.
+    pub fn insert_by_key(mut self, key: PropertyKey, value: PropertyValue) -> Self {
+        if let Ok(val_size) = value.serialized_size() {
+            if let Some(old_val) = self.map.insert(key, value) {
+                self.current_size = self
+                    .current_size
+                    .saturating_sub(old_val.serialized_size().unwrap_or(0))
+                    .saturating_add(val_size);
+            } else {
+                let key_len = GLOBAL_INTERNER
+                    .resolve_with(key, |s| s.len())
+                    .unwrap_or(256);
+                let key_size = 4 + key_len;
+                self.current_size = self
+                    .current_size
+                    .saturating_add(key_size)
+                    .saturating_add(val_size);
+            }
+        }
+        self
     }
 
     /// Insert a property with an already-interned key (fallible).
@@ -3677,7 +3712,7 @@ mod sentry_tests {
         let invalid_key = InternedString::from_raw(u32::MAX);
         let builder = PropertyMapBuilder::new();
         // This should trigger debug_assert!(false) inside try_insert_by_key
-        builder.insert_by_key(invalid_key, PropertyValue::Int(1));
+        let _ = builder.try_insert_by_key(invalid_key, PropertyValue::Int(1));
     }
 
     /// 🎯 Target: PropertyValue equality with NaN
@@ -3728,18 +3763,22 @@ mod sentry_tests {
         );
     }
 
-    /// 🎯 Target: PropertyMapBuilder::insert panic
-    /// 💣 Risk: Incorrect panic message or behavior on recursion limit.
-    /// 🧪 Strategy: Trigger recursion limit and catch panic message.
+    /// 🎯 Target: PropertyMapBuilder::try_insert error
+    /// 💣 Risk: Incorrect error message or behavior on recursion limit.
+    /// 🧪 Strategy: Trigger recursion limit and catch error message.
     /// 🔬 Verification: expect specific string.
     #[test]
-    #[should_panic(expected = "recursion depth limit exceeded")]
-    fn test_property_map_builder_insert_panic_message() {
+    fn test_property_map_builder_try_insert_error_message() {
         let mut value = PropertyValue::Int(42);
         for _ in 0..MAX_RECURSION_DEPTH + 1 {
             value = PropertyValue::Array(Arc::new(vec![value]));
         }
-        PropertyMapBuilder::new().insert("deep", value);
+        let res = PropertyMapBuilder::new().try_insert("deep", value);
+        assert!(res.is_err());
+        if let Err(e) = res {
+            let err_msg = e.to_string();
+            assert!(err_msg.contains("recursion depth limit exceeded"));
+        }
     }
 
     /// 🎯 Target: PropertyMap::deserialize (MAX_PROPERTY_MAP_CAPACITY)
