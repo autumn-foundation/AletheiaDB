@@ -580,3 +580,127 @@ mod proptests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentinel_hasher_tests {
+    use super::*;
+    use std::hash::Hasher;
+
+    #[test]
+    fn test_sentinel_update_state_exact_bounds() {
+        let mut h = IdentityHasher::default();
+        h.update_state(42);
+        assert_eq!(h.0, 42); // Replaces empty implementation check
+
+        h.update_state(0);
+        assert_eq!(h.0, 42u64.wrapping_mul(FNV_PRIME)); // Checks `^=` vs `|=` and `&=`
+
+        let mut h2 = IdentityHasher(5);
+        h2.update_state(3);
+        // (5 ^ 3) * FNV_PRIME
+        let expected = (5u64 ^ 3u64).wrapping_mul(FNV_PRIME);
+        assert_eq!(h2.0, expected);
+
+        // Ensure that ^= wasn't changed to &= (5 & 3 = 1)
+        assert_ne!(h2.0, (5u64 & 3u64).wrapping_mul(FNV_PRIME));
+
+        // Ensure that ^= wasn't changed to |= (5 | 3 = 7)
+        assert_ne!(h2.0, (5u64 | 3u64).wrapping_mul(FNV_PRIME));
+    }
+
+    #[test]
+    fn test_sentinel_write_exact_match_arms() {
+        // len 1
+        let mut h = IdentityHasher::default();
+        h.write(&[0xFF]);
+        assert_eq!(h.finish(), 255);
+
+        // len 2
+        let mut h = IdentityHasher::default();
+        h.write(&[0x12, 0x34]);
+        assert_eq!(h.finish(), 0x3412);
+
+        // len 4
+        let mut h = IdentityHasher::default();
+        h.write(&[0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(h.finish(), 0x78563412);
+
+        // len 8
+        let mut h = IdentityHasher::default();
+        h.write(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        assert_eq!(h.finish(), 0x8877665544332211);
+
+        // len 16
+        let mut h = IdentityHasher::default();
+        let bytes: [u8; 16] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+            0x17, 0x18,
+        ];
+        h.write(&bytes);
+        let low = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let high = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let expected = low ^ high;
+        assert_eq!(h.finish(), expected);
+        assert_ne!(h.finish(), low | high);
+        assert_ne!(h.finish(), low & high);
+    }
+
+    #[test]
+    fn test_sentinel_write_fallback_bitwise() {
+        let mut h = IdentityHasher::default();
+        h.write(&[0x11, 0x22, 0x33]); // len 3, falls through to _
+        let mut expected = FNV_OFFSET_BASIS;
+        expected ^= 0x11;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        expected ^= 0x22;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        expected ^= 0x33;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        assert_eq!(h.finish(), expected);
+
+        let mut bad_expected_and = FNV_OFFSET_BASIS;
+        bad_expected_and &= 0x11;
+        bad_expected_and = bad_expected_and.wrapping_mul(FNV_PRIME);
+        bad_expected_and &= 0x22;
+        bad_expected_and = bad_expected_and.wrapping_mul(FNV_PRIME);
+        bad_expected_and &= 0x33;
+        bad_expected_and = bad_expected_and.wrapping_mul(FNV_PRIME);
+        assert_ne!(h.finish(), bad_expected_and);
+
+        let mut bad_expected_or = FNV_OFFSET_BASIS;
+        bad_expected_or |= 0x11;
+        bad_expected_or = bad_expected_or.wrapping_mul(FNV_PRIME);
+        bad_expected_or |= 0x22;
+        bad_expected_or = bad_expected_or.wrapping_mul(FNV_PRIME);
+        bad_expected_or |= 0x33;
+        bad_expected_or = bad_expected_or.wrapping_mul(FNV_PRIME);
+        assert_ne!(h.finish(), bad_expected_or);
+    }
+
+    #[test]
+    fn test_sentinel_primitive_writes_not_empty() {
+        let mut h1 = IdentityHasher::default();
+        h1.write_u8(1);
+        assert_eq!(h1.0, 1);
+
+        let mut h2 = IdentityHasher::default();
+        h2.write_u16(2);
+        assert_eq!(h2.0, 2);
+
+        let mut h3 = IdentityHasher::default();
+        h3.write_u32(3);
+        assert_eq!(h3.0, 3);
+
+        let mut h4 = IdentityHasher::default();
+        h4.write_u64(4);
+        assert_eq!(h4.0, 4);
+
+        let mut h5 = IdentityHasher::default();
+        h5.write_usize(5);
+        assert_eq!(h5.0, 5);
+
+        assert_eq!(h5.finish(), 5);
+        assert_ne!(h5.finish(), 0);
+        assert_ne!(h5.finish(), 1);
+    }
+}
