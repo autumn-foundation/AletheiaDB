@@ -33,3 +33,7 @@
 2024-XX-XX - [Warden: CSR Adjacency Index Vulnerability]
 **Threat:** `AdjacencyIndex::import_csr` did not validate that `node_ids` is sorted, and did not validate that `offsets` is monotonically increasing. It also didn't validate that the first offset is `0`. This allows a maliciously constructed CSR payload to cause OOB reads (Denial of Service) when `get_adjacency` is called, due to `start > end` or `end > edges.len()` when slicing the `edges` array.
 **Defense:** Added rigorous validation in `validate_csr_invariants` to ensure `node_ids` is strictly sorted (no duplicates), `offsets` begins with `0`, and is monotonically increasing.
+
+**2024-05-19 - Untrusted CSR IDs Exceeding MAX_VALID_ID**
+**Threat:** Zero-copy transmute in `AdjacencyIndex::import_csr` did not validate that imported node or edge IDs were less than or equal to `MAX_VALID_ID`. This allowed arbitrarily large u64 values to bypass the `NodeId` / `EdgeId` boundary checks via the `transmute_vec` function, breaking the newtype invariants and introducing potential logic bugs or downstream memory corruption when those IDs are used in vectors.
+**Defense:** Added explicit bounds checks in `validate_csr_invariants` to ensure that no `node_ids` or `edge_ids` exceed `MAX_VALID_ID` before transmuting them from `Vec<u64>` to `Vec<NodeId>`.

@@ -548,6 +548,27 @@ impl AdjacencyIndex {
         offsets: &[u64],
         edge_ids: &[u64],
     ) -> Result<(), String> {
+        use crate::core::id::MAX_VALID_ID;
+
+        #[allow(clippy::collapsible_if)]
+        if let Some(&max_id) = node_ids.iter().max() {
+            if max_id > MAX_VALID_ID {
+                return Err(format!(
+                    "CSR node_ids contains an invalid ID: {} > MAX_VALID_ID ({})",
+                    max_id, MAX_VALID_ID
+                ));
+            }
+        }
+
+        #[allow(clippy::collapsible_if)]
+        if let Some(&max_edge) = edge_ids.iter().max() {
+            if max_edge > MAX_VALID_ID {
+                return Err(format!(
+                    "CSR edge_ids contains an invalid ID: {} > MAX_VALID_ID ({})",
+                    max_edge, MAX_VALID_ID
+                ));
+            }
+        }
         if offsets.len() != node_ids.len() + 1 {
             return Err(format!(
                 "CSR offsets length mismatch: expected {}, got {}",
@@ -1142,6 +1163,34 @@ mod sentry_tests {
         let offsets = vec![0]; // invalid len (should be 2)
         let edge_ids = vec![100]; // Non-empty to bypass early return
         let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+    }
+
+    #[test]
+    #[should_panic(expected = "CSR node_ids contains an invalid ID")]
+    fn test_import_csr_panics_on_invalid_node_id() {
+        use crate::core::id::MAX_VALID_ID;
+        let node_ids = vec![MAX_VALID_ID + 1]; // invalid ID
+        let offsets = vec![0, 1];
+        let edge_ids = vec![100];
+        let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        let target = NodeId::new(99).unwrap();
+        let label = crate::core::interning::InternedString::from_raw(1);
+        edges_map.insert(EdgeId::new(100).unwrap(), (target, label));
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+    }
+
+    #[test]
+    #[should_panic(expected = "CSR edge_ids contains an invalid ID")]
+    fn test_import_csr_panics_on_invalid_edge_id() {
+        use crate::core::id::MAX_VALID_ID;
+        let node_ids = vec![10];
+        let offsets = vec![0, 1];
+        let edge_ids = vec![MAX_VALID_ID + 1]; // invalid ID
+        let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        let target = NodeId::new(99).unwrap();
+        let label = crate::core::interning::InternedString::from_raw(1);
+        edges_map.insert(EdgeId::new(100).unwrap(), (target, label));
         AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
 
