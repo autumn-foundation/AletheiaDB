@@ -1322,3 +1322,57 @@ mod tests {
         assert!(msg.contains("by 0"));
     }
 }
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+    use crate::core::id::{NodeId, VersionId};
+
+    #[test]
+    fn test_all_error_display() {
+        let errs = vec![
+            (
+                Error::Storage(StorageError::NodeNotFound(NodeId::new(42).unwrap())),
+                "Storage error: Node not found: Node(42)",
+            ),
+            (
+                Error::Temporal(TemporalError::VersionNotFound(VersionId::new(1).unwrap())),
+                "Temporal error: Version Version(1) not found",
+            ),
+            (
+                Error::Query(QueryError::LimitExceeded { limit: 100 }),
+                "Query error: Query result limit (100) exceeded",
+            ),
+            (
+                Error::Transaction(TransactionError::AlreadyCommitted { tx_id: 123 }),
+                "Transaction error: Transaction 123 has already been committed",
+            ),
+            (
+                Error::Vector(VectorError::ContainsNaN { count: 1 }),
+                "Vector error: Vector contains 1 NaN value(s)",
+            ),
+            (
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "file not found",
+                )),
+                "I/O error: file not found",
+            ),
+            (
+                Error::NotImplemented {
+                    feature: "foo".to_string(),
+                    reason: "bar".to_string(),
+                },
+                "Feature not implemented: foo (bar)",
+            ),
+            (
+                Error::Other("custom error message".to_string()),
+                "custom error message",
+            ),
+        ];
+
+        for (err, expected) in errs {
+            assert_eq!(format!("{}", err), expected);
+        }
+    }
+}
