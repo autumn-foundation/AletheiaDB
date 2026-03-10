@@ -124,6 +124,9 @@ pub mod chronos;
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
 #[cfg(feature = "nova")]
+/// Dejavu: Repeating History Detection.
+pub mod dejavu;
+#[cfg(feature = "nova")]
 /// Dissonance: Semantic Stress Detector.
 pub mod dissonance;
 #[cfg(feature = "nova")]
