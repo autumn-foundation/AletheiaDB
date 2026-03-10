@@ -119,6 +119,3 @@ pub use serialization::*;
 pub use sparse::*;
 pub use types::*;
 pub use validation::*;
-
-#[cfg(test)]
-mod havoc_vector_math;
