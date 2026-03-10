@@ -1395,7 +1395,8 @@ impl PropertyMap {
             }
             // SAFETY: Length check above guarantees 4 bytes available
             let key_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default()) as usize;
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
+                    as usize;
             offset += 4;
 
             // Read key
