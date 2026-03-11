@@ -25,7 +25,6 @@ use crate::api::transaction::ReadOps;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 
-
 /// The result of a Tesseract boundary analysis.
 #[derive(Debug, Clone)]
 pub struct BoundaryScore {
