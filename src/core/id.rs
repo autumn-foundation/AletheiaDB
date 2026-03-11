@@ -21,7 +21,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const MAX_VALID_ID: u64 = u64::MAX - 1000;
 
 /// Unique identifier for a node in the graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod, bytemuck::Zeroable,
+)]
 #[repr(transparent)]
 pub struct NodeId(u64);
 
@@ -65,7 +67,9 @@ impl fmt::Display for NodeId {
 }
 
 /// Unique identifier for an edge in the graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod, bytemuck::Zeroable,
+)]
 #[repr(transparent)]
 pub struct EdgeId(u64);
 
@@ -109,7 +113,9 @@ impl fmt::Display for EdgeId {
 }
 
 /// Unique identifier for a version of a node or edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod, bytemuck::Zeroable,
+)]
 #[repr(transparent)]
 pub struct VersionId(u64);
 
@@ -1455,7 +1461,9 @@ mod proptests {
 }
 
 /// Transaction ID - globally unique identifier for transactions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable,
+)]
 #[repr(transparent)]
 pub struct TxId(u64);
 
