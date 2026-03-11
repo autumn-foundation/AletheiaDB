@@ -22,3 +22,6 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+## Dimension Mismatch Error Path Coverage
+**Learning:** Error paths for vector operations involving dimension mismatches (like `sparse_euclidean_distance` and `sparse_cosine_similarity`) lacked explicit test coverage to verify that they actually return the expected `VectorError::DimensionMismatch`.
+**Action:** Always test error branches of similarity/distance functions by intentionally passing vectors of different dimensions and asserting that the resulting `Err` matches the specific expected variant.
