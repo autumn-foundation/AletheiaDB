@@ -3168,7 +3168,6 @@ mod tests {
         let empty_size = map_empty.estimated_heap_size();
 
         let large_string = "x".repeat(10000); // 10KB
-        // builder() consumes the map, potentially reusing the HashMap if distinct
         let map_with_string = map_empty
             .builder()
             .insert("large", large_string.as_str())
@@ -3176,16 +3175,22 @@ mod tests {
         let string_size = map_with_string.estimated_heap_size();
 
         // The size difference should be exactly the string length.
-        // Explanation:
-        // 1. We pre-allocated capacity, so the "HashMap overhead" term (capacity * fixed_size)
-        //    should remain constant (assuming no resize).
-        // 2. The new entry's fixed overhead is covered by the pre-allocated capacity term.
-        // 3. The only *additional* heap usage is the dynamic size of the value itself (the string).
         let delta = string_size - empty_size;
         assert_eq!(
             delta,
             large_string.len(),
-            "Heap size delta should be exactly string length (assuming no resize)"
+            "Heap size delta should be exactly string length"
+        );
+
+        // Also check actual total size bounds.
+        // It must be at least the string length + HashMap capacity overhead
+        let min_expected_size =
+            large_string.len() + (100 * std::mem::size_of::<(PropertyKey, PropertyValue)>());
+        assert!(
+            string_size >= min_expected_size,
+            "string_size {} < min_expected {}",
+            string_size,
+            min_expected_size
         );
     }
 
@@ -3208,28 +3213,48 @@ mod tests {
             delta, expected_delta,
             "Heap size delta should be exactly vector data size"
         );
+
+        let min_expected_size =
+            expected_delta + (100 * std::mem::size_of::<(PropertyKey, PropertyValue)>());
+        assert!(
+            vector_size >= min_expected_size,
+            "vector_size {} < min_expected {}",
+            vector_size,
+            min_expected_size
+        );
     }
 
     #[test]
     fn test_serialized_size_matches_actual() {
         let values = vec![
-            PropertyValue::Null,
-            PropertyValue::Bool(true),
-            PropertyValue::Int(123),
-            PropertyValue::Float(123.456),
-            PropertyValue::string("test string"),
-            PropertyValue::bytes([1, 2, 3]),
-            PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::string("nested")]),
-            PropertyValue::vector([1.0f32, 2.0, 3.0]),
+            (PropertyValue::Null, 1),                           // tag
+            (PropertyValue::Bool(true), 2),                     // tag + 1 byte
+            (PropertyValue::Int(123), 9),                       // tag + 8 bytes
+            (PropertyValue::Float(123.456), 9),                 // tag + 8 bytes
+            (PropertyValue::string("test string"), 1 + 4 + 11), // tag + len + "test string"
+            (PropertyValue::bytes([1, 2, 3]), 1 + 4 + 3),       // tag + len + 3 bytes
+            (
+                PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::string("nested")]),
+                1 + 4 + 9 + (1 + 4 + 6), // tag + count + (tag + int) + (tag + len + "nested")
+            ),
+            (PropertyValue::vector([1.0f32, 2.0, 3.0]), 1 + 4 + 12), // tag + len + 3 * 4 bytes
         ];
 
-        for value in values {
+        for (value, expected_size) in values {
             let predicted = value.serialized_size().expect("Size calculation failed");
-            let actual = value.serialize().expect("Serialization failed").len();
+            let serialized = value.serialize().expect("Serialization failed");
+
             assert_eq!(
                 predicted,
-                actual,
-                "Size mismatch for {:?}",
+                expected_size,
+                "Predicted size mismatch for {:?}",
+                value.type_name()
+            );
+
+            assert_eq!(
+                serialized.len(),
+                expected_size,
+                "Actual serialization length mismatch for {:?}",
                 value.type_name()
             );
         }
@@ -3242,28 +3267,37 @@ mod tests {
             .insert("age", 30i64)
             .build();
 
-        // Manual calculation:
-        // Count: 4 bytes
-        // Entry 1: "name" -> "Alice"
-        // Key: 4 (len) + 4 ("name") = 8 bytes
-        // Value (String): 1 (tag) + 4 (len) + 5 ("Alice") = 10 bytes
-        // Total entry 1: 18 bytes
-        // Entry 2: "age" -> 30 (Int)
-        // Key: 4 (len) + 3 ("age") = 7 bytes
-        // Value (Int): 1 (tag) + 8 (i64) = 9 bytes
-        // Total entry 2: 16 bytes
-        // Total map: 4 + 18 + 16 = 38 bytes
+        // Expected format (little-endian):
+        // 1. Entry count (u32): 2 (4 bytes)
+        // 2. Entries (sorted by key):
+        //    - "age":
+        //      - Key length (u32): 3 (4 bytes)
+        //      - Key bytes: b"age" (3 bytes)
+        //      - Value Tag: TAG_INT (1 byte)
+        //      - Value Data: 30 (8 bytes)
+        //    - "name":
+        //      - Key length (u32): 4 (4 bytes)
+        //      - Key bytes: b"name" (4 bytes)
+        //      - Value Tag: TAG_STRING (1 byte)
+        //      - Value Data: length (4 bytes) + b"Alice" (5 bytes)
+        let expected_size = 4 + (4 + 3 + 1 + 8) + (4 + 4 + 1 + 4 + 5);
 
-        let expected_size = 4 + 18 + 16;
         assert_eq!(
             map.serialized_size(),
             expected_size,
-            "Serialized size should match manual calculation"
+            "Serialized size should match exact byte format calculation"
         );
 
-        // Also verify it matches actual serialization
-        let actual = map.serialize().unwrap().len();
-        assert_eq!(expected_size, actual);
+        let serialized = map.serialize().unwrap();
+        assert_eq!(
+            serialized.len(),
+            expected_size,
+            "Actual serialization length should match exact byte format calculation"
+        );
+
+        // Exact byte checks
+        let count = u32::from_le_bytes(serialized[0..4].try_into().unwrap());
+        assert_eq!(count, 2);
     }
 
     #[test]
