@@ -588,7 +588,17 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
     }
 
     // Clean up extra whitespace
-    cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    // ⚡ Bolt: Avoid allocating an intermediate Vec just to join string slices.
+    let mut new_cleaned = String::with_capacity(cleaned.len());
+    let mut first = true;
+    for word in cleaned.split_whitespace() {
+        if !first {
+            new_cleaned.push(' ');
+        }
+        new_cleaned.push_str(word);
+        first = false;
+    }
+    cleaned = new_cleaned;
 
     Ok(ExtractedTemporal {
         cleaned_sql: cleaned,
