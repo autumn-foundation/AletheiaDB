@@ -548,7 +548,6 @@ impl AdjacencyIndex {
         offsets: &[u64],
         edge_ids: &[u64],
     ) -> Result<(), String> {
-
         for &node_id in node_ids {
             if node_id > crate::core::id::MAX_VALID_ID {
                 return Err(format!("Node ID {} exceeds MAX_VALID_ID", node_id));
@@ -1100,7 +1099,9 @@ mod sentry_tests {
         let edge_ids = vec![100];
         let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         let target = NodeId::new(99).unwrap();
-        let label = crate::core::interning::GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
         edges_map.insert(EdgeId::new(100).unwrap(), (target, label));
 
         AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
