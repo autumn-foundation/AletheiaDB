@@ -243,5 +243,8 @@ pub mod voyager;
 pub mod serendipity;
 
 #[cfg(feature = "nova")]
+/// Tesseract: Semantic Boundary Detector.
+pub mod tesseract;
+#[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
