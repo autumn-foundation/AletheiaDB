@@ -588,7 +588,19 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
     }
 
     // Clean up extra whitespace
-    cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    // PERF: Avoid intermediate Vec allocation when cleaning up whitespace.
+    // By pre-allocating a String with the capacity of the original string and
+    // pushing directly, we avoid allocating and populating a Vec for the joined words.
+    let mut new_cleaned = String::with_capacity(cleaned.len());
+    let mut first = true;
+    for word in cleaned.split_whitespace() {
+        if !first {
+            new_cleaned.push(' ');
+        }
+        new_cleaned.push_str(word);
+        first = false;
+    }
+    cleaned = new_cleaned;
 
     Ok(ExtractedTemporal {
         cleaned_sql: cleaned,
