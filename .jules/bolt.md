@@ -41,3 +41,7 @@
 ## 2026-11-20 - Avoid `min_by` on DashMap
 **Learning:** `DashMap::iter().min_by(...)` and `max_by(...)` hold onto `RefMulti` read guards across loop iterations, which can cause deadlocks if a concurrent writer is waiting for a lock on the same shard.
 **Action:** Use `.fold(None, |min, current| ...)` to extract and clone only the necessary minimum/maximum value while immediately dropping the reference guard for each element. This prevents deadlocks and improves concurrency performance.
+
+**Pre-allocate Vectors in collect_structured**
+**Learning:** `Vec::new()` without capacity hints inside a loop where the target size is known (via `iterator.size_hint()` or `Vec::len()`) causes unnecessary heap allocations. Using `Vec::with_capacity` based on iterator size bounds prevents these allocations.
+**Action:** Always check if the final collection size is known or estimable (e.g. from an iterator) and use `Vec::with_capacity` instead of `Vec::new()` to initialize collections.

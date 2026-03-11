@@ -561,24 +561,30 @@ impl QueryResults {
         let has_any_nodes = rows.iter().any(|r| r.entity.as_node().is_some());
 
         // Second pass: extract data with padding
-        let mut nodes = Vec::new();
+        let capacity = rows.len();
+        let node_capacity = if has_any_nodes {
+            rows.iter().filter(|r| r.entity.as_node().is_some()).count()
+        } else {
+            0
+        };
+        let mut nodes = Vec::with_capacity(node_capacity);
         let mut properties = if has_any_nodes {
-            Some(Vec::new())
+            Some(Vec::with_capacity(node_capacity))
         } else {
             None
         };
         let mut scores = if has_any_scores {
-            Some(Vec::new())
+            Some(Vec::with_capacity(capacity))
         } else {
             None
         };
         let mut paths = if has_any_paths {
-            Some(Vec::new())
+            Some(Vec::with_capacity(capacity))
         } else {
             None
         };
         let mut versions = if has_any_versions {
-            Some(Vec::new())
+            Some(Vec::with_capacity(capacity))
         } else {
             None
         };
