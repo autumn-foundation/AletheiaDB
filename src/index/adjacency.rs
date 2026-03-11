@@ -548,6 +548,22 @@ impl AdjacencyIndex {
         offsets: &[u64],
         edge_ids: &[u64],
     ) -> Result<(), String> {
+        for &id in node_ids {
+            if id > crate::core::id::MAX_VALID_ID {
+                return Err(format!(
+                    "CSR node_ids contains invalid ID exceeding MAX_VALID_ID: {}",
+                    id
+                ));
+            }
+        }
+        for &id in edge_ids {
+            if id > crate::core::id::MAX_VALID_ID {
+                return Err(format!(
+                    "CSR edge_ids contains invalid ID exceeding MAX_VALID_ID: {}",
+                    id
+                ));
+            }
+        }
         if offsets.len() != node_ids.len() + 1 {
             return Err(format!(
                 "CSR offsets length mismatch: expected {}, got {}",

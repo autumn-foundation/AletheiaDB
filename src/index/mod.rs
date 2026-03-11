@@ -24,3 +24,6 @@ pub use temporal::TemporalIndexes;
 pub use temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
 pub use vector::{DistanceMetric, VectorIndex};
 pub use vector::{HnswIndex, HnswIndexBuilder};
+#[cfg(test)]
+/// Havoc test cases
+pub mod havoc_tests;
