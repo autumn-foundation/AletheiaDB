@@ -10,6 +10,7 @@ keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations"]
 
 [dependencies]
+bytemuck = { version = "1.14", features = ["extern_crate_alloc"] }
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
