@@ -548,6 +548,18 @@ impl AdjacencyIndex {
         offsets: &[u64],
         edge_ids: &[u64],
     ) -> Result<(), String> {
+
+        for &node_id in node_ids {
+            if node_id > crate::core::id::MAX_VALID_ID {
+                return Err(format!("Node ID {} exceeds MAX_VALID_ID", node_id));
+            }
+        }
+        for &edge_id in edge_ids {
+            if edge_id > crate::core::id::MAX_VALID_ID {
+                return Err(format!("Edge ID {} exceeds MAX_VALID_ID", edge_id));
+            }
+        }
+
         if offsets.len() != node_ids.len() + 1 {
             return Err(format!(
                 "CSR offsets length mismatch: expected {}, got {}",
@@ -1079,6 +1091,21 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
+    #[test]
+    #[should_panic(expected = "Node ID 18446744073709550715 exceeds MAX_VALID_ID")]
+    fn test_import_csr_havoc_invalid_node_id() {
+        let invalid_node_id = crate::core::id::MAX_VALID_ID + 100;
+        let node_ids = vec![invalid_node_id];
+        let offsets = vec![0, 1];
+        let edge_ids = vec![100];
+        let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        let target = NodeId::new(99).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        edges_map.insert(EdgeId::new(100).unwrap(), (target, label));
+
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+    }
+
     use std::collections::HashMap;
     use std::hash::BuildHasherDefault;
 
