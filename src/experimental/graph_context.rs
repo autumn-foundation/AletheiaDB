@@ -19,7 +19,6 @@
 //!
 //! ```rust
 //! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::graph_context::GraphContextBuilder;
 //! use aletheiadb::core::id::NodeId;
 //!
 //! # fn example(db: &AletheiaDB, node_id: NodeId) -> aletheiadb::core::error::Result<()> {
@@ -71,193 +70,144 @@ use std::fmt::Write;
 ///
 /// ```rust
 /// # use aletheiadb::AletheiaDB;
-/// # use aletheiadb::experimental::graph_context::GraphContextBuilder;
 /// # fn example(db: &AletheiaDB, node_id: aletheiadb::core::id::NodeId) -> aletheiadb::core::error::Result<()> {
-/// let context = GraphContextBuilder::new(db, node_id)
-///     .with_history_limit(5)
-///     .with_neighbor_limit(10)
-///     .build()?;
+/// let context = aletheiadb::experimental::graph_context::build_graph_context(db, node_id, 5, 10)?;
 /// # Ok(())
 /// # }
 /// ```
-pub struct GraphContextBuilder<'a> {
-    db: &'a AletheiaDB,
+fn resolve_interned(s: InternedString) -> String {
+    GLOBAL_INTERNER
+        .resolve_with(s, |s| s.to_string())
+        .unwrap_or_else(|| format!("<interned:{}>", s.as_u32()))
+}
+
+/// Build the context string (Markdown).
+///
+/// # Returns
+///
+/// A formatted Markdown string containing the node's context.
+///
+/// # Errors
+///
+/// Returns an error if the `center_node` does not exist in the database.
+pub fn build_graph_context(
+    db: &AletheiaDB,
     center_node: NodeId,
     history_limit: usize,
     neighbor_limit: usize,
-}
+) -> Result<String> {
+    let mut output = String::new();
+    let node = db.get_node(center_node)?;
+    let label = resolve_interned(node.label);
 
-impl<'a> GraphContextBuilder<'a> {
-    /// Create a new builder for the given node.
-    ///
-    /// # Arguments
-    ///
-    /// * `db` - Reference to the database instance.
-    /// * `center_node` - The ID of the node to generate context for.
-    pub fn new(db: &'a AletheiaDB, center_node: NodeId) -> Self {
-        Self {
-            db,
-            center_node,
-            history_limit: 5,
-            neighbor_limit: 10,
+    // 1. Header
+    writeln!(
+        &mut output,
+        "# Node Context: {} ({})",
+        center_node.as_u64(),
+        label
+    )
+    .unwrap();
+
+    // 2. Properties
+    writeln!(&mut output, "\n## Properties").unwrap();
+    if node.properties.is_empty() {
+        writeln!(&mut output, "- (No properties)").unwrap();
+    } else {
+        // Sort keys for deterministic output
+        let mut props: Vec<_> = node.properties.iter().collect();
+        props.sort_by_key(|(k, _)| *k);
+
+        for (key_id, val) in props {
+            let key = resolve_interned(*key_id);
+            writeln!(&mut output, "- {}: {}", key, val).unwrap();
         }
     }
 
-    /// Set the maximum number of history events to include.
-    ///
-    /// # Trade-offs
-    ///
-    /// *   **Higher limit**: Provides more context on how the node evolved, useful for understanding causality.
-    /// *   **Lower limit**: Saves tokens in the LLM prompt window.
-    ///
-    /// Defaults to 5.
-    pub fn with_history_limit(mut self, limit: usize) -> Self {
-        self.history_limit = limit;
-        self
+    // 3. Evolution (History)
+    writeln!(&mut output, "\n## Evolution").unwrap();
+    let generator = NarrativeGenerator::new(db);
+    match generator.generate_node_narrative(center_node) {
+        Ok(events) => {
+            if events.is_empty() {
+                writeln!(&mut output, "- No history available.").unwrap();
+            } else {
+                for event in events.iter().rev().take(history_limit) {
+                    writeln!(
+                        &mut output,
+                        "- {} (v{}): {}",
+                        event.timestamp, event.version_number, event.description
+                    )
+                    .unwrap();
+                    for change in &event.changes {
+                        writeln!(&mut output, "  - {}", change).unwrap();
+                    }
+                }
+                if events.len() > history_limit {
+                    writeln!(
+                        &mut output,
+                        "- ... ({} more versions)",
+                        events.len() - history_limit
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        Err(e) => {
+            writeln!(&mut output, "- Error retrieving history: {}", e).unwrap();
+        }
     }
 
-    /// Set the maximum number of neighbors to include.
-    ///
-    /// # Trade-offs
-    ///
-    /// *   **Higher limit**: Provides a broader view of the node's connections.
-    /// *   **Lower limit**: Saves tokens and prevents "context pollution" from irrelevant neighbors.
-    ///
-    /// Defaults to 10.
-    pub fn with_neighbor_limit(mut self, limit: usize) -> Self {
-        self.neighbor_limit = limit;
-        self
-    }
-
-    fn resolve(s: InternedString) -> String {
-        GLOBAL_INTERNER
-            .resolve_with(s, |s| s.to_string())
-            .unwrap_or_else(|| format!("<interned:{}>", s.as_u32()))
-    }
-
-    /// Build the context string (Markdown).
-    ///
-    /// # Returns
-    ///
-    /// A formatted Markdown string containing the node's context.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the `center_node` does not exist in the database.
-    pub fn build(&self) -> Result<String> {
-        let mut output = String::new();
-        let node = self.db.get_node(self.center_node)?;
-        let label = Self::resolve(node.label);
-
-        // 1. Header
+    // 4. Neighborhood
+    writeln!(&mut output, "\n## Neighborhood").unwrap();
+    let edges = db.get_outgoing_edges(center_node);
+    if edges.is_empty() {
+        writeln!(&mut output, "- (No outgoing edges)").unwrap();
+    } else {
         writeln!(
             &mut output,
-            "# Node Context: {} ({})",
-            self.center_node.as_u64(),
-            label
+            "{} outgoing edges (showing max {}):",
+            edges.len(),
+            neighbor_limit
         )
         .unwrap();
-
-        // 2. Properties
-        writeln!(&mut output, "\n## Properties").unwrap();
-        if node.properties.is_empty() {
-            writeln!(&mut output, "- (No properties)").unwrap();
-        } else {
-            // Sort keys for deterministic output
-            let mut props: Vec<_> = node.properties.iter().collect();
-            props.sort_by_key(|(k, _)| *k);
-
-            for (key_id, val) in props {
-                let key = Self::resolve(*key_id);
-                writeln!(&mut output, "- {}: {}", key, val).unwrap();
-            }
-        }
-
-        // 3. Evolution (History)
-        writeln!(&mut output, "\n## Evolution").unwrap();
-        let generator = NarrativeGenerator::new(self.db);
-        match generator.generate_node_narrative(self.center_node) {
-            Ok(events) => {
-                if events.is_empty() {
-                    writeln!(&mut output, "- No history available.").unwrap();
+        for edge_id in edges.iter().take(neighbor_limit) {
+            if let Ok(edge) = db.get_edge(*edge_id) {
+                let edge_label = resolve_interned(edge.label);
+                // Try to get target node label if possible, otherwise just ID
+                let target_desc = if let Ok(target_node) = db.get_node(edge.target) {
+                    format!(
+                        "{} ({})",
+                        resolve_interned(target_node.label),
+                        edge.target.as_u64()
+                    )
                 } else {
-                    for event in events.iter().rev().take(self.history_limit) {
-                        writeln!(
-                            &mut output,
-                            "- {} (v{}): {}",
-                            event.timestamp, event.version_number, event.description
-                        )
-                        .unwrap();
-                        for change in &event.changes {
-                            writeln!(&mut output, "  - {}", change).unwrap();
-                        }
-                    }
-                    if events.len() > self.history_limit {
-                        writeln!(
-                            &mut output,
-                            "- ... ({} more versions)",
-                            events.len() - self.history_limit
-                        )
-                        .unwrap();
-                    }
-                }
-            }
-            Err(e) => {
-                writeln!(&mut output, "- Error retrieving history: {}", e).unwrap();
-            }
-        }
+                    format!("Node {}", edge.target.as_u64())
+                };
 
-        // 4. Neighborhood
-        writeln!(&mut output, "\n## Neighborhood").unwrap();
-        let edges = self.db.get_outgoing_edges(self.center_node);
-        if edges.is_empty() {
-            writeln!(&mut output, "- (No outgoing edges)").unwrap();
-        } else {
-            writeln!(
-                &mut output,
-                "{} outgoing edges (showing max {}):",
-                edges.len(),
-                self.neighbor_limit
-            )
-            .unwrap();
-            for edge_id in edges.iter().take(self.neighbor_limit) {
-                if let Ok(edge) = self.db.get_edge(*edge_id) {
-                    let edge_label = Self::resolve(edge.label);
-                    // Try to get target node label if possible, otherwise just ID
-                    let target_desc = if let Ok(target_node) = self.db.get_node(edge.target) {
-                        format!(
-                            "{} ({})",
-                            Self::resolve(target_node.label),
-                            edge.target.as_u64()
-                        )
-                    } else {
-                        format!("Node {}", edge.target.as_u64())
-                    };
+                writeln!(&mut output, "- {} -> {}", edge_label, target_desc).unwrap();
 
-                    writeln!(&mut output, "- {} -> {}", edge_label, target_desc).unwrap();
-
-                    // Edge properties (compact)
-                    if !edge.properties.is_empty() {
-                        let mut props_str: Vec<String> = edge
-                            .properties
-                            .iter()
-                            .map(|(k, v)| format!("{}: {}", Self::resolve(*k), v))
-                            .collect();
-                        // Sort for deterministic output
-                        props_str.sort();
-                        writeln!(
-                            &mut output,
-                            "  - Properties: {{ {} }}",
-                            props_str.join(", ")
-                        )
-                        .unwrap();
-                    }
+                // Edge properties (compact)
+                if !edge.properties.is_empty() {
+                    let mut props_str: Vec<String> = edge
+                        .properties
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", resolve_interned(*k), v))
+                        .collect();
+                    // Sort for deterministic output
+                    props_str.sort();
+                    writeln!(
+                        &mut output,
+                        "  - Properties: {{ {} }}",
+                        props_str.join(", ")
+                    )
+                    .unwrap();
                 }
             }
         }
-
-        Ok(output)
     }
+
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -299,10 +249,7 @@ mod tests {
             .unwrap();
 
         // 5. Build Context
-        let context = GraphContextBuilder::new(&db, node_a)
-            .with_history_limit(5)
-            .build()
-            .unwrap();
+        let context = build_graph_context(&db, node_a, 5, 10).unwrap();
 
         println!("{}", context);
 

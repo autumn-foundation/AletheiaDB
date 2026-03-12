@@ -44,25 +44,6 @@ use std::collections::HashMap;
 /// Maps NodeId -> Vector (state).
 pub type PropagationState = HashMap<NodeId, Vec<f32>>;
 
-/// Defines how a node updates its state based on its neighbors.
-pub trait PropagationModel {
-    /// Calculate the next state for a node.
-    ///
-    /// # Arguments
-    /// * `node_id` - The node being updated.
-    /// * `current_self` - The node's current vector (if any).
-    /// * `neighbors` - List of (NodeId, Neighbor Vector) tuples.
-    ///
-    /// # Returns
-    /// The new vector state for the node.
-    fn next_state(
-        &self,
-        node_id: NodeId,
-        current_self: Option<&[f32]>,
-        neighbors: &[(NodeId, &[f32])],
-    ) -> Option<Vec<f32>>;
-}
-
 /// A simple linear propagation model.
 /// New State = (1 - alpha) * Old State + alpha * Average(Neighbor States)
 pub struct LinearPropagation {
@@ -81,8 +62,17 @@ impl LinearPropagation {
     }
 }
 
-impl PropagationModel for LinearPropagation {
-    fn next_state(
+impl LinearPropagation {
+    /// Calculate the next state for a node.
+    ///
+    /// # Arguments
+    /// * `_node_id` - The node being updated.
+    /// * `current_self` - The node's current vector (if any).
+    /// * `neighbors` - List of (NodeId, Neighbor Vector) tuples.
+    ///
+    /// # Returns
+    /// The new vector state for the node.
+    pub fn next_state(
         &self,
         _node_id: NodeId,
         current_self: Option<&[f32]>,
@@ -156,10 +146,10 @@ impl<'a> Sybil<'a> {
     /// * `property_name` - The vector property to use as the "meme".
     /// * `model` - The propagation logic.
     /// * `steps` - Number of iterations.
-    pub fn simulate<M: PropagationModel>(
+    pub fn simulate(
         &self,
         property_name: &str,
-        model: &M,
+        model: &LinearPropagation,
         steps: usize,
     ) -> Result<PropagationState> {
         // Step 1: Load Initial State
