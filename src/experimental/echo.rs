@@ -261,6 +261,7 @@ mod tests {
 
 
     #[test]
+    #[cfg(feature = "nova")]
     fn test_activity_density_resonator_standalone() {
         let resonator = ActivityDensityResonator::default();
         let history = EntityHistory {
