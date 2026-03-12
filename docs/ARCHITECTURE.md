@@ -1189,6 +1189,112 @@ stateDiagram-v2
     Decayed --> Unweighted : Decay(Time)
 ```
 
+
+### Advanced Semantic Traversals & Synthesis
+
+**Voyager (Maximal Novelty Traversal)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Voyager
+    participant DB as AletheiaDB
+
+    User->>Voyager: traverse(start_node, max_steps)
+    loop Until max_steps or Dead End
+        Voyager->>DB: get_outgoing_edges(current_node)
+        Voyager->>DB: get_vector(neighbors)
+        Voyager->>Voyager: find_least_similar_neighbor()
+        Voyager->>Voyager: move_to(least_similar_neighbor)
+    end
+    Voyager-->>User: Path of Novelty
+```
+
+**Serendipity (Scenic Route Finder)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class SerendipityEngine {
+            +find_scenic_route(start, end)
+        }
+        class ScenicRoute {
+            +path: Vec<NodeId>
+            +serendipity_score: f32
+        }
+    }
+    SerendipityEngine --> AletheiaDB : Uses
+    SerendipityEngine ..> ScenicRoute : Produces
+```
+
+**Luna (Semantic Subgraph Synthesis)**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Luna
+    participant DB as AletheiaDB
+
+    User->>Luna: synthesize(seed_nodes)
+    Luna->>DB: get_vectors(seed_nodes)
+    Luna->>Luna: compute_centroid()
+    Luna->>DB: create_node(CoreConcept, centroid)
+    loop For each seed
+        Luna->>DB: create_edge(CoreConcept, seed, "CORE_OF")
+    end
+    Luna-->>User: Synthesized NodeId
+```
+
+**Omen (Semantic Collision Detection)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Omen {
+            +predict_collision(node_a, node_b)
+        }
+        class Encounter {
+            +time: f32
+            +distance: f32
+        }
+    }
+    Omen --> AletheiaDB : Analyzes Trajectories
+    Omen ..> Encounter : Predicts
+```
+
+**Tremor (Semantic Earthquake Detector)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class TremorEngine {
+            +detect_shift(time_a, time_b)
+        }
+        class TremorScore {
+            +magnitude: f32
+            +details: String
+        }
+    }
+    TremorEngine --> AletheiaDB : Compares Global States
+    TremorEngine ..> TremorScore : Calculates
+```
+
+**Spectre (Semantic Perspective Engine)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Spectre {
+            +traverse_with_lens(start, lens)
+        }
+        class Lens {
+            +vector: Vec<f32>
+        }
+    }
+    Spectre --> AletheiaDB : Traverses Graph
+    Spectre --> Lens : Applies Warp
+```
+
 ### Temporal Query Processing
 
 **Query Types:**
