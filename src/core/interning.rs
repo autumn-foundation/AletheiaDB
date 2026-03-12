@@ -1294,4 +1294,22 @@ mod mutant_kill_tests {
         assert_eq!(all[0], "A");
         assert_eq!(all[1], "C");
     }
+
+    #[test]
+    fn test_interned_string_debug_format_exhaustive() {
+        let interner = &GLOBAL_INTERNER;
+        let id = interner.intern("hello_world_debug_test").unwrap();
+
+        let debug_output = format!("{:?}", id);
+
+        // Explicitly check the string is not empty and has a distinct specific value
+        assert!(!debug_output.is_empty());
+        assert_eq!(debug_output, "InternedString(\"hello_world_debug_test\")");
+
+        // Check fallback case for unknown ID
+        let unknown_id = InternedString(999999);
+        let unknown_debug = format!("{:?}", unknown_id);
+        assert!(!unknown_debug.is_empty());
+        assert_eq!(unknown_debug, "InternedString(999999)");
+    }
 }
