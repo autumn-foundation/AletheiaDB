@@ -82,3 +82,7 @@
 ## 2025-03-05 - Logical vs Physical Plans and Iterator Performance
 **Confusion:** The difference between logical plans (`LogicalOp`) and physical plans (`PhysicalOp`) in the query engine was unclear. Additionally, the iterators used for execution (`ResultIterator` implementations) lacked clarity on their streaming architecture.
 **Clarification:** Documented `PhysicalOp` to explain its 1:1 mapping with iterators. Added struct-level documentation to `ResultIterator` implementations to clarify the pull-based, lazy execution model used during query processing.
+
+## 2025-05-24 - Result Shadowing in Prelude
+**Confusion:** The `aletheiadb::prelude` module exports `Result` which maps to `Result<T, aletheiadb::Error>`. When users copy-paste examples into their own `fn main() -> Result<(), Box<dyn std::error::Error>>`, they encounter compiler errors because the prelude's `Result` shadows `std::result::Result` and expects only 1 type argument.
+**Clarification:** Documented the shadowing behavior directly on `pub use crate::core::error::{Error, Result};` in `src/prelude.rs` with an executable doctest demonstrating the explicit `std::result::Result` usage. Also updated all `fn main()` examples in `README.md` to use the explicit path and added an inline comment explaining why.

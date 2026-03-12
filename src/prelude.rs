@@ -11,7 +11,29 @@
 
 pub use crate::AletheiaDB;
 pub use crate::api::{ReadOps, ReadTransaction, WriteOps, WriteTransaction};
+
+/// The database error and result types.
+///
+/// **⚠️ Warning:** Importing `Result` from the prelude shadows the standard library's `std::result::Result`.
+/// If you are writing a `main` function that returns a result, you must explicitly use `std::result::Result`:
+///
+/// ```rust
+/// use aletheiadb::prelude::*;
+///
+/// // Notice the explicit std::result::Result here:
+/// fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+///     let db = AletheiaDB::new()?;
+///
+///     // Database methods return aletheiadb::Result
+///     let id: NodeId = db.write(|tx| {
+///         tx.create_node("Test", PropertyMap::new())
+///     })?;
+///
+///     Ok(())
+/// }
+/// ```
 pub use crate::core::error::{Error, Result};
+
 pub use crate::core::id::{EdgeId, NodeId, VersionId};
 pub use crate::core::interning::InternedString;
 pub use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};

@@ -354,6 +354,8 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 ```rust
 use aletheiadb::prelude::*;
 
+// Note: `aletheiadb::prelude::Result` shadows `std::result::Result`.
+// When returning a result from `main()`, explicitly specify `std::result::Result`.
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Create a new database
     let db = AletheiaDB::new().unwrap();
@@ -805,7 +807,7 @@ use std::sync::Arc;
 
 // Note: Requires `tokio` dependency in Cargo.toml
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
 
     // 1. Create embedding service
