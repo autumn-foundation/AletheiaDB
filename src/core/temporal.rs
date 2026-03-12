@@ -1945,3 +1945,116 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod elenchus_tests {
+    use super::*;
+
+    #[test]
+    fn test_elenchus_duration_micros_constants() {
+        // ⚔️ Elenchus Test: Catch `Some(0)`, `Some(1)`, `Some(-1)` overrides.
+        // A duration_micros of 5 must not be overwritten by 0, 1, or -1.
+        let t1 = crate::core::hlc::HybridTimestamp::new_unchecked(100, 0);
+        let t2 = crate::core::hlc::HybridTimestamp::new_unchecked(105, 0);
+        let range = TimeRange::new(t1, t2).unwrap();
+        assert_eq!(
+            range.duration_micros(),
+            Some(5),
+            "duration should be exactly 5, not a mutated constant"
+        );
+    }
+
+    #[test]
+    fn test_elenchus_bitemporal_is_visible_at_logic() {
+        // ⚔️ Elenchus Test: Catch `&&` -> `||` in `is_visible_at`.
+        // We need a case where valid_time matches (True) but tx_time does not (False).
+        // If it was mutated to `||`, True || False = True, failing this test.
+        let valid_start = crate::core::hlc::HybridTimestamp::new_unchecked(1000, 0);
+        let valid_end = crate::core::hlc::HybridTimestamp::new_unchecked(2000, 0);
+        let tx_start = crate::core::hlc::HybridTimestamp::new_unchecked(3000, 0);
+        let tx_end = crate::core::hlc::HybridTimestamp::new_unchecked(4000, 0);
+
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(valid_start, valid_end).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap(),
+        );
+
+        // valid_time = 1500 (True), tx_time = 2500 (False)
+        assert!(
+            !interval.is_visible_at(
+                crate::core::hlc::HybridTimestamp::new_unchecked(1500, 0),
+                crate::core::hlc::HybridTimestamp::new_unchecked(2500, 0)
+            ),
+            "Should not be visible if tx_time is out of range (protects against && -> || mutant)"
+        );
+
+        // valid_time = 500 (False), tx_time = 3500 (True)
+        assert!(
+            !interval.is_visible_at(
+                crate::core::hlc::HybridTimestamp::new_unchecked(500, 0),
+                crate::core::hlc::HybridTimestamp::new_unchecked(3500, 0)
+            ),
+            "Should not be visible if valid_time is out of range (protects against && -> || mutant)"
+        );
+    }
+
+    #[test]
+    fn test_elenchus_time_to_secs_mutants() {
+        // ⚔️ Elenchus Test: Catch `/` -> `*`, `/` -> `%` in `to_secs`
+        // Catch `*` -> `/`, `*` -> `+` in `from_secs`.
+        // The original roundtrip test suffered from the Oracle problem.
+        let t = time::from_secs(5);
+        assert_eq!(
+            t.wallclock(),
+            5_000_000,
+            "from_secs must correctly multiply by 1_000_000"
+        );
+        assert_eq!(
+            time::to_secs(t),
+            5,
+            "to_secs must correctly divide by 1_000_000"
+        );
+    }
+
+    #[test]
+    fn test_elenchus_time_to_millis_mutants() {
+        // ⚔️ Elenchus Test: Catch `/` -> `*`, `/` -> `%` in `to_millis`
+        // Catch `*` -> `/`, `*` -> `+` in `from_millis`.
+        let t = time::from_millis(5);
+        assert_eq!(
+            t.wallclock(),
+            5_000,
+            "from_millis must correctly multiply by 1_000"
+        );
+        assert_eq!(
+            time::to_millis(t),
+            5,
+            "to_millis must correctly divide by 1_000"
+        );
+    }
+
+    #[test]
+    fn test_elenchus_timerange_overlaps_boundary() {
+        // ⚔️ Elenchus Test: Catch `<` -> `<=` inside `overlaps()`.
+        let r1 = TimeRange::new(
+            crate::core::hlc::HybridTimestamp::new_unchecked(100, 0),
+            crate::core::hlc::HybridTimestamp::new_unchecked(200, 0),
+        )
+        .unwrap();
+        let r2 = TimeRange::new(
+            crate::core::hlc::HybridTimestamp::new_unchecked(200, 0),
+            crate::core::hlc::HybridTimestamp::new_unchecked(300, 0),
+        )
+        .unwrap();
+
+        // They touch at 200, but do not overlap because end is exclusive.
+        assert!(
+            !r1.overlaps(&r2),
+            "Touching ranges do not overlap (protects against < to <= mutant)"
+        );
+        assert!(
+            !r2.overlaps(&r1),
+            "Touching ranges do not overlap (protects against < to <= mutant)"
+        );
+    }
+}

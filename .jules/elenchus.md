@@ -339,3 +339,17 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[TimeRange duration_micros and Timestamp Arithmetic]**
+**Module:** `aletheiadb::core::temporal`
+**Severity:** 🔴 Critical
+**Finding:** Mutants replacing `duration_micros` with constants (e.g., `Some(0)`, `Some(1)`) and mutating arithmetic operators in `time::to_secs`/`time::to_millis` (e.g., `/` to `%` or `*`) survived existing tests.
+**Evidence:** The original tests asserted `to_secs(from_secs(x)) == x` which passes even if the operator is changed to `%` for certain inputs, or they lacked independent ground truth for the conversions, making them susceptible to the Oracle Problem.
+**Recommendation:** Added specific boundary tests for `to_secs` and `to_millis` that check against hardcoded constants (e.g., `assert_eq!(time::to_secs(t), 5)`). Added tests for `duration_micros` asserting specific interval lengths.
+
+**[BiTemporalInterval Visibility and Overlap Logic]**
+**Module:** `aletheiadb::core::temporal`
+**Severity:** 🔴 Critical
+**Finding:** A mutant replacing `&&` with `||` in `BiTemporalInterval::is_visible_at` survived. Similarly, mutations to operators in `TimeRange::overlaps` (`<` to `<=`) survived basic checks.
+**Evidence:** The test `test_bitemporal_visibility` provided inputs that were either entirely out of range or entirely in range, failing to test the `true && false` vs `true || false` cases.
+**Recommendation:** Added tests specifically checking states where one dimension is valid but the other is not (e.g., `is_visible_at` with out-of-bounds `transaction_time` but in-bounds `valid_time`) to strictly verify the logical AND.
