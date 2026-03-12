@@ -595,6 +595,20 @@ impl AdjacencyIndex {
             }
         }
 
+        // Validate that no NodeId or EdgeId exceeds MAX_VALID_ID
+        // This prevents creating invalid IDs when zero-copy transmuting or casting arrays
+        // See https://github.com/madmax983/AletheiaDB/issues/432
+        for &id in node_ids {
+            if id > crate::core::id::MAX_VALID_ID {
+                return Err(format!("Invalid NodeId {} exceeds MAX_VALID_ID", id));
+            }
+        }
+        for &id in edge_ids {
+            if id > crate::core::id::MAX_VALID_ID {
+                return Err(format!("Invalid EdgeId {} exceeds MAX_VALID_ID", id));
+            }
+        }
+
         Ok(())
     }
 
@@ -1132,6 +1146,30 @@ mod sentry_tests {
             AdjacencyIndex::validate_csr_invariants(&duplicate_node_ids, &offsets, &edge_ids)
                 .unwrap_err();
         assert!(err_duplicate.contains("CSR node_ids are not strictly monotonically increasing"));
+
+        // 8. Invalid MAX_VALID_ID node
+        let invalid_node_ids = vec![10, crate::core::id::MAX_VALID_ID + 1];
+        let err_invalid_node =
+            AdjacencyIndex::validate_csr_invariants(&invalid_node_ids, &offsets, &edge_ids)
+                .unwrap_err();
+        assert!(err_invalid_node.contains("exceeds MAX_VALID_ID"));
+
+        // 9. Invalid MAX_VALID_ID edge
+        let invalid_edge_ids = vec![100, crate::core::id::MAX_VALID_ID + 1];
+        let err_invalid_edge =
+            AdjacencyIndex::validate_csr_invariants(&node_ids, &offsets, &invalid_edge_ids)
+                .unwrap_err();
+        assert!(err_invalid_edge.contains("exceeds MAX_VALID_ID"));
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_VALID_ID")]
+    fn test_import_csr_panics_on_invalid_id_max() {
+        let node_ids = vec![crate::core::id::MAX_VALID_ID + 1];
+        let offsets = vec![0, 1];
+        let edge_ids = vec![100];
+        let edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
     }
 
     #[test]
