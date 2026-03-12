@@ -56,6 +56,19 @@ impl ResultIterator for EmptyIterator {
 /// Direct node lookup iterator.
 ///
 /// Yields nodes corresponding to a specific list of IDs. O(1) per node.
+///
+/// # Examples
+///
+/// ```ignore
+/// use aletheiadb::query::executor::NodeLookupIterator;
+/// use aletheiadb::storage::current::CurrentStorage;
+/// use aletheiadb::core::id::NodeId;
+/// use std::sync::Arc;
+///
+/// // Assuming `current` is a valid Arc<CurrentStorage>
+/// let node_ids = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+/// let iter = NodeLookupIterator::new(node_ids, current);
+/// ```
 pub struct NodeLookupIterator {
     node_ids: std::vec::IntoIter<NodeId>,
     current: Arc<CurrentStorage>,
@@ -116,6 +129,17 @@ impl ResultIterator for NodeLookupIterator {
 /// Sequential node scan iterator.
 ///
 /// Scans through nodes sequentially, optionally applying a label filter.
+///
+/// # Examples
+///
+/// ```ignore
+/// use aletheiadb::query::executor::NodeScanIterator;
+/// use aletheiadb::storage::current::CurrentStorage;
+/// use std::sync::Arc;
+///
+/// // Assuming `current` is a valid Arc<CurrentStorage>
+/// let iter = NodeScanIterator::new(Some("Person".to_string()), current);
+/// ```
 pub struct NodeScanIterator {
     label: Option<String>,
     current: Arc<CurrentStorage>,
