@@ -221,6 +221,10 @@ pub mod mnemosyne;
 pub mod muse;
 
 #[cfg(feature = "nova")]
+/// Odometer: Measuring Semantic Distance Over Time.
+pub mod odometer;
+
+#[cfg(feature = "nova")]
 pub mod omen;
 #[cfg(feature = "nova")]
 /// Oracle: Probabilistic Graph Reasoning.
