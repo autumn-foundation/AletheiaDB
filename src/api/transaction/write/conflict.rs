@@ -17,6 +17,78 @@
 
 use super::WriteTransaction;
 use crate::core::error::{Result, TransactionError};
+use crate::core::hlc::HybridTimestamp;
+
+fn check_commit_timestamp<F>(
+    entity_fn: F,
+    commit_ts: Option<HybridTimestamp>,
+    snapshot_ts: HybridTimestamp,
+) -> Result<()>
+where
+    F: FnOnce() -> String,
+{
+    if let Some(commit_ts) = commit_ts
+        && commit_ts > snapshot_ts
+    {
+        return Err(TransactionError::SerializationFailure {
+            entity: entity_fn(),
+            reason: format!(
+                "Version committed at {} after snapshot at {}",
+                commit_ts, snapshot_ts
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn check_node_conflict(
+    tx: &WriteTransaction,
+    node_id: crate::core::id::NodeId,
+    is_update: bool,
+) -> Result<()> {
+    match tx.current.get_node(node_id) {
+        Ok(current_node) => check_commit_timestamp(
+            || format!("{:?}", node_id),
+            current_node.metadata.commit_timestamp,
+            tx.snapshot.snapshot_timestamp,
+        ),
+        Err(_) if is_update => {
+            // Node doesn't exist in current storage. Since we successfully
+            // called update_node() earlier (which reads from current storage),
+            // the node must have been deleted by another transaction.
+            Err(TransactionError::SerializationFailure {
+                entity: format!("{:?}", node_id),
+                reason: "Node was deleted by another transaction".to_string(),
+            }
+            .into())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+fn check_edge_conflict(
+    tx: &WriteTransaction,
+    edge_id: crate::core::id::EdgeId,
+    is_update: bool,
+) -> Result<()> {
+    match tx.current.get_edge(edge_id) {
+        Ok(current_edge) => check_commit_timestamp(
+            || format!("{:?}", edge_id),
+            current_edge.metadata.commit_timestamp,
+            tx.snapshot.snapshot_timestamp,
+        ),
+        Err(_) if is_update => {
+            // Edge doesn't exist - it was deleted by another transaction
+            Err(TransactionError::SerializationFailure {
+                entity: format!("{:?}", edge_id),
+                reason: "Edge was deleted by another transaction".to_string(),
+            }
+            .into())
+        }
+        Err(_) => Ok(()),
+    }
+}
 
 /// Detect write-write conflicts for Snapshot Isolation.
 ///
@@ -38,104 +110,18 @@ use crate::core::error::{Result, TransactionError};
 pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
     for write in tx.buffer.operations() {
         match write {
-            // UpdateNode: check if node was modified or deleted after our snapshot
             crate::api::transaction::BufferedWrite::UpdateNode { node_id, .. } => {
-                match tx.current.get_node(*node_id) {
-                    Ok(current_node) => {
-                        // Node exists - check if it was modified after our snapshot
-                        if let Some(commit_ts) = current_node.metadata.commit_timestamp
-                            && commit_ts > tx.snapshot.snapshot_timestamp
-                        {
-                            return Err(TransactionError::SerializationFailure {
-                                entity: format!("{:?}", node_id),
-                                reason: format!(
-                                    "Version committed at {} after snapshot at {}",
-                                    commit_ts, tx.snapshot.snapshot_timestamp
-                                ),
-                            }
-                            .into());
-                        }
-                    }
-                    Err(_) => {
-                        // Node doesn't exist in current storage. Since we successfully
-                        // called update_node() earlier (which reads from current storage),
-                        // the node must have been deleted by another transaction.
-                        return Err(TransactionError::SerializationFailure {
-                            entity: format!("{:?}", node_id),
-                            reason: "Node was deleted by another transaction".to_string(),
-                        }
-                        .into());
-                    }
-                }
+                check_node_conflict(tx, *node_id, true)?;
             }
-
-            // UpdateEdge: check if edge was modified or deleted after our snapshot
             crate::api::transaction::BufferedWrite::UpdateEdge { edge_id, .. } => {
-                match tx.current.get_edge(*edge_id) {
-                    Ok(current_edge) => {
-                        // Edge exists - check if it was modified after our snapshot
-                        if let Some(commit_ts) = current_edge.metadata.commit_timestamp
-                            && commit_ts > tx.snapshot.snapshot_timestamp
-                        {
-                            return Err(TransactionError::SerializationFailure {
-                                entity: format!("{:?}", edge_id),
-                                reason: format!(
-                                    "Version committed at {} after snapshot at {}",
-                                    commit_ts, tx.snapshot.snapshot_timestamp
-                                ),
-                            }
-                            .into());
-                        }
-                    }
-                    Err(_) => {
-                        // Edge doesn't exist - it was deleted by another transaction
-                        return Err(TransactionError::SerializationFailure {
-                            entity: format!("{:?}", edge_id),
-                            reason: "Edge was deleted by another transaction".to_string(),
-                        }
-                        .into());
-                    }
-                }
+                check_edge_conflict(tx, *edge_id, true)?;
             }
-
-            // DeleteNode: check if node was modified after our snapshot
             crate::api::transaction::BufferedWrite::DeleteNode { node_id, .. } => {
-                // Get current version from storage
-                if let Ok(current_node) = tx.current.get_node(*node_id)
-                    && let Some(commit_ts) = current_node.metadata.commit_timestamp
-                    && commit_ts > tx.snapshot.snapshot_timestamp
-                {
-                    return Err(TransactionError::SerializationFailure {
-                        entity: format!("{:?}", node_id),
-                        reason: format!(
-                            "Version committed at {} after snapshot at {}",
-                            commit_ts, tx.snapshot.snapshot_timestamp
-                        ),
-                    }
-                    .into());
-                }
+                check_node_conflict(tx, *node_id, false)?;
             }
-
-            // DeleteEdge: check if edge was modified after our snapshot
             crate::api::transaction::BufferedWrite::DeleteEdge { edge_id, .. } => {
-                // Get current version from storage
-                if let Ok(current_edge) = tx.current.get_edge(*edge_id)
-                    && let Some(commit_ts) = current_edge.metadata.commit_timestamp
-                    && commit_ts > tx.snapshot.snapshot_timestamp
-                {
-                    return Err(TransactionError::SerializationFailure {
-                        entity: format!("{:?}", edge_id),
-                        reason: format!(
-                            "Version committed at {} after snapshot at {}",
-                            commit_ts, tx.snapshot.snapshot_timestamp
-                        ),
-                    }
-                    .into());
-                }
+                check_edge_conflict(tx, *edge_id, false)?;
             }
-
-            // CreateNode and CreateEdge don't need conflict detection
-            // since they're creating new entities that didn't exist before
             _ => {}
         }
     }
