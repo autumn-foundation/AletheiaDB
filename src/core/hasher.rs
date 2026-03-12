@@ -434,6 +434,16 @@ mod tests {
         assert_eq!(hasher.finish(), low ^ high);
     }
 
+    /// A reference FNV-1a implementation for comparison in tests.
+    fn reference_fnv1a(bytes: &[u8], initial_state: u64) -> u64 {
+        let mut hash = initial_state;
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
     #[test]
     fn test_identity_hasher_write_fallback_fnv() {
         let mut hasher = IdentityHasher::default();
@@ -441,13 +451,7 @@ mod tests {
         let bytes = [1u8, 2u8, 3u8];
         hasher.write(&bytes);
 
-        let mut expected = FNV_OFFSET_BASIS;
-        expected ^= 1;
-        expected = expected.wrapping_mul(FNV_PRIME);
-        expected ^= 2;
-        expected = expected.wrapping_mul(FNV_PRIME);
-        expected ^= 3;
-        expected = expected.wrapping_mul(FNV_PRIME);
+        let expected = reference_fnv1a(&bytes, FNV_OFFSET_BASIS);
 
         assert_eq!(hasher.finish(), expected);
     }
@@ -460,13 +464,7 @@ mod tests {
         let bytes = [1u8, 2u8, 3u8];
         hasher.write(&bytes);
 
-        let mut expected = 42u64;
-        expected ^= 1;
-        expected = expected.wrapping_mul(FNV_PRIME);
-        expected ^= 2;
-        expected = expected.wrapping_mul(FNV_PRIME);
-        expected ^= 3;
-        expected = expected.wrapping_mul(FNV_PRIME);
+        let expected = reference_fnv1a(&bytes, 42u64);
 
         assert_eq!(hasher.finish(), expected);
     }

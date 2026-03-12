@@ -332,3 +332,10 @@
 **Finding:** While logic checking for `MAX_ARRAY_ELEMENTS` and `MAX_PROPERTY_MAP_CAPACITY` existed, the tests validating these boundaries were weak. They didn't explicitly verify the exact limit vs. limit + 1 boundary conditions correctly to protect against off-by-one regressions.
 **Evidence:** `test_array_max_elements` checked behavior, but the new tests specifically test exact size rejection correctly and verify against `MAX_ARRAY_ELEMENTS + 1`.
 **Recommendation:** Modified the boundary tests to ensure exact limits act as expected, specifically focusing on `MAX_ARRAY_ELEMENTS + 1`.
+
+**[IdentityHasher Tautological Fallback Audit]**
+**Module:** `aletheiadb::core::hasher`
+**Severity:** 🔴 Critical
+**Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
+**Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
+**Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
