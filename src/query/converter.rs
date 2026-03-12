@@ -2120,4 +2120,26 @@ mod sentry_tests {
         let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_)));
         assert!(has_filter, "Should produce Filter for age");
     }
+
+    #[test]
+    #[should_panic(expected = "convert_logic_predicate called on non-logic expr")]
+    fn test_convert_logic_predicate_unreachable() {
+        let converter = AstConverter::new();
+        let expr = PredicateExpr::Exists(crate::query::ast::PropertyAccess {
+            variable: "n".to_string(),
+            property: "prop".to_string(),
+        });
+        let _ = converter.convert_logic_predicate(&expr);
+    }
+
+    #[test]
+    #[should_panic(expected = "convert_string_predicate called on non-string expr")]
+    fn test_convert_string_predicate_unreachable() {
+        let converter = AstConverter::new();
+        let expr = PredicateExpr::Exists(crate::query::ast::PropertyAccess {
+            variable: "n".to_string(),
+            property: "prop".to_string(),
+        });
+        let _ = converter.convert_string_predicate(&expr);
+    }
 }
