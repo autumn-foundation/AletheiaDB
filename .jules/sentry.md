@@ -22,3 +22,7 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+
+**MAX_VALID_ID Validation on Zero-Copy Imports**
+**Learning:** Raw arrays intended for zero-copy transmute into strongly typed wrappers (like `NodeId` or `EdgeId`) must be explicitly validated against `MAX_VALID_ID` before the `unsafe` block. Failure to do so bypasses the type system's bounds checking, leading to logic bugs or memory corruption downstream.
+**Action:** Always validate that no elements exceed `MAX_VALID_ID` in `Vec<u64>` imports before using `unsafe` zero-copy transmute.

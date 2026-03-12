@@ -14,6 +14,7 @@
 //! sequential access to a contiguous region of memory.
 
 use crate::core::hasher::IdentityHasher;
+use crate::core::id::MAX_VALID_ID;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use rayon::prelude::*;
@@ -595,6 +596,23 @@ impl AdjacencyIndex {
             }
         }
 
+        #[allow(clippy::collapsible_if)]
+        if let Some(&last_node_id) = node_ids.last() {
+            if last_node_id > MAX_VALID_ID {
+                return Err(format!(
+                    "CSR node_ids exceed MAX_VALID_ID: {}",
+                    last_node_id
+                ));
+            }
+        }
+
+        if let Some(&invalid_edge) = edge_ids.iter().find(|&&id| id > MAX_VALID_ID) {
+            return Err(format!(
+                "CSR edge_ids exceed MAX_VALID_ID: {}",
+                invalid_edge
+            ));
+        }
+
         Ok(())
     }
 
@@ -1132,6 +1150,20 @@ mod sentry_tests {
             AdjacencyIndex::validate_csr_invariants(&duplicate_node_ids, &offsets, &edge_ids)
                 .unwrap_err();
         assert!(err_duplicate.contains("CSR node_ids are not strictly monotonically increasing"));
+
+        // 8. Node ID > MAX_VALID_ID
+        let invalid_node_ids = vec![10, MAX_VALID_ID + 1];
+        let err_invalid_node =
+            AdjacencyIndex::validate_csr_invariants(&invalid_node_ids, &offsets, &edge_ids)
+                .unwrap_err();
+        assert!(err_invalid_node.contains("CSR node_ids exceed MAX_VALID_ID"));
+
+        // 9. Edge ID > MAX_VALID_ID
+        let invalid_edge_ids = vec![100, MAX_VALID_ID + 1];
+        let err_invalid_edge =
+            AdjacencyIndex::validate_csr_invariants(&node_ids, &offsets, &invalid_edge_ids)
+                .unwrap_err();
+        assert!(err_invalid_edge.contains("CSR edge_ids exceed MAX_VALID_ID"));
     }
 
     #[test]
