@@ -985,7 +985,7 @@ impl CurrentStorage {
         incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
-    ) {
+    ) -> crate::core::error::Result<()> {
         self.indexes.import_csr(
             outgoing_node_ids,
             outgoing_offsets,
@@ -993,7 +993,8 @@ impl CurrentStorage {
             incoming_node_ids,
             incoming_offsets,
             incoming_edge_ids,
-        );
+        ).map_err(|e| crate::core::error::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        Ok(())
     }
 
     /// Get the number of nodes.

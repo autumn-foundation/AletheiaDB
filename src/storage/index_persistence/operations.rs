@@ -879,14 +879,16 @@ pub(crate) fn load_indexes_startup(
                 if !graph_data.outgoing_offsets.is_empty()
                     && !graph_data.incoming_offsets.is_empty()
                 {
-                    current.import_csr(
+                    if let Err(_) = current.import_csr(
                         graph_data.outgoing_node_ids,
                         graph_data.outgoing_offsets,
                         graph_data.outgoing_neighbors,
                         graph_data.incoming_node_ids,
                         graph_data.incoming_offsets,
                         graph_data.incoming_neighbors,
-                    );
+                    ) {
+                        current.compact_adjacency();
+                    }
                 } else {
                     // Fallback for older index files without CSR data
                     current.compact_adjacency();

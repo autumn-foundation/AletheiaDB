@@ -1,0 +1,101 @@
+   Compiling aletheiadb-fuzz v0.0.0 (/app/fuzz)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3.41s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.15s
+     Running `fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency -artifact_prefix=/app/fuzz/artifacts/fuzz_adjacency/ -max_total_time=10 /app/fuzz/corpus/fuzz_adjacency`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3482464027
+INFO: Loaded 1 modules   (1494 inline 8-bit counters): 1494 [0x55d29db46470, 0x55d29db46a46),
+INFO: Loaded 1 PC tables (1494 PCs): 1494 [0x55d29db46a48,0x55d29db4c7a8),
+INFO:        0 files found in /app/fuzz/corpus/fuzz_adjacency
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 50 ft: 51 corp: 1/1b exec/s: 0 rss: 53Mb
+	NEW_FUNC[1/1]: 0x55d29db004a0  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x18e4a0) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+#3	NEW    cov: 59 ft: 64 corp: 2/2b lim: 4 exec/s: 0 rss: 53Mb L: 1/1 MS: 1 ChangeByte-
+#8	NEW    cov: 59 ft: 66 corp: 3/4b lim: 4 exec/s: 0 rss: 53Mb L: 2/2 MS: 5 ChangeBinInt-ChangeByte-ShuffleBytes-ChangeBit-CopyPart-
+#10	NEW    cov: 62 ft: 69 corp: 4/6b lim: 4 exec/s: 0 rss: 53Mb L: 2/2 MS: 2 EraseBytes-CrossOver-
+	NEW_FUNC[1/2]: 0x55d29da9c2a0  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x12a2a0) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+	NEW_FUNC[2/2]: 0x55d29da9ceb0  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x12aeb0) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+#16	NEW    cov: 87 ft: 96 corp: 5/9b lim: 4 exec/s: 0 rss: 53Mb L: 3/3 MS: 1 InsertByte-
+#734	NEW    cov: 88 ft: 97 corp: 6/18b lim: 11 exec/s: 0 rss: 53Mb L: 9/9 MS: 3 CrossOver-CopyPart-InsertRepeatedBytes-
+#808	NEW    cov: 91 ft: 105 corp: 7/28b lim: 11 exec/s: 0 rss: 53Mb L: 10/10 MS: 4 InsertByte-ChangeBinInt-ChangeBinInt-InsertRepeatedBytes-
+#941	NEW    cov: 91 ft: 106 corp: 8/39b lim: 11 exec/s: 0 rss: 53Mb L: 11/11 MS: 3 ChangeBit-InsertRepeatedBytes-ChangeBinInt-
+#1250	NEW    cov: 91 ft: 107 corp: 9/52b lim: 14 exec/s: 0 rss: 53Mb L: 13/13 MS: 4 ChangeBinInt-ChangeBinInt-InsertByte-InsertByte-
+#1550	REDUCE cov: 91 ft: 107 corp: 9/51b lim: 14 exec/s: 0 rss: 53Mb L: 12/12 MS: 5 EraseBytes-CMP-ChangeBit-ChangeBit-CrossOver- DE: "\000\000"-
+#1618	NEW    cov: 98 ft: 120 corp: 10/63b lim: 14 exec/s: 0 rss: 53Mb L: 12/12 MS: 3 ShuffleBytes-ChangeBinInt-InsertByte-
+#1658	NEW    cov: 98 ft: 121 corp: 11/76b lim: 14 exec/s: 0 rss: 53Mb L: 13/13 MS: 5 CMP-ShuffleBytes-PersAutoDict-InsertByte-CopyPart- DE: "\377\377\377\377\377\377\377\004"-"\000\000"-
+
+thread '<unnamed>' (10326) panicked at /app/src/index/adjacency.rs:162:71:
+called `Result::unwrap()` on an `Err` value: "CSR first offset mismatch: expected 0, got 18446744073709551409"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+==10326== ERROR: libFuzzer: deadly signal
+    #0 0x55d29da6df21  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0xfbf21) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #1 0x55d29daff14d  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x18d14d) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #2 0x55d29dae3b39  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x171b39) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #3 0x7ff94d37632f  (/lib/x86_64-linux-gnu/libc.so.6+0x4532f) (BuildId: 8e9fd827446c24067541ac5390e6f527fb5947bb)
+    #4 0x7ff94d3cfb2b  (/lib/x86_64-linux-gnu/libc.so.6+0x9eb2b) (BuildId: 8e9fd827446c24067541ac5390e6f527fb5947bb)
+    #5 0x7ff94d37627d  (/lib/x86_64-linux-gnu/libc.so.6+0x4527d) (BuildId: 8e9fd827446c24067541ac5390e6f527fb5947bb)
+    #6 0x7ff94d3598fe  (/lib/x86_64-linux-gnu/libc.so.6+0x288fe) (BuildId: 8e9fd827446c24067541ac5390e6f527fb5947bb)
+    #7 0x55d29db25759  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x1b3759) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #8 0x55d29db24588  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x1b2588) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #9 0x55d29daa5df4  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x133df4) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #10 0x55d29db24811  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x1b2811) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #11 0x55d29db14e47  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x1a2e47) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #12 0x55d29db0ce08  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x19ae08) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #13 0x55d29db155cc  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x1a35cc) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #14 0x55d29db373fb  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x1c53fb) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #15 0x55d29db371d1  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x1c51d1) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #16 0x55d29daa0b1a  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x12eb1a) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #17 0x55d29da98689  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x126689) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #18 0x55d29da9b682  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x129682) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #19 0x55d29daa5974  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x133974) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #20 0x55d29daa65d8  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x1345d8) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #21 0x55d29daa505d  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x13305d) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #22 0x55d29dae4098  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x172098) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #23 0x55d29daeab59  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x178b59) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #24 0x55d29daebc6a  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x179c6a) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #25 0x55d29daecbd7  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x17abd7) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #26 0x55d29dab9197  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x147197) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #27 0x55d29daa6606  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x134606) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+    #28 0x7ff94d35b1c9  (/lib/x86_64-linux-gnu/libc.so.6+0x2a1c9) (BuildId: 8e9fd827446c24067541ac5390e6f527fb5947bb)
+    #29 0x7ff94d35b28a  (/lib/x86_64-linux-gnu/libc.so.6+0x2a28a) (BuildId: 8e9fd827446c24067541ac5390e6f527fb5947bb)
+    #30 0x55d29d9d9654  (/app/fuzz/target/x86_64-unknown-linux-gnu/release/fuzz_adjacency+0x67654) (BuildId: d5d4aaada6106046c3530bec030990bad1a4d053)
+
+NOTE: libFuzzer has rudimentary signal handlers.
+      Combine libFuzzer with AddressSanitizer or similar for better crash reports.
+SUMMARY: libFuzzer: deadly signal
+MS: 3 InsertRepeatedBytes-InsertByte-PersAutoDict- DE: "\377\377\377\377\377\377\377\004"-; base unit: adc83b19e793491b1c6ea0fd8b46cd9f32e592fc
+0xa,0x31,0x31,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x4,0x31,0x31,0x28,
+\01211\377\377\377\377\377\377\377\00411(
+artifact_prefix='/app/fuzz/artifacts/fuzz_adjacency/'; Test unit written to /app/fuzz/artifacts/fuzz_adjacency/crash-1b24f375f2e1ae0d101ebd11e2d882f7e5faf883
+Base64: CjEx/////////wQxMSg=
+
+────────────────────────────────────────────────────────────────────────────────
+
+Failing input:
+
+	fuzz/artifacts/fuzz_adjacency/crash-1b24f375f2e1ae0d101ebd11e2d882f7e5faf883
+
+Output of `std::fmt::Debug`:
+
+	(
+	    [],
+	    [
+	        18446744073709551409,
+	    ],
+	    [
+	        10289,
+	    ],
+	)
+
+Reproduce with:
+
+	cargo fuzz run fuzz_adjacency fuzz/artifacts/fuzz_adjacency/crash-1b24f375f2e1ae0d101ebd11e2d882f7e5faf883
+
+Minimize test case with:
+
+	cargo fuzz tmin fuzz_adjacency fuzz/artifacts/fuzz_adjacency/crash-1b24f375f2e1ae0d101ebd11e2d882f7e5faf883
+
+────────────────────────────────────────────────────────────────────────────────
+
+Error: Fuzz target exited with exit status: 77
