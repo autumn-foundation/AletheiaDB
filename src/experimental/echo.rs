@@ -76,7 +76,8 @@ impl Default for ActivityDensityResonator {
 }
 
 impl ActivityDensityResonator {
-    fn resonate(&self, history: &EntityHistory) -> TemporalFingerprint {
+    /// Generate a fingerprint from the given history.
+    pub fn resonate(&self, history: &EntityHistory) -> TemporalFingerprint {
         let mut bins = vec![0.0; self.num_bins];
         let bin_size_us = self.window_size_us / self.num_bins as i64;
 
