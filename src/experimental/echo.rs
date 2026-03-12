@@ -228,6 +228,23 @@ impl<'a> EchoChamber<'a> {
     }
 }
 
+
+#[cfg(test)]
+mod base_tests {
+    use super::*;
+    use crate::core::history::EntityHistory;
+
+    #[test]
+    fn test_activity_density_resonator_standalone() {
+        let resonator = ActivityDensityResonator::default();
+        let history = EntityHistory {
+            versions: vec![],
+        };
+        let fp = resonator.resonate(&history);
+        assert_eq!(fp.bins.len(), 60);
+    }
+}
+
 #[cfg(all(test, feature = "nova"))]
 mod tests {
     use super::*;
@@ -260,16 +277,7 @@ mod tests {
     }
 
 
-    #[test]
-    #[cfg(feature = "nova")]
-    fn test_activity_density_resonator_standalone() {
-        let resonator = ActivityDensityResonator::default();
-        let history = EntityHistory {
-            versions: vec![],
-        };
-        let fp = resonator.resonate(&history);
-        assert_eq!(fp.bins.len(), 60);
-    }
+
     #[test]
     fn test_echo_chamber_integration() {
         let db = AletheiaDB::new().unwrap();
