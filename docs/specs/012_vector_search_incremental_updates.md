@@ -33,7 +33,7 @@ Currently, AletheiaDB supports HNSW vector indexing. However, large-scale vector
 
 - **Success:**
     - Indexing overhead remains < 1ms per vector during continuous ingest.
-    - Vector search latency (< 10ms for 1M vectors) does not degrade by more than 5% after 100,000 incremental updates.
+    - Vector search latency (< 10ms for 1M vectors) does not degrade by more than 5% after 100,000 incremental updates (mixed operations: 40% inserts, 40% updates, 20% deletes).
     - Storage overhead for the incremental structures is < 20% of the total index size.
 
 ## 4. 📝 Gap Analysis (Current vs. Spec)
@@ -65,10 +65,16 @@ Currently, AletheiaDB supports HNSW vector indexing. However, large-scale vector
 5.  **Persistence**:
     - The incremental changes must be persisted to disk efficiently to ensure fast recovery times (cold starts).
 
+6.  **Transactional Integrity**:
+    - All incremental operations (inserts, updates, deletes) must be atomic and honor the parent transaction's outcome. If a transaction is rolled back, all corresponding vector index changes must also be rolled back, leaving the index in a consistent state.
+
+7.  **Batch Operations**:
+    - The system must support efficient batch operations for inserts, updates, and deletes to handle scenarios like re-indexing a large number of nodes after an embedding model update.
+
 ### Non-Functional Requirements
 - **Concurrency**: Incremental updates must support high concurrency (e.g., lock-free or highly granular locking) to avoid blocking reads during writes.
 
-## 6. 🚫 Out of Scope (Phase 1)
+## 6. 🚫 Out of Scope (Phase 5)
 
 - **Distributed Incremental Indexing**: Synchronizing incremental vector index updates across multiple shards or replicas (deferred to replication/sharding phases).
 - **Auto-tuning Hyperparameters**: Automatically adjusting HNSW parameters (ef_construction, M) on the fly based on workload (users still manually configure these).
