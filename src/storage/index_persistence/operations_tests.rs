@@ -261,6 +261,9 @@ fn test_load_indexes_startup_corrupted_csr_fallback() {
     data.outgoing_node_ids = vec![1];
     data.outgoing_offsets = vec![0]; // invalid length, should be 2
     data.outgoing_neighbors = vec![100];
+    data.incoming_node_ids = vec![];
+    data.incoming_offsets = vec![0];
+    data.incoming_neighbors = vec![];
 
     crate::storage::index_persistence::graph::save_graph_index(&data, &graph_path).unwrap();
 

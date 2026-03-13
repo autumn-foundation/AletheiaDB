@@ -1789,3 +1789,30 @@ fn test_current_indexes_import_csr_error() {
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("CSR offsets length mismatch"));
 }
+
+#[test]
+fn test_current_indexes_import_csr_error_incoming() {
+    let indexes = aletheiadb::CurrentIndexes::new();
+
+    // Valid outgoing
+    let out_nodes = vec![];
+    let out_offsets = vec![0];
+    let out_edges = vec![];
+
+    // Invalid incoming
+    let in_nodes = vec![2];
+    let in_offsets = vec![0]; // Invalid length
+    let in_edges = vec![100];
+
+    let result = indexes.import_csr(
+        out_nodes,
+        out_offsets,
+        out_edges,
+        in_nodes,
+        in_offsets,
+        in_edges,
+    );
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("CSR offsets length mismatch"));
+}
