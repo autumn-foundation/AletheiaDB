@@ -7,3 +7,8 @@
 **Bloat:** `ColdStorage` trait (Single-implementation abstraction used only by `RedbColdStorage`).
 **Cut:** Deleted the `ColdStorage` trait and `cold_storage.rs` module. Refactored all consumers to use the concrete `RedbColdStorage` struct directly.
 **Saved:** ~300 lines of boilerplate (trait definitions, mock implementations, duplicate imports) + removed dynamic dispatch overhead.
+
+## [Reduction]
+**Bloat:** `GraphView` trait (Single-implementation abstraction over `AletheiaDB`).
+**Cut:** Deleted the `GraphView` trait entirely and replaced it with direct usage of the concrete `AletheiaDB` struct in `SemanticPathfinder` and hybrid query functions.
+**Saved:** ~130 lines of boilerplate trait definitions, implementation, and explicit forwarding methods + reduced generic soup in query layer signatures.
