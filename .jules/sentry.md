@@ -22,3 +22,11 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+
+## Optimization Rule Equivalent Mutations
+**Learning:** Manual implementation of `predicates_equal` in `operation_reordering.rs` resulted in many equivalent mutations because matching enums and fields by hand misses out on built-in Rust traits and makes it prone to typos or false equivalence from `cargo-mutants`. Replacing the complex match block with Rust's derived `PartialEq` (`a == b`) killed all remaining mutants instantly and made the code much safer.
+**Action:** Always prefer deriving and using `PartialEq` for deep structural checks instead of implementing manual matching.
+
+## Trait Implementation Coverage Gaps
+**Learning:** Trivial trait functions such as an optimizer rule's `name()` or its base behavior when failing to apply to `LogicalOp::Empty` often lack tests. Although simple, these are critical parts of the trait contract (`OptimizationRule`). `cargo-mutants` exposes these missing tests, highlighting the risk of a bug where an optimizer could unexpectedly misbehave or panic.
+**Action:** Always explicitly test trait base implementations (like `OptimizationRule` properties) and failure scenarios (like un-optimizable root nodes) for every new rule.
