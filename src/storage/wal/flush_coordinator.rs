@@ -260,7 +260,8 @@ impl FlushCoordinator {
                     .extension()
                     .filter(|ext| *ext == "log")
                     .and_then(|_| path.file_stem())
-                    .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse::<u64>().ok())
                 {
                     max_segment_id = max_segment_id.max(id);
                 }
@@ -471,7 +472,8 @@ impl FlushCoordinator {
                 let is_old_segment = path.extension().is_some_and(|ext| ext == "log")
                     && path
                         .file_stem()
-                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<u64>().ok())
                         .is_some_and(|id| id < retain_from);
 
                 // Check for .log.meta files
@@ -526,7 +528,8 @@ impl FlushCoordinator {
                 if path.extension().is_some_and(|ext| ext == "log")
                     && let Some(segment_id) = path
                         .file_stem()
-                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<u64>().ok())
                     && segment_id < current_id
                 {
                     segments_to_check.push((segment_id, path));
@@ -572,7 +575,8 @@ impl FlushCoordinator {
                 if path.extension().is_some_and(|ext| ext == "log")
                     && let Some(segment_id) = path
                         .file_stem()
-                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<u64>().ok())
                     && let Some(metadata) = self.read_segment_metadata(segment_id)
                 {
                     segments.push((segment_id, metadata));
@@ -1202,7 +1206,8 @@ mod tests {
                 let path = e.path();
                 if path.extension().is_some_and(|ext| ext == "log") {
                     path.file_stem()
-                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<u64>().ok())
                 } else {
                     None
                 }
@@ -1337,7 +1342,8 @@ mod tests {
                 let path = e.path();
                 if path.extension().is_some_and(|ext| ext == "log") {
                     path.file_stem()
-                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<u64>().ok())
                 } else {
                     None
                 }

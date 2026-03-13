@@ -37,3 +37,7 @@
 **Avoid `.map(|r| r.key().clone()).min()`**
 **Learning:** `.map(...).min()` allocates a new string (via clone) for *every* element in a `DashMap` (or any iterator of refs) before it computes the minimum. This means `O(N)` heap allocations instead of O(1).
 **Action:** Use `.min_by(|a, b| a.key().cmp(b.key()))` first to find the ref to the minimal element, and *then* call `.map(|r| r.key().clone())` to allocate exactly once!
+
+**[to_string_lossy Allocations in OsStr Parsing]**
+**Learning:** `OsStr::to_string_lossy()` often looks innocent but can allocate intermediate `Cow::Owned(String)` dynamically, especially if the string contains invalid UTF-8 bytes (even if ignored later) or simply during conversion in strict contexts. This caused noticeable regression during `read_dir` hot loops for log filename parsing when looking for valid `u64` stems.
+**Action:** When parsing basic strings/identifiers from paths that must only contain ASCII logic (e.g. `u64` parsing), use `.to_str()` directly. `to_str()` yields an `Option<&str>` without string allocations and neatly filters out invalid UTF-8 gracefully in standard contexts before calling `.parse()`.
