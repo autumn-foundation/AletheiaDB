@@ -114,6 +114,24 @@ classDiagram
 - **Current**: All non-temporal queries, latest state access
 - **Historical**: Time-travel, audit trails, temporal analysis, LLM reasoning
 
+
+### Temporal Index and Core Decoupling
+
+The `TimelineVersionMetadata` is internal to the temporal index, enforcing clear boundaries so that the domain primitive `VersionMetadata` in `Core` is distinct.
+
+```mermaid
+classDiagram
+    namespace Core {
+        class VersionMetadata
+    }
+    namespace TemporalIndex {
+        class TimelineVersionMetadata
+        class TimelineVersionMetadataIndex
+    }
+
+    TimelineVersionMetadata ..> VersionMetadata : References internally
+```
+
 ### Semantic Clustering ("The Cartographer")
 
 ```mermaid
