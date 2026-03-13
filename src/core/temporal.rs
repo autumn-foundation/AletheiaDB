@@ -1014,6 +1014,157 @@ mod tests {
         assert_eq!(&bytes[20..24], &[0, 0, 0, 0], "end.logical should be 0");
     }
 
+    #[test]
+    fn test_sentinel_time_range_is_closed_boundary() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let current_range = TimeRange::from(HybridTimestamp::new(1000, 0).unwrap());
+        assert!(
+            !current_range.is_closed(),
+            "Current range should not be closed"
+        );
+
+        // At exactly MAX_VALID_TIMESTAMP
+        let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+        let max_range = TimeRange::new(HybridTimestamp::new(1000, 0).unwrap(), max_valid).unwrap();
+        assert!(
+            max_range.is_closed(),
+            "Range ending at MAX_VALID_TIMESTAMP should be closed"
+        );
+    }
+
+    #[test]
+    fn test_sentinel_time_range_contains_or_after_boundary() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let start = HybridTimestamp::new(1000, 0).unwrap();
+        let end = HybridTimestamp::new(2000, 0).unwrap();
+        let range = TimeRange::new(start, end).unwrap();
+
+        // Exact boundary checks
+        assert!(!range.contains_or_after(HybridTimestamp::new(999, 0).unwrap()));
+        assert!(range.contains_or_after(HybridTimestamp::new(1000, 0).unwrap()));
+        assert!(range.contains_or_after(HybridTimestamp::new(1001, 0).unwrap()));
+    }
+
+    #[test]
+    fn test_sentinel_time_range_overlaps_touching() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let r1 = TimeRange::new(
+            HybridTimestamp::new(1000, 0).unwrap(),
+            HybridTimestamp::new(2000, 0).unwrap(),
+        )
+        .unwrap();
+        let r2 = TimeRange::new(
+            HybridTimestamp::new(2000, 0).unwrap(),
+            HybridTimestamp::new(3000, 0).unwrap(),
+        )
+        .unwrap();
+
+        // Touching at boundary is not overlapping
+        assert!(!r1.overlaps(&r2));
+        assert!(!r2.overlaps(&r1));
+
+        let r3 = TimeRange::new(
+            HybridTimestamp::new(1999, 0).unwrap(),
+            HybridTimestamp::new(3000, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(r1.overlaps(&r3));
+        assert!(r3.overlaps(&r1));
+    }
+
+    #[test]
+    fn test_sentinel_time_range_contains_range_exact() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let outer = TimeRange::new(
+            HybridTimestamp::new(1000, 0).unwrap(),
+            HybridTimestamp::new(2000, 0).unwrap(),
+        )
+        .unwrap();
+        let inner = TimeRange::new(
+            HybridTimestamp::new(1000, 0).unwrap(),
+            HybridTimestamp::new(2000, 0).unwrap(),
+        )
+        .unwrap();
+
+        // A range contains itself exactly
+        assert!(outer.contains_range(&inner));
+
+        // Slightly outside
+        let early_start = TimeRange::new(
+            HybridTimestamp::new(999, 0).unwrap(),
+            HybridTimestamp::new(2000, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(!outer.contains_range(&early_start));
+
+        let late_end = TimeRange::new(
+            HybridTimestamp::new(1000, 0).unwrap(),
+            HybridTimestamp::new(2001, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(!outer.contains_range(&late_end));
+    }
+
+    #[test]
+    fn test_sentinel_bitemporal_is_current_logic() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_start = HybridTimestamp::new(1000, 0).unwrap();
+        let tx_start = HybridTimestamp::new(2000, 0).unwrap();
+
+        let interval = BiTemporalInterval::now(valid_start, tx_start);
+        assert!(interval.is_current());
+
+        // Close valid time only
+        let valid_closed = interval
+            .close_valid_time(HybridTimestamp::new(1500, 0).unwrap())
+            .unwrap();
+        assert!(!valid_closed.is_current());
+
+        // Close tx time only
+        let tx_closed = interval
+            .close_transaction_time(HybridTimestamp::new(2500, 0).unwrap())
+            .unwrap();
+        assert!(!tx_closed.is_current());
+
+        // Close both
+        let both_closed = interval
+            .close_both(
+                HybridTimestamp::new(1500, 0).unwrap(),
+                HybridTimestamp::new(2500, 0).unwrap(),
+            )
+            .unwrap();
+        assert!(!both_closed.is_current());
+    }
+
+    #[test]
+    fn test_sentinel_bitemporal_deserialize_exact() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid = TimeRange::new(
+            HybridTimestamp::new(1000, 0).unwrap(),
+            HybridTimestamp::new(2000, 0).unwrap(),
+        )
+        .unwrap();
+        let tx = TimeRange::new(
+            HybridTimestamp::new(3000, 0).unwrap(),
+            HybridTimestamp::new(4000, 0).unwrap(),
+        )
+        .unwrap();
+        let interval = BiTemporalInterval::new(valid, tx);
+
+        let serialized = interval.serialize();
+        assert_eq!(serialized.len(), 48);
+
+        let (deserialized, bytes_read) = BiTemporalInterval::deserialize(&serialized).unwrap();
+        assert_eq!(deserialized, interval);
+        assert_eq!(bytes_read, 48);
+    }
+
     // =========================================================================
     // Phase 2: HybridTimestamp Integration Tests
     // =========================================================================
