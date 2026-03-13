@@ -80,3 +80,9 @@
 **Summary:** Numerous mutants survived in `predicates_equal`, replacing boolean operators `&&` with `||` and equality operators `==` with `!=`.
 **Diagnosis:** WEAK_TEST - The existing tests only checked equality matching entirely (where both terms were exactly the same) or entirely differently (different variants). It lacked "partial mismatch" checks (same variant, different internal value).
 **Kill Shot:** Added `test_predicates_equal_exhaustive_mismatches` to explicitly check every `Predicate` variant with slightly mismatched keys or values to force the strict `&&` evaluations.
+
+**[Weak Test Coverage in ID Generation Boundaries]**
+**Module:** `src/core/id.rs`
+**Summary:** Several mutants in boundary checks of ID generators survived: replacing `>` with `==` or `<` in `IdGenerator::next` error condition (`id > MAX_VALID_ID`), replacing `>` with `>=` or `<` in `IdGenerator::ensure_at_least` (`min_value > current`), and replacing `+` with `-` or `*` in `TxIdGenerator::next` (`current + 1`).
+**Diagnosis:** WEAK_ASSERTION - Tests did not exercise exact boundary values (e.g., initializing exactly at `MAX_VALID_ID`, ensuring `current` value matches exactly) or explicitly verifying exact `+ 1` increments.
+**Kill Shot:** Added tests `test_id_generator_next_exact_boundaries`, `test_id_generator_ensure_at_least_exact_boundaries`, and `test_tx_id_generator_next_exact_increment` to precisely test boundary conditions.

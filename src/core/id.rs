@@ -468,6 +468,40 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_id_generator_next_exact_boundaries() {
+        // Initialize at MAX_VALID_ID
+        let generator = IdGenerator::with_start(MAX_VALID_ID);
+        // First next() will fetch MAX_VALID_ID and increment next_id to MAX_VALID_ID + 1.
+        // It returns Ok(MAX_VALID_ID).
+        assert_eq!(generator.next(), Ok(MAX_VALID_ID));
+
+        // Now next_id is MAX_VALID_ID + 1
+        // The next() call will fetch MAX_VALID_ID + 1 and see that it's > MAX_VALID_ID
+        assert!(generator.next().is_err());
+
+        // Now next_id is MAX_VALID_ID + 2
+        assert!(generator.next().is_err());
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least_exact_boundaries() {
+        let generator = IdGenerator::with_start(100);
+
+        // If current is 100 and we ensure 100, the atomic variable should remain EXACTLY 100.
+        // It should NOT be incremented or decremented.
+        generator.ensure_at_least(100);
+        assert_eq!(generator.current(), 100);
+
+        // If we ensure a value slightly lower, it must not change.
+        generator.ensure_at_least(99);
+        assert_eq!(generator.current(), 100);
+
+        // If we ensure a value slightly higher, it must change exactly to that value.
+        generator.ensure_at_least(101);
+        assert_eq!(generator.current(), 101);
+    }
+
+    #[test]
     fn test_id_generator_ensure_at_least_concurrent() {
         use std::sync::Arc;
         use std::thread;
@@ -521,6 +555,21 @@ mod sentry_tests {
 
         // Verify strict ordering
         assert!(id2 > id1);
+    }
+
+    #[test]
+    fn test_tx_id_generator_next_exact_increment() {
+        let tx_gen = TxIdGenerator::new();
+
+        // Ensure next() increments by exactly 1
+        let mut prev = tx_gen.current().as_u64();
+        for _ in 0..10 {
+            let curr_id = tx_gen.next();
+            let curr = curr_id.as_u64();
+
+            assert_eq!(curr, prev + 1, "TxIdGenerator must increment by exactly 1");
+            prev = curr;
+        }
     }
 
     #[test]
