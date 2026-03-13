@@ -679,149 +679,115 @@ impl TraversalIterator {
         }
     }
 
-    /// Check if an edge existed at the specified temporal context using a pre-acquired lock guard.
-    /// Returns true if no temporal context is set (current state query).
-    #[inline]
-    fn edge_visible_at_time(
-        &self,
-        edge_id: crate::core::EdgeId,
-        historical_guard: &Option<parking_lot::RwLockReadGuard<'_, HistoricalStorage>>,
-    ) -> bool {
-        match self.temporal_context {
-            Some((valid_time, tx_time)) => {
-                // Use the pre-acquired guard to avoid per-edge lock acquisition
-                historical_guard
-                    .as_ref()
-                    .expect("historical_guard must be Some when temporal_context is Some")
-                    .find_edge_version_at_time(edge_id, valid_time, tx_time)
-                    .is_some()
-            }
-            None => true, // No temporal context, use current state
-        }
-    }
-
-    fn get_neighbors(&self, node_id: NodeId) -> Vec<(NodeId, crate::core::EdgeId)> {
+    fn process_neighbors<F>(
+        direction: &Direction,
+        label: Option<&String>,
+        current: &Arc<CurrentStorage>,
+        temporal_context: Option<(Timestamp, Timestamp)>,
+        historical: &Arc<RwLock<HistoricalStorage>>,
+        node_id: NodeId,
+        mut f: F,
+    ) where
+        F: FnMut(NodeId, crate::core::EdgeId),
+    {
         // Acquire historical lock ONCE for all edge checks in this call.
-        // This avoids the performance regression of acquiring per-edge locks.
-        let historical_guard = self.temporal_context.map(|_| self.historical.read());
+        let historical_guard = temporal_context.map(|_| historical.read());
 
-        match self.direction {
+        let edge_visible_at_time =
+            |edge_id: crate::core::EdgeId,
+             guard: &Option<parking_lot::RwLockReadGuard<'_, HistoricalStorage>>|
+             -> bool {
+                match temporal_context {
+                    Some((valid_time, tx_time)) => guard
+                        .as_ref()
+                        .expect("historical_guard must be Some when temporal_context is Some")
+                        .find_edge_version_at_time(edge_id, valid_time, tx_time)
+                        .is_some(),
+                    None => true,
+                }
+            };
+
+        match direction {
             Direction::Outgoing => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
-                if let Some(ref label) = self.label {
-                    self.current
-                        .get_outgoing_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
+                if let Some(lbl) = label {
+                    for edge_id in current.get_outgoing_edges_with_label_iter(node_id, lbl) {
+                        if !edge_visible_at_time(edge_id, &historical_guard) {
+                            continue;
+                        }
+                        if let Ok(target) = current.get_edge_target(edge_id) {
+                            f(target, edge_id);
+                        }
+                    }
                 } else {
-                    self.current
-                        .get_outgoing_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
+                    for edge_id in current.get_outgoing_edges_iter(node_id) {
+                        if !edge_visible_at_time(edge_id, &historical_guard) {
+                            continue;
+                        }
+                        if let Ok(target) = current.get_edge_target(edge_id) {
+                            f(target, edge_id);
+                        }
+                    }
                 }
             }
             Direction::Incoming => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
-                if let Some(ref label) = self.label {
-                    self.current
-                        .get_incoming_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
+                if let Some(lbl) = label {
+                    for edge_id in current.get_incoming_edges_with_label_iter(node_id, lbl) {
+                        if !edge_visible_at_time(edge_id, &historical_guard) {
+                            continue;
+                        }
+                        if let Ok(source) = current.get_edge_source(edge_id) {
+                            f(source, edge_id);
+                        }
+                    }
                 } else {
-                    self.current
-                        .get_incoming_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
+                    for edge_id in current.get_incoming_edges_iter(node_id) {
+                        if !edge_visible_at_time(edge_id, &historical_guard) {
+                            continue;
+                        }
+                        if let Ok(source) = current.get_edge_source(edge_id) {
+                            f(source, edge_id);
+                        }
+                    }
                 }
             }
             Direction::Both => {
-                let mut neighbors = Vec::new();
-
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
-                // Helper closure to process edges and add to neighbors
-                // Zero-copy: only get target NodeId, not full Edge (Issue #190)
                 let mut process_outgoing = |edge_id| {
-                    if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                    if !edge_visible_at_time(edge_id, &historical_guard) {
                         return;
                     }
-                    if let Ok(target) = self.current.get_edge_target(edge_id) {
-                        neighbors.push((target, edge_id));
+                    if let Ok(target) = current.get_edge_target(edge_id) {
+                        f(target, edge_id);
                     }
                 };
 
-                if let Some(ref label) = self.label {
-                    for edge_id in self
-                        .current
-                        .get_outgoing_edges_with_label_iter(node_id, label)
-                    {
+                if let Some(lbl) = label {
+                    for edge_id in current.get_outgoing_edges_with_label_iter(node_id, lbl) {
                         process_outgoing(edge_id);
                     }
                 } else {
-                    for edge_id in self.current.get_outgoing_edges_iter(node_id) {
+                    for edge_id in current.get_outgoing_edges_iter(node_id) {
                         process_outgoing(edge_id);
                     }
                 }
 
-                // Zero-copy: only get source NodeId, not full Edge (Issue #190)
                 let mut process_incoming = |edge_id| {
-                    if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                    if !edge_visible_at_time(edge_id, &historical_guard) {
                         return;
                     }
-                    if let Ok(source) = self.current.get_edge_source(edge_id) {
-                        neighbors.push((source, edge_id));
+                    if let Ok(source) = current.get_edge_source(edge_id) {
+                        f(source, edge_id);
                     }
                 };
 
-                if let Some(ref label) = self.label {
-                    for edge_id in self
-                        .current
-                        .get_incoming_edges_with_label_iter(node_id, label)
-                    {
+                if let Some(lbl) = label {
+                    for edge_id in current.get_incoming_edges_with_label_iter(node_id, lbl) {
                         process_incoming(edge_id);
                     }
                 } else {
-                    for edge_id in self.current.get_incoming_edges_iter(node_id) {
+                    for edge_id in current.get_incoming_edges_iter(node_id) {
                         process_incoming(edge_id);
                     }
                 }
-
-                neighbors
             }
         }
     }
@@ -843,16 +809,23 @@ impl ResultIterator for TraversalIterator {
                 }
 
                 // Expand neighbors
-                let neighbors = self.get_neighbors(node_id);
-                for (target, edge_id) in neighbors {
-                    if self.visited.insert(target) {
-                        let mut new_path = path.clone();
-                        new_path.push(EntityId::Edge(edge_id));
-                        new_path.push(EntityId::Node(target));
-                        self.frontier
-                            .push_back((target, new_path, current_depth + 1));
-                    }
-                }
+                Self::process_neighbors(
+                    &self.direction,
+                    self.label.as_ref(),
+                    &self.current,
+                    self.temporal_context,
+                    &self.historical,
+                    node_id,
+                    |target, edge_id| {
+                        if self.visited.insert(target) {
+                            let mut new_path = path.clone();
+                            new_path.push(EntityId::Edge(edge_id));
+                            new_path.push(EntityId::Node(target));
+                            self.frontier
+                                .push_back((target, new_path, current_depth + 1));
+                        }
+                    },
+                );
                 continue;
             }
 
