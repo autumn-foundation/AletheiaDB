@@ -22,3 +22,7 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+
+## Missing Exact Score Assertions in Fusion Tests
+**Learning:** Testing ranking algorithms (like `hybrid_fusion` or `reciprocal_rank_fusion`) by solely asserting the sorted order of returned IDs creates significant coverage gaps. Mutants that drastically alter normalization arithmetic (e.g. returning a hardcoded score, multiplying instead of adding) can easily survive if the final sorting order happens to remain the same by chance or due to the inputs being spaced far apart.
+**Action:** Always write assertions for the exact computed score values alongside asserting the sorted identity order. Use float tolerance checks (e.g. `(actual - expected).abs() < 1e-6`) to verify numerical correctness and kill underlying arithmetic mutants.

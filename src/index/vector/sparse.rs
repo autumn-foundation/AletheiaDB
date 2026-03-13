@@ -1535,6 +1535,13 @@ mod tests {
         // Node 3: 0.0 + 0.5*0.5 = 0.25
         // Node 4: 0.5*0.0 + 0.5*0.0 = 0.0
         assert_eq!(fused[0].0, NodeId::new(2).unwrap());
+        assert!((fused[0].1 - 0.875).abs() < 1e-6);
+        assert_eq!(fused[1].0, NodeId::new(1).unwrap());
+        assert!((fused[1].1 - 0.5).abs() < 1e-6);
+        assert_eq!(fused[2].0, NodeId::new(3).unwrap());
+        assert!((fused[2].1 - 0.25).abs() < 1e-6);
+        assert_eq!(fused[3].0, NodeId::new(4).unwrap());
+        assert!((fused[3].1 - 0.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1564,6 +1571,9 @@ mod tests {
 
         assert_eq!(fused.len(), 2);
         assert_eq!(fused[0].0, NodeId::new(1).unwrap());
+        assert!((fused[0].1 - 0.5).abs() < 1e-6);
+        assert_eq!(fused[1].0, NodeId::new(2).unwrap());
+        assert!((fused[1].1 - 0.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1602,6 +1612,10 @@ mod tests {
         // Node 2 is rank 2 in dense (1/(60+2)) and rank 1 in sparse (1/(60+1))
         // Node 1 is rank 1 in dense (1/(60+1)) and rank 3 in sparse (1/(60+3))
         // They should both have high RRF scores
+        assert_eq!(fused[0].0, NodeId::new(2).unwrap());
+        assert!((fused[0].1 - (1.0 / 62.0 + 1.0 / 61.0)).abs() < 1e-6);
+        assert_eq!(fused[1].0, NodeId::new(1).unwrap());
+        assert!((fused[1].1 - (1.0 / 61.0 + 1.0 / 63.0)).abs() < 1e-6);
     }
 
     // ========================================================================
