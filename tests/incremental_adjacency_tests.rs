@@ -1113,7 +1113,7 @@ mod phase6_current_indexes_integration {
     // Step 6.1: Test insert_edge updates adjacency incrementally (no rebuild)
     #[test]
     fn test_incremental_edge_insertion() {
-        let indexes = CurrentIndexes::new();
+        let indexes = aletheiadb::CurrentIndexes::new();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert first edge
@@ -1155,7 +1155,7 @@ mod phase6_current_indexes_integration {
     // Step 6.3 RED: Test get_outgoing returns merged frozen + delta
     #[test]
     fn test_get_outgoing_merges_frozen_and_delta() {
-        let indexes = CurrentIndexes::new();
+        let indexes = aletheiadb::CurrentIndexes::new();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Add 100 edges to build up frozen
@@ -1280,7 +1280,7 @@ mod phase6_current_indexes_integration {
     // Step 6.9 RED: Test remove_edge with tombstones
     #[test]
     fn test_remove_edge_with_tombstones() {
-        let indexes = CurrentIndexes::new();
+        let indexes = aletheiadb::CurrentIndexes::new();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert edges
@@ -1325,7 +1325,7 @@ mod phase7_persistence_integration {
     // Step 7.1: Test delta reconstruction after import
     #[test]
     fn test_delta_reconstruction_after_import() {
-        let indexes = CurrentIndexes::new();
+        let indexes = aletheiadb::CurrentIndexes::new();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert 10 edges
@@ -1411,7 +1411,7 @@ mod phase7_persistence_integration {
     // Step 7.3: Test empty delta reconstruction
     #[test]
     fn test_empty_delta_reconstruction() {
-        let indexes = CurrentIndexes::new();
+        let indexes = aletheiadb::CurrentIndexes::new();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert 10 edges and compact (all go to frozen)
@@ -1471,7 +1471,7 @@ mod phase7_persistence_integration {
     // Step 7.5: Test delta reconstruction with multiple nodes
     #[test]
     fn test_delta_reconstruction_multiple_nodes() {
-        let indexes = CurrentIndexes::new();
+        let indexes = aletheiadb::CurrentIndexes::new();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert edges for nodes 0, 1, 2
@@ -1560,7 +1560,7 @@ mod phase7_persistence_integration {
     // Step 7.7: Test no delta when all edges in frozen
     #[test]
     fn test_no_delta_when_all_edges_frozen() {
-        let indexes = CurrentIndexes::new();
+        let indexes = aletheiadb::CurrentIndexes::new();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert and compact (all edges frozen, no delta)
@@ -1764,3 +1764,28 @@ mod phase9_frozen_view {
 // ============================================================================
 
 // Helper functions for test setup will go here
+
+#[test]
+fn test_current_indexes_import_csr_error() {
+    let indexes = aletheiadb::CurrentIndexes::new();
+
+    let out_nodes = vec![1];
+    let out_offsets = vec![0]; // Invalid length
+    let out_edges = vec![100];
+
+    let in_nodes = vec![2];
+    let in_offsets = vec![0, 1];
+    let in_edges = vec![100];
+
+    let result = indexes.import_csr(
+        out_nodes,
+        out_offsets,
+        out_edges,
+        in_nodes,
+        in_offsets,
+        in_edges,
+    );
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("CSR offsets length mismatch"));
+}

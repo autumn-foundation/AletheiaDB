@@ -236,3 +236,44 @@ fn test_temporal_persist_keeps_interner_consistent_with_temporal_string_ids() {
         .expect("persisted string id should index into persisted interner");
     assert_eq!(resolved, &unique_value);
 }
+
+#[test]
+fn test_load_indexes_startup_corrupted_csr_fallback() {
+    use crate::core::id::IdGenerator;
+    use parking_lot::RwLock;
+
+    let dir = tempfile::tempdir().unwrap();
+    let manager =
+        Arc::new(crate::storage::index_persistence::IndexPersistenceManager::new(dir.path()));
+
+    let current = Arc::new(CurrentStorage::new());
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+
+    let node_id_gen = Arc::new(IdGenerator::new());
+    let edge_id_gen = Arc::new(IdGenerator::new());
+    let version_id_gen = Arc::new(IdGenerator::new());
+
+    // Create a mock persistence file with corrupted CSR offsets
+    std::fs::create_dir_all(manager.graph_path()).unwrap();
+    let graph_path = manager.graph_path().join("adjacency.idx");
+
+    let mut data = crate::storage::index_persistence::graph::new_graph_index_data();
+    data.outgoing_node_ids = vec![1];
+    data.outgoing_offsets = vec![0]; // invalid length, should be 2
+    data.outgoing_neighbors = vec![100];
+
+    crate::storage::index_persistence::graph::save_graph_index(&data, &graph_path).unwrap();
+
+    // Load indexes
+    // This should print a warning and fallback to compact_adjacency, not panic
+    crate::storage::index_persistence::operations::load_indexes_startup(
+        &manager,
+        &current,
+        &historical,
+        &node_id_gen,
+        &edge_id_gen,
+        &version_id_gen,
+    );
+
+    // Test passed if we didn't panic
+}
