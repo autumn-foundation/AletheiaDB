@@ -73,3 +73,6 @@ pub use vector::{
     validate_vector_with_bounds,
 };
 pub mod version;
+
+#[cfg(test)]
+mod tests;

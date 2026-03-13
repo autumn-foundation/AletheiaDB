@@ -597,7 +597,7 @@ pub enum QueryError {
 }
 
 /// Format the `IndexNotFound` display message with optional hint.
-fn format_index_not_found(index_type: &str, property_name: &str, hint: &Option<String>) -> String {
+pub fn format_index_not_found(index_type: &str, property_name: &str, hint: &Option<String>) -> String {
     let mut msg = format!(
         "Query requires {} index on '{}' property which is not enabled",
         index_type, property_name
@@ -697,7 +697,7 @@ pub enum TransactionError {
 }
 
 /// Format the `ClockSkew` display message with computed direction.
-fn format_clock_skew(wallclock: i64, previous: i64, drift_us: i64, max_allowed: i64) -> String {
+pub fn format_clock_skew(wallclock: i64, previous: i64, drift_us: i64, max_allowed: i64) -> String {
     let direction = if drift_us < 0 { "backward" } else { "forward" };
     format!(
         "Clock skew too large: system clock jumped {} by {} \u{b5}s (max allowed: {} \u{b5}s). \
