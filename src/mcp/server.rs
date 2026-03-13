@@ -751,6 +751,24 @@ impl AletheiaMcpServer {
         tx_time.unwrap_or_else(|| TRANSACTION_TIME_NOW.to_string())
     }
 
+    /// Filter incoming edges by label. Mirrors `get_outgoing_edges_with_label` for the
+    /// incoming direction, which has no equivalent on the DB API.
+    fn incoming_edges_with_label<'a>(
+        &'a self,
+        node_id: NodeId,
+        edge_label: &'a str,
+    ) -> impl Iterator<Item = EdgeId> + 'a {
+        self.db
+            .get_incoming_edges(node_id)
+            .into_iter()
+            .filter(|eid| {
+                self.db
+                    .get_edge(*eid)
+                    .map(|e| e.has_label_str(edge_label))
+                    .unwrap_or(false)
+            })
+    }
+
     /// Get the expected dimensions for a vector index property.
     /// Returns None if the index doesn't exist.
     fn get_vector_index_dimensions(&self, property_name: &str) -> Option<usize> {
@@ -1321,35 +1339,14 @@ impl AletheiaMcpServer {
 
             if current_depth < depth {
                 let edge_ids: Vec<EdgeId> = match direction {
-                    "incoming" => {
-                        // Filter incoming edges by label manually
-                        self.db
-                            .get_incoming_edges(current_id)
-                            .into_iter()
-                            .filter(|eid| {
-                                self.db
-                                    .get_edge(*eid)
-                                    .map(|e| e.has_label_str(&req.edge_label))
-                                    .unwrap_or(false)
-                            })
-                            .collect()
-                    }
+                    "incoming" => self
+                        .incoming_edges_with_label(current_id, &req.edge_label)
+                        .collect(),
                     "both" => {
                         let mut edges = self
                             .db
                             .get_outgoing_edges_with_label(current_id, &req.edge_label);
-                        let incoming: Vec<EdgeId> = self
-                            .db
-                            .get_incoming_edges(current_id)
-                            .into_iter()
-                            .filter(|eid| {
-                                self.db
-                                    .get_edge(*eid)
-                                    .map(|e| e.has_label_str(&req.edge_label))
-                                    .unwrap_or(false)
-                            })
-                            .collect();
-                        edges.extend(incoming);
+                        edges.extend(self.incoming_edges_with_label(current_id, &req.edge_label));
                         edges
                     }
                     _ => self
