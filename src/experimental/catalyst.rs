@@ -137,7 +137,9 @@ impl<'a> CatalystEngine<'a> {
                             .collect();
 
                         // Preserve existing properties
-                        let props = node.properties.builder()
+                        let props = node
+                            .properties
+                            .builder()
                             .insert_vector(property_name, &new_vec)
                             .build();
 
@@ -150,7 +152,9 @@ impl<'a> CatalystEngine<'a> {
                 } else {
                     // Force update the start node to the exact catalyst vector
                     let node = tx.get_node(start_node)?;
-                    let props = node.properties.builder()
+                    let props = node
+                        .properties
+                        .builder()
                         .insert_vector(property_name, catalyst_vector)
                         .build();
                     tx.update_node(start_node, props)?;
