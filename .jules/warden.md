@@ -33,3 +33,7 @@
 2024-XX-XX - [Warden: CSR Adjacency Index Vulnerability]
 **Threat:** `AdjacencyIndex::import_csr` did not validate that `node_ids` is sorted, and did not validate that `offsets` is monotonically increasing. It also didn't validate that the first offset is `0`. This allows a maliciously constructed CSR payload to cause OOB reads (Denial of Service) when `get_adjacency` is called, due to `start > end` or `end > edges.len()` when slicing the `edges` array.
 **Defense:** Added rigorous validation in `validate_csr_invariants` to ensure `node_ids` is strictly sorted (no duplicates), `offsets` begins with `0`, and is monotonically increasing.
+
+**2026-03-09 - [Denial of Service in Quinn endpoints]**
+**Threat:** A high severity vulnerability (RUSTSEC-2026-0037) was discovered in `quinn-proto` v0.11.13, which could allow a Denial of Service attack against Quinn endpoints.
+**Defense:** Updated `quinn-proto` to `>=0.11.14` via `cargo update -p quinn-proto` to resolve the vulnerability.
