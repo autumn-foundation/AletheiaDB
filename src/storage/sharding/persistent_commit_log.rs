@@ -326,6 +326,14 @@ impl CommitLogEntry {
             u16::from_le_bytes([entry_data[offset], entry_data[offset + 1]]) as usize;
         offset += 2;
 
+        // Prevent DoS through excessive memory allocation by ensuring the entry
+        // has enough data to hold the claimed participant count.
+        if offset + participant_count.saturating_mul(2) > checksum_offset {
+            return Err(CommitLogError::InvalidEntry(
+                "Participant count exceeds available data length".into(),
+            ));
+        }
+
         let mut participants = Vec::with_capacity(participant_count);
         for _ in 0..participant_count {
             if offset + 2 > checksum_offset {
