@@ -544,6 +544,186 @@ impl From<i64> for HybridTimestamp {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_hybrid_timestamp_receive_complex_conditions() {
+        // Mutants replacing `&&` with `||` and various `>=` etc
+
+        // 1. `if new_wallclock > self.wallclock && new_wallclock > msg.wallclock`
+        // We need a case where ONE is true, but NOT BOTH.
+        // Let's say new_wallclock > self.wallclock is True, but new_wallclock > msg.wallclock is False.
+        // Since new_wallclock = max(self, msg, phy), if it's > self, it could be == msg.
+        let local1 = HybridTimestamp::new(1000, 10).unwrap();
+        let msg1 = HybridTimestamp::new(2000, 20).unwrap();
+        let next1 = local1.receive(msg1, 1000).unwrap();
+        // new = 2000. 2000 > 1000 (True) AND 2000 > 2000 (False). So the `&&` is False.
+        // If it were `||`, it would evaluate to True and reset logical to 0.
+        // But since it's False, it should hit `else` block -> increment msg logical
+        assert_eq!(next1.wallclock(), 2000);
+        assert_eq!(next1.logical(), 21); // NOT 0!
+
+        // 2. `else if new_wallclock == self.wallclock && new_wallclock == msg.wallclock`
+        // Again, ONE true, NOT BOTH.
+        // Let new_wallclock == self.wallclock (True) but != msg.wallclock (False)
+        // e.g. local=2000, msg=1000, phy=2000
+        let local2 = HybridTimestamp::new(2000, 10).unwrap();
+        let msg2 = HybridTimestamp::new(1000, 20).unwrap();
+        let next2 = local2.receive(msg2, 1000).unwrap();
+        // new = 2000. 2000 == 2000 (True) AND 2000 == 1000 (False) -> False.
+        // If it were `||`, it would be True, returning max(10, 20)+1 = 21.
+        // Since it's False, it hits `else if new_wallclock == self.wallclock` -> local+1
+        assert_eq!(next2.wallclock(), 2000);
+        assert_eq!(next2.logical(), 11); // NOT 21!
+    }
+
+    #[test]
+    fn test_is_clock_skew_self_heal_enabled_true_false() {
+        // Without override, testing the default.
+        // Let's set the env var to "1" and test. We can only do this reliably if we spawn or if it's not initialized,
+        // but Since OnceLock is global, it might be initialized already in test runs.
+        // Instead, we can't test the actual env var easily in unit tests without pollution.
+        // But we CAN ensure that the function doesn't unconditionally return `true` or `false`
+        // if we use the override.
+        let _default = is_clock_skew_self_heal_enabled();
+
+        let _guard = ClockSkewAutoHealTestGuard::force(true);
+        assert!(is_clock_skew_self_heal_enabled());
+        drop(_guard);
+
+        let _guard = ClockSkewAutoHealTestGuard::force(false);
+        assert!(!is_clock_skew_self_heal_enabled());
+        drop(_guard);
+    }
+
+    #[test]
+    fn test_max_drift_constants_exact_value() {
+        let backwards: i64 = MAX_BACKWARD_DRIFT_US;
+        let forwards: i64 = MAX_FORWARD_JUMP_US;
+        assert_eq!(backwards, 300_000_000);
+        assert_eq!(forwards, 3_600_000_000);
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_exact_boundaries_math() {
+        let current = 1000;
+        let frontier = current + MAX_BACKWARD_DRIFT_US;
+
+        let decision = evaluate_clock_skew(current, frontier, None, true).unwrap();
+        assert_eq!(decision.drift_us, -MAX_BACKWARD_DRIFT_US);
+        assert_eq!(decision.effective_wallclock, current);
+        assert_eq!(decision.healed_direction, None);
+
+        let decision2 = evaluate_clock_skew(current - 1, frontier, None, true).unwrap();
+        assert_eq!(decision2.drift_us, -MAX_BACKWARD_DRIFT_US - 1);
+        assert_eq!(decision2.effective_wallclock, frontier);
+        assert_eq!(
+            decision2.healed_direction,
+            Some(ClockSkewDirection::Backward)
+        );
+
+        let max_forward = 5000;
+        let decision3 =
+            evaluate_clock_skew(frontier + max_forward, frontier, Some(max_forward), true).unwrap();
+        assert_eq!(decision3.drift_us, max_forward);
+        assert_eq!(decision3.effective_wallclock, frontier + max_forward);
+        assert_eq!(decision3.healed_direction, None);
+
+        let decision4 = evaluate_clock_skew(
+            frontier + max_forward + 1,
+            frontier,
+            Some(max_forward),
+            true,
+        )
+        .unwrap();
+        assert_eq!(decision4.drift_us, max_forward + 1);
+        assert_eq!(decision4.effective_wallclock, frontier);
+        assert_eq!(
+            decision4.healed_direction,
+            Some(ClockSkewDirection::Forward)
+        );
+
+        let decision_exact = evaluate_clock_skew(1000, 1000, None, false).unwrap();
+        assert_eq!(decision_exact.drift_us, 0);
+        assert_eq!(decision_exact.effective_wallclock, 1000);
+        assert_eq!(decision_exact.healed_direction, None);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_receive_exact_boundaries() {
+        let ts1 = HybridTimestamp::new(1000, 10).unwrap();
+        let ts2 = HybridTimestamp::new(1000, 20).unwrap();
+
+        let ts_both_match = ts1.receive(ts2, 1000).unwrap();
+        assert_eq!(ts_both_match.wallclock(), 1000);
+        assert_eq!(ts_both_match.logical(), 21);
+
+        let ts3 = HybridTimestamp::new(1001, 10).unwrap();
+        let ts4 = HybridTimestamp::new(1000, 20).unwrap();
+        let ts_local_match = ts3.receive(ts4, 1000).unwrap();
+        assert_eq!(ts_local_match.wallclock(), 1001);
+        assert_eq!(ts_local_match.logical(), 11);
+
+        let ts5 = HybridTimestamp::new(1000, 10).unwrap();
+        let ts6 = HybridTimestamp::new(1001, 20).unwrap();
+        let ts_msg_match = ts5.receive(ts6, 1000).unwrap();
+        assert_eq!(ts_msg_match.wallclock(), 1001);
+        assert_eq!(ts_msg_match.logical(), 21);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_serialize_deserialize_exact() {
+        let ts = HybridTimestamp::new(500, 42).unwrap();
+        let bytes = ts.serialize();
+        assert_eq!(bytes, vec![244, 1, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0]);
+
+        let (ts2, consumed) = HybridTimestamp::deserialize(&bytes).unwrap();
+        assert_eq!(ts2, ts);
+        assert_eq!(consumed, 12);
+
+        let bad_bytes = vec![244, 1, 0, 0, 0, 0, 0, 0, 42, 0, 0];
+        assert!(matches!(
+            HybridTimestamp::deserialize(&bad_bytes),
+            Err(StorageError::CorruptedData(_))
+        ));
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_fmt_exact() {
+        let ts = HybridTimestamp::new(1234, 56).unwrap();
+        let s = format!("{}", ts);
+        assert_eq!(s, "1234.56");
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_from_i64_exact() {
+        let ts: HybridTimestamp = 12345_i64.into();
+        assert_eq!(ts.wallclock(), 12345);
+        assert_eq!(ts.logical(), 0);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_new_unchecked_exact() {
+        let ts = HybridTimestamp::new_unchecked(999, 11);
+        assert_eq!(ts.wallclock(), 999);
+        assert_eq!(ts.logical(), 11);
+    }
+
+    #[test]
+    fn test_send_with_overflow_self_heal_exact_guard() {
+        let ts = HybridTimestamp::new(1000, u32::MAX).unwrap();
+
+        let res_false = send_with_overflow_self_heal(&ts, 1000, false, |e| e);
+        assert!(matches!(
+            res_false,
+            Err(SendWithSelfHealError::InitialSend(
+                TemporalError::LogicalCounterOverflow { .. }
+            ))
+        ));
+
+        let res_true = send_with_overflow_self_heal(&ts, 1000, true, |e| e);
+        assert_eq!(res_true.unwrap().wallclock(), 1001);
+    }
+
     use super::*;
 
     #[test]
@@ -959,7 +1139,7 @@ mod tests {
     #[test]
     fn test_is_clock_skew_self_heal_enabled_override() {
         // Default might be false based on env
-        let default = is_clock_skew_self_heal_enabled();
+        let _default = is_clock_skew_self_heal_enabled();
 
         // Override to true
         let _guard_true = ClockSkewAutoHealTestGuard::force(true);
@@ -972,7 +1152,7 @@ mod tests {
         drop(_guard_false);
 
         // Reverted
-        assert_eq!(is_clock_skew_self_heal_enabled(), default);
+        assert_eq!(is_clock_skew_self_heal_enabled(), _default);
     }
 
     #[test]
