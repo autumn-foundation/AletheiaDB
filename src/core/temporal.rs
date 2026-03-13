@@ -2096,17 +2096,26 @@ mod mutant_kill_tests {
         // After tx start
         assert!(interval.is_recorded_at(HybridTimestamp::new_unchecked(201, 0)));
 
-        let closed = interval.close_both(HybridTimestamp::new_unchecked(150, 0), HybridTimestamp::new_unchecked(250, 0)).unwrap();
+        let closed = interval
+            .close_both(
+                HybridTimestamp::new_unchecked(150, 0),
+                HybridTimestamp::new_unchecked(250, 0),
+            )
+            .unwrap();
         assert!(!closed.is_currently_valid());
         assert!(!closed.is_currently_recorded());
         assert!(!closed.is_current());
 
-        let closed_valid = interval.close_valid_time(HybridTimestamp::new_unchecked(150, 0)).unwrap();
+        let closed_valid = interval
+            .close_valid_time(HybridTimestamp::new_unchecked(150, 0))
+            .unwrap();
         assert!(!closed_valid.is_currently_valid());
         assert!(closed_valid.is_currently_recorded());
         assert!(!closed_valid.is_current());
 
-        let closed_tx = interval.close_transaction_time(HybridTimestamp::new_unchecked(250, 0)).unwrap();
+        let closed_tx = interval
+            .close_transaction_time(HybridTimestamp::new_unchecked(250, 0))
+            .unwrap();
         assert!(closed_tx.is_currently_valid());
         assert!(!closed_tx.is_currently_recorded());
         assert!(!closed_tx.is_current());
@@ -2202,19 +2211,31 @@ mod mutant_kill_tests {
 
         let interval = BiTemporalInterval::new(
             TimeRange::new(valid_start, valid_end).unwrap(),
-            TimeRange::new(tx_start, tx_end).unwrap()
+            TimeRange::new(tx_start, tx_end).unwrap(),
         );
 
         // Test boundary conditions for valid time
-        assert!(!interval.is_visible_at(HybridTimestamp::new_unchecked(99, 0), HybridTimestamp::new_unchecked(350, 0)));
+        assert!(!interval.is_visible_at(
+            HybridTimestamp::new_unchecked(99, 0),
+            HybridTimestamp::new_unchecked(350, 0)
+        ));
         assert!(interval.is_visible_at(valid_start, HybridTimestamp::new_unchecked(350, 0)));
-        assert!(interval.is_visible_at(HybridTimestamp::new_unchecked(199, 0), HybridTimestamp::new_unchecked(350, 0)));
+        assert!(interval.is_visible_at(
+            HybridTimestamp::new_unchecked(199, 0),
+            HybridTimestamp::new_unchecked(350, 0)
+        ));
         assert!(!interval.is_visible_at(valid_end, HybridTimestamp::new_unchecked(350, 0)));
 
         // Test boundary conditions for transaction time
-        assert!(!interval.is_visible_at(HybridTimestamp::new_unchecked(150, 0), HybridTimestamp::new_unchecked(299, 0)));
+        assert!(!interval.is_visible_at(
+            HybridTimestamp::new_unchecked(150, 0),
+            HybridTimestamp::new_unchecked(299, 0)
+        ));
         assert!(interval.is_visible_at(HybridTimestamp::new_unchecked(150, 0), tx_start));
-        assert!(interval.is_visible_at(HybridTimestamp::new_unchecked(150, 0), HybridTimestamp::new_unchecked(399, 0)));
+        assert!(interval.is_visible_at(
+            HybridTimestamp::new_unchecked(150, 0),
+            HybridTimestamp::new_unchecked(399, 0)
+        ));
         assert!(!interval.is_visible_at(HybridTimestamp::new_unchecked(150, 0), tx_end));
     }
 
