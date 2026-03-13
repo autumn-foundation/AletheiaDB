@@ -1274,3 +1274,29 @@ mod tests {
         ));
     }
 }
+#[cfg(test)]
+mod sentry_operation_reordering_mutants {
+    use crate::query::ir::Predicate;
+    use crate::query::planner::rules::operation_reordering::OperationReordering;
+
+    #[test]
+    fn test_predicates_equal_and_or_nested_mismatches() {
+        let rule = OperationReordering;
+
+        // Same length, but different internal elements
+        assert!(!rule.predicates_equal(
+            &Predicate::And(vec![Predicate::eq("a", 1)]),
+            &Predicate::And(vec![Predicate::eq("a", 2)])
+        ));
+
+        assert!(!rule.predicates_equal(
+            &Predicate::Or(vec![Predicate::eq("a", 1)]),
+            &Predicate::Or(vec![Predicate::eq("a", 2)])
+        ));
+
+        assert!(!rule.predicates_equal(
+            &Predicate::Not(Box::new(Predicate::eq("a", 1))),
+            &Predicate::Not(Box::new(Predicate::eq("a", 2)))
+        ));
+    }
+}

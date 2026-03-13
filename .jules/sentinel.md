@@ -131,3 +131,15 @@
 **Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`. Also, mutants returning arbitrary Option/Result values or defaults (`Default::default()`) survived in formatting (`fmt::Display`), duration (`duration_micros`), closures (`close_valid_time`, `close_transaction_time`), constructors (`now`, `current`), and bounds evaluation methods (`is_empty`, `is_closed`, `is_current`, `contains`, `contains_or_after`, `contains_range`, `is_valid_at`, `is_recorded_at`).
 **Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, exact exclusion of boundaries inside interval intersections, and robust exact type-checks (like testing that `TimeRange::at()` does not yield an empty string or default timestamp).
 **Kill Shot:** Appended explicit exact boundary tests `test_timerange_is_empty_exact`, `test_timerange_is_current_closed_exact`, `test_timerange_contains_range_exact`, `test_timerange_close_at_exact`, `test_timerange_serialization_exact`, `test_bitemporal_serialization_exact`, `test_bitemporal_close_exact`, `test_bitemporal_constructors_exact`, `test_temporal_display_exact`, `test_time_try_now_exact`, and `test_time_from_secs_millis_exact` directly to `tests/sentry_temporal.rs`.
+
+**[Weak Test Coverage in Predicate Pushdown Boundaries]**
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Summary:** Mutants returning arbitrary boolean logic `Ok((Default::default(), true))` or `false` inside the base rule application survived.
+**Diagnosis:** MISSING_TEST - The tests did not explicitly verify the actual return result (`changed` boolean) of the `push_down` function on simple unchanged plans like `LogicalOp::Empty`.
+**Kill Shot:** Added `test_push_down_default_return_false` and `test_push_down_default_return_true` to explicitly verify the rule's `changed` boolean output.
+
+**[Weak Test Coverage in Logical Equality Nesting]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Summary:** Mutants inside `predicates_equal` modifying the boolean evaluation of nested matching (`||` mutated to `&&` and `==` mutated to `!=`) within `Predicate::And` and `Predicate::Or` evaluation survived.
+**Diagnosis:** WEAK_TEST - The existing exhaustive match tests lacked matching nested vectors that possessed the same length but completely differing inner properties causing the early iteration validation to pass incorrectly for mutants.
+**Kill Shot:** Added `test_predicates_equal_and_or_nested_mismatches` to explicitly build `Predicate::And` operations containing vectors of identically lengthed mismatched elements.
