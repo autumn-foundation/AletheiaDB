@@ -231,3 +231,17 @@ fn test_entity_id_as_edge_exhaustive() {
     // Check node case returns None
     assert_eq!(entity_node.as_edge(), None);
 }
+#[test]
+fn test_tx_id_generator_next_exhaustive() {
+    let generator = TxIdGenerator::new(); // Starts at 1
+    let first = generator.next();
+    assert_eq!(first, TxId::new(1));
+    let second = generator.next();
+    assert_eq!(second, TxId::new(2));
+    assert_ne!(second, TxId::new(0)); // default returns
+
+    // ensure + -> - and * are killed
+    assert_eq!(second.as_u64(), 2);
+    assert_ne!(second.as_u64(), 0); // 1 - 1
+    assert_ne!(second.as_u64(), 1); // 1 * 1
+}
