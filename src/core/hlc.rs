@@ -1020,7 +1020,8 @@ mod tests {
         assert!(matches!(result, Err(StorageError::CorruptedData(_))));
 
         // Values above MAX_VALID_TIMESTAMP but NOT i64::MAX are NOT allowed.
-        let invalid_wallclock_bytes = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0).serialize();
+        let invalid_wallclock_bytes =
+            HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0).serialize();
         let result2 = HybridTimestamp::deserialize(&invalid_wallclock_bytes);
         assert!(matches!(result2, Err(StorageError::CorruptedData(_))));
 
