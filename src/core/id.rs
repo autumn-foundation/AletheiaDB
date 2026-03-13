@@ -468,36 +468,91 @@ mod sentry_tests {
     }
 
     #[test]
-    fn test_id_generator_ensure_at_least_concurrent() {
-        use std::sync::Arc;
+    fn test_id_generator_ensure_at_least_retry() {
+        use std::sync::{Arc, Barrier};
         use std::thread;
 
         let generator = Arc::new(IdGenerator::new());
-        let num_threads = 10;
 
-        // Each thread tries to ensure at least its thread_id * 100
-        // The final value should be the maximum of all inputs
+        // Use a loop to trigger the race condition and ensure we hit the CAS retry
+        for _ in 0..100 {
+            // Reset to 0 for each iteration
+            generator.reset_to(0);
+
+            let barrier = Arc::new(Barrier::new(2));
+
+            // Thread 1: Rapidly increments the generator
+            let gen_clone1 = Arc::clone(&generator);
+            let barrier_clone1 = Arc::clone(&barrier);
+            let handle1 = thread::spawn(move || {
+                barrier_clone1.wait();
+                for _ in 0..100 {
+                    let _ = gen_clone1.next();
+                }
+            });
+
+            // Thread 2: Continuously calls ensure_at_least with exactly 500.
+            // Since thread 1 is concurrently incrementing it (0..100), the CAS inside
+            // ensure_at_least will likely fail and retry because the expected 'current'
+            // value keeps changing under it.
+            let gen_clone2 = Arc::clone(&generator);
+            let barrier_clone2 = Arc::clone(&barrier);
+            let handle2 = thread::spawn(move || {
+                barrier_clone2.wait();
+                for _ in 0..100 {
+                    gen_clone2.ensure_at_least(500);
+                }
+            });
+
+            handle1.join().unwrap();
+            handle2.join().unwrap();
+
+            // The value must be exactly 500 because Thread 1 only adds up to ~100
+            // and Thread 2 ensures it's at least 500. If the CAS retry logic in
+            // ensure_at_least was broken, this assert would fail.
+            let current = generator.current();
+            assert!((500..=600).contains(&current), "Value was {}", current);
+        }
+    }
+
+    #[test]
+    fn test_tx_id_generator_concurrent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tx_gen = Arc::new(TxIdGenerator::new());
+        let num_threads = 10;
+        let ids_per_thread = 1000;
+
         let handles: Vec<_> = (0..num_threads)
-            .map(|i| {
-                let generator_clone = Arc::clone(&generator);
+            .map(|_| {
+                let tx_gen_clone = Arc::clone(&tx_gen);
                 thread::spawn(move || {
-                    generator_clone.ensure_at_least((i as u64) * 100);
+                    let mut local_ids = Vec::with_capacity(ids_per_thread);
+                    for _ in 0..ids_per_thread {
+                        local_ids.push(tx_gen_clone.next());
+                    }
+                    local_ids
                 })
             })
             .collect();
 
+        let mut all_ids = Vec::new();
         for handle in handles {
-            handle.join().unwrap();
+            let ids = handle.join().unwrap();
+            all_ids.extend(ids);
         }
 
-        // The max input was (9 * 100) = 900
-        // ensure_at_least(X) sets current to max(current, X).
-        // So the final value must be >= max(inputs) = 900.
+        all_ids.sort_unstable();
+        all_ids.dedup();
 
-        assert!(generator.current() >= 900);
-
-        // It should be exactly 900 unless we called next() somewhere (we didn't).
-        assert_eq!(generator.current(), 900);
+        // Should have exactly num_threads * ids_per_thread unique IDs
+        assert_eq!(all_ids.len(), num_threads * ids_per_thread);
+        // Current should reflect the total number of IDs generated
+        assert_eq!(
+            tx_gen.current().as_u64(),
+            (num_threads * ids_per_thread) as u64
+        );
     }
 
     #[test]
@@ -535,6 +590,17 @@ mod sentry_tests {
         assert_eq!(format!("{}", tx_id), "TxId(12345)");
         assert_ne!(format!("{}", tx_id), "TxId(0)");
         assert_ne!(format!("{}", tx_id), "");
+    }
+
+    #[test]
+    fn test_entity_id_display() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_node: EntityId = node_id.into();
+        assert_eq!(format!("{}", entity_node), "Node(42)");
+
+        let edge_id = EdgeId::new(100).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+        assert_eq!(format!("{}", entity_edge), "Edge(100)");
     }
 
     #[test]
@@ -661,30 +727,33 @@ mod tests {
         // IDs exceeding MAX_VALID_ID should be rejected
         let node_result = NodeId::new(MAX_VALID_ID + 1);
         assert!(node_result.is_err());
-        if let Err(StorageError::InvalidId { id, id_type }) = node_result {
-            assert_eq!(id, MAX_VALID_ID + 1);
-            assert_eq!(id_type, "node");
-        } else {
-            panic!("Expected InvalidId error");
-        }
+        let err = node_result.unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+        let StorageError::InvalidId { id, id_type } = err else {
+            unreachable!()
+        };
+        assert_eq!(id, MAX_VALID_ID + 1);
+        assert_eq!(id_type, "node");
 
         let edge_result = EdgeId::new(u64::MAX);
         assert!(edge_result.is_err());
-        if let Err(StorageError::InvalidId { id, id_type }) = edge_result {
-            assert_eq!(id, u64::MAX);
-            assert_eq!(id_type, "edge");
-        } else {
-            panic!("Expected InvalidId error");
-        }
+        let err = edge_result.unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+        let StorageError::InvalidId { id, id_type } = err else {
+            unreachable!()
+        };
+        assert_eq!(id, u64::MAX);
+        assert_eq!(id_type, "edge");
 
         let version_result = VersionId::new(MAX_VALID_ID + 1000);
         assert!(version_result.is_err());
-        if let Err(StorageError::InvalidId { id, id_type }) = version_result {
-            assert_eq!(id, MAX_VALID_ID + 1000);
-            assert_eq!(id_type, "version");
-        } else {
-            panic!("Expected InvalidId error");
-        }
+        let err = version_result.unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+        let StorageError::InvalidId { id, id_type } = err else {
+            unreachable!()
+        };
+        assert_eq!(id, MAX_VALID_ID + 1000);
+        assert_eq!(id_type, "version");
     }
 
     #[test]
@@ -1609,11 +1678,15 @@ mod sentinel_id_generator_tests {
         let second = generator.next();
         assert!(second.is_err());
 
-        if let Err(crate::core::error::StorageError::InvalidId { id, .. }) = second {
-            assert_eq!(id, MAX_VALID_ID + 1);
-        } else {
-            panic!("Expected InvalidId error");
-        }
+        let err = second.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::core::error::StorageError::InvalidId { .. }
+        ));
+        let crate::core::error::StorageError::InvalidId { id, .. } = err else {
+            unreachable!()
+        };
+        assert_eq!(id, MAX_VALID_ID + 1);
     }
 
     #[test]
