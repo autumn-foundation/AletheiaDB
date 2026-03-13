@@ -720,7 +720,6 @@ pub(crate) fn load_indexes_startup(
                     version_id_gen.reset_to(max_version_id + 1);
                 }
 
-
                 let node_stats = restore_nodes_startup(&graph_data.nodes, current, current_time);
                 let nodes_loaded = node_stats.loaded;
                 let nodes_failed_label = node_stats.failed_label;
@@ -844,7 +843,6 @@ pub(crate) fn load_indexes_startup(
     manifest_lsn
 }
 
-
 #[derive(Default)]
 struct RestoreStats {
     loaded: usize,
@@ -860,69 +858,69 @@ fn restore_nodes_startup(
 ) -> RestoreStats {
     let mut stats = RestoreStats::default();
 
-                // Restore nodes with explicit error tracking
-                for persisted_node in persisted_nodes {
-                    // Validate label exists in string interner
-                    let label_str = match GLOBAL_INTERNER.resolve_with(
-                        crate::core::InternedString::from_raw(persisted_node.label_idx),
-                        |s| s.to_string(),
-                    ) {
-                        Some(s) => s,
-                        None => {
-                            stats.failed_label += 1;
-                            eprintln!(
-                                "Warning: Skipping node {}: label index {} not found in string interner",
-                                persisted_node.id, persisted_node.label_idx
-                            );
-                            continue;
-                        }
-                    };
+    // Restore nodes with explicit error tracking
+    for persisted_node in persisted_nodes {
+        // Validate label exists in string interner
+        let label_str = match GLOBAL_INTERNER.resolve_with(
+            crate::core::InternedString::from_raw(persisted_node.label_idx),
+            |s| s.to_string(),
+        ) {
+            Some(s) => s,
+            None => {
+                stats.failed_label += 1;
+                eprintln!(
+                    "Warning: Skipping node {}: label index {} not found in string interner",
+                    persisted_node.id, persisted_node.label_idx
+                );
+                continue;
+            }
+        };
 
-                    // Restore properties
-                    let properties = match crate::storage::index_persistence::graph::restore_property_map(&persisted_node.properties) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            stats.failed_properties += 1;
-                            eprintln!(
-                                "Warning: Skipping node {} (label '{}'): property restoration failed: {}",
-                                persisted_node.id, label_str, e
-                            );
-                            continue;
-                        }
-                    };
+        // Restore properties
+        let properties = match crate::storage::index_persistence::graph::restore_property_map(
+            &persisted_node.properties,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                stats.failed_properties += 1;
+                eprintln!(
+                    "Warning: Skipping node {} (label '{}'): property restoration failed: {}",
+                    persisted_node.id, label_str, e
+                );
+                continue;
+            }
+        };
 
-                    // Restore version ID from persisted data (CRITICAL for temporal provenance)
-                    let version_id = match VersionId::new(persisted_node.version_id) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            stats.failed_version += 1;
-                            eprintln!(
-                                "Warning: Skipping node {} (label '{}'): invalid version ID {}: {}",
-                                persisted_node.id, label_str, persisted_node.version_id, e
-                            );
-                            continue;
-                        }
-                    };
+        // Restore version ID from persisted data (CRITICAL for temporal provenance)
+        let version_id = match VersionId::new(persisted_node.version_id) {
+            Ok(v) => v,
+            Err(e) => {
+                stats.failed_version += 1;
+                eprintln!(
+                    "Warning: Skipping node {} (label '{}'): invalid version ID {}: {}",
+                    persisted_node.id, label_str, persisted_node.version_id, e
+                );
+                continue;
+            }
+        };
 
-                    let node = Node {
-                        id: NodeId::new_unchecked(persisted_node.id),
-                        label: crate::core::InternedString::from_raw(persisted_node.label_idx),
-                        properties,
-                        current_version: version_id,
-                        metadata: VersionMetadata {
-                            created_by_tx: TxId::new(0), // Restored from disk
-                            commit_timestamp: Some(current_time),
-                        },
-                    };
+        let node = Node {
+            id: NodeId::new_unchecked(persisted_node.id),
+            label: crate::core::InternedString::from_raw(persisted_node.label_idx),
+            properties,
+            current_version: version_id,
+            metadata: VersionMetadata {
+                created_by_tx: TxId::new(0), // Restored from disk
+                commit_timestamp: Some(current_time),
+            },
+        };
 
-                    let _ = current.insert_node_direct(node, current_time);
-                    stats.loaded += 1;
-                }
-
+        let _ = current.insert_node_direct(node, current_time);
+        stats.loaded += 1;
+    }
 
     stats
 }
-
 
 fn restore_edges_startup(
     persisted_edges: &[crate::storage::index_persistence::PersistedEdge],
@@ -931,66 +929,67 @@ fn restore_edges_startup(
 ) -> RestoreStats {
     let mut stats = RestoreStats::default();
 
-                for persisted_edge in persisted_edges {
-                    // Validate label exists in string interner
-                    let label_str = match GLOBAL_INTERNER.resolve_with(
-                        crate::core::InternedString::from_raw(persisted_edge.label_idx),
-                        |s| s.to_string(),
-                    ) {
-                        Some(s) => s,
-                        None => {
-                            stats.failed_label += 1;
-                            eprintln!(
-                                "Warning: Skipping edge {}: label index {} not found in string interner",
-                                persisted_edge.id, persisted_edge.label_idx
-                            );
-                            continue;
-                        }
-                    };
+    for persisted_edge in persisted_edges {
+        // Validate label exists in string interner
+        let label_str = match GLOBAL_INTERNER.resolve_with(
+            crate::core::InternedString::from_raw(persisted_edge.label_idx),
+            |s| s.to_string(),
+        ) {
+            Some(s) => s,
+            None => {
+                stats.failed_label += 1;
+                eprintln!(
+                    "Warning: Skipping edge {}: label index {} not found in string interner",
+                    persisted_edge.id, persisted_edge.label_idx
+                );
+                continue;
+            }
+        };
 
-                    // Restore properties
-                    let properties = match crate::storage::index_persistence::graph::restore_property_map(&persisted_edge.properties) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            stats.failed_properties += 1;
-                            eprintln!(
-                                "Warning: Skipping edge {} (label '{}'): property restoration failed: {}",
-                                persisted_edge.id, label_str, e
-                            );
-                            continue;
-                        }
-                    };
+        // Restore properties
+        let properties = match crate::storage::index_persistence::graph::restore_property_map(
+            &persisted_edge.properties,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                stats.failed_properties += 1;
+                eprintln!(
+                    "Warning: Skipping edge {} (label '{}'): property restoration failed: {}",
+                    persisted_edge.id, label_str, e
+                );
+                continue;
+            }
+        };
 
-                    // Restore version ID from persisted data (CRITICAL for temporal provenance)
-                    let version_id = match VersionId::new(persisted_edge.version_id) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            stats.failed_version += 1;
-                            eprintln!(
-                                "Warning: Skipping edge {} (label '{}'): invalid version ID {}: {}",
-                                persisted_edge.id, label_str, persisted_edge.version_id, e
-                            );
-                            continue;
-                        }
-                    };
+        // Restore version ID from persisted data (CRITICAL for temporal provenance)
+        let version_id = match VersionId::new(persisted_edge.version_id) {
+            Ok(v) => v,
+            Err(e) => {
+                stats.failed_version += 1;
+                eprintln!(
+                    "Warning: Skipping edge {} (label '{}'): invalid version ID {}: {}",
+                    persisted_edge.id, label_str, persisted_edge.version_id, e
+                );
+                continue;
+            }
+        };
 
-                    let edge = Edge {
-                        id: EdgeId::new_unchecked(persisted_edge.id),
-                        source: NodeId::new_unchecked(persisted_edge.source_id),
-                        target: NodeId::new_unchecked(persisted_edge.target_id),
-                        label: crate::core::InternedString::from_raw(persisted_edge.label_idx),
-                        properties,
-                        current_version: version_id,
-                        metadata: VersionMetadata {
-                            created_by_tx: TxId::new(0), // Restored from disk
-                            commit_timestamp: Some(current_time),
-                        },
-                    };
+        let edge = Edge {
+            id: EdgeId::new_unchecked(persisted_edge.id),
+            source: NodeId::new_unchecked(persisted_edge.source_id),
+            target: NodeId::new_unchecked(persisted_edge.target_id),
+            label: crate::core::InternedString::from_raw(persisted_edge.label_idx),
+            properties,
+            current_version: version_id,
+            metadata: VersionMetadata {
+                created_by_tx: TxId::new(0), // Restored from disk
+                commit_timestamp: Some(current_time),
+            },
+        };
 
-                    let _ = current.insert_edge_direct(edge);
-                    stats.loaded += 1;
-                }
-
+        let _ = current.insert_edge_direct(edge);
+        stats.loaded += 1;
+    }
 
     stats
 }
