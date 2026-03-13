@@ -390,7 +390,7 @@ impl HybridTimestamp {
     /// ```
     /// use aletheiadb::core::hlc::HybridTimestamp;
     ///
-    /// let local = HybridTimestamp::new(1000, 0).unwrap();
+    /// let mut local = HybridTimestamp::new(1000, 0).unwrap();
     /// let msg1 = HybridTimestamp::new(1100, 0).unwrap();
     /// let msg2 = HybridTimestamp::new(1050, 0).unwrap();
     ///
