@@ -7,6 +7,21 @@
 use std::fmt;
 
 /// A token in the AQL language.
+///
+/// Represents the fundamental lexical units of an AQL query, such as keywords,
+/// literals, punctuation, and operators. The lexer converts a raw string into
+/// a stream of these tokens, which is then consumed by the parser.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::lexer::{Lexer, Token};
+///
+/// let tokens = Lexer::tokenize("MATCH (n:Person)").unwrap();
+/// assert_eq!(tokens[0], Token::Match);
+/// assert_eq!(tokens[1], Token::LeftParen);
+/// assert_eq!(tokens[2], Token::Identifier("n".to_string()));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Keywords - Graph
@@ -228,6 +243,19 @@ impl fmt::Display for Token {
 /// Error type for lexer errors.
 ///
 /// Indicates a syntax error or unexpected character encountered during tokenization.
+/// Provides detailed information about where the error occurred in the input string.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::lexer::Lexer;
+///
+/// // Unclosed string literal causes a lexer error
+/// let result = Lexer::tokenize("MATCH (n:Person {name: 'Alice})");
+/// assert!(result.is_err());
+/// let error = result.unwrap_err();
+/// assert_eq!(error.line, 1);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError {
     /// Error message describing what went wrong.

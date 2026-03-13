@@ -14,6 +14,22 @@ use crate::core::id::NodeId;
 use std::collections::HashMap;
 
 /// A point in 2D space.
+///
+/// Represents the location of a node in the generated visual layout.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// # use aletheiadb::experimental::kaleidoscope::Point;
+/// let p1 = Point::new(0.0, 0.0);
+/// let p2 = Point::new(3.0, 4.0);
+/// assert_eq!(p1.distance(&p2), 5.0);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     /// X coordinate
@@ -96,6 +112,37 @@ impl Default for LayoutConfig {
 }
 
 /// The Layout Engine.
+///
+/// Simulates physical forces acting on the graph's nodes to project them onto a
+/// 2D plane. It incorporates structural connections (springs) and semantic
+/// similarities (gravity) to form distinct clusters of conceptually related entities.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// # use aletheiadb::experimental::kaleidoscope::{LayoutEngine, LayoutConfig};
+/// # use aletheiadb::core::id::NodeId;
+/// let mut engine = LayoutEngine::new(LayoutConfig::default());
+/// let n1 = NodeId::new(1).unwrap();
+/// let n2 = NodeId::new(2).unwrap();
+///
+/// // Add an edge connecting the nodes
+/// engine.add_edge(n1, n2);
+///
+/// // Add semantic similarity between nodes
+/// engine.add_semantic_link(n1, n2, 0.95);
+///
+/// // Run the simulation
+/// engine.run();
+///
+/// let positions = engine.get_positions();
+/// println!("Node 1 position: {:?}", positions.get(&n1));
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct LayoutEngine {
     config: LayoutConfig,
     nodes: Vec<NodeId>,

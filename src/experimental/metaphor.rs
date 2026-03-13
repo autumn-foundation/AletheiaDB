@@ -26,6 +26,26 @@ use crate::core::vector::cosine_similarity;
 use std::collections::{HashMap, HashSet};
 
 /// A single mapping in the alignment.
+///
+/// Indicates that a node from the source subgraph conceptually maps to a
+/// node in the target subgraph, with an associated confidence score.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// # use aletheiadb::experimental::metaphor::Mapping;
+/// # use aletheiadb::core::id::NodeId;
+/// let mapping = Mapping {
+///     source: NodeId::new(1).unwrap(),
+///     target: NodeId::new(2).unwrap(),
+///     score: 0.95,
+/// };
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mapping {
     /// The node in the source subgraph.
@@ -37,6 +57,30 @@ pub struct Mapping {
 }
 
 /// The result of an alignment operation.
+///
+/// Contains the individual mappings between nodes and a global score
+/// representing the overall structural and semantic similarity between
+/// the two aligned subgraphs.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// # use aletheiadb::experimental::metaphor::{Alignment, Mapping};
+/// # use aletheiadb::core::id::NodeId;
+/// let alignment = Alignment {
+///     mappings: vec![Mapping {
+///         source: NodeId::new(1).unwrap(),
+///         target: NodeId::new(2).unwrap(),
+///         score: 0.85,
+///     }],
+///     global_score: 0.85,
+/// };
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct Alignment {
     /// The list of mappings found.
@@ -46,6 +90,33 @@ pub struct Alignment {
 }
 
 /// The Metaphor Engine.
+///
+/// Finds analogies between two subgraphs by aligning them based on both
+/// semantic similarity (vectors) and structural isomorphism (edges).
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # use aletheiadb::AletheiaDB;
+/// # use aletheiadb::core::id::NodeId;
+/// # use aletheiadb::experimental::metaphor::Metaphor;
+/// # let dir = tempfile::tempdir().unwrap();
+/// # let db = AletheiaDB::new_with_path(dir.path()).unwrap();
+/// let metaphor = Metaphor::new(&db);
+///
+/// let source_nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+/// let target_nodes = vec![NodeId::new(3).unwrap(), NodeId::new(4).unwrap()];
+///
+/// // Align the two sets of nodes using the "embedding" vector property,
+/// // with a structural weight of 0.5.
+/// // let alignment = metaphor.align(&source_nodes, &target_nodes, "embedding", 0.5)?;
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct Metaphor<'a> {
     #[allow(dead_code)]
     db: &'a AletheiaDB,

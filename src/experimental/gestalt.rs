@@ -19,6 +19,22 @@ use crate::core::id::{EdgeId, NodeId};
 use std::collections::{HashMap, HashSet};
 
 /// A node in the pattern graph.
+///
+/// Nodes can optionally be constrained by a label and/or a vector embedding.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # use aletheiadb::experimental::gestalt::{Pattern, PatternNode};
+/// let mut pattern = Pattern::new();
+/// let node_id = pattern.add_node(Some("Person".to_string()));
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct PatternNode {
     /// The ID of the node within the pattern (0, 1, 2...).
@@ -30,6 +46,29 @@ pub struct PatternNode {
 }
 
 /// A vector constraint on a pattern node.
+///
+/// Requires the matched node to have a vector in the specified `property`
+/// that is at least `threshold` similar to the target `vector`.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # use aletheiadb::experimental::gestalt::{Pattern, VectorConstraint};
+/// let mut pattern = Pattern::new();
+/// // Adds a node with a vector constraint
+/// let node_id = pattern.add_semantic_node(
+///     Some("Document".to_string()),
+///     "embedding".to_string(),
+///     vec![0.1, 0.2, 0.3],
+///     0.9,
+/// );
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct VectorConstraint {
     /// The property containing the vector.
@@ -41,6 +80,25 @@ pub struct VectorConstraint {
 }
 
 /// An edge in the pattern graph.
+///
+/// Represents a directed relationship between two `PatternNode`s, optionally
+/// constrained by a label.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # use aletheiadb::experimental::gestalt::{Pattern, PatternEdge};
+/// let mut pattern = Pattern::new();
+/// let node1 = pattern.add_node(Some("Person".to_string()));
+/// let node2 = pattern.add_node(Some("Company".to_string()));
+/// pattern.add_edge(node1, node2, Some("WORKS_FOR".to_string()));
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct PatternEdge {
     /// The source pattern node ID.
@@ -137,6 +195,28 @@ pub struct Match {
 }
 
 /// The Gestalt Engine.
+///
+/// Finds occurrences of a specific graph pattern where nodes are matched
+/// not just by label, but by semantic similarity to a concept vector.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # use aletheiadb::AletheiaDB;
+/// # use aletheiadb::experimental::gestalt::{GestaltMatcher, Pattern};
+/// # let dir = tempfile::tempdir().unwrap();
+/// # let db = AletheiaDB::new_with_path(dir.path()).unwrap();
+/// let matcher = GestaltMatcher::new(&db);
+/// let pattern = Pattern::new();
+/// // ... build pattern ...
+/// let matches = matcher.find_matches(&pattern, 10)?;
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct GestaltMatcher<'a> {
     db: &'a AletheiaDB,
 }
