@@ -1322,3 +1322,40 @@ mod tests {
         assert!(msg.contains("by 0"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_error_format_tests {
+    use super::*;
+
+    #[test]
+    fn test_format_index_not_found_exact() {
+        let hint = None;
+        let res = format_index_not_found("HNSW", "embedding", &hint);
+        assert_eq!(
+            res,
+            "Query requires HNSW index on 'embedding' property which is not enabled"
+        );
+
+        let hint = Some("Use create_index()".to_string());
+        let res = format_index_not_found("HNSW", "embedding", &hint);
+        assert_eq!(
+            res,
+            "Query requires HNSW index on 'embedding' property which is not enabled. Hint: Use create_index()"
+        );
+    }
+
+    #[test]
+    fn test_format_clock_skew_exact() {
+        let res = format_clock_skew(100, 200, -100, 50);
+        assert_eq!(
+            res,
+            "Clock skew too large: system clock jumped backward by 100 \u{b5}s (max allowed: 50 \u{b5}s). Wallclock: 100, Previous: 200. This may indicate NTP adjustment or manual clock change."
+        );
+
+        let res = format_clock_skew(200, 100, 100, 50);
+        assert_eq!(
+            res,
+            "Clock skew too large: system clock jumped forward by 100 \u{b5}s (max allowed: 50 \u{b5}s). Wallclock: 200, Previous: 100. This may indicate NTP adjustment or manual clock change."
+        );
+    }
+}
