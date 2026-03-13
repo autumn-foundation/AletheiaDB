@@ -148,6 +148,26 @@ impl QueryRow {
 ///
 /// This wraps a result iterator and provides convenience methods
 /// for collecting and processing results.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::AletheiaDB;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+///
+/// // Query returns `QueryResults`
+/// let results = db.query().scan_label("Person").execute(&db)?;
+///
+/// // You can iterate over it directly:
+/// for row in results {
+///     let row = row?;
+///     println!("{:?}", row.entity);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct QueryResults {
     iterator: Box<dyn ResultIterator>,
 }

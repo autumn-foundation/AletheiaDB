@@ -7,6 +7,18 @@
 use std::fmt;
 
 /// A token in the AQL language.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::lexer::Token;
+///
+/// let token = Token::Match;
+/// assert_eq!(format!("{}", token), "MATCH");
+///
+/// let identifier = Token::Identifier("Person".to_string());
+/// assert_eq!(format!("{}", identifier), "Person");
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Keywords - Graph
@@ -228,6 +240,20 @@ impl fmt::Display for Token {
 /// Error type for lexer errors.
 ///
 /// Indicates a syntax error or unexpected character encountered during tokenization.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::lexer::{Lexer, LexerError};
+///
+/// let result = Lexer::tokenize("MATCH @invalid");
+/// assert!(result.is_err());
+///
+/// let error = result.unwrap_err();
+/// assert_eq!(error.line, 1);
+/// assert_eq!(error.column, 7);
+/// assert!(error.message.contains("Unexpected character"));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError {
     /// Error message describing what went wrong.
