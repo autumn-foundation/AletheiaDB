@@ -751,12 +751,6 @@ impl AletheiaMcpServer {
         tx_time.unwrap_or_else(|| TRANSACTION_TIME_NOW.to_string())
     }
 
-    fn matches_label(&self, interned: crate::core::InternedString, label: &str) -> bool {
-        GLOBAL_INTERNER
-            .resolve_with(interned, |s| s == label)
-            .unwrap_or(false)
-    }
-
     /// Get the expected dimensions for a vector index property.
     /// Returns None if the index doesn't exist.
     fn get_vector_index_dimensions(&self, property_name: &str) -> Option<usize> {
@@ -1270,7 +1264,7 @@ impl AletheiaMcpServer {
             .filter(|e| {
                 req.label
                     .as_ref()
-                    .map(|l| self.matches_label(e.label, l))
+                    .map(|l| e.has_label_str(l))
                     .unwrap_or(true)
             })
             .map(|e| self.edge_to_response(&e))
@@ -1335,7 +1329,7 @@ impl AletheiaMcpServer {
                             .filter(|eid| {
                                 self.db
                                     .get_edge(*eid)
-                                    .map(|e| self.matches_label(e.label, &req.edge_label))
+                                    .map(|e| e.has_label_str(&req.edge_label))
                                     .unwrap_or(false)
                             })
                             .collect()
@@ -1351,7 +1345,7 @@ impl AletheiaMcpServer {
                             .filter(|eid| {
                                 self.db
                                     .get_edge(*eid)
-                                    .map(|e| self.matches_label(e.label, &req.edge_label))
+                                    .map(|e| e.has_label_str(&req.edge_label))
                                     .unwrap_or(false)
                             })
                             .collect();

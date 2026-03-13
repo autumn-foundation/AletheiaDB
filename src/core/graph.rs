@@ -43,13 +43,13 @@ impl Node {
         properties: PropertyMap,
         current_version: VersionId,
     ) -> Self {
-        Node {
+        Self::with_metadata(
             id,
             label,
             properties,
             current_version,
-            metadata: VersionMetadata::default(),
-        }
+            VersionMetadata::default(),
+        )
     }
 
     /// Create a new node with explicit metadata (for transactions).
@@ -169,15 +169,15 @@ impl Edge {
         properties: PropertyMap,
         current_version: VersionId,
     ) -> Self {
-        Edge {
+        Self::with_metadata(
             id,
             label,
             source,
             target,
             properties,
             current_version,
-            metadata: VersionMetadata::default(),
-        }
+            VersionMetadata::default(),
+        )
     }
 
     /// Create a new edge with explicit metadata (for transactions).
