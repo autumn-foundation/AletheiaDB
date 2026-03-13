@@ -4236,3 +4236,82 @@ mod sentry_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sentry_overflow_tests {
+    use super::*;
+
+    #[test]
+    fn test_sentry_deserialize_string_length_overflow() {
+        // 🛡️ Sentry Test: Verify `deserialize_string` correctly handles length overflow
+        // which prevents DoS attacks via memory exhaustion or integer overflow panics.
+        // It specifically targets `offset.checked_add(len)` logic.
+
+        // TAG_STRING = 8
+        // [tag:1][len:4][data...]
+        let mut bytes = vec![TAG_STRING];
+
+        // len = u32::MAX, this causes offset (5) + len (4294967295) = 4294967300
+        // on 32-bit systems this would overflow usize, on 64-bit it's just very large
+        // But the check `if bytes.len() < required_len` will safely fail.
+
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("Buffer too short for String data"),
+                    "Error should mention buffer too short, got: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_sentry_deserialize_bytes_length_overflow() {
+        // 🛡️ Sentry Test: Verify `deserialize_bytes` correctly handles length overflow.
+        let mut bytes = vec![TAG_BYTES];
+
+        // len = u32::MAX
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("Buffer too short for Bytes data"),
+                    "Error should mention buffer too short, got: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_sentry_deserialize_array_length_overflow() {
+        // 🛡️ Sentry Test: Verify `deserialize_array` correctly protects against memory exhaustion DoS.
+        let mut bytes = vec![TAG_ARRAY];
+
+        // request count = u32::MAX elements, which far exceeds MAX_ARRAY_ELEMENTS
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("Array count"),
+                    "Error should mention Array count, got: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", result),
+        }
+    }
+}
