@@ -1485,3 +1485,4 @@ mod tests {
         assert!(node.properties.get("embedding").is_none());
     }
 }
+mod traversal_iterator_tests;
