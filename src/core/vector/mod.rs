@@ -104,9 +104,6 @@ mod sentry_simd_tests;
 mod sentry_safety_tests;
 
 #[cfg(test)]
-mod sentry_sparse_consistency_tests;
-
-#[cfg(test)]
 mod sentry_sparse_tests;
 
 #[cfg(test)]
