@@ -988,6 +988,50 @@ mod tests {
     }
 
     #[test]
+    fn test_hybrid_timestamp_display_not_default() {
+        let ts = HybridTimestamp::new(100, 10).unwrap();
+        let display_str = ts.to_string();
+        assert_eq!(display_str, "100.10");
+        assert_ne!(display_str, "");
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_from_i64_exact() {
+        let ts: HybridTimestamp = 12345.into();
+        assert_eq!(ts.wallclock(), 12345);
+        assert_eq!(ts.logical(), 0);
+
+        let ts2 = HybridTimestamp::from(54321_i64);
+        assert_eq!(ts2.wallclock(), 54321);
+        assert_eq!(ts2.logical(), 0);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_deserialize_sentinel_logic() {
+        // Sentinel value i64::MAX with logical = 0 is allowed.
+        let sentinel_bytes = HybridTimestamp::new_unchecked(i64::MAX, 0).serialize();
+        let (ts, _) = HybridTimestamp::deserialize(&sentinel_bytes).unwrap();
+        assert_eq!(ts.wallclock(), i64::MAX);
+        assert_eq!(ts.logical(), 0);
+
+        // Sentinel value i64::MAX with logical != 0 is NOT allowed.
+        let invalid_sentinel_bytes = HybridTimestamp::new_unchecked(i64::MAX, 1).serialize();
+        let result = HybridTimestamp::deserialize(&invalid_sentinel_bytes);
+        assert!(matches!(result, Err(StorageError::CorruptedData(_))));
+
+        // Values above MAX_VALID_TIMESTAMP but NOT i64::MAX are NOT allowed.
+        let invalid_wallclock_bytes = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0).serialize();
+        let result2 = HybridTimestamp::deserialize(&invalid_wallclock_bytes);
+        assert!(matches!(result2, Err(StorageError::CorruptedData(_))));
+
+        // Valid timestamp at MAX_VALID_TIMESTAMP
+        let valid_max_bytes = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 10).serialize();
+        let (ts3, _) = HybridTimestamp::deserialize(&valid_max_bytes).unwrap();
+        assert_eq!(ts3.wallclock(), MAX_VALID_TIMESTAMP);
+        assert_eq!(ts3.logical(), 10);
+    }
+
+    #[test]
     fn test_hybrid_timestamp_as_secs_millis_exact() {
         let ts = HybridTimestamp::new(5_000_000, 0).unwrap();
         // Exact operators for `as_secs` (/ 1_000_000) and `as_millis` (/ 1_000)
