@@ -245,3 +245,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Momentum: Semantic Velocity & Acceleration Engine.
+pub mod momentum;
