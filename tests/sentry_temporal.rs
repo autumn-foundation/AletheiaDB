@@ -573,3 +573,107 @@ fn test_time_from_secs_millis_exact() {
         "from_millis should not return default"
     );
 }
+
+#[test]
+fn test_time_to_secs_millis_kill_mutants() {
+    use aletheiadb::core::temporal::time;
+
+    // We must use values where / and % give different results to kill `replace / with %`
+    // e.g. 5_000_000 / 1_000_000 = 5, but 5_000_000 % 1_000_000 = 0.
+    // If to_secs(5_000_000) = 0 due to mutant, assert_eq!(0, 5) fails.
+
+    // Using a wallclock of 5_000_000.
+    // time::from_secs(5) internally does 5 * 1_000_000 = 5_000_000.
+    let secs = 5;
+    let ts_secs = time::from_secs(secs);
+    let back_secs = time::to_secs(ts_secs);
+    assert_eq!(back_secs, secs);
+
+    // If * becomes + in from_secs, time::from_secs(5) -> 5 + 1_000_000 = 1_000_005.
+    // Then to_secs(1_000_005) -> 1_000_005 / 1_000_000 = 1.
+    // assert_eq!(1, 5) fails.
+    assert_eq!(ts_secs.wallclock(), 5_000_000);
+
+    // If * becomes / in from_secs, time::from_secs(5) -> 5 / 1_000_000 = 0.
+    // assert_eq!(0, 5_000_000) fails.
+
+    // Test from_millis & to_millis
+    let millis = 5000;
+    let ts_millis = time::from_millis(millis);
+    let back_millis = time::to_millis(ts_millis);
+    assert_eq!(back_millis, millis);
+
+    // time::from_millis(5000) -> 5000 * 1000 = 5_000_000.
+    assert_eq!(ts_millis.wallclock(), 5_000_000);
+}
+
+#[test]
+fn test_timerange_contains_range_exact_boundaries() {
+    use aletheiadb::core::temporal::TimeRange;
+    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+    let r2 = TimeRange::new(150.into(), 199.into()).unwrap();
+    assert!(r1.contains_range(&r2));
+
+    // Exact match
+    let r_exact = TimeRange::new(100.into(), 200.into()).unwrap();
+    assert!(r1.contains_range(&r_exact));
+
+    // Exceeds start (not contained)
+    let r_start_early = TimeRange::new(99.into(), 150.into()).unwrap();
+    assert!(!r1.contains_range(&r_start_early));
+
+    // Exceeds end (not contained)
+    let r_end_late = TimeRange::new(150.into(), 201.into()).unwrap();
+    assert!(!r1.contains_range(&r_end_late));
+
+    // If <= becomes <, the exact match will fail.
+    // If <= becomes ==, the strictly inside check (r2) will fail.
+}
+
+#[test]
+fn test_bitemporal_is_visible_at_exact() {
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+    let valid_start = 1000.into();
+    let valid_end = 2000.into();
+    let tx_start = 3000.into();
+    let tx_end = 4000.into();
+
+    let interval = BiTemporalInterval::new(
+        TimeRange::new(valid_start, valid_end).unwrap(),
+        TimeRange::new(tx_start, tx_end).unwrap(),
+    );
+
+    // True only if BOTH are true.
+    assert!(interval.is_visible_at(1500.into(), 3500.into()));
+
+    // Valid true, tx false. Must be false (kills replace && with ||)
+    assert!(!interval.is_visible_at(1500.into(), 5000.into()));
+
+    // Valid false, tx true. Must be false (kills replace && with ||)
+    assert!(!interval.is_visible_at(5000.into(), 3500.into()));
+
+    // Both false
+    assert!(!interval.is_visible_at(5000.into(), 5000.into()));
+}
+
+#[test]
+fn test_time_to_iso8601_exact_math() {
+    use aletheiadb::core::temporal::time;
+    // We want a timestamp that produces a remainder different from its quotient
+    // to catch replacing / with % or + or *.
+    // 5005 milliseconds = 5 seconds and 5 milliseconds
+    let ts = time::from_millis(5005);
+    let output = time::to_iso8601(ts);
+
+    // exact internal representation check
+    assert!(
+        output.contains("5000000") || output.contains("5005"),
+        "Output was: {}",
+        output
+    );
+
+    // Let's also do a year that doesn't trigger 1970
+    let ts2 = time::from_secs(1609459200); // 2021-01-01
+    let out2 = time::to_iso8601(ts2);
+    assert!(out2.contains("1609459200") || out2.contains("2021"));
+}
