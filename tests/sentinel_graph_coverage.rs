@@ -108,3 +108,81 @@ fn test_edge_with_metadata_stores_metadata() {
         "Metadata should have correct TxId"
     );
 }
+
+#[test]
+fn test_edge_connects_mutants() {
+    let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    let edge = Edge::new(
+        EdgeId::new(1).unwrap(),
+        label,
+        NodeId::new(1).unwrap(), // Source: 1
+        NodeId::new(2).unwrap(), // Target: 2
+        PropertyMapBuilder::new().build(),
+        VersionId::new(1).unwrap(),
+    );
+
+    // Kills: self.source == source || self.target == target
+    assert!(
+        !edge.connects(NodeId::new(1).unwrap(), NodeId::new(3).unwrap()),
+        "Should return false when source matches but target mismatches"
+    );
+
+    assert!(
+        !edge.connects(NodeId::new(3).unwrap(), NodeId::new(2).unwrap()),
+        "Should return false when source mismatches but target matches"
+    );
+
+    // Kills: replace == with != in self.source == source
+    // Kills: replace == with != in self.target == target
+    assert!(
+        !edge.connects(NodeId::new(3).unwrap(), NodeId::new(3).unwrap()),
+        "Should return false when both mismatch"
+    );
+
+    // Kills: replace Edge::connects with false
+    // Kills: replace Edge::connects with true (covered by above falses)
+    assert!(
+        edge.connects(NodeId::new(1).unwrap(), NodeId::new(2).unwrap()),
+        "Should return true when both match"
+    );
+}
+
+#[test]
+fn test_edge_debug_mutant() {
+    let label = GLOBAL_INTERNER.intern("TEST_LABEL").unwrap();
+    let edge = Edge::new(
+        EdgeId::new(1).unwrap(),
+        label,
+        NodeId::new(1).unwrap(),
+        NodeId::new(2).unwrap(),
+        PropertyMapBuilder::new().build(),
+        VersionId::new(1).unwrap(),
+    );
+
+    let debug_output = format!("{:?}", edge);
+    assert!(
+        debug_output.contains("Edge {"),
+        "Debug output must include struct name"
+    );
+    assert!(debug_output.contains("id:"), "Debug output must include id");
+    assert!(
+        debug_output.contains("label:"),
+        "Debug output must include label"
+    );
+    assert!(
+        debug_output.contains("TEST_LABEL"),
+        "Debug output must include resolved label"
+    );
+    assert!(
+        debug_output.contains("source:"),
+        "Debug output must include source"
+    );
+    assert!(
+        debug_output.contains("target:"),
+        "Debug output must include target"
+    );
+    assert!(
+        debug_output.contains("properties:"),
+        "Debug output must include properties"
+    );
+}
