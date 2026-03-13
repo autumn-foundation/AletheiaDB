@@ -1809,7 +1809,90 @@ macro_rules! properties {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    use crate::core::error::StorageError;
+
+    #[test]
+    fn should_return_error_when_buffer_short_table_driven() {
+        // Table of inputs that are too short to be successfully deserialized
+        let invalid_buffers: Vec<&[u8]> = vec![
+            &[crate::core::property::TAG_BOOL], // bool missing data
+            &[crate::core::property::TAG_INT, 1, 2, 3, 4, 5, 6, 7], // int missing 1 byte
+            &[crate::core::property::TAG_FLOAT, 1, 2, 3, 4, 5, 6, 7], // float missing 1 byte
+            &[crate::core::property::TAG_STRING, 1, 2, 3], // string missing len byte
+            &[crate::core::property::TAG_STRING, 5, 0, 0, 0, b'a', b'b'], // string missing data
+            &[crate::core::property::TAG_BYTES, 1, 2, 3], // bytes missing len byte
+            &[crate::core::property::TAG_BYTES, 5, 0, 0, 0, 1, 2], // bytes missing data
+            &[crate::core::property::TAG_ARRAY, 1, 2, 3], // array missing count byte
+            &[
+                crate::core::property::TAG_ARRAY,
+                2,
+                0,
+                0,
+                0,
+                crate::core::property::TAG_INT,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+            ], // array missing second element
+        ];
+
+        for (i, buffer) in invalid_buffers.into_iter().enumerate() {
+            let res = PropertyValue::deserialize(buffer);
+            assert!(
+                res.is_err(),
+                "Case {} should have returned an error for buffer {:?}",
+                i,
+                buffer
+            );
+            if let Err(e) = res {
+                assert!(
+                    matches!(
+                        &e,
+                        crate::core::error::Error::Storage(StorageError::CorruptedData(_))
+                    ),
+                    "Case {} returned unexpected error: {}",
+                    i,
+                    e
+                );
+            }
+        }
+
+        // Test PropertyMap specific deserialization failures
+        let invalid_map_buffers: Vec<&[u8]> = vec![
+            &[1, 2, 3],                            // map missing count byte
+            &[1, 0, 0, 0, 1, 2, 3], // map count 1, but key len is only 3 bytes instead of 4
+            &[1, 0, 0, 0, 5, 0, 0, 0, b'a', b'b'], // map count 1, key len 5, but only 2 bytes data
+        ];
+
+        for (i, buffer) in invalid_map_buffers.into_iter().enumerate() {
+            let res = PropertyMap::deserialize(buffer);
+            assert!(
+                res.is_err(),
+                "Map Case {} should have returned an error for buffer {:?}",
+                i,
+                buffer
+            );
+            if let Err(e) = res {
+                assert!(
+                    matches!(
+                        &e,
+                        crate::core::error::Error::Storage(StorageError::CorruptedData(_))
+                    ),
+                    "Map Case {} returned unexpected error: {}",
+                    i,
+                    e
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_property_value_types() {
