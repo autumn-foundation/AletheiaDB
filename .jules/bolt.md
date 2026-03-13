@@ -45,3 +45,7 @@
 **Pre-allocate Vectors in collect_structured**
 **Learning:** `Vec::new()` without capacity hints inside a loop where the target size is known (via `iterator.size_hint()` or `Vec::len()`) causes unnecessary heap allocations. Using `Vec::with_capacity` based on iterator size bounds prevents these allocations.
 **Action:** Always check if the final collection size is known or estimable (e.g. from an iterator) and use `Vec::with_capacity` instead of `Vec::new()` to initialize collections.
+
+**[Optimize temporal parser whitespace clean up]**
+**Learning:** Chaining `.split_whitespace().collect::<Vec<_>>().join(" ")` creates an intermediate vector which can be costly on hot paths.
+**Action:** Replace `split_whitespace().collect::<Vec<_>>().join(" ")` with manual traversal over `split_whitespace()` where strings are pushed onto a pre-allocated buffer of length `String::with_capacity(string.len())`.
