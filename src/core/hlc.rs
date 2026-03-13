@@ -390,7 +390,7 @@ impl HybridTimestamp {
     /// ```
     /// use aletheiadb::core::hlc::HybridTimestamp;
     ///
-    /// let mut local = HybridTimestamp::new(1000, 0).unwrap();
+    /// let local = HybridTimestamp::new(1000, 0).unwrap();
     /// let msg1 = HybridTimestamp::new(1100, 0).unwrap();
     /// let msg2 = HybridTimestamp::new(1050, 0).unwrap();
     ///
@@ -1189,5 +1189,204 @@ mod proptests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+
+    #[test]
+    fn test_evaluate_clock_skew_exact_boundaries_self_heal() {
+        let current = 1_000_000;
+
+        // Exact backward boundary with self heal
+        let frontier_backward = current + MAX_BACKWARD_DRIFT_US;
+        let result_backward = evaluate_clock_skew(current, frontier_backward, None, true);
+        assert!(result_backward.is_ok());
+        assert_eq!(result_backward.unwrap().effective_wallclock, current);
+
+        // Slightly beyond backward boundary with self heal
+        let frontier_backward_violation = current + MAX_BACKWARD_DRIFT_US + 1;
+        let result_backward_violation =
+            evaluate_clock_skew(current, frontier_backward_violation, None, true);
+        assert!(result_backward_violation.is_ok());
+        assert_eq!(
+            result_backward_violation.unwrap().effective_wallclock,
+            frontier_backward_violation
+        );
+
+        // Exact forward boundary with self heal
+        let max_jump = 100;
+        let frontier_forward = current - max_jump;
+        let result_forward = evaluate_clock_skew(current, frontier_forward, Some(max_jump), true);
+        assert!(result_forward.is_ok());
+        assert_eq!(result_forward.unwrap().effective_wallclock, current);
+
+        // Slightly beyond forward boundary with self heal
+        let frontier_forward_violation = current - max_jump - 1;
+        let result_forward_violation =
+            evaluate_clock_skew(current, frontier_forward_violation, Some(max_jump), true);
+        assert!(result_forward_violation.is_ok());
+        assert_eq!(
+            result_forward_violation.unwrap().effective_wallclock,
+            frontier_forward_violation
+        );
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_exact_boundaries_additions() {
+        let current = 1_000_000;
+        // Slightly beyond backward boundary (drift == -MAX_BACKWARD_DRIFT_US - 1)
+        let frontier_backward_violation = current + MAX_BACKWARD_DRIFT_US + 1;
+        let result_backward_violation =
+            evaluate_clock_skew(current, frontier_backward_violation, None, false);
+        assert!(
+            result_backward_violation.is_err(),
+            "Slightly beyond backward boundary should be rejected"
+        );
+
+        // Slightly beyond forward boundary (drift == max_jump + 1)
+        let max_jump = 100;
+        let frontier_forward_violation = current - max_jump - 1;
+        let result_forward_violation =
+            evaluate_clock_skew(current, frontier_forward_violation, Some(max_jump), false);
+        assert!(
+            result_forward_violation.is_err(),
+            "Slightly beyond forward boundary should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_serialize_deserialize_exact_boundary() {
+        // Test serialize bounds
+        let ts = HybridTimestamp::new(100, 200).unwrap();
+        let bytes = ts.serialize();
+        assert_eq!(bytes.len(), 12);
+
+        let mut buffer = Vec::new();
+        ts.serialize_into(&mut buffer);
+        assert_eq!(buffer.len(), 12);
+
+        // Test deserialize exactly at boundary length
+        let bytes_bound = vec![0; 11];
+        let result = HybridTimestamp::deserialize(&bytes_bound);
+        assert!(result.is_err());
+
+        // Test display implementation explicitly
+        let ts_display = HybridTimestamp::new(100, 200).unwrap();
+        let display_str = format!("{}", ts_display);
+        assert!(!display_str.is_empty());
+        assert_eq!(display_str, "100.200");
+    }
+
+    #[test]
+    fn test_receive_exact_wallclock_logic_mutants() {
+        // test new_wallclock > self.wallclock && new_wallclock > msg.wallclock
+        let local = HybridTimestamp::new(100, 10).unwrap();
+        let msg = HybridTimestamp::new(100, 20).unwrap();
+        let phys = 101;
+        let result = local.receive(msg, phys).unwrap();
+        assert_eq!(result.wallclock, 101);
+        assert_eq!(result.logical, 0);
+
+        // new_wallclock == msg.wallclock but strictly greater than self.wallclock
+        let local_lower = HybridTimestamp::new(100, 10).unwrap();
+        let msg_higher = HybridTimestamp::new(105, 20).unwrap();
+        let phys_lower = 101;
+        let result_higher_msg = local_lower.receive(msg_higher, phys_lower).unwrap();
+        assert_eq!(result_higher_msg.wallclock, 105);
+        assert_eq!(result_higher_msg.logical, 21); // Should hit msg wallclock chosen branch
+
+        // test causality collision branch where new_wallclock == local but not msg
+        let local_higher = HybridTimestamp::new(105, 10).unwrap();
+        let msg_lower = HybridTimestamp::new(100, 20).unwrap();
+        let result_higher_local = local_higher.receive(msg_lower, phys_lower).unwrap();
+        assert_eq!(result_higher_local.wallclock, 105);
+        assert_eq!(result_higher_local.logical, 11);
+
+        // Testing the boundaries of logical combinations (equal wallclocks)
+        let phys_eq = 100;
+        let local_eq = HybridTimestamp::new(100, 10).unwrap();
+        let msg_eq = HybridTimestamp::new(100, 20).unwrap();
+        let local_res = local_eq.receive(msg_eq, phys_eq).unwrap();
+        assert_eq!(local_res.logical, 21); // Should hit both equal case max(10, 20) + 1
+
+        let msg_same = HybridTimestamp::new(100, 10).unwrap();
+        let same_res = local_eq.receive(msg_same, phys_eq).unwrap();
+        assert_eq!(same_res.logical, 11); // max(10, 10) + 1 = 11
+
+        let msg_lower_logical = HybridTimestamp::new(100, 5).unwrap();
+        let lower_res = local_eq.receive(msg_lower_logical, phys_eq).unwrap();
+        assert_eq!(lower_res.logical, 11); // max(10, 5) + 1 = 11
+
+        // Targets replace == with != in line 435
+        let msg_lower_wall = HybridTimestamp::new(99, 10).unwrap();
+        let local_higher_wall = HybridTimestamp::new(100, 10).unwrap();
+        let res3 = local_higher_wall.receive(msg_lower_wall, phys_eq).unwrap();
+        assert_eq!(res3.wallclock, 100);
+        assert_eq!(res3.logical, 11);
+    }
+
+    #[test]
+    fn test_send_mutants() {
+        let ts = HybridTimestamp::new(100, 10).unwrap();
+
+        // Exact greater boundary
+        let res1 = ts.send(101).unwrap();
+        assert_eq!(res1.wallclock, 101);
+        assert_eq!(res1.logical, 0);
+
+        // Exact equal boundary
+        let res2 = ts.send(100).unwrap();
+        assert_eq!(res2.wallclock, 100);
+        assert_eq!(res2.logical, 11);
+
+        // Max timestamp boundary
+        let ts_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP - 1, 0).unwrap();
+
+        let res_max = ts_max.send(MAX_VALID_TIMESTAMP).unwrap();
+        assert_eq!(res_max.wallclock, MAX_VALID_TIMESTAMP);
+
+        let res_max_violation = ts_max.send(MAX_VALID_TIMESTAMP + 1);
+        assert!(res_max_violation.is_err());
+    }
+
+    #[test]
+    fn test_deserialize_mutants() {
+        // Test logical sentinel validation bounds
+        let valid_sentinel = HybridTimestamp::new_unchecked(i64::MAX, 0);
+        let valid_bytes = valid_sentinel.serialize();
+        let (ts, len) = HybridTimestamp::deserialize(&valid_bytes).unwrap();
+        assert_eq!(ts.wallclock, i64::MAX);
+        assert_eq!(ts.logical, 0);
+        assert_eq!(len, 12);
+
+        let invalid_sentinel = HybridTimestamp::new_unchecked(i64::MAX, 1);
+        let invalid_bytes = invalid_sentinel.serialize();
+        let res = HybridTimestamp::deserialize(&invalid_bytes);
+        assert!(res.is_err());
+
+        // Test max valid boundary
+        let max_valid = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 10);
+        let max_valid_bytes = max_valid.serialize();
+        let (ts2, _) = HybridTimestamp::deserialize(&max_valid_bytes).unwrap();
+        assert_eq!(ts2.wallclock, MAX_VALID_TIMESTAMP);
+
+        let invalid_beyond = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 10);
+        let invalid_beyond_bytes = invalid_beyond.serialize();
+        let res_beyond = HybridTimestamp::deserialize(&invalid_beyond_bytes);
+        assert!(res_beyond.is_err());
+    }
+
+    #[test]
+    fn test_as_secs_and_millis_mutants() {
+        let ts = HybridTimestamp::new(2000, 0).unwrap();
+        assert_eq!(ts.as_secs(), 0);
+        assert_eq!(ts.as_millis(), 2);
+
+        let ts2 = HybridTimestamp::new(2000000, 0).unwrap();
+        assert_eq!(ts2.as_secs(), 2);
+        assert_eq!(ts2.as_millis(), 2000);
     }
 }
