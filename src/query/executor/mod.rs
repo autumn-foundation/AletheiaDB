@@ -3,6 +3,36 @@
 //! Executes physical query plans using a pull-based iterator model.
 //! The executor transforms physical operators into iterators that
 //! lazily produce results.
+//!
+//! # Logical vs Physical Execution
+//!
+//! While the `LogicalPlan` (from the planner) describes *what* data to retrieve,
+//! the `PhysicalPlan` maps directly to execution primitives. This module is responsible
+//! for taking a `PhysicalPlan` and orchestrating its execution over the storage layers.
+//!
+//! # Streaming Iterator Model
+//!
+//! Query execution uses a pull-based streaming iterator model (`ResultIterator`).
+//! Each physical operator is implemented as an iterator. Calling `.next()` on the root
+//! operator pulls results sequentially through the entire pipeline.
+//!
+//! ## Why Streaming Iterators?
+//!
+//! 1. **Memory Efficiency**: Instead of materializing all intermediate results into large
+//!    `Vec` allocations at each step, data flows through the pipeline one row at a time.
+//!    This allows the engine to process datasets much larger than available memory.
+//! 2. **Early Termination**: Operations like `LIMIT` or `SKIP` can short-circuit the
+//!    execution. If a query only needs 10 rows, the iterator will only pull enough data
+//!    from the storage engine to satisfy those 10 rows, drastically reducing I/O and CPU time.
+//! 3. **Latency**: The first row of results can be returned to the client almost immediately,
+//!    rather than waiting for the entire query to finish processing.
+//!
+//! # Storage Access
+//!
+//! The executor manages access to two primary storage layers:
+//! - `CurrentStorage`: For querying the latest state of the graph.
+//! - `HistoricalStorage`: For executing temporal queries (`AS OF`, `BETWEEN`) by reconstructing
+//!   historical snapshots using anchor+delta compression.
 
 mod iterators;
 mod results;

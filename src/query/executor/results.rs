@@ -78,6 +78,10 @@ impl EntityResult {
 }
 
 /// A single row in query results.
+///
+/// `QueryRow` is the fundamental unit of data flowing through the `ResultIterator` pipeline.
+/// It wraps the primary entity (node or edge) along with optional metadata like vector similarity
+/// scores, traversal paths, and temporal timestamps.
 #[derive(Debug, Clone)]
 pub struct QueryRow {
     /// The primary entity (node or edge)
@@ -144,10 +148,16 @@ impl QueryRow {
     }
 }
 
-/// Collected query results.
+/// Collected query results stream.
 ///
-/// This wraps a result iterator and provides convenience methods
-/// for collecting and processing results.
+/// Wraps a `ResultIterator` and provides convenience methods for consuming the
+/// stream and extracting specific data (e.g., `collect_nodes`, `collect_structured`).
+///
+/// # Bolt Optimization
+///
+/// Many methods on `QueryResults` (such as `collect_nodes`) use zero-allocation techniques.
+/// Instead of collecting all `QueryRow` objects into a large intermediate `Vec`, they
+/// consume the iterator directly, extracting only the requested data into a pre-allocated vector.
 pub struct QueryResults {
     iterator: Box<dyn ResultIterator>,
 }
@@ -269,8 +279,8 @@ impl Iterator for QueryResults {
 ///
 /// Unlike `QueryResults` which provides streaming access through an iterator,
 /// `QueryResult` is a concrete struct that holds all results in structured vectors.
-/// This is useful for batch operations or when you want to inspect all results
-/// with their associated metadata at once.
+/// This columnar format is highly efficient for batch operations, serialization,
+/// and inspecting all results with their associated metadata at once.
 ///
 /// # Example
 ///
