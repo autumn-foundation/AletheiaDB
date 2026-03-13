@@ -706,4 +706,121 @@ mod sentry_tests {
         // Case 4: Both mismatch (False)
         assert!(!edge.connects(other, other));
     }
+
+    #[test]
+    fn test_node_get_property_exact() {
+        // 🛡️ Sentry Test: Verify Node::get_property returns exact properties.
+        let props = PropertyMapBuilder::new().insert("age", 30i64).build();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // Positive case
+        let prop = node.get_property("age").expect("Property should exist");
+        assert_eq!(prop.as_int(), Some(30));
+
+        // Negative case
+        assert!(node.get_property("name").is_none());
+        assert!(node.get_property("").is_none());
+    }
+
+    #[test]
+    fn test_edge_get_property_exact() {
+        // 🛡️ Sentry Test: Verify Edge::get_property returns exact properties.
+        let props = PropertyMapBuilder::new().insert("weight", 2.5f64).build();
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // Positive case
+        let prop = edge.get_property("weight").expect("Property should exist");
+        assert_eq!(prop.as_float(), Some(2.5));
+
+        // Negative case
+        assert!(edge.get_property("distance").is_none());
+        assert!(edge.get_property("").is_none());
+    }
+
+    #[test]
+    fn test_node_has_label_exact() {
+        // 🛡️ Sentry Test: Verify Node::has_label boundary conditions
+        let label1 = GLOBAL_INTERNER.intern("Person").unwrap();
+        let label2 = GLOBAL_INTERNER.intern("Animal").unwrap();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label1,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(node.has_label(label1));
+        assert!(!node.has_label(label2));
+    }
+
+    #[test]
+    fn test_edge_has_label_exact() {
+        // 🛡️ Sentry Test: Verify Edge::has_label boundary conditions
+        let label1 = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let label2 = GLOBAL_INTERNER.intern("LIKES").unwrap();
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label1,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(edge.has_label(label1));
+        assert!(!edge.has_label(label2));
+    }
+
+    #[test]
+    fn test_node_has_label_str_exact() {
+        // 🛡️ Sentry Test: Verify Node::has_label_str boundary conditions exactly.
+        // This targets mutants returning hardcoded `true` or `false`.
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(node.has_label_str("Person"));
+        assert!(!node.has_label_str("Animal"));
+        assert!(!node.has_label_str(""));
+        assert!(!node.has_label_str("person")); // Case sensitive
+    }
+
+    #[test]
+    fn test_edge_has_label_str_exact() {
+        // 🛡️ Sentry Test: Verify Edge::has_label_str boundary conditions exactly.
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(edge.has_label_str("KNOWS"));
+        assert!(!edge.has_label_str("LIKES"));
+        assert!(!edge.has_label_str(""));
+        assert!(!edge.has_label_str("knows")); // Case sensitive
+    }
 }
