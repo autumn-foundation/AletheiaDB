@@ -159,6 +159,9 @@ pub mod kairos;
 /// Kaleidoscope: Semantic Force-Directed Layout Engine.
 pub mod kaleidoscope;
 #[cfg(feature = "nova")]
+/// Nexus: Semantic Center of Mass Engine.
+pub mod nexus;
+#[cfg(feature = "nova")]
 /// Prism: Semantic Spectroscopy for Vectors.
 pub mod prism;
 #[cfg(feature = "nova")]
