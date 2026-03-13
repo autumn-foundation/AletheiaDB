@@ -1551,6 +1551,16 @@ mod sentinel_id_generator_tests {
     use super::*;
 
     #[test]
+    fn test_tx_id_generator_next_mutant_kill() {
+        let generator = TxIdGenerator::new();
+        let id1 = generator.next();
+        let id2 = generator.next();
+        assert_ne!(id1, TxId::new(0)); // Kills replace with Default::default()
+        assert_ne!(id2, TxId::new(0)); // Kills replace with Default::default()
+        assert_eq!(id1.as_u64() + 1, id2.as_u64()); // Kills replace + with - or *
+    }
+
+    #[test]
     fn test_id_generator_current_approximate_exhaustive() {
         let generator = IdGenerator::with_start(42);
 
