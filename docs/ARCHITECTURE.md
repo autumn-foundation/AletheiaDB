@@ -1666,3 +1666,44 @@ for row in result {
 - [XTDB Bi-temporality](https://v1-docs.xtdb.com/concepts/bitemporality/)
 - [Temporal Database Concepts](https://en.wikipedia.org/wiki/Temporal_database)
 - [Rust Performance Book](https://nnethercote.github.io/perf-book/)
+
+### Extended Cognitive Architecture
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class FossilDetector {
+            +detect_fossils(time_window)
+        }
+        class TemporalDiffEngine {
+            +compute_diff(t1, t2)
+        }
+        class ArchetypeEngine {
+            +extract_concept(nodes)
+        }
+        class EntanglementDetector {
+            +measure_entanglement(time_window)
+        }
+        class AuraEngine {
+            +calculate_aura(node)
+        }
+        class TemporalNarrativeGenerator {
+            +generate_narrative(node)
+        }
+        class SemanticNavigator {
+            +find_semantic_path(start, goal)
+        }
+        class ParadoxEngine {
+            +detect_paradoxes()
+        }
+        class GraphContextBuilder {
+            +build_context(node)
+        }
+        class MosaicEngine {
+            +compositional_search(query_vector)
+        }
+        class SybilEngine {
+            +simulate_propagation(seed, steps)
+        }
+    }
+```
