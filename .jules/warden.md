@@ -33,3 +33,6 @@
 2024-XX-XX - [Warden: CSR Adjacency Index Vulnerability]
 **Threat:** `AdjacencyIndex::import_csr` did not validate that `node_ids` is sorted, and did not validate that `offsets` is monotonically increasing. It also didn't validate that the first offset is `0`. This allows a maliciously constructed CSR payload to cause OOB reads (Denial of Service) when `get_adjacency` is called, due to `start > end` or `end > edges.len()` when slicing the `edges` array.
 **Defense:** Added rigorous validation in `validate_csr_invariants` to ensure `node_ids` is strictly sorted (no duplicates), `offsets` begins with `0`, and is monotonically increasing.
+**2024-10-08 - [AdjacencyIndex Panic DoS]**
+**Threat:** A panic vulnerability (`.unwrap()`) in `AdjacencyIndex::import_csr` could be triggered on startup by corrupted or maliciously crafted index persistence files, resulting in an unhandled exception and a Denial of Service (DoS) preventing the database from starting.
+**Defense:** Changed the signature of `import_csr` to return a `Result` instead of panicking, and updated the persistence startup operation (`load_indexes_startup`) to catch this error gracefully and fallback to index compaction.

@@ -781,7 +781,7 @@ impl CurrentIndexes {
         incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
-    ) {
+    ) -> Result<(), String> {
         use crate::core::hasher::IdentityHasher;
         use std::collections::{HashMap, HashSet};
         use std::hash::BuildHasherDefault;
@@ -812,7 +812,7 @@ impl CurrentIndexes {
             outgoing_offsets.clone(),
             outgoing_edge_ids.clone(),
             &edges_map,
-        );
+        )?;
         self.outgoing.import_frozen_csr(Arc::new(outgoing_csr));
 
         // Rebuild edges map for incoming (maps edge_id to source, not target)
@@ -828,7 +828,7 @@ impl CurrentIndexes {
             incoming_offsets,
             incoming_edge_ids.clone(),
             &edges_map,
-        );
+        )?;
         self.incoming.import_frozen_csr(Arc::new(incoming_csr));
 
         // ===== Phase 7: Reconstruct Delta Buffer =====
@@ -858,6 +858,7 @@ impl CurrentIndexes {
                 );
             }
         }
+        Ok(())
     }
 }
 
