@@ -82,3 +82,11 @@
 ## 2025-03-05 - Logical vs Physical Plans and Iterator Performance
 **Confusion:** The difference between logical plans (`LogicalOp`) and physical plans (`PhysicalOp`) in the query engine was unclear. Additionally, the iterators used for execution (`ResultIterator` implementations) lacked clarity on their streaming architecture.
 **Clarification:** Documented `PhysicalOp` to explain its 1:1 mapping with iterators. Added struct-level documentation to `ResultIterator` implementations to clarify the pull-based, lazy execution model used during query processing.
+
+## 2025-03-13 - The Case of the Undocumented Observability Backend
+**Confusion:** The `PrometheusBackend` and core API methods like `Interner::resolve` and `TemporalContext::between` were entirely undocumented and lacked examples, leaving users to guess how to initialize metric scraping or query specific points in time.
+**Clarification:** Added comprehensive `///` documentation blocks and runnable doctests to `PrometheusBackend`, `resolve`, and `between` to demonstrate their purpose and usage explicitly without requiring source code inspection.
+
+## 2025-03-13 - The Case of the Undocumented Observability Backend
+**Confusion:** The `PrometheusBackend` and core API methods like `Interner::resolve` and `TemporalContext::between` were entirely undocumented and lacked examples, leaving users to guess how to initialize metric scraping or query specific points in time.
+**Clarification:** Added comprehensive `///` documentation blocks and runnable doctests to `PrometheusBackend`, `resolve`, and `between` to demonstrate their purpose and usage explicitly without requiring source code inspection.

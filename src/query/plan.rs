@@ -434,6 +434,32 @@ impl TemporalContext {
     ///
     /// **Deprecated**: Use `valid_time_between()` or `transaction_time_between()` for clarity.
     #[must_use]
+    /// Creates a temporal evaluation context restricted to a specific time range.
+    ///
+    /// This is an essential building block for historical analysis, allowing you to
+    /// evaluate a query within a window of validity, rather than just accessing the
+    /// latest (current) state.
+    ///
+    /// # Arguments
+    ///
+    /// * `range` - The `TimeRange` that defines the boundaries of validity.
+    ///
+    /// # Returns
+    ///
+    /// * `TemporalContext` configured for the specified range.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::temporal::TimeRange;
+    /// use aletheiadb::query::plan::TemporalContext;
+    ///
+    /// // Create a query context for the year 2025
+    /// let range = TimeRange::new(1735689600.into(), 1767225600.into()).unwrap();
+    /// let context = TemporalContext::between(range);
+    ///
+    /// assert_eq!(context.valid_time_between, Some(range));
+    /// ```
     #[deprecated(
         since = "0.1.0",
         note = "Use valid_time_between() or transaction_time_between() instead"

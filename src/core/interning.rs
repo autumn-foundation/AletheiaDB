@@ -221,6 +221,35 @@ impl StringInterner {
     ///
     /// - **For read-only access**: Use [`resolve_with`](Self::resolve_with) to avoid Arc cloning.
     /// - **When an owned Arc is needed**: Use this method (`resolve`).
+    ///
+    /// Resolves an `InternedString` back into its original `Arc<str>`.
+    ///
+    /// This is the primary method for getting a string value out of the intern pool
+    /// if you need ownership of the resulting string reference (e.g. to store it
+    /// somewhere else). If you just need temporary read access, consider using
+    /// [`get`](Self::get) or [`resolve_with`](Self::resolve_with) to avoid the overhead of cloning the `Arc`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The `InternedString` handle to resolve.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Arc<str>)` if the interned string exists in the pool.
+    /// * `None` if the interned string is invalid or has been purged.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::interning::StringInterner;
+    ///
+    /// let interner = StringInterner::new();
+    /// let id = interner.intern("hello");
+    ///
+    /// // Resolve the ID back to a string
+    /// let resolved = interner.resolve(id.unwrap()).unwrap();
+    /// assert_eq!(&*resolved, "hello");
+    /// ```
     #[deprecated(
         since = "0.1.0",
         note = "Use resolve_with() for read-only access; use resolve() only when an owned Arc<str> is strictly required"

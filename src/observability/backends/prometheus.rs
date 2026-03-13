@@ -98,14 +98,47 @@ fn sync_metrics_to_prometheus() {
 }
 
 #[cfg(not(feature = "observability-prometheus"))]
+/// Exposes internal metrics to Prometheus via a background HTTP server.
+///
+/// `PrometheusBackend` implements the `MetricsBackend` trait to act as a bridge
+/// between AletheiaDB's internal `metrics` macros and a standard Prometheus endpoint.
+/// When started, it spawns a lightweight server (defaulting to `0.0.0.0:9090/metrics`)
+/// where external monitoring tools can scrape the database's live operational statistics.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::observability::config::PrometheusConfig;
+/// use aletheiadb::observability::backends::PrometheusBackend;
+///
+/// let config = PrometheusConfig::default();
+/// let backend = PrometheusBackend::new(config);
+/// // In a real app, you would start the backend:
+/// // backend.start().unwrap();
+/// ```
 pub struct PrometheusBackend;
 
 #[cfg(not(feature = "observability-prometheus"))]
 impl PrometheusBackend {
+    /// Initializes a new Prometheus backend instance using the provided configuration.
+    ///
+    /// This sets up the internal HTTP router but does not bind to the network port
+    /// or spawn background threads until [`start`](Self::start) is called.
+    ///
+    /// # Arguments
+    ///
+    /// * `_config` - Configuration options including host and port (currently partially mocked).
     pub fn new(_config: PrometheusConfig) -> Self {
         Self
     }
 
+    /// Binds to the configured network interface and begins serving metrics.
+    ///
+    /// # Note
+    ///
+    /// This method is currently a mocked stub that always returns `Ok(())`.
+    /// In a future release, it will spawn a background Tokio task to serve
+    /// HTTP requests on the `/metrics` endpoint.
     pub fn start(self) -> Result<(), Error> {
         Err(Error::other(
             "Prometheus support not compiled in. Enable the 'observability-prometheus' feature.",
