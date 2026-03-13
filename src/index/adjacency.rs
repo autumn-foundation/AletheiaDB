@@ -439,8 +439,11 @@ impl AdjacencyIndex {
 
     /// Get total number of edges in the index.
     ///
-    /// Returns the exact size of the underlying flat CSR edges array.
-    /// Because the array is flat, this is an O(1) operation.
+    /// Retrieves the exact size of the underlying flat CSR edges array.
+    /// Because the index stores edges sequentially in a single contiguous block
+    /// of memory (the Compressed Sparse Row architecture), determining the total
+    /// edge count avoids any iteration or pointer chasing. This makes it an
+    /// extremely cheap `O(1)` operation.
     ///
     /// ## Examples
     ///
@@ -515,9 +518,13 @@ impl AdjacencyIndex {
 
     /// Get the number of nodes with outgoing edges.
     ///
-    /// Returns the exact size of the underlying CSR `node_ids` array.
-    /// Because the array only stores source nodes, this reflects the number
-    /// of unique nodes with an out-degree > 0. This is an O(1) operation.
+    /// Retrieves the exact size of the underlying CSR `node_ids` array.
+    ///
+    /// In a CSR graph, nodes that do not possess any outgoing edges are not allocated
+    /// a dedicated index slot in the sparse array structure in order to save memory.
+    /// Therefore, this method specifically reflects the number of unique nodes acting
+    /// as "sources" (out-degree > 0), rather than the total number of nodes in the database.
+    /// This is an `O(1)` operation.
     ///
     /// ## Examples
     ///

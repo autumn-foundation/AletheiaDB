@@ -203,13 +203,44 @@ pub trait ReadOps {
 
     /// Find nodes by label and property value.
     ///
-    /// Returns the IDs of all nodes with the given label whose specified property
-    /// equals the given value. Only nodes visible in the current snapshot are returned.
+    /// This method is a targeted scan that retrieves the [`NodeId`]s of all nodes
+    /// matching the given label whose specified property strictly equals the given value.
+    /// It respects the snapshot isolation of the current transaction, meaning it only
+    /// returns nodes that were visible when this read transaction began.
     ///
     /// # Performance
     ///
     /// - **Time**: O(N) where N = nodes with the given label
-    /// - **Space**: O(M) where M = number of matching nodes
+    /// - **Space**: O(M) where M = matching nodes (allocates a Vec for results)
+    ///
+    /// *Note:* This operation currently performs a linear scan over all nodes with the
+    /// specified label. For highly selective queries on large datasets, this may be slow.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::{ReadOps, WriteOps};
+    /// # use aletheiadb::core::property::PropertyValue;
+    /// # use aletheiadb::core::error::Error;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// db.write(|tx| -> Result<(), Error> {
+    ///     tx.create_node("User", properties!{"status" => "active", "tier" => "pro"})?;
+    ///     tx.create_node("User", properties!{"status" => "inactive", "tier" => "free"})?;
+    ///     Ok(())
+    /// })?;
+    ///
+    /// db.read(|tx| -> Result<(), Error> {
+    ///     // Find all users who are currently active
+    ///     let active_val = PropertyValue::String("active".into());
+    ///     let active_users = tx.find_nodes_by_property("User", "status", &active_val);
+    ///     assert_eq!(active_users.len(), 1);
+    ///     Ok(())
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn find_nodes_by_property(
         &self,
         label: &str,

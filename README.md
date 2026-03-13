@@ -650,7 +650,7 @@ use aletheiadb::storage::wal::DurabilityMode;
 
 // Load from TOML file (requires file to exist)
 // let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
-// let db = AletheiaDB::with_unified_config(config);
+// let _db = AletheiaDB::with_unified_config(config);
 
 // Programmatic configuration
 let config = AletheiaDBConfig::builder()
@@ -799,6 +799,7 @@ db.write(|tx| {
 AletheiaDB includes an optional embedding generation system for semantic search:
 
 ```rust
+use aletheiadb::prelude::*;
 use aletheiadb::{AletheiaDB, properties};
 use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 use std::sync::Arc;
@@ -861,6 +862,7 @@ features = [
 **Basic usage:**
 
 ```rust
+use aletheiadb::prelude::*;
 // ⚠️ REQUIRES FEATURE: observability
 // [dependencies]
 // aletheiadb = { version = "0.1", features = ["observability"] }
