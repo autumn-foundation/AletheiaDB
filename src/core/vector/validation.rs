@@ -168,3 +168,96 @@ pub fn validate_vector_with_bounds(v: &[f32], max_dimension: usize) -> Result<()
     // Then validate contents
     validate_vector(v)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_vector_valid() {
+        assert!(validate_vector(&[]).is_ok());
+        assert!(validate_vector(&[1.0, 2.0, -3.5, 0.0]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_nan() {
+        let v = vec![1.0, f32::NAN, 3.0, f32::NAN];
+        let result = validate_vector(&v);
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::ContainsNaN { count: 2 }))
+        ));
+    }
+
+    #[test]
+    fn test_validate_vector_infinity() {
+        let v = vec![1.0, f32::INFINITY, f32::NEG_INFINITY];
+        let result = validate_vector(&v);
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::ContainsInfinity { count: 2 }))
+        ));
+    }
+
+    #[test]
+    fn test_validate_vector_nan_and_infinity() {
+        // NaN should be prioritized over Infinity
+        let v = vec![1.0, f32::NAN, f32::INFINITY];
+        let result = validate_vector(&v);
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::ContainsNaN { count: 1 }))
+        ));
+    }
+
+    #[test]
+    fn test_check_dimensions_match() {
+        let a = vec![1.0, 2.0];
+        let b = vec![3.0, 4.0];
+        let c = vec![1.0];
+
+        assert!(check_dimensions_match(&a, &b).is_ok());
+        assert!(check_dimensions_match(&[], &[]).is_ok());
+
+        let result = check_dimensions_match(&a, &c);
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::DimensionMismatch {
+                expected: 2,
+                actual: 1
+            }))
+        ));
+
+        let result_empty = check_dimensions_match(&a, &[]);
+        assert!(matches!(
+            result_empty,
+            Err(Error::Vector(VectorError::DimensionMismatch {
+                expected: 2,
+                actual: 0
+            }))
+        ));
+    }
+
+    #[test]
+    fn test_validate_vector_with_bounds() {
+        let valid = vec![1.0, 2.0];
+        assert!(validate_vector_with_bounds(&valid, 2).is_ok());
+        assert!(validate_vector_with_bounds(&valid, 10).is_ok());
+
+        let result_too_large = validate_vector_with_bounds(&valid, 1);
+        assert!(matches!(
+            result_too_large,
+            Err(Error::Vector(VectorError::DimensionTooLarge {
+                dimension: 2,
+                max_allowed: 1
+            }))
+        ));
+
+        let invalid = vec![1.0, f32::NAN];
+        let result_invalid = validate_vector_with_bounds(&invalid, 2);
+        assert!(matches!(
+            result_invalid,
+            Err(Error::Vector(VectorError::ContainsNaN { count: 1 }))
+        ));
+    }
+}

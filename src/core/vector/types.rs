@@ -100,3 +100,66 @@ impl From<VectorDimension> for usize {
         dim.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::vector::constants::MAX_VECTOR_DIMENSIONS;
+
+    #[test]
+    fn test_vector_dimension_new() {
+        let dim = VectorDimension::new(100);
+        assert_eq!(dim.0, 100);
+    }
+
+    #[test]
+    fn test_vector_dimension_as_usize() {
+        let dim = VectorDimension::new(100);
+        assert_eq!(dim.as_usize(), 100);
+    }
+
+    #[test]
+    fn test_vector_dimension_is_zero() {
+        assert!(VectorDimension::new(0).is_zero());
+        assert!(!VectorDimension::new(1).is_zero());
+    }
+
+    #[test]
+    fn test_vector_dimension_exceeds_max() {
+        assert!(!VectorDimension::new(MAX_VECTOR_DIMENSIONS - 1).exceeds_max());
+        assert!(!VectorDimension::new(MAX_VECTOR_DIMENSIONS).exceeds_max());
+        assert!(VectorDimension::new(MAX_VECTOR_DIMENSIONS + 1).exceeds_max());
+    }
+
+    #[test]
+    fn test_vector_dimension_fmt() {
+        let dim = VectorDimension::new(100);
+        assert_eq!(format!("{}", dim), "100");
+    }
+
+    #[test]
+    fn test_vector_dimension_from_usize() {
+        let dim: VectorDimension = 100.into();
+        assert_eq!(dim.0, 100);
+
+        let dim2 = VectorDimension::from(200);
+        assert_eq!(dim2.0, 200);
+    }
+
+    #[test]
+    fn test_usize_from_vector_dimension() {
+        let dim = VectorDimension::new(100);
+        let val: usize = dim.into();
+        assert_eq!(val, 100);
+
+        let val2 = usize::from(VectorDimension::new(200));
+        assert_eq!(val2, 200);
+    }
+
+    #[test]
+    fn test_vector_dimension_default() {
+        let dim = VectorDimension::default();
+        assert_eq!(dim.0, 0);
+        assert!(dim.is_zero());
+    }
+}
