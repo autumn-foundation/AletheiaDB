@@ -943,6 +943,7 @@ cargo run --example observability_demo --all-features
 - **[docs/adr/0022-multi-property-vector-index.md](docs/adr/0022-multi-property-vector-index.md)** - Multi-property vector indexes
 - **[docs/adr/0023-index-persistence-layer.md](docs/adr/0023-index-persistence-layer.md)** - Index persistence architecture
 - **[docs/adr/0024-hybrid-logical-clock-timestamps.md](docs/adr/0024-hybrid-logical-clock-timestamps.md)** - HLC timestamp design
+- **[docs/adr/0055-sharding-storage-simulation.md](docs/adr/0055-sharding-storage-simulation.md)** - Sharding storage simulation
 
 See `docs/adr/` for all architectural decisions.
 

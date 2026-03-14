@@ -1666,3 +1666,35 @@ for row in result {
 - [XTDB Bi-temporality](https://v1-docs.xtdb.com/concepts/bitemporality/)
 - [Temporal Database Concepts](https://en.wikipedia.org/wiki/Temporal_database)
 - [Rust Performance Book](https://nnethercote.github.io/perf-book/)
+
+### Sharding Simulation
+
+To evaluate sharding strategies and capacity requirements before deployment, AletheiaDB provides a Sharding Simulation component.
+
+```mermaid
+classDiagram
+    namespace Sharding {
+        class ShardingSimulation {
+            +run(strategy) SimulationResult
+        }
+        class SimulationResult {
+            +total_nodes: u64
+            +total_edges: u64
+            +cross_shard_edges: u64
+            +storage_analysis: StorageAnalysis
+            +report() String
+        }
+        class StorageAnalysis {
+            +base_storage_bytes: u64
+            +replication_overhead_bytes: u64
+            +total_storage_bytes: u64
+            +overhead_ratio: f64
+            +calculate()
+        }
+    }
+
+    ShardingSimulation --> SimulationResult : Produces
+    SimulationResult --> StorageAnalysis : Contains
+```
+
+This simulation analyzes graph topology (nodes, edges, domains) against different sharding strategies (Domain-Based, Hash-Based) to estimate edge cuts and storage overheads (e.g., edge replication penalties), enabling administrators to plan cluster capacity effectively.
