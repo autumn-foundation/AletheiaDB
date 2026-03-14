@@ -1,8 +1,47 @@
 //! Query Language Lexer
 //!
-//! Tokenizes AQL (Aletheia Query Language) input strings into a stream of tokens.
-//! This is the first stage of parsing - converting raw text into structured tokens
-//! that the parser can work with.
+//! Tokenizes AQL (Aletheia Query Language) input strings into a stream of [`Token`]s.
+//! This is the foundational stage of the query compilation pipeline—converting
+//! raw text (like `MATCH (n:Person) RETURN n`) into a structured stream of tokens
+//! that the [`Parser`](crate::query::parser::Parser) can interpret.
+//!
+//! # The Role of the Lexer
+//!
+//! The lexer strips away the "noise" of human formatting (whitespace, comments)
+//! and identifies the core grammatical components of AQL:
+//! - **Keywords**: `MATCH`, `WHERE`, `SIMILAR TO`, `AS OF`
+//! - **Operators**: `=`, `>`, `->`
+//! - **Literals**: `'Alice'`, `42`, `3.14`
+//! - **Identifiers and Parameters**: `n`, `Person`, `$embedding`
+//!
+//! By handling these low-level details, the lexer allows the parser to focus
+//! entirely on grammatical structure without worrying about string manipulation.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use aletheiadb::query::lexer::{Lexer, Token};
+//!
+//! // Raw AQL string
+//! let input = "MATCH (n) RETURN n";
+//!
+//! // Tokenize the input string
+//! let tokens = Lexer::tokenize(input).unwrap();
+//!
+//! // The lexer breaks the string into logical components
+//! assert_eq!(
+//!     tokens,
+//!     vec![
+//!         Token::Match,
+//!         Token::LeftParen,
+//!         Token::Identifier("n".to_string()),
+//!         Token::RightParen,
+//!         Token::Return,
+//!         Token::Identifier("n".to_string()),
+//!         Token::Eof,
+//!     ]
+//! );
+//! ```
 
 use std::fmt;
 
@@ -227,7 +266,27 @@ impl fmt::Display for Token {
 
 /// Error type for lexer errors.
 ///
-/// Indicates a syntax error or unexpected character encountered during tokenization.
+/// Indicates a failure during the tokenization process. This typically occurs when
+/// the input string contains invalid syntax that the lexer cannot resolve into a [`Token`].
+///
+/// Common causes include:
+/// - **Unexpected Characters**: Symbols that do not belong to the AQL grammar (e.g., `@`, `!`).
+/// - **Unterminated Strings**: A string literal missing its closing quote (e.g., `'hello`).
+/// - **Invalid Numbers**: Malformed numeric literals.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::lexer::Lexer;
+///
+/// // An unclosed string literal will cause a lexer error
+/// let result = Lexer::tokenize("MATCH (n {name: 'Alice})");
+///
+/// assert!(result.is_err());
+/// let err = result.unwrap_err();
+/// assert_eq!(err.message, "Unterminated string");
+/// assert_eq!(err.line, 1);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError {
     /// Error message describing what went wrong.
@@ -279,12 +338,17 @@ pub struct Lexer<'a> {
 impl<'a> Lexer<'a> {
     /// Create a new lexer for the given input.
     ///
+    /// Initializes the lexer state, pointing to the beginning of the input string.
+    ///
     /// # Examples
     ///
     /// ```rust
-    /// use aletheiadb::query::lexer::Lexer;
+    /// use aletheiadb::query::lexer::{Lexer, Token};
     ///
-    /// let _lexer = Lexer::new("MATCH (n)");
+    /// let mut lexer = Lexer::new("MATCH (n)");
+    ///
+    /// // The lexer is now ready to produce tokens one by one
+    /// assert_eq!(lexer.next_token().unwrap(), Token::Match);
     /// ```
     pub fn new(input: &'a str) -> Self {
         Lexer {
@@ -298,7 +362,8 @@ impl<'a> Lexer<'a> {
 
     /// Tokenize the entire input and return a vector of tokens.
     ///
-    /// This is a convenience method that creates a lexer and consumes it completely.
+    /// This is a convenience method that creates a lexer and consumes it completely
+    /// until it encounters the end of the file (`EOF`) or a lexer error.
     ///
     /// # Examples
     ///
@@ -306,7 +371,9 @@ impl<'a> Lexer<'a> {
     /// use aletheiadb::query::lexer::{Lexer, Token};
     ///
     /// let tokens = Lexer::tokenize("RETURN 42").unwrap();
-    /// assert_eq!(tokens.len(), 3); // RETURN, 42, EOF
+    ///
+    /// // The resulting vector always ends with an EOF token
+    /// assert_eq!(tokens.len(), 3);
     /// assert_eq!(tokens[0], Token::Return);
     /// assert_eq!(tokens[1], Token::IntegerLiteral(42));
     /// assert_eq!(tokens[2], Token::Eof);
@@ -329,19 +396,24 @@ impl<'a> Lexer<'a> {
 
     /// Get the next token from the input.
     ///
-    /// Returns [`Token::Eof`] when the end of input is reached.
+    /// Consumes characters from the input stream, skipping any whitespace and comments,
+    /// and constructs the next logical [`Token`].
+    ///
+    /// Returns [`Token::Eof`] when the end of the input string is reached.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use aletheiadb::query::lexer::{Lexer, Token};
     ///
-    /// let mut lexer = Lexer::new("MATCH");
-    /// let token = lexer.next_token().unwrap();
-    /// assert_eq!(token, Token::Match);
+    /// let mut lexer = Lexer::new("  MATCH -- a comment \n (n) ");
     ///
-    /// let eof = lexer.next_token().unwrap();
-    /// assert_eq!(eof, Token::Eof);
+    /// // Whitespace and comments are automatically skipped
+    /// assert_eq!(lexer.next_token().unwrap(), Token::Match);
+    /// assert_eq!(lexer.next_token().unwrap(), Token::LeftParen);
+    /// assert_eq!(lexer.next_token().unwrap(), Token::Identifier("n".to_string()));
+    /// assert_eq!(lexer.next_token().unwrap(), Token::RightParen);
+    /// assert_eq!(lexer.next_token().unwrap(), Token::Eof);
     /// ```
     pub fn next_token(&mut self) -> Result<Token, LexerError> {
         self.skip_whitespace_and_comments()?;

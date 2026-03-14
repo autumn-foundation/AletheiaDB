@@ -1,8 +1,19 @@
 //! Query Executor
 //!
-//! Executes physical query plans using a pull-based iterator model.
-//! The executor transforms physical operators into iterators that
-//! lazily produce results.
+//! Executes optimized physical query plans against the underlying storage.
+//!
+//! # The Pull-Based Iterator Model
+//!
+//! The executor uses a lazy, pull-based iteration strategy (often called the Volcano model).
+//! Instead of computing the entire result set at once, the executor transforms each
+//! [`PhysicalOp`](crate::query::planner::PhysicalOp) into a corresponding
+//! [`ResultIterator`](iterators::ResultIterator).
+//!
+//! When a user requests the next row from the top-level iterator, it "pulls" data from its
+//! children. This approach ensures:
+//! - **Minimal Memory Footprint**: Data is streamed row-by-row.
+//! - **Early Termination**: Operations like `LIMIT` can stop upstream execution immediately.
+//! - **Lazy Evaluation**: No work is performed until `.next()` is called.
 
 mod iterators;
 mod results;
@@ -25,17 +36,33 @@ pub use iterators::{
 };
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
-/// Configuration for query execution.
+/// Configuration for tuning query execution performance and limits.
+///
+/// This struct allows developers to adjust how the query engine utilizes
+/// system resources (memory, CPU threads) and enforce guardrails (timeouts).
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
     /// Maximum number of results to buffer before backpressure is applied.
-    /// Default is 10,000.
+    ///
+    /// *Why tune this?*
+    /// Large buffers consume more memory but can smooth out I/O latency spikes
+    /// during heavy queries. Decrease this on memory-constrained systems.
+    /// Default is `10,000`.
     pub max_buffer_size: usize,
-    /// Enable parallel execution of query operators (where applicable).
-    /// Default is false.
+
+    /// Enable parallel execution of query operators.
+    ///
+    /// *Why tune this?*
+    /// Enabling parallelism can significantly speed up massive table scans or complex
+    /// vector reranking, but at the cost of higher CPU utilization and thread contention.
+    /// Default is `false`.
     pub parallel: bool,
+
     /// Execution timeout in milliseconds.
-    /// 0 means no timeout. Default is 0.
+    ///
+    /// *Why tune this?*
+    /// Prevents "query of death" scenarios from hanging the database forever.
+    /// A value of `0` means no timeout. Default is `0`.
     pub timeout_ms: u64,
 }
 
@@ -166,12 +193,14 @@ impl QueryExecutor {
     ///     include_provenance: true,
     /// };
     ///
-    /// // 3. Execute
+    /// // 3. Execute - this converts the plan into an iterator pipeline,
+    /// // but doesn't fetch data yet!
     /// let results = executor.execute(plan).unwrap();
     ///
-    /// // 4. Iterate
+    /// // 4. Iterate - this is where data is actually pulled from storage
     /// for row in results {
-    ///     println!("Got row: {:?}", row);
+    ///     let row = row.unwrap();
+    ///     println!("Got entity: {:?}", row.entity);
     /// }
     /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {

@@ -44,8 +44,9 @@
 //! The parser is implemented as a recursive descent parser. It consumes a stream of `Token`s
 //! produced by the `Lexer`.
 //!
-//! - **Recursion Depth**: Limited to 100 to prevent stack overflow on deeply nested predicates.
-//! - **Error Handling**: Returns detailed `ParseError`s with position information to help users debug syntax errors.
+//! - **Recursion Depth**: The parser limits recursion depth to prevent stack overflow DoS attacks on deeply nested predicates.
+//! - **Error Handling**: Returns detailed [`ParseError`]s with position information to help users debug syntax errors.
+//! - **Operator Precedence**: Handled naturally through the recursive descent structure (e.g., `OR` expressions call `AND` expressions, which call `NOT`, ensuring correct boolean logic evaluation).
 
 use std::sync::Arc;
 
@@ -60,7 +61,27 @@ const MAX_RECURSION_DEPTH: usize = 100;
 /// Error type for parser errors.
 ///
 /// This error provides detailed information about what went wrong during parsing,
-/// including the position in the token stream and what was expected vs found.
+/// indicating that the sequence of tokens does not conform to the AQL grammar.
+///
+/// Parsing fails when:
+/// - **Missing Keywords**: E.g., Starting a query without `MATCH` or `SIMILAR TO`.
+/// - **Mismatched Punctuation**: E.g., Missing a closing parenthesis `)`.
+/// - **Unexpected Tokens**: E.g., Finding an identifier when a comparison operator is expected.
+/// - **Recursion Depth Exceeded**: Queries with excessive nesting that could cause stack overflows.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::parser::Parser;
+///
+/// // Missing closing parenthesis in node pattern
+/// let result = Parser::parse("MATCH (n:Person RETURN n");
+///
+/// assert!(result.is_err());
+/// let err = result.unwrap_err();
+/// // The parser expected a right parenthesis but found the RETURN keyword
+/// assert!(err.message.contains("Expected )"));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
     /// A descriptive error message explaining the failure.
@@ -132,11 +153,14 @@ impl Parser {
     /// ```rust
     /// use aletheiadb::query::parser::Parser;
     ///
-    /// let query = "MATCH (n:Person) RETURN n.name";
-    /// match Parser::parse(query) {
-    ///     Ok(ast) => println!("Successfully parsed query: {:?}", ast),
-    ///     Err(e) => eprintln!("Parse error: {}", e),
-    /// }
+    /// // A standard graph pattern match with a property filter
+    /// let query = "MATCH (n:Person) WHERE n.age > 21 RETURN n";
+    ///
+    /// let ast = Parser::parse(query).expect("Failed to parse valid query");
+    ///
+    /// // The resulting AST can be inspected
+    /// assert!(ast.return_clause.is_some());
+    /// assert!(ast.where_clause.is_some());
     /// ```
     pub fn parse(input: &str) -> Result<QueryAst, ParseError> {
         let tokens = Lexer::tokenize(input)?;
