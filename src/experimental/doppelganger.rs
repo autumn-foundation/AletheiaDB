@@ -242,9 +242,13 @@ mod tests {
         let db = AletheiaDB::with_unified_config(config)?;
 
         // Vectors
-        let vector_positive = PropertyValue::Vector(std::sync::Arc::from(vec![1.0, 1.0, 1.0].into_boxed_slice())); // Vector A
-        let vector_similar = PropertyValue::Vector(std::sync::Arc::from(vec![0.9, 0.9, 1.0].into_boxed_slice())); // Vector B (similar to A)
-        let vector_negative = PropertyValue::Vector(std::sync::Arc::from(vec![-1.0, -1.0, -1.0].into_boxed_slice())); // Vector C (opposite of A)
+        let vector_positive =
+            PropertyValue::Vector(std::sync::Arc::from(vec![1.0, 1.0, 1.0].into_boxed_slice())); // Vector A
+        let vector_similar =
+            PropertyValue::Vector(std::sync::Arc::from(vec![0.9, 0.9, 1.0].into_boxed_slice())); // Vector B (similar to A)
+        let vector_negative = PropertyValue::Vector(std::sync::Arc::from(
+            vec![-1.0, -1.0, -1.0].into_boxed_slice(),
+        )); // Vector C (opposite of A)
 
         // Create nodes
         let (n1, n2, n3) = db.write(|tx| {
@@ -275,11 +279,31 @@ mod tests {
             // Setup structurally identical networks for n1, n2, n3
             // Everyone connects to peer1, peer2, peer3
             for src in [n1, n2, n3] {
-                tx.create_edge(src, peer1, "KNOWS", crate::core::property::PropertyMap::default())?;
-                tx.create_edge(src, peer2, "KNOWS", crate::core::property::PropertyMap::default())?;
-                tx.create_edge(src, peer3, "KNOWS", crate::core::property::PropertyMap::default())?;
+                tx.create_edge(
+                    src,
+                    peer1,
+                    "KNOWS",
+                    crate::core::property::PropertyMap::default(),
+                )?;
+                tx.create_edge(
+                    src,
+                    peer2,
+                    "KNOWS",
+                    crate::core::property::PropertyMap::default(),
+                )?;
+                tx.create_edge(
+                    src,
+                    peer3,
+                    "KNOWS",
+                    crate::core::property::PropertyMap::default(),
+                )?;
                 // And receive a connection from peer1
-                tx.create_edge(peer1, src, "FOLLOWS", crate::core::property::PropertyMap::default())?;
+                tx.create_edge(
+                    peer1,
+                    src,
+                    "FOLLOWS",
+                    crate::core::property::PropertyMap::default(),
+                )?;
             }
 
             Ok::<_, Error>((n1, n2, n3))
