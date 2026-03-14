@@ -199,6 +199,15 @@ pub struct WriteBuffer {
 
 impl WriteBuffer {
     /// Create a new empty write buffer with default capacity limit
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::WriteBuffer;
+    ///
+    /// let buffer = WriteBuffer::new();
+    /// assert!(buffer.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self::with_max_operations(DEFAULT_MAX_OPERATIONS)
     }
@@ -239,6 +248,31 @@ impl WriteBuffer {
     /// Add a write operation to the buffer
     ///
     /// Returns an error if the maximum number of operations is exceeded (DoS protection).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::{WriteBuffer, BufferedWrite};
+    /// use aletheiadb::core::id::{NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::temporal::time;
+    ///
+    /// let mut buffer = WriteBuffer::new();
+    /// let node_id = NodeId::new(1).unwrap();
+    /// let version_id = VersionId::new(1).unwrap();
+    /// let label = GLOBAL_INTERNER.intern("Person").unwrap();
+    ///
+    /// buffer.add(BufferedWrite::CreateNode {
+    ///     node_id,
+    ///     version_id,
+    ///     label,
+    ///     properties: PropertyMap::new(),
+    ///     valid_from: time::now(),
+    /// }).unwrap();
+    ///
+    /// assert_eq!(buffer.len(), 1);
+    /// ```
     pub fn add(&mut self, write: BufferedWrite) -> Result<()> {
         // Check capacity limit (DoS protection)
         if self.operations.len() >= self.max_operations {

@@ -24,6 +24,10 @@ use crate::storage::historical::HistoricalStorage;
 use super::results::{EntityId, EntityResult, QueryRow};
 
 /// Trait for result iteration (pull-based).
+///
+/// Query execution uses a pull-based iterator model, where each physical
+/// operator is implemented as an iterator. Calling `next()` pulls results
+/// sequentially through the pipeline.
 pub trait ResultIterator: Send {
     /// Get the next result row
     fn next(&mut self) -> Option<Result<QueryRow>>;
@@ -35,6 +39,8 @@ pub trait ResultIterator: Send {
 }
 
 /// Empty iterator that produces no results.
+///
+/// Used for query plans that evaluate to empty at planning time.
 pub struct EmptyIterator;
 
 impl ResultIterator for EmptyIterator {
@@ -47,7 +53,22 @@ impl ResultIterator for EmptyIterator {
     }
 }
 
-/// Iterator for direct node lookups.
+/// Direct node lookup iterator.
+///
+/// Yields nodes corresponding to a specific list of IDs. O(1) per node.
+///
+/// # Examples
+///
+/// ```ignore
+/// use aletheiadb::query::executor::NodeLookupIterator;
+/// use aletheiadb::storage::current::CurrentStorage;
+/// use aletheiadb::core::id::NodeId;
+/// use std::sync::Arc;
+///
+/// // Assuming `current` is a valid Arc<CurrentStorage>
+/// let node_ids = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+/// let iter = NodeLookupIterator::new(node_ids, current);
+/// ```
 pub struct NodeLookupIterator {
     node_ids: std::vec::IntoIter<NodeId>,
     current: Arc<CurrentStorage>,
@@ -104,6 +125,21 @@ impl ResultIterator for NodeLookupIterator {
 /// - Streaming iteration using channels (`std::sync::mpsc`)
 /// - Chunked iteration to limit memory per batch
 /// - Index-based iteration that doesn't require holding locks
+///
+/// Sequential node scan iterator.
+///
+/// Scans through nodes sequentially, optionally applying a label filter.
+///
+/// # Examples
+///
+/// ```ignore
+/// use aletheiadb::query::executor::NodeScanIterator;
+/// use aletheiadb::storage::current::CurrentStorage;
+/// use std::sync::Arc;
+///
+/// // Assuming `current` is a valid Arc<CurrentStorage>
+/// let iter = NodeScanIterator::new(Some("Person".to_string()), current);
+/// ```
 pub struct NodeScanIterator {
     label: Option<String>,
     current: Arc<CurrentStorage>,
@@ -864,6 +900,10 @@ impl ResultIterator for TraversalIterator {
 /// // Iterate results
 /// // for row in filter_iter { ... }
 /// ```
+///
+/// Iterator that applies a predicate filter.
+///
+/// Pulls rows from the input and yields only those matching the predicate.
 pub struct FilterIterator {
     input: Box<dyn ResultIterator>,
     predicate: Predicate,

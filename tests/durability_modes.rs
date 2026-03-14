@@ -1321,7 +1321,7 @@ fn test_recovery_after_concurrent_writes() {
                         let lsn = loop {
                             match wal_ref.append_async(operation.clone()) {
                                 Ok(lsn) => break lsn,
-                                Err(e) if retries < 10 => {
+                                Err(_e) if retries < 10 => {
                                     retries += 1;
                                     std::thread::sleep(std::time::Duration::from_millis(1));
                                 }

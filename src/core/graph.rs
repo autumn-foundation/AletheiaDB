@@ -621,6 +621,25 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_matches_label_mismatch() {
+        // 🛡️ Sentry Test: Verify `matches_label` correctly returns false when checking a valid
+        // label against a different string. This kills the mutant replacing `matches_label`
+        // return value with `true`.
+        let label = GLOBAL_INTERNER.intern("User").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            !node.has_label_str("Admin"),
+            "matches_label should return false when checking against a different label"
+        );
+    }
+
+    #[test]
     fn test_node_with_metadata() {
         // 🛡️ Sentry Test: Verify Node::with_metadata correctly stores metadata.
         // This targets mutants where the metadata argument is ignored and replaced with default.

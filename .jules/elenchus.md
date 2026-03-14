@@ -307,20 +307,35 @@
 
 ## [Predicate Pushdown Weak Assertions]
 **Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** The doc test example in `src/query/planner/rules/predicate_pushdown.rs` contained a weak assertion using `matches!`, which failed to verify the full AST structure after optimization. Furthermore, several unit tests (`test_push_filter_below_vector_rank_no_limit`, `test_push_filter_below_sort`, `test_binary_op_recursion_logic`, and `test_binary_op_partial_optimization`) included redundant and weak `assert!(result.is_some())` assertions.
+**Evidence:** The doc test used `assert!(matches!(optimized_plan.root, LogicalOp::Unary { op: UnaryOp::Sort { .. }, input: _ }));`, only verifying the root node type. The unit tests redundantly asserted `is_some()` before checking equality.
+**Recommendation:** Fixed the doc test to use an exact `expected_plan` and `assert_eq!(optimized_plan, expected_plan)` for complete structural verification (condensing the tree into single line structure to avoid Codecov issues). Updated the four unit tests to replace `assert!(result.is_some())` and `assert_eq!(result.unwrap(), expected_plan)` with a single robust `assert_eq!(result, Some(expected_plan))` check.
+
+**[Property Serialization Verification]**
+**Module:** `aletheiadb::core::property`
 **Severity:** 🟡 Suspect
-**Finding:** Tests such as `test_push_filter_below_vector_rank_no_limit`, `test_push_filter_below_sort`, `test_binary_op_recursion_logic`, and `test_binary_op_partial_optimization` use weak assertions. They verify `result.is_some()` but only use generic `matches!` on the top level or a few levels of the resulting tree.
-**Evidence:** In `test_push_filter_below_sort`:
-```rust
-        let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
-        let new_plan = result.unwrap();
-        assert!(matches!(
-            new_plan.root,
-            LogicalOp::Unary {
-                op: UnaryOp::Sort { .. },
-                ..
-            }
-        ));
-```
-This asserts only that the root became a `Sort`. It doesn't verify that the *child* of `Sort` actually became the `Filter`, or that the parameters of the `Sort` operator remain correct, or that the `Filter` actually wrapped the original `Scan`.
-**Recommendation:** Replace weak `matches!` tests with exact tree matching (using `assert_eq!`) if `LogicalOp` implements `Eq`, or exhaustively destructure the AST down to the leaf nodes and assert all fields are correct.
+**Finding:** Tautological tests `test_property_map_serialized_size` and `test_serialized_size_matches_actual` simply compared the result of `serialized_size()` against the length of `.serialize().unwrap()`. These tests would pass even if both functions were entirely wrong, so long as they were wrong in the exact same way.
+**Evidence:** The assertions only asserted `assert_eq!(predicted, actual)`, offering no ground truth validation against the spec.
+**Recommendation:** Refactored tests to verify against explicitly hardcoded byte-size calculations derived from the data structure format.
+
+**[Heap Size Estimation Weakness]**
+**Module:** `aletheiadb::core::property`
+**Severity:** 🟡 Suspect
+**Finding:** Heap size estimation tests (`test_property_map_estimated_heap_size_with_values` and `test_property_map_estimated_heap_size_with_vector`) checked that the delta in heap size after adding an element was correct, but did not assert a minimum bound on the total size itself based on standard type memory overhead (e.g. `size_of::<(PropertyKey, PropertyValue)>()`).
+**Evidence:** The original test only proved that the size *increased* by the dynamic portion, without proving that the *base allocation* (capacity overhead) was appropriately tracked.
+**Recommendation:** Strengthened assertions to guarantee total `estimated_heap_size` is greater than or equal to the explicit dynamic payload size plus the `HashMap` capacity overhead calculated via `std::mem::size_of`.
+
+**[Limit Boundary Enforcement Testing]**
+**Module:** `aletheiadb::core::property`
+**Severity:** 🟡 Suspect
+**Finding:** While logic checking for `MAX_ARRAY_ELEMENTS` and `MAX_PROPERTY_MAP_CAPACITY` existed, the tests validating these boundaries were weak. They didn't explicitly verify the exact limit vs. limit + 1 boundary conditions correctly to protect against off-by-one regressions.
+**Evidence:** `test_array_max_elements` checked behavior, but the new tests specifically test exact size rejection correctly and verify against `MAX_ARRAY_ELEMENTS + 1`.
+**Recommendation:** Modified the boundary tests to ensure exact limits act as expected, specifically focusing on `MAX_ARRAY_ELEMENTS + 1`.
+
+**[IdentityHasher Tautological Fallback Audit]**
+**Module:** `aletheiadb::core::hasher`
+**Severity:** 🔴 Critical
+**Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
+**Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
+**Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.

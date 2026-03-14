@@ -331,7 +331,7 @@ mod sentry_tests {
         // Create the original entry
         // checksum is initially 0
         let mut original_entry = WalEntry::new(lsn, op);
-        // Fix the timestamp to something deterministic for the test
+        // Set the timestamp to something deterministic for the test
         original_entry.timestamp = crate::core::hlc::HybridTimestamp::new(2_000_000, 20).unwrap();
 
         // Serialize

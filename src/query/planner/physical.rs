@@ -323,6 +323,27 @@ fn format_memory(bytes: usize) -> String {
 }
 
 /// Physical operators that execute against storage.
+///
+/// Unlike `LogicalOp`s which describe the intent of the query, `PhysicalOp`s
+/// specify exactly how the data will be accessed and processed. They map 1:1
+/// with the iterators in `src/query/executor/iterators.rs`.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::NodeId;
+/// use aletheiadb::query::planner::physical::PhysicalOp;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // A node lookup operator directly fetches specific nodes by ID.
+/// let op = PhysicalOp::NodeLookup {
+///     node_ids: vec![NodeId::new(42)?],
+/// };
+///
+/// assert_eq!(op.name(), "NodeLookup");
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub enum PhysicalOp {
     // === Scan Operators ===

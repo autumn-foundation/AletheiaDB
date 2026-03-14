@@ -11,7 +11,7 @@ use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyValue;
-use crate::core::temporal::time;
+
 use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
@@ -50,6 +50,14 @@ pub struct ReadTransaction {
 
 impl ReadTransaction {
     /// Create a new read-only transaction
+    ///
+    /// # Arguments
+    ///
+    /// * `tx_id` - The unique identifier assigned to this transaction
+    /// * `snapshot` - The isolated view of the database state captured at the start of this transaction
+    /// * `current` - Reference to the current (latest) graph state storage
+    /// * `visibility_manager` - Manages which versions of entities are visible to this transaction
+    /// * `historical` - Reference to the historical graph state storage for resolving older versions
     pub(crate) fn new(
         tx_id: TxId,
         snapshot: TransactionSnapshot,
@@ -59,7 +67,7 @@ impl ReadTransaction {
     ) -> Self {
         ReadTransaction {
             tx_id,
-            start_timestamp: time::now(),
+            start_timestamp: snapshot.snapshot_timestamp,
             snapshot,
             current,
             visibility_manager,
@@ -67,7 +75,27 @@ impl ReadTransaction {
         }
     }
 
-    /// Get transaction metadata
+    /// Get transaction metadata.
+    ///
+    /// This metadata provides information about the transaction's lifecycle,
+    /// such as its unique ID, start timestamp, and current state. Since this
+    /// is a read-only transaction, the state will always be `Active` until dropped,
+    /// and the commit timestamp will be `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let tx = db.read_transaction()?;
+    /// let meta = tx.metadata();
+    ///
+    /// assert!(meta.is_read_only);
+    /// assert_eq!(meta.tx_id, tx.tx_id());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn metadata(&self) -> TxMetadata {
         TxMetadata {
             tx_id: self.tx_id,
@@ -78,7 +106,23 @@ impl ReadTransaction {
         }
     }
 
-    /// Get transaction ID
+    /// Get transaction ID.
+    ///
+    /// Returns the unique identifier assigned to this transaction when it was created.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let tx = db.read_transaction()?;
+    /// let id = tx.tx_id();
+    ///
+    /// println!("Running in transaction context: {:?}", id);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn tx_id(&self) -> TxId {
         self.tx_id
     }
@@ -309,6 +353,7 @@ mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
+
     use parking_lot::RwLock;
     use std::collections::HashSet;
     use std::sync::Arc;

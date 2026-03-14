@@ -1039,10 +1039,19 @@ impl CurrentStorage {
 
         // Find min key alphabetically
         // Note: DashMap iteration order is not guaranteed, so we must scan all keys
+        // We use `.fold` instead of `.min_by` to prevent deadlocks. `.min_by` holds
+        // multiple `RefMulti` read guards across iteration steps, which can block
+        // concurrent writers indefinitely. `.fold` immediately drops the guard for
+        // each element after extracting the necessary data.
         self.vector_indexes
             .iter()
-            .min_by(|a, b| a.key().cmp(b.key()))
-            .map(|r| r.key().clone())
+            .fold(None, |min: Option<String>, current| {
+                let key = current.key();
+                match min {
+                    Some(m) if m.as_str() <= key.as_str() => Some(m),
+                    _ => Some(key.clone()),
+                }
+            })
     }
 
     /// Get or create filter statistics for a label (Issue #334).
@@ -1910,8 +1919,19 @@ impl CurrentStorage {
     /// Returns an iterator of (interned_label, count) pairs.
     /// Used by the query planner for cost estimation and cardinality estimation.
     pub fn label_counts(&self) -> Vec<(crate::core::interning::InternedString, usize)> {
+        use crate::core::hasher::IdentityHasher;
         use std::collections::HashMap;
-        let mut counts: HashMap<crate::core::interning::InternedString, usize> = HashMap::new();
+        use std::hash::BuildHasherDefault;
+
+        // ⚡ Bolt: Use `IdentityHasher` instead of default SipHash.
+        // `InternedString` is already a high-quality unique integer ID (u32),
+        // so computing SipHash per node (potentially millions) is pure overhead.
+        // Bypassing hashing reduces cardinality estimation time significantly.
+        let mut counts: HashMap<
+            crate::core::interning::InternedString,
+            usize,
+            BuildHasherDefault<IdentityHasher>,
+        > = HashMap::default();
         for node in self.indexes.iter_nodes() {
             *counts.entry(node.label).or_insert(0) += 1;
         }

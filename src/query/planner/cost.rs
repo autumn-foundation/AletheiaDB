@@ -198,6 +198,18 @@ impl Default for OperationCosts {
 }
 
 /// Cost model for estimating query execution costs.
+///
+/// Contains weights and base costs for CPU, I/O, memory, and network operations.
+/// Different models can be used to optimize for different environments (e.g., low-latency vs high-throughput).
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::query::planner::cost::CostModel;
+///
+/// let model = CostModel::new();
+/// assert_eq!(model.weights.cpu_weight, 1.0);
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct CostModel {
     /// Cost weights for combining different factors

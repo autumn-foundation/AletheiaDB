@@ -142,6 +142,17 @@ impl CompressionAlgorithm {
 }
 
 /// Configuration for cold storage.
+///
+/// Configures behavior like compression, batch sizes, and durability.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::storage::redb_cold_storage::{ColdStorageConfig, CompressionAlgorithm};
+///
+/// let config = ColdStorageConfig::default();
+/// assert!(matches!(config.compression, CompressionAlgorithm::Zstd));
+/// ```
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
@@ -173,6 +184,19 @@ impl Default for ColdStorageConfig {
 }
 
 /// Statistics for cold storage operations.
+///
+/// Tracks bytes written, read, compression ratios, and error counts.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::storage::redb_cold_storage::ColdStorageStats;
+///
+/// let mut stats = ColdStorageStats::default();
+/// stats.bytes_written_raw = 1000;
+/// stats.bytes_written_compressed = 500;
+/// assert_eq!(stats.compression_ratio(), 2.0);
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ColdStorageStats {
     /// Total number of node versions stored.
@@ -302,6 +326,20 @@ fn map_compaction_error(
 }
 
 /// Configuration for Redb cold storage.
+///
+/// Used to tune the internal Redb environment and setup cache sizes,
+/// compression, and checksumming.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::storage::redb_cold_storage::{RedbConfig, CompressionAlgorithm};
+///
+/// let config = RedbConfig::new()
+///     .compression(CompressionAlgorithm::Fast)
+///     .enable_checksums(true)
+///     .cache_size_bytes(1024 * 1024 * 64); // 64MB cache
+/// ```
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]

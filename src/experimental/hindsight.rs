@@ -24,6 +24,10 @@ use crate::core::temporal::Timestamp;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A scenario representing a set of hypothetical changes to the graph.
+///
+/// This structure holds all the virtual modifications (additions, updates, deletions)
+/// that are applied as an overlay on top of the base database state.
+
 #[derive(Debug, Clone)]
 pub struct Scenario {
     /// Nodes added in this scenario.
@@ -70,6 +74,10 @@ impl Scenario {
 }
 
 /// A report of the differences between the scenario and the base state.
+///
+/// This allows you to inspect exactly what changes would be made if the scenario
+/// were committed to the actual database.
+
 #[derive(Debug, Clone)]
 pub struct HindsightDiff {
     /// Nodes added in this scenario.
@@ -82,6 +90,30 @@ pub struct HindsightDiff {
 }
 
 /// The Hindsight engine wrapping the database and a scenario.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> aletheiadb::core::error::Result<()> {
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::hindsight::Hindsight;
+/// use aletheiadb::core::property::PropertyMapBuilder;
+///
+/// let db = AletheiaDB::new()?;
+/// let mut engine = Hindsight::new(&db);
+///
+/// // Simulate adding a new node without modifying the actual database
+/// let props = PropertyMapBuilder::new().build();
+/// let v_id = engine.add_node("TestLabel", props)?;
+///
+/// // Query the virtual graph
+/// let node = engine.get_node(v_id)?;
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct Hindsight<'a> {
     db: &'a AletheiaDB,
     scenario: Scenario,

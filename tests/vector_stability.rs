@@ -56,8 +56,8 @@ fn test_cosine_similarity_zero_vectors() {
 
 #[test]
 fn test_cosine_similarity_small_vectors_under_threshold() {
-    // SQUARED_MAGNITUDE_THRESHOLD is 1e-25
-    let tiny_val = 1.0e-15; // sq mag = 1e-30 < 1e-25
+    // SQUARED_MAGNITUDE_THRESHOLD is 1e-30
+    let tiny_val = 1.0e-16; // sq mag = 1e-32 < 1e-30
     let tiny = vec![tiny_val];
     let normal = vec![1.0];
 

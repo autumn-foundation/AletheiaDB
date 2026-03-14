@@ -41,3 +41,6 @@
 **[to_string_lossy Allocations in OsStr Parsing]**
 **Learning:** `OsStr::to_string_lossy()` often looks innocent but can allocate intermediate `Cow::Owned(String)` dynamically, especially if the string contains invalid UTF-8 bytes (even if ignored later) or simply during conversion in strict contexts. This caused noticeable regression during `read_dir` hot loops for log filename parsing when looking for valid `u64` stems.
 **Action:** When parsing basic strings/identifiers from paths that must only contain ASCII logic (e.g. `u64` parsing), use `.to_str()` directly. `to_str()` yields an `Option<&str>` without string allocations and neatly filters out invalid UTF-8 gracefully in standard contexts before calling `.parse()`.
+**Avoid intermediate Vec allocations when parsing queries**
+**Learning:** `cleaned.split_whitespace().collect::<Vec<_>>().join(" ");` creates an unnecessary `Vec` allocation on the heap, which isn't necessary for simple string transformations.
+**Action:** Use a pre-allocated string with `String::with_capacity(cleaned.len())` and a loop over the word iterator to concatenate spaces and words directly.

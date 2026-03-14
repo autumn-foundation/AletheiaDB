@@ -551,7 +551,7 @@ impl PropertyDelta {
                         && let Some(base_vec) = base_value.as_vector()
                     {
                         let new_vec = vec_delta.apply(base_vec);
-                        result.insert(*key, PropertyValue::vector(&new_vec));
+                        result.insert(*key, new_vec.into());
                     }
                 }
             }
@@ -626,7 +626,7 @@ impl PropertyDelta {
 
                         // Apply sparse delta to get full vector
                         let new_vec = vec_delta.apply(base_vec);
-                        self.changed.insert(key, PropertyValue::vector(&new_vec));
+                        self.changed.insert(key, new_vec.into());
                     }
                 }
             }

@@ -1,8 +1,28 @@
 //! WAL recovery logic.
 //!
-//! This module provides shared logic for replaying WAL entries into storage.
-//! It is used by both the CheckpointManager (for recovering from checkpoints)
-//! and AletheiaDB startup (for recovering from persisted indexes).
+//! This module provides the shared logic for replaying Write-Ahead Log (WAL) entries
+//! back into the database's storage engines. It acts as the bridge between durable
+//! disk storage and the in-memory/disk-backed data structures.
+//!
+//! # The "Resurrection" Process
+//!
+//! When AletheiaDB experiences an ungraceful shutdown (a crash or power failure),
+//! the data in memory is lost. To ensure data durability (the 'D' in ACID), every
+//! committed transaction is first written to the WAL on disk.
+//!
+//! Upon restart, this module reads those persisted WAL entries and "replays" them.
+//! It reconstructs the exact state of the database by systematically applying every
+//! recorded `Create`, `Update`, and `Delete` operation to both the `CurrentStorage`
+//! (the hot, current state of the graph) and the `HistoricalStorage` (the temporal,
+//! versioned state of the graph).
+//!
+//! # Why is it needed?
+//!
+//! Replaying the WAL is necessary because building the database's optimized read
+//! structures (like the CSR adjacency matrices or vector indexes) is expensive and
+//! typically done in memory. Instead of syncing these complex structures to disk on
+//! every write, we sync a simple, sequential log of operations. The recovery process
+//! uses this log to rebuild the complex structures exactly as they were.
 
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
@@ -30,6 +50,68 @@ use crate::storage::wal::{LSN, WalOperation};
 /// - The maximum node ID observed (if any)
 /// - The maximum edge ID observed (if any)
 /// - The next version ID to use (updated after replay)
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// # use tempfile::tempdir;
+/// # use std::sync::Arc;
+/// # use aletheiadb::WalConfigBuilder;
+/// # use aletheiadb::storage::wal::{LSN, WalOperation};
+/// # use aletheiadb::storage::wal::concurrent_system::ConcurrentWalSystem;
+/// # use aletheiadb::storage::current::CurrentStorage;
+/// # use aletheiadb::storage::historical::HistoricalStorage;
+/// # // Note: This function is pub(crate) and generally called internally by
+/// # // AletheiaDB::new() or CheckpointManager::recover().
+/// # use aletheiadb::core::id::{NodeId, VersionId, TxId};
+/// # use aletheiadb::core::interning::InternedString;
+/// # use aletheiadb::core::property::PropertyMap;
+/// # use aletheiadb::core::temporal::Timestamp;
+/// # use aletheiadb::core::GLOBAL_INTERNER;
+/// # fn main() -> aletheiadb::core::error::Result<()> {
+/// // 1. Set up a temporary directory and WAL system
+/// let dir = tempdir().unwrap();
+/// let mut config = WalConfigBuilder::new().build();
+/// config.wal_dir = dir.path().to_path_buf();
+/// let wal = ConcurrentWalSystem::new(&config)?;
+///
+/// // 2. Simulate a crash: Write a raw entry directly to the WAL
+/// let node_id = NodeId::new(1).unwrap();
+/// let label = GLOBAL_INTERNER.intern("User").unwrap();
+/// let ts = Timestamp::from(100);
+///
+/// let op = WalOperation::CreateNode {
+///     node_id,
+///     label,
+///     properties: PropertyMap::default(),
+///     valid_from: ts,
+/// };
+/// wal.append(op)?; // Append takes just the operation, timestamp is assigned by WAL
+/// wal.flush()?;
+///
+/// // 3. The Resurrection: Create empty storage instances
+/// let current = CurrentStorage::new();
+/// let mut historical = HistoricalStorage::new();
+///
+/// // 4. Replay the WAL into storage
+/// let start_lsn = LSN::initial();
+/// let initial_version_id = 1;
+///
+/// // Internally, AletheiaDB calls this during initialization
+/// let (final_lsn, max_node, _, next_vid) = replay_wal_into_storage(
+///     &wal,
+///     &current,
+///     &mut historical,
+///     start_lsn,
+///     initial_version_id
+/// )?;
+///
+/// // 5. Verify the state was reconstructed
+/// assert_eq!(max_node, Some(1));
+/// assert!(current.get_node(node_id).is_ok(), "Node was recovered!");
+/// # Ok(())
+/// # }
+/// ```
 pub(crate) fn replay_wal_into_storage(
     wal: &ConcurrentWalSystem,
     current: &CurrentStorage,

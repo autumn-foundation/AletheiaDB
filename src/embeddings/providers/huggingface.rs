@@ -40,7 +40,7 @@ pub struct HuggingFaceConfig {
     pub model_id: String,
     /// Expected dimensions (must match model)
     pub dimensions: usize,
-    /// API URL (default: https://api-inference.huggingface.co)
+    /// API URL (default: <https://api-inference.huggingface.co>)
     pub base_url: Option<String>,
     /// Request timeout
     pub timeout_secs: u64,

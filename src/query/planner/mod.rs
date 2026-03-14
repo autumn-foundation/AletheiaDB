@@ -107,6 +107,23 @@ impl QueryPlanner {
     }
 
     /// Create a planner with custom cost model.
+    ///
+    /// The cost model is used to estimate the cost of different execution plans,
+    /// enabling the planner to choose the most efficient strategy.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::query::planner::{QueryPlanner, Statistics, CostModel};
+    /// # use aletheiadb::storage::CurrentStorage;
+    /// let storage = Arc::new(CurrentStorage::new());
+    /// let stats = Arc::new(Statistics::default());
+    /// let custom_cost = CostModel::default();
+    ///
+    /// let planner = QueryPlanner::new(stats, storage)
+    ///     .with_cost_model(custom_cost);
+    /// ```
     #[must_use]
     pub fn with_cost_model(mut self, cost_model: CostModel) -> Self {
         self.cost_model = cost_model;
@@ -114,6 +131,23 @@ impl QueryPlanner {
     }
 
     /// Create a planner with custom optimization rules.
+    ///
+    /// Optimization rules are applied to the logical plan before physical planning.
+    /// They can simplify the query, push down filters, or reorder operations.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::query::planner::{QueryPlanner, Statistics, OptimizationRule};
+    /// # use aletheiadb::storage::CurrentStorage;
+    /// let storage = Arc::new(CurrentStorage::new());
+    /// let stats = Arc::new(Statistics::default());
+    /// let custom_rules: Vec<Box<dyn OptimizationRule>> = vec![];
+    ///
+    /// let planner = QueryPlanner::new(stats, storage)
+    ///     .with_rules(custom_rules);
+    /// ```
     #[must_use]
     pub fn with_rules(mut self, rules: Vec<Box<dyn OptimizationRule>>) -> Self {
         self.rules = rules;

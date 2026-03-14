@@ -10,6 +10,7 @@ keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations"]
 
 [dependencies]
+bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
@@ -83,7 +84,7 @@ rand = "0.8"
 [dev-dependencies]
 criterion = "0.8"
 proptest = "1.4"
-tempfile = "3.26"
+tempfile = "3.27"
 serial_test = "3.4"
 # Tokio for async tests
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "test-util"] }

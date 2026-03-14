@@ -45,7 +45,7 @@ impl ShutdownHandle {
 /// - Health check endpoint at `/status`
 ///
 /// Note: This function only configures routes, not middleware.
-/// Middleware (CORS, logging) is configured in [`create_app`] or [`create_app_with_config`].
+/// Middleware (CORS, logging) is configured in [`create_app`] or [`create_server`].
 ///
 /// # Example
 ///
@@ -127,7 +127,7 @@ fn build_rate_limit(
 /// Create a configured Actix-web application factory with all middleware.
 ///
 /// This creates an app with **permissive CORS** suitable for development/testing.
-/// For production use, prefer [`create_app_with_config`] with proper CORS settings.
+/// For production use, prefer [`create_server`] with proper CORS settings.
 ///
 /// This includes:
 /// - Request logging middleware
@@ -137,7 +137,7 @@ fn build_rate_limit(
 /// # Security Warning
 ///
 /// This function uses permissive CORS settings. For production deployments,
-/// use [`create_app_with_config`] with a properly configured [`ServerConfig`].
+/// use [`create_server`] with a properly configured [`ServerConfig`].
 pub fn create_app() -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
