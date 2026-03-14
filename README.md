@@ -412,39 +412,43 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use aletheiadb::prelude::*;
-use aletheiadb::{HnswConfig, DistanceMetric};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
-let db = AletheiaDB::new().unwrap();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
 
-// Enable vector indexing with temporal support
-db.vector_index("embedding")
-    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
-    .temporal(TemporalVectorConfig::default())
-    .enable()?;
+    // Enable vector indexing with temporal support
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+        .temporal(TemporalVectorConfig::default())
+        .enable()?;
 
-let embedding = vec![0.1f32; 384];
+    let embedding = vec![0.1f32; 384];
 
-// Store node with embedding - automatically indexed!
-// Note: We convert the vector to a slice for the properties! macro
-let doc_id = db.create_node("Document",
-    properties! {
-        "title" => "Introduction to Rust",
-        "embedding" => &embedding[..],
-    }
-)?;
+    // Store node with embedding - automatically indexed!
+    // Note: We convert the vector to a slice for the properties! macro
+    let doc_id = db.create_node("Document",
+        properties! {
+            "title" => "Introduction to Rust",
+            "embedding" => &embedding[..],
+        }
+    )?;
 
-// Create another similar node so we have something to find
-let _doc2_id = db.create_node("Document",
-    properties! {
-        "title" => "Rust for Beginners",
-        "embedding" => &embedding[..], // Same embedding for max similarity
-    }
-)?;
+    // Create another similar node so we have something to find
+    let _doc2_id = db.create_node("Document",
+        properties! {
+            "title" => "Rust for Beginners",
+            "embedding" => &embedding[..], // Same embedding for max similarity
+        }
+    )?;
 
-// Find similar nodes
-// Note: find_similar excludes the query node itself from results
-let similar = db.find_similar(doc_id, 10)?;
+    // Find similar nodes
+    // Note: find_similar excludes the query node itself from results
+    let _similar = db.find_similar(doc_id, 10)?;
+
+    Ok(())
+}
 ```
 
 ### Hybrid Queries (Graph + Vector + Temporal)
@@ -454,56 +458,60 @@ use aletheiadb::prelude::*;
 use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
-let db = AletheiaDB::new().unwrap();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
 
-// First, configure and enable the vector index
-db.vector_index("embedding")
-    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
-    .temporal(TemporalVectorConfig::default())
-    .enable()?;
+    // First, configure and enable the vector index
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+        .temporal(TemporalVectorConfig::default())
+        .enable()?;
 
-let alice_id = db.create_node("Person", properties! { "name" => "Alice", "age" => 30 })?;
-let bob_id = db.create_node("Person", properties! { "name" => "Bob", "age" => 30 })?;
-db.create_edge(alice_id, bob_id, "KNOWS", properties! {})?;
+    let alice_id = db.create_node("Person", properties! { "name" => "Alice", "age" => 30 })?;
+    let bob_id = db.create_node("Person", properties! { "name" => "Bob", "age" => 30 })?;
+    db.create_edge(alice_id, bob_id, "KNOWS", properties! {})?;
 
-// Setup query parameters
-let query_embedding = vec![0.1f32; 384];
-let valid_time = aletheiadb::time::now();
-let tx_time = aletheiadb::time::now();
+    // Setup query parameters
+    let query_embedding = vec![0.1f32; 384];
+    let valid_time = aletheiadb::time::now();
+    let tx_time = aletheiadb::time::now();
 
-// Simple: Graph + Vector hybrid
-let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
-for row in results {
-    // Iterate over results (QueryResults is an iterator)
-    println!("Found: {:?}", row?.entity);
-}
+    // Simple: Graph + Vector hybrid
+    let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
+    for row in results {
+        // Iterate over results (QueryResults is an iterator)
+        println!("Found: {:?}", row?.entity);
+    }
 
-// Complex: Full hybrid with builder
-let results = db.query()
-    .as_of(valid_time, tx_time)        // Temporal: point-in-time
-    .start(alice_id)                   // Graph: start node
-    .traverse("KNOWS")                 // Graph: traverse edges
-    .rank_by_similarity(&query_embedding, 10) // Vector: rank by similarity
-    .with_provenance()                 // Include metadata
-    .execute(&db)?;
+    // Complex: Full hybrid with builder
+    let results = db.query()
+        .as_of(valid_time, tx_time)        // Temporal: point-in-time
+        .start(alice_id)                   // Graph: start node
+        .traverse("KNOWS")                 // Graph: traverse edges
+        .rank_by_similarity(&query_embedding, 10) // Vector: rank by similarity
+        .with_provenance()                 // Include metadata
+        .execute(&db)?;
 
-for row in results {
-    // Access score from metadata
-    let row = row?;
-    if let Some(score) = row.score {
-        if score > 0.8 {
-            println!("High similarity match: {:?}", row.entity);
+    for row in results {
+        // Access score from metadata
+        let row = row?;
+        if let Some(score) = row.score {
+            if score > 0.8 {
+                println!("High similarity match: {:?}", row.entity);
+            }
         }
     }
-}
 
-// Property-specific vector queries
-let _results = db.query()
-    .find_similar_builder(&query_embedding, 10)
-    .property("embedding")  // Query specific property
-    .metric(DistanceMetric::Cosine)
-    .finish()
-    .execute(&db)?;
+    // Property-specific vector queries
+    let _results = db.query()
+        .find_similar_builder(&query_embedding, 10)
+        .property("embedding")  // Query specific property
+        .metric(DistanceMetric::Cosine)
+        .finish()
+        .execute(&db)?;
+
+    Ok(())
+}
 ```
 
 See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** for complete API reference.
@@ -516,47 +524,51 @@ use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::{DriftMetric, TemporalVectorConfig, SnapshotStrategy};
 use aletheiadb::core::temporal::TimeRange;
 
-let db = AletheiaDB::new().unwrap();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
 
-// Configure vector indexing with frequent snapshots for demonstration
-let mut temp_config = TemporalVectorConfig::default();
-temp_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
+    // Configure vector indexing with frequent snapshots for demonstration
+    let mut temp_config = TemporalVectorConfig::default();
+    temp_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
 
-db.vector_index("embedding")
-    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
-    .temporal(temp_config)
-    .enable()?;
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+        .temporal(temp_config)
+        .enable()?;
 
-// 1. Create node with initial embedding
-let embedding1 = vec![0.0f32; 384];
-let node_id = db.create_node("Person", properties! {
-    "name" => "Alice",
-    "embedding" => &embedding1[..],
-})?;
+    // 1. Create node with initial embedding
+    let embedding1 = vec![0.0f32; 384];
+    let node_id = db.create_node("Person", properties! {
+        "name" => "Alice",
+        "embedding" => &embedding1[..],
+    })?;
 
-// 2. Update node with different embedding (simulating drift)
-let mut embedding2 = vec![0.0f32; 384];
-embedding2[0] = 1.0; // Changed!
-db.write(|tx| {
-    tx.update_node(node_id, properties! {
-        "embedding" => &embedding2[..],
-    })
-})?;
+    // 2. Update node with different embedding (simulating drift)
+    let mut embedding2 = vec![0.0f32; 384];
+    embedding2[0] = 1.0; // Changed!
+    db.write(|tx| {
+        tx.update_node(node_id, properties! {
+            "embedding" => &embedding2[..],
+        })
+    })?;
 
-// 3. Find drift covering the changes
-let start = aletheiadb::time::from_secs(0);
-let end = aletheiadb::time::now();
-let time_range = TimeRange::new(start, end)?;
+    // 3. Find drift covering the changes
+    let start = aletheiadb::time::from_secs(0);
+    let end = aletheiadb::time::now();
+    let time_range = TimeRange::new(start, end)?;
 
-let drifted_nodes = db.find_drift_in(
-    "embedding",
-    0.1,
-    time_range,
-    DriftMetric::Cosine,
-)?;
+    let drifted_nodes = db.find_drift_in(
+        "embedding",
+        0.1,
+        time_range,
+        DriftMetric::Cosine,
+    )?;
 
-for (node_id, drift_score) in drifted_nodes {
-    println!("Node {} drifted by {:.3}", node_id, drift_score);
+    for (node_id, drift_score) in drifted_nodes {
+        println!("Node {} drifted by {:.3}", node_id, drift_score);
+    }
+
+    Ok(())
 }
 ```
 
@@ -781,17 +793,30 @@ For complex operations involving multiple updates, use explicit transactions.
 ```rust
 use aletheiadb::prelude::*;
 
-// Explicit read transaction
-let result = db.read(|tx| {
-    tx.get_node(alice_id).map(|node| node.label.clone())
-})?;
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
 
-// Explicit write transaction with multiple operations
-db.write(|tx| {
-    let node1 = tx.create_node("Event", PropertyMap::new())?;
-    let node2 = tx.create_node("Event", PropertyMap::new())?;
-    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
-})?;
+    let alice_id = db.write(|tx| {
+        tx.create_node("Person", properties! {
+            "name" => "Alice",
+            "age" => 30,
+        })
+    })?;
+
+    // Explicit read transaction
+    let _result = db.read(|tx| {
+        tx.get_node(alice_id).map(|node| node.label.clone())
+    })?;
+
+    // Explicit write transaction with multiple operations
+    db.write(|tx| {
+        let node1 = tx.create_node("Event", PropertyMap::new())?;
+        let node2 = tx.create_node("Event", PropertyMap::new())?;
+        tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
+    })?;
+
+    Ok(())
+}
 ```
 
 ### Embedding Generation (Optional)
