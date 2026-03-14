@@ -1945,3 +1945,324 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+
+    #[test]
+    fn test_sentry_time_range_from_boundary() {
+        // Targets replace > with ==, <, >= in TimeRange::from
+        // We know MAX_VALID_TIMESTAMP = i64::MAX - 1000.
+        // If it is > MAX_VALID_TIMESTAMP, it should panic.
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let result = std::panic::catch_unwind(|| {
+            TimeRange::from(invalid_ts);
+        });
+        assert!(
+            result.is_err(),
+            "from() should panic if start > MAX_VALID_TIMESTAMP"
+        );
+
+        // The exact boundary should not panic
+        let valid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let range = TimeRange::from(valid_ts);
+        assert_eq!(range.start(), valid_ts);
+
+        // Check for != TIMESTAMP_MAX
+        // Since TIMESTAMP_MAX > MAX_VALID_TIMESTAMP, it would panic without the != TIMESTAMP_MAX condition
+        let range_max = TimeRange::from(TIMESTAMP_MAX);
+        assert_eq!(range_max.start(), TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_sentry_time_range_at_boundary() {
+        // Targets replace > with ==, <, >= in TimeRange::at
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let result = std::panic::catch_unwind(|| {
+            TimeRange::at(invalid_ts);
+        });
+        assert!(
+            result.is_err(),
+            "at() should panic if timestamp > MAX_VALID_TIMESTAMP"
+        );
+
+        // The exact boundary should not panic
+        let valid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let range = TimeRange::at(valid_ts);
+        assert_eq!(range.start(), valid_ts);
+
+        // Check for != TIMESTAMP_MAX
+        let range_max = TimeRange::at(TIMESTAMP_MAX);
+        assert_eq!(range_max.start(), TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_sentry_time_range_is_closed_boundary() {
+        // Targets replace < with ==, >, <= in TimeRange::is_closed
+        // A range is closed if its end is strictly less than TIMESTAMP_MAX
+
+        let start = HybridTimestamp::new_unchecked(100, 0);
+
+        // Not closed (end == TIMESTAMP_MAX)
+        let open_range = TimeRange::from(start);
+        assert!(
+            !open_range.is_closed(),
+            "is_closed() should be false for TIMESTAMP_MAX"
+        );
+
+        // Closed (end < TIMESTAMP_MAX)
+        let exact_max_valid = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let closed_range = TimeRange::new(start, exact_max_valid).unwrap();
+        assert!(
+            closed_range.is_closed(),
+            "is_closed() should be true for max valid timestamp"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_range_contains_boundary() {
+        // Targets replacing >= with <, and < with ==, >, <=
+        // Also targets && with ||
+
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let end = HybridTimestamp::new_unchecked(200, 0);
+        let range = TimeRange::new(start, end).unwrap();
+
+        // Exactly at start (should be contained)
+        assert!(
+            range.contains(start),
+            "contains() should be true at exactly start"
+        );
+
+        // Before start (should not be contained)
+        let before_start = HybridTimestamp::new_unchecked(99, 0);
+        assert!(
+            !range.contains(before_start),
+            "contains() should be false before start"
+        );
+
+        // Exactly at end (should not be contained, exclusive bound)
+        assert!(
+            !range.contains(end),
+            "contains() should be false at exactly end"
+        );
+
+        // After end
+        let after_end = HybridTimestamp::new_unchecked(201, 0);
+        assert!(
+            !range.contains(after_end),
+            "contains() should be false after end"
+        );
+
+        // Between start and end
+        let inside = HybridTimestamp::new_unchecked(150, 0);
+        assert!(
+            range.contains(inside),
+            "contains() should be true strictly inside range"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_range_contains_or_after_boundary() {
+        // Targets replace >= with < in contains_or_after
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let end = HybridTimestamp::new_unchecked(200, 0);
+        let range = TimeRange::new(start, end).unwrap();
+
+        // Exactly at start
+        assert!(
+            range.contains_or_after(start),
+            "contains_or_after() should be true at exactly start"
+        );
+
+        // Before start
+        let before_start = HybridTimestamp::new_unchecked(99, 0);
+        assert!(
+            !range.contains_or_after(before_start),
+            "contains_or_after() should be false before start"
+        );
+
+        // After start
+        let after_start = HybridTimestamp::new_unchecked(101, 0);
+        assert!(
+            range.contains_or_after(after_start),
+            "contains_or_after() should be true after start"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_range_overlaps_boundary() {
+        // Targets replace < with ==, >, <= in overlaps
+        // Also targets && with ||
+
+        // self: [100, 200), other: [200, 300) -> start = 100, end = 200, other.start = 200, other.end = 300
+        // overlaps if: self.start < other.end && other.start < self.end
+        // 100 < 300 (true) && 200 < 200 (false) -> false
+
+        let self_range = TimeRange::new(
+            HybridTimestamp::new_unchecked(100, 0),
+            HybridTimestamp::new_unchecked(200, 0),
+        )
+        .unwrap();
+
+        // Exact touch right
+        let right_touch = TimeRange::new(
+            HybridTimestamp::new_unchecked(200, 0),
+            HybridTimestamp::new_unchecked(300, 0),
+        )
+        .unwrap();
+        assert!(
+            !self_range.overlaps(&right_touch),
+            "overlaps() should be false on exact right touch"
+        );
+
+        // Exact touch left
+        let left_touch = TimeRange::new(
+            HybridTimestamp::new_unchecked(0, 0),
+            HybridTimestamp::new_unchecked(100, 0),
+        )
+        .unwrap();
+        assert!(
+            !self_range.overlaps(&left_touch),
+            "overlaps() should be false on exact left touch"
+        );
+
+        // Disjoint right
+        let right_disjoint = TimeRange::new(
+            HybridTimestamp::new_unchecked(201, 0),
+            HybridTimestamp::new_unchecked(300, 0),
+        )
+        .unwrap();
+        assert!(
+            !self_range.overlaps(&right_disjoint),
+            "overlaps() should be false for strictly disjoint right"
+        );
+
+        // Disjoint left
+        let left_disjoint = TimeRange::new(
+            HybridTimestamp::new_unchecked(0, 0),
+            HybridTimestamp::new_unchecked(99, 0),
+        )
+        .unwrap();
+        assert!(
+            !self_range.overlaps(&left_disjoint),
+            "overlaps() should be false for strictly disjoint left"
+        );
+
+        // Overlap right
+        let right_overlap = TimeRange::new(
+            HybridTimestamp::new_unchecked(199, 0),
+            HybridTimestamp::new_unchecked(300, 0),
+        )
+        .unwrap();
+        assert!(
+            self_range.overlaps(&right_overlap),
+            "overlaps() should be true for partial overlap right"
+        );
+
+        // Overlap left
+        let left_overlap = TimeRange::new(
+            HybridTimestamp::new_unchecked(0, 0),
+            HybridTimestamp::new_unchecked(101, 0),
+        )
+        .unwrap();
+        assert!(
+            self_range.overlaps(&left_overlap),
+            "overlaps() should be true for partial overlap left"
+        );
+
+        // Empty ranges never overlap
+        let empty_range = TimeRange::new(
+            HybridTimestamp::new_unchecked(150, 0),
+            HybridTimestamp::new_unchecked(150, 0),
+        )
+        .unwrap();
+        assert!(
+            !self_range.overlaps(&empty_range),
+            "overlaps() should be false when the other range is empty"
+        );
+        assert!(
+            !empty_range.overlaps(&self_range),
+            "overlaps() should be false when self is empty"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_to_iso8601_math() {
+        // targets math operator mutations like *, /, +, - inside to_iso8601
+
+        // Let's test a known timestamp
+        // 1_000_000 microseconds = 1 second
+        // 1_500_000 microseconds = 1 second + 500 milliseconds (500_000_000 nanoseconds)
+
+        let wallclock = 1_500_000;
+        let ts = HybridTimestamp::new_unchecked(wallclock, 0);
+        let iso = time::to_iso8601(ts);
+
+        // Based on the simplified formatting `format!("{:?}", datetime)`
+        // std::time::SystemTime debug format contains seconds and nanos
+
+        // 1_500_000 % 1_000_000 = 500_000. 500_000 * 1000 = 500_000_000 nanos
+        // if * 1000 is mutated to / 1000, we get 500 nanos.
+        // if / 1_000_000 is mutated to * 1_000_000, seconds will be huge
+
+        // This is tricky because the format is different on Windows vs Unix.
+        // We can just verify the actual expected numeric substrings are present.
+
+        if cfg!(windows) {
+            // Windows ticks logic:
+            // secs = 1, nanos = 500_000_000
+            // base_secs = 11644473600
+            // total_secs = 11644473601
+            // total_ticks = 11644473601 * 10_000_000 + 500_000_000 / 100
+            // total_ticks = 116444736010000000 + 5000000 = 116444736015000000
+            // wait, Duration::new(1, 500_000_000). SystemTime::UNIX_EPOCH + dur.
+            assert!(
+                iso.contains("116444736015000000"),
+                "iso string should contain correct windows ticks"
+            );
+        } else {
+            // Unix logic:
+            assert!(
+                iso.contains("tv_sec: 1"),
+                "iso string should contain tv_sec: 1"
+            );
+            assert!(
+                iso.contains("tv_nsec: 500000000"),
+                "iso string should contain tv_nsec: 500000000"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sentry_time_from_secs_math() {
+        // targets * with +, / in from_secs
+        // `secs * 1_000_000`
+        let secs = 2; // > 1 to catch commutative operator swap or similar math mutations
+        let ts = time::from_secs(secs);
+        assert_eq!(
+            ts.wallclock(),
+            2_000_000,
+            "from_secs should multiply by 1_000_000"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_to_secs_math() {
+        // targets / with %, * and returning 0, 1, -1 in to_secs
+        let ts = HybridTimestamp::new_unchecked(2_000_000, 0); // 2 seconds
+        let secs = time::to_secs(ts);
+
+        assert_eq!(secs, 2, "to_secs should divide by 1_000_000");
+    }
+
+    #[test]
+    fn test_sentry_time_to_millis_math() {
+        // targets / with %, * and returning 0, 1, -1 in to_millis
+        let ts = HybridTimestamp::new_unchecked(2_000, 0); // 2 milliseconds
+        let millis = time::to_millis(ts);
+
+        assert_eq!(millis, 2, "to_millis should divide by 1_000");
+    }
+}
