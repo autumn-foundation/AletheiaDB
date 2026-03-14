@@ -442,7 +442,7 @@ impl SparseVec {
 /// # Returns
 ///
 /// * `Ok(f32)` - The dot product
-/// * `Err` - Never returns an error (kept for API consistency with dense vectors)
+/// * `Err(VectorError::DimensionMismatch)` - If vectors have different dimensions
 ///
 /// # Algorithm
 ///
@@ -452,10 +452,17 @@ impl SparseVec {
 /// 3. Advance pointer with smaller index
 /// 4. Time complexity: O(nnz_a + nnz_b)
 ///
+/// # Errors
+///
+/// Returns a `VectorError::DimensionMismatch` if the two vectors do not have the same
+/// total dimension. This matches the behavior of dense vectors to prevent mathematically
+/// questionable results.
+///
 /// # Example
 ///
 /// ```rust
 /// use aletheiadb::core::vector::{SparseVec, sparse_dot_product};
+/// use aletheiadb::core::error::{Error, VectorError};
 ///
 /// // Sparse vectors: [1, 0, 2, 0, 0] and [0, 0, 3, 0, 4]
 /// let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
@@ -464,6 +471,11 @@ impl SparseVec {
 /// // Only index 2 overlaps: 2.0 * 3.0 = 6.0
 /// let dot = sparse_dot_product(&a, &b).unwrap();
 /// assert_eq!(dot, 6.0);
+///
+/// // Dimension mismatch example:
+/// let c = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+/// let err = sparse_dot_product(&a, &c).unwrap_err();
+/// assert!(matches!(err, Error::Vector(VectorError::DimensionMismatch { .. })));
 /// ```
 ///
 /// # Performance
@@ -522,8 +534,14 @@ pub fn sparse_dot_product(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 ///
 /// # Returns
 ///
-/// * `Ok(f32)` - Cosine similarity in range [-1, 1]
-/// * `Err` - If either vector has zero magnitude
+/// * `Ok(f32)` - Cosine similarity in range `[-1.0, 1.0]`, or `0.0` if either vector has zero magnitude.
+/// * `Err(VectorError::DimensionMismatch)` - If vectors have different dimensions
+///
+/// # Errors
+///
+/// Returns a `VectorError::DimensionMismatch` if the two vectors do not have the same
+/// total dimension. This matches the behavior of dense vectors to prevent mathematically
+/// questionable results.
 ///
 /// # Formula
 ///
@@ -535,6 +553,7 @@ pub fn sparse_dot_product(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 ///
 /// ```rust
 /// use aletheiadb::core::vector::{SparseVec, sparse_cosine_similarity};
+/// use aletheiadb::core::error::{Error, VectorError};
 ///
 /// let a = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
 /// let b = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
@@ -542,6 +561,16 @@ pub fn sparse_dot_product(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 /// // Identical vectors have cosine similarity = 1.0
 /// let sim = sparse_cosine_similarity(&a, &b).unwrap();
 /// assert!((sim - 1.0).abs() < 1e-6);
+///
+/// // Zero magnitude vectors return 0.0
+/// let zero = SparseVec::new(vec![], vec![], 5).unwrap();
+/// let zero_sim = sparse_cosine_similarity(&a, &zero).unwrap();
+/// assert_eq!(zero_sim, 0.0);
+///
+/// // Dimension mismatch example:
+/// let c = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+/// let err = sparse_cosine_similarity(&a, &c).unwrap_err();
+/// assert!(matches!(err, Error::Vector(VectorError::DimensionMismatch { .. })));
 /// ```
 ///
 /// # Performance
