@@ -1945,3 +1945,234 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+
+    #[test]
+    fn test_sentinel_timerange_is_closed_boundaries() {
+        // 🤖 Sentinel Test: Kill mutants replacing `<` with `==`, `>`, `<=`, etc.
+        let ts_before_max = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+
+        let open_range = TimeRange::from(100.into());
+        assert!(
+            !open_range.is_closed(),
+            "TIMESTAMP_MAX end should not be closed"
+        );
+
+        let closed_range = TimeRange::new(100.into(), ts_before_max).unwrap();
+        assert!(
+            closed_range.is_closed(),
+            "End strictly less than TIMESTAMP_MAX should be closed"
+        );
+
+        let current_range = TimeRange::new(100.into(), TIMESTAMP_MAX).unwrap();
+        assert!(
+            !current_range.is_closed(),
+            "TIMESTAMP_MAX end must evaluate correctly (not closed)"
+        );
+    }
+
+    #[test]
+    fn test_sentinel_timerange_overlaps_exact_boundaries() {
+        // 🤖 Sentinel Test: Kill mutants replacing `<` with `==`, `>`, `<=` in overlaps
+        // r1: [100, 200)
+        let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        // r2: [200, 300) - touching end of r1
+        let r2 = TimeRange::new(200.into(), 300.into()).unwrap();
+        assert!(
+            !r1.overlaps(&r2),
+            "Ranges touching at boundary must not overlap (r1.end == r2.start)"
+        );
+        assert!(
+            !r2.overlaps(&r1),
+            "Ranges touching at boundary must not overlap (r2.start == r1.end)"
+        );
+
+        // r3: [50, 100) - touching start of r1
+        let r3 = TimeRange::new(50.into(), 100.into()).unwrap();
+        assert!(
+            !r1.overlaps(&r3),
+            "Ranges touching at boundary must not overlap (r1.start == r3.end)"
+        );
+        assert!(
+            !r3.overlaps(&r1),
+            "Ranges touching at boundary must not overlap (r3.end == r1.start)"
+        );
+
+        // r4: [199, 201) - truly overlapping by 1 unit
+        let r4 = TimeRange::new(199.into(), 201.into()).unwrap();
+        assert!(r1.overlaps(&r4), "Overlapping ranges must overlap");
+        assert!(r4.overlaps(&r1), "Overlapping ranges must overlap");
+    }
+
+    #[test]
+    fn test_sentinel_timerange_contains_logical_operator() {
+        // 🤖 Sentinel Test: Kill `replace && with ||` in `TimeRange::contains`
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        // Test values strictly outside boundaries to ensure `&&` is respected.
+        // If `&&` mutates to `||`, `range.contains(50)` evaluates to `(50 >= 100) || (50 < 200)`.
+        // Since `50 < 200` is true, the `||` mutant returns `true`.
+        assert!(
+            !range.contains(50.into()),
+            "Contains must strictly respect AND bounds (below start)"
+        );
+
+        // If `&&` mutates to `||`, `range.contains(250)` evaluates to `(250 >= 100) || (250 < 200)`.
+        // Since `250 >= 100` is true, the `||` mutant returns `true`.
+        assert!(
+            !range.contains(250.into()),
+            "Contains must strictly respect AND bounds (above end)"
+        );
+
+        // Boundary conditions
+        assert!(range.contains(100.into()), "Must contain exact start");
+        assert!(
+            !range.contains(200.into()),
+            "Must NOT contain exact end (exclusive)"
+        );
+
+        // TimeRange::contains_range:
+        // `self.start <= other.start && other.end <= self.end`
+        // Mutating `&&` to `||` means if ANY bound is within, it returns true.
+        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+        let strictly_before_partial = TimeRange::new(50.into(), 150.into()).unwrap();
+        let strictly_after_partial = TimeRange::new(250.into(), 350.into()).unwrap();
+
+        assert!(
+            !outer.contains_range(&strictly_before_partial),
+            "Contains range must respect AND logic (starts before)"
+        );
+        assert!(
+            !outer.contains_range(&strictly_after_partial),
+            "Contains range must respect AND logic (ends after)"
+        );
+    }
+
+    #[test]
+    fn test_sentinel_constructors_and_defaults() {
+        // 🤖 Sentinel Test: Kill mutants returning defaults for constructors and formatting.
+
+        // Create an explicit "default" timestamp equivalent (0 wallclock, 0 logical)
+        let default_ts = HybridTimestamp::new_unchecked(0, 0);
+
+        // TimeRange::from
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let from_range = TimeRange::from(start);
+        assert_ne!(
+            from_range.end(),
+            default_ts,
+            "TimeRange::from should not default end timestamp to 0"
+        );
+        assert_eq!(
+            from_range.start(),
+            start,
+            "TimeRange::from must respect provided start"
+        );
+        assert_eq!(
+            from_range.end(),
+            TIMESTAMP_MAX,
+            "TimeRange::from must set end to TIMESTAMP_MAX"
+        );
+
+        // TimeRange::at
+        let at_range = TimeRange::at(start);
+        assert_ne!(
+            at_range.start(),
+            default_ts,
+            "TimeRange::at should not default start timestamp to 0"
+        );
+        assert_ne!(
+            at_range.end(),
+            default_ts,
+            "TimeRange::at should not default end timestamp to 0"
+        );
+        assert_eq!(
+            at_range.start(),
+            start,
+            "TimeRange::at must respect provided start"
+        );
+        assert_eq!(
+            at_range.end(),
+            start,
+            "TimeRange::at must respect provided end"
+        );
+
+        // time::try_now
+        let try_now_ts = time::try_now().expect("System clock must be valid");
+        assert_ne!(
+            try_now_ts, default_ts,
+            "time::try_now should not return default 0 epoch"
+        );
+        assert!(
+            try_now_ts.wallclock() > 1700000000000000,
+            "try_now should return a realistic modern timestamp, not 0 or 1"
+        );
+
+        // time::now
+        let now_ts = time::now();
+        assert_ne!(
+            now_ts, default_ts,
+            "time::now should not return default 0 epoch"
+        );
+
+        // time::to_iso8601
+        let ts = time::from_secs(1609459200); // 2021-01-01 00:00:00 UTC
+        let iso_str = time::to_iso8601(ts);
+        assert_ne!(iso_str, "", "to_iso8601 should not return an empty string");
+        assert_ne!(
+            iso_str, "xyzzy",
+            "to_iso8601 should not return a mutated hardcoded string"
+        );
+
+        let current_iso = time::to_iso8601(TIMESTAMP_MAX);
+        assert_eq!(
+            current_iso, "current",
+            "TIMESTAMP_MAX must explicitly format as 'current'"
+        );
+
+        // Constructors: time::from_secs / time::from_millis default mutators
+        let from_secs_ts = time::from_secs(123);
+        assert_ne!(
+            from_secs_ts, default_ts,
+            "from_secs must not return default"
+        );
+        assert_eq!(
+            from_secs_ts.wallclock(),
+            123_000_000,
+            "from_secs must exactly scale by 1M"
+        );
+
+        let from_millis_ts = time::from_millis(456);
+        assert_ne!(
+            from_millis_ts, default_ts,
+            "from_millis must not return default"
+        );
+        assert_eq!(
+            from_millis_ts.wallclock(),
+            456_000,
+            "from_millis must exactly scale by 1000"
+        );
+    }
+
+    #[test]
+    fn test_sentinel_timerange_duration_micros_exact() {
+        // 🤖 Sentinel Test: Kill mutants returning None or Some(0)/Some(1) arbitrarily
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let end = HybridTimestamp::new_unchecked(500, 0);
+        let range = TimeRange::new(start, end).unwrap();
+
+        let duration = range.duration_micros();
+        assert_eq!(duration, Some(400), "Duration should be exactly 400");
+        assert_ne!(
+            duration, None,
+            "Duration must not be None for a closed interval"
+        );
+        assert_ne!(duration, Some(0), "Duration must not be 0");
+        assert_ne!(duration, Some(1), "Duration must not be 1");
+    }
+}
