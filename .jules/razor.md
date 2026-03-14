@@ -1,9 +1,4 @@
 ## [Reduction]
-**Bloat:** `FileColdStorage` (Redundant, inferior implementation of `ColdStorage` trait).
-**Cut:** Deleted `FileColdStorage` struct, implementation, and tests.
-**Saved:** ~200 lines of code + cognitive load of maintaining two cold storage backends.
-
-## [Reduction]
-**Bloat:** `ColdStorage` trait (Single-implementation abstraction used only by `RedbColdStorage`).
-**Cut:** Deleted the `ColdStorage` trait and `cold_storage.rs` module. Refactored all consumers to use the concrete `RedbColdStorage` struct directly.
-**Saved:** ~300 lines of boilerplate (trait definitions, mock implementations, duplicate imports) + removed dynamic dispatch overhead.
+**Bloat:** [The over-engineered pattern] `GraphView` trait implemented only by `AletheiaDB`.
+**Cut:** [The simplified solution] De-abstracted `GraphView` by removing the trait entirely, substituting it with direct usage of `AletheiaDB`.
+**Saved:** [Lines of code / Cognitive load] Reduced trait cognitive load and simplified code routing without abstractions, simplifying hybrid query handling and semantic pathfinding.
