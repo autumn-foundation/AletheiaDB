@@ -547,9 +547,13 @@ impl QueryResults {
     ///
     /// For very large result sets, this may consume significant memory. Consider using
     /// the streaming iterator directly for result sets exceeding 100K rows.
+    ///
+    /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
+    /// to reduce heap allocations during collection.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
         // First pass: collect all rows
-        let mut rows = Vec::new();
+        let (lower, _) = self.iterator.size_hint();
+        let mut rows = Vec::with_capacity(lower);
         while let Some(row) = self.iterator.next() {
             rows.push(row?);
         }
