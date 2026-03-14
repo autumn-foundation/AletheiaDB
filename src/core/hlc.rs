@@ -957,6 +957,20 @@ mod tests {
     }
 
     #[test]
+    fn test_max_drift_constants_exact_math() {
+        // Targets:
+        // `replace * with +` and `replace * with /` on lines 34 and 40
+        //
+        // MAX_BACKWARD_DRIFT_US: i64 = 5 * 60 * 1_000_000;
+        assert_eq!(MAX_BACKWARD_DRIFT_US, 300_000_000,
+            "MAX_BACKWARD_DRIFT_US must strictly equal 300,000,000 to catch mutated arithmetic operators like + or /");
+
+        // MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000;
+        assert_eq!(MAX_FORWARD_JUMP_US, 3_600_000_000,
+            "MAX_FORWARD_JUMP_US must strictly equal 3,600,000,000 to catch mutated arithmetic operators like + or /");
+    }
+
+    #[test]
     fn test_is_clock_skew_self_heal_enabled_override() {
         // Default might be false based on env
         let default = is_clock_skew_self_heal_enabled();
