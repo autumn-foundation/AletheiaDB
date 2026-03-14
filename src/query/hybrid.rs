@@ -31,8 +31,8 @@ use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
 
-use std::cmp::Ordering;
 use crate::db::AletheiaDB;
+use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
 /// A candidate node with its similarity score, ordered by similarity (min-heap).

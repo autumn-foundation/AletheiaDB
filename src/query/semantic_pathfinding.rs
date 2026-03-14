@@ -61,10 +61,10 @@
 
 use crate::core::error::Result;
 use crate::core::hasher::IdentityHasher;
-use crate::db::AletheiaDB;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::core::vector::cosine_similarity;
+use crate::db::AletheiaDB;
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
