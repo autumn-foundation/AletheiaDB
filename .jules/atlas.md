@@ -75,3 +75,24 @@
 ## 2025-03-10 - Breaking VersionMetadata Dependency Cycle
 **Tangle:** Both `src/index/temporal.rs` and `src/core/version.rs` contained structs named `VersionMetadata`, causing naming collisions and semantic ambiguity ("The Leak" architectural smell).
 **Blueprint:** Renamed `src/index/temporal.rs::VersionMetadata` to `TimelineVersionMetadata` (and the associated index alias) to strictly enforce domain boundaries and clarify that the index-level struct serves temporal timelines, whereas `core` defines the global domain version primitive.
+
+## 2026-03-14 - The Blob in Core Property
+**Tangle:** `src/core/property.rs` was a 4,200-line "Blob" module. It contained serialization tags, value definitions, serialization/deserialization logic, the core `PropertyValue` enum, the `PropertyMap` struct, the builder pattern, and 2,500 lines of tests. The file was difficult to navigate and combined too many distinct concerns related to the copy-on-write property system.
+**Blueprint:** Refactored `src/core/property.rs` into a `src/core/property/` directory.
+1. Extracted serialization constants, vectors, and the `PropertyValue` enum (and its impls) into `src/core/property/value.rs`.
+2. Extracted `PropertyKey`, `PropertyMap`, and `PropertyMapBuilder` into `src/core/property/map.rs`.
+3. Moved all tests into `src/core/property/tests.rs`.
+4. Kept `src/core/property/mod.rs` as a clean facade module re-exporting the public types and constants.
+
+## 2026-03-14 - The Blob in Storage Checkpoint
+**Tangle:** `src/storage/checkpoint.rs` was a 3,000-line "Blob" module containing the configuration, recovery result structs, the core manager logic, and large test suites for point-in-time snapshots and crash recovery.
+**Blueprint:** Refactored `src/storage/checkpoint.rs` into a `src/storage/checkpoint/` directory.
+1. Extracted `CheckpointConfig` into `config.rs`.
+2. Extracted `RecoveryResult` and related structs into `recovery.rs`.
+3. Extracted `CheckpointManager` and `CheckpointStats` into `manager.rs`.
+4. Moved tests to `tests.rs`.
+5. Re-exported the public API in `mod.rs`.
+
+## 2026-03-14 - RedbColdStorage Tests Separation
+**Tangle:** `src/storage/redb_cold_storage.rs` was a 3,400-line file that included 1,900 lines of tests. The sheer size of the test module obscured the core storage implementation.
+**Blueprint:** Created `src/storage/redb_cold_storage/` directory. Split tests into `src/storage/redb_cold_storage/tests.rs` and retained the storage implementation in `mod.rs`.
