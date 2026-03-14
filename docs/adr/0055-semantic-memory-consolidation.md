@@ -1,4 +1,4 @@
-# ADR-0050: Semantic Memory Consolidation (Mnemosyne)
+# ADR-0055: Semantic Memory Consolidation (Mnemosyne)
 
 **Status:** Accepted
 **Date:** 2024-05-24

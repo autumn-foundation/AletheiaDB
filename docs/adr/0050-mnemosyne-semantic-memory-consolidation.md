@@ -1,10 +1,10 @@
-# 50. Mnemosyne: Semantic Memory Consolidation
+# ADR-0050: Mnemosyne: Semantic Memory Consolidation
 
 Date: 2024-05-22
 
 ## Status
 
-Superseded by [ADR 0050: Semantic Memory Consolidation](0050-semantic-memory-consolidation.md)
+Superseded by [ADR-0055: Semantic Memory Consolidation](0055-semantic-memory-consolidation.md)
 
 ## Context
 

@@ -1210,6 +1210,46 @@ sequenceDiagram
     Voyager-->>User: Path of Novelty
 ```
 
+**Synergy (Emergent Semantic Value)**
+
+```mermaid
+classDiagram
+    namespace Experimental {
+        class Synergy {
+            +analyze(nodes, property_name)
+        }
+        class SynergyResult {
+            +baseline_vector: Vec<f32>
+            +emergent_vector: Vec<f32>
+            +synergy_score: f32
+        }
+    }
+    Synergy --> AletheiaDB : Uses
+    Synergy ..> SynergyResult : Produces
+```
+
+**Sequence: Synergy Analysis**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Syn as Synergy
+    participant DB as AletheiaDB
+
+    User->>Syn: analyze(nodes, prop)
+    Syn->>DB: read() (Single Transaction)
+    DB-->>Syn: vectors and topology
+    Syn->>Syn: baseline = average(vectors)
+    loop Every Node in Set
+        Syn->>Syn: neighbors = get_internal_edges(node)
+        Syn->>Syn: neighbor_avg = average(neighbor_vectors)
+        Syn->>Syn: emergent = blend(node, neighbor_avg, 0.5)
+    end
+    Syn->>Syn: overall_emergent = average(emergent_components)
+    Syn->>Syn: score = 1.0 - similarity(baseline, overall_emergent)
+    Syn-->>User: SynergyResult
+```
+
 **Serendipity (Scenic Route Finder)**
 
 ```mermaid
