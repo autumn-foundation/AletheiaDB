@@ -775,7 +775,8 @@ impl WalRingBuffer {
     pub fn len_approx(&self) -> usize {
         let write = self.write_pos.load(Ordering::Relaxed);
         let read = self.read_pos.load(Ordering::Relaxed);
-        write.wrapping_sub(read) as usize
+        let diff = write.wrapping_sub(read);
+        std::cmp::min(diff, self.capacity as u64) as usize
     }
 
     /// Check if the buffer is approximately empty.
@@ -1429,7 +1430,7 @@ mod tests {
         let len = buf.len_approx();
         assert_eq!(
             len, 3,
-            "👺 HAVOC SUCCESS: len_approx() failed on wraparound! Expected 3, got {}",
+            "👺 HAVOC DEFEATED: len_approx() succeeded on wraparound! Expected 3, got {}",
             len
         );
     }
