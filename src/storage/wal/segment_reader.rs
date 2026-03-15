@@ -425,7 +425,10 @@ pub(crate) fn parse_entry_at(
             // During recovery, the string should already be in the interner
             // (either from checkpoint or previous WAL entries)
             let label = crate::core::interning::InternedString::from_raw(label_id);
-            if crate::core::interning::GLOBAL_INTERNER.resolve_with(label, |_| ()).is_none() {
+            if crate::core::interning::GLOBAL_INTERNER
+                .resolve_with(label, |_| ())
+                .is_none()
+            {
                 return Err(StorageError::CorruptedData(format!(
                     "Failed to resolve interned string with ID: {}. \
                      This likely indicates data corruption.",
@@ -496,7 +499,10 @@ pub(crate) fn parse_entry_at(
 
             // Reconstruct InternedString from ID
             let label = crate::core::interning::InternedString::from_raw(label_id);
-            if crate::core::interning::GLOBAL_INTERNER.resolve_with(label, |_| ()).is_none() {
+            if crate::core::interning::GLOBAL_INTERNER
+                .resolve_with(label, |_| ())
+                .is_none()
+            {
                 return Err(StorageError::CorruptedData(format!(
                     "Failed to resolve interned string with ID: {}. \
                      This likely indicates data corruption.",
@@ -567,7 +573,10 @@ pub(crate) fn parse_entry_at(
 
                 // Reconstruct InternedString from ID
                 let lbl = crate::core::interning::InternedString::from_raw(label_id);
-                if crate::core::interning::GLOBAL_INTERNER.resolve_with(lbl, |_| ()).is_none() {
+                if crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(lbl, |_| ())
+                    .is_none()
+                {
                     return Err(StorageError::CorruptedData(format!(
                         "Failed to resolve interned string with ID: {}. \
                          This likely indicates data corruption.",
@@ -644,7 +653,10 @@ pub(crate) fn parse_entry_at(
 
                 // Reconstruct InternedString from ID
                 let lbl = crate::core::interning::InternedString::from_raw(label_id);
-                if crate::core::interning::GLOBAL_INTERNER.resolve_with(lbl, |_| ()).is_none() {
+                if crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(lbl, |_| ())
+                    .is_none()
+                {
                     return Err(StorageError::CorruptedData(format!(
                         "Failed to resolve interned string with ID: {}. \
                          This likely indicates data corruption.",
