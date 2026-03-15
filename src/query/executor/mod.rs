@@ -201,29 +201,7 @@ impl QueryExecutor {
                 k,
                 label_filter,
                 property_key,
-            } => {
-                let results = match (property_key, label_filter) {
-                    // Property-specific with label filter
-                    (Some(prop), Some(label)) => self
-                        .current
-                        .find_similar_by_embedding_in_with_label(prop, embedding, label, *k)?,
-                    // Property-specific without label filter
-                    (Some(prop), None) => self
-                        .current
-                        .find_similar_by_embedding_in(prop, embedding, *k)?,
-                    // Default property with label filter
-                    (None, Some(label)) => self
-                        .current
-                        .find_similar_by_embedding_with_label(embedding, label, *k)?,
-                    // Default property without label filter
-                    (None, None) => self.current.find_similar_by_embedding(embedding, *k)?,
-                };
-
-                Ok(Box::new(iterators::VectorResultIterator::new(
-                    results,
-                    Arc::clone(&self.current),
-                )))
-            }
+            } => self.execute_hnsw_search(embedding, *k, label_filter.as_deref(), property_key.as_deref()),
 
             PhysicalOp::TemporalNodeLookup {
                 node_ids,
@@ -347,84 +325,7 @@ impl QueryExecutor {
                 property_key,
                 k,
                 label_filter,
-            } => {
-                // 1. Validate that property_key matches the indexed property
-                let indexed_property =
-                    self.current.get_indexed_property_name().ok_or_else(|| {
-                        crate::core::error::Error::Query(
-                            crate::core::error::QueryError::ExecutionError {
-                                message:
-                                    "No vector index is enabled. Call enable_vector_index() first."
-                                        .to_string(),
-                            },
-                        )
-                    })?;
-
-                if property_key != &indexed_property {
-                    return Err(crate::core::error::Error::Query(
-                        crate::core::error::QueryError::ExecutionError {
-                            message: format!(
-                                "Property key '{}' does not match indexed property '{}'. \
-                                 Vector index was built on '{}', so similar_to queries must use the same property.",
-                                property_key, indexed_property, indexed_property
-                            ),
-                        },
-                    ));
-                }
-
-                // 2. Look up the source node
-                let node = self.current.get_node(*source_node).map_err(|_| {
-                    crate::core::error::Error::Query(
-                        crate::core::error::QueryError::ExecutionError {
-                            message: format!("Source node {:?} not found", source_node),
-                        },
-                    )
-                })?;
-
-                // 3. Extract the embedding from the specified property
-                let embedding = node
-                    .properties
-                    .get(property_key)
-                    .and_then(|v: &crate::core::PropertyValue| v.as_vector())
-                    .ok_or_else(|| {
-                        crate::core::error::Error::Query(
-                            crate::core::error::QueryError::ExecutionError {
-                                message: format!(
-                                    "Node {:?} does not have a vector property '{}'",
-                                    source_node, property_key
-                                ),
-                            },
-                        )
-                    })?;
-
-                // 4. Perform HNSW search with the extracted embedding.
-                // Request k+1 results to account for filtering out the source node.
-                // Use checked_add to prevent overflow (though k=usize::MAX is extremely unlikely).
-                let k_with_source = k.checked_add(1).unwrap_or(*k);
-                let mut results = if let Some(label) = label_filter {
-                    self.current.find_similar_by_embedding_with_label(
-                        embedding,
-                        label,
-                        k_with_source,
-                    )?
-                } else {
-                    self.current
-                        .find_similar_by_embedding(embedding, k_with_source)?
-                };
-
-                // Remove source node from results. In vector similarity with cosine distance,
-                // a node has similarity 1.0 with itself, so it's always the first result.
-                // Filtering it out ensures we return k truly *different* nodes.
-                results.retain(|(node_id, _)| node_id != source_node);
-
-                // Trim to requested k results after filtering
-                results.truncate(*k);
-
-                Ok(Box::new(iterators::VectorResultIterator::new(
-                    results,
-                    Arc::clone(&self.current),
-                )))
-            }
+            } => self.execute_similar_to_node(*source_node, property_key, *k, label_filter.as_deref()),
 
             // For unsupported operations, return error
             _ => Err(crate::core::error::Error::Query(
@@ -433,6 +334,121 @@ impl QueryExecutor {
                 },
             )),
         }
+    }
+
+    fn execute_hnsw_search(
+        &self,
+        embedding: &[f32],
+        k: usize,
+        label_filter: Option<&str>,
+        property_key: Option<&str>,
+    ) -> Result<Box<dyn ResultIterator>> {
+        let results = match (property_key, label_filter) {
+            // Property-specific with label filter
+            (Some(prop), Some(label)) => self
+                .current
+                .find_similar_by_embedding_in_with_label(prop, embedding, label, k)?,
+            // Property-specific without label filter
+            (Some(prop), None) => self
+                .current
+                .find_similar_by_embedding_in(prop, embedding, k)?,
+            // Default property with label filter
+            (None, Some(label)) => self
+                .current
+                .find_similar_by_embedding_with_label(embedding, label, k)?,
+            // Default property without label filter
+            (None, None) => self.current.find_similar_by_embedding(embedding, k)?,
+        };
+
+        Ok(Box::new(iterators::VectorResultIterator::new(
+            results,
+            Arc::clone(&self.current),
+        )))
+    }
+
+    fn execute_similar_to_node(
+        &self,
+        source_node: crate::core::NodeId,
+        property_key: &str,
+        k: usize,
+        label_filter: Option<&str>,
+    ) -> Result<Box<dyn ResultIterator>> {
+        // 1. Validate that property_key matches the indexed property
+        let indexed_property =
+            self.current.get_indexed_property_name().ok_or_else(|| {
+                crate::core::error::Error::Query(
+                    crate::core::error::QueryError::ExecutionError {
+                        message:
+                            "No vector index is enabled. Call enable_vector_index() first."
+                                .to_string(),
+                    },
+                )
+            })?;
+
+        if property_key != indexed_property {
+            return Err(crate::core::error::Error::Query(
+                crate::core::error::QueryError::ExecutionError {
+                    message: format!(
+                        "Property key '{}' does not match indexed property '{}'. \
+                         Vector index was built on '{}', so similar_to queries must use the same property.",
+                        property_key, indexed_property, indexed_property
+                    ),
+                },
+            ));
+        }
+
+        // 2. Look up the source node
+        let node = self.current.get_node(source_node).map_err(|_| {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ExecutionError {
+                    message: format!("Source node {:?} not found", source_node),
+                },
+            )
+        })?;
+
+        // 3. Extract the embedding from the specified property
+        let embedding = node
+            .properties
+            .get(property_key)
+            .and_then(|v: &crate::core::PropertyValue| v.as_vector())
+            .ok_or_else(|| {
+                crate::core::error::Error::Query(
+                    crate::core::error::QueryError::ExecutionError {
+                        message: format!(
+                            "Node {:?} does not have a vector property '{}'",
+                            source_node, property_key
+                        ),
+                    },
+                )
+            })?;
+
+        // 4. Perform HNSW search with the extracted embedding.
+        // Request k+1 results to account for filtering out the source node.
+        // Use checked_add to prevent overflow (though k=usize::MAX is extremely unlikely).
+        let k_with_source = k.checked_add(1).unwrap_or(k);
+        let mut results = if let Some(label) = label_filter {
+            self.current.find_similar_by_embedding_with_label(
+                embedding,
+                label,
+                k_with_source,
+            )?
+        } else {
+            self.current
+                .find_similar_by_embedding(embedding, k_with_source)?
+        };
+
+        // Remove source node from results. In vector similarity with cosine distance,
+        // a node has similarity 1.0 with itself, so it's always the first result.
+        // Filtering it out ensures we return k truly *different* nodes.
+        results.retain(|(node_id, _)| node_id != &source_node);
+
+        // Trim to requested k results after filtering
+        results.truncate(k);
+
+        Ok(Box::new(iterators::VectorResultIterator::new(
+            results,
+            Arc::clone(&self.current),
+        )))
     }
 }
 
