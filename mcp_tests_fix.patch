@@ -1,0 +1,30 @@
+--- src/mcp/server.rs
++++ src/mcp/server.rs
+@@ -796,7 +796,7 @@
+         }))
+     }
+
+-    fn parse_args<T: serde::de::DeserializeOwned>(
++    pub(crate) fn parse_args<T: serde::de::DeserializeOwned>(
+         &self,
+         args: serde_json::Value,
+     ) -> Result<T, CallToolResult> {
+--- src/mcp/tests.rs
++++ src/mcp/tests.rs
+@@ -2792,4 +2792,16 @@
+         );
+         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+     }
++
++    #[test]
++    fn test_parse_args_invalid_argument() {
++        let server = create_test_server();
++        let invalid_args = serde_json::json!("this is definitely not a valid struct argument");
++
++        // The helper should gracefully return a CallToolResult error for unparseable input.
++        let result: Result<crate::mcp::GetNodeRequest, _> = server.parse_args(invalid_args);
++
++        let err = result.unwrap_err();
++        assert!(err.is_error.unwrap_or(false), "Should be marked as an error response");
++    }
+ }

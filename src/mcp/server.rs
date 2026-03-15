@@ -792,7 +792,7 @@ impl AletheiaMcpServer {
         )])
     }
 
-    fn parse_args<T: serde::de::DeserializeOwned>(
+    pub(crate) fn parse_args<T: serde::de::DeserializeOwned>(
         &self,
         args: serde_json::Value,
     ) -> Result<T, CallToolResult> {

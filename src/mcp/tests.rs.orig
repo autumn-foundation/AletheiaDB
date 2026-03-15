@@ -2779,16 +2779,4 @@ mod list_nodes_extended_tests {
         let nodes = value["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 1, "Page 3 should have 1 node");
     }
-
-    #[test]
-    fn test_parse_args_invalid_argument() {
-        let server = create_test_server();
-        let invalid_args = serde_json::json!("this is definitely not a valid struct argument");
-
-        // The helper should gracefully return a CallToolResult error for unparseable input.
-        let result: Result<crate::mcp::GetNodeRequest, _> = server.parse_args(invalid_args);
-
-        let err = result.unwrap_err();
-        assert!(err.is_error.unwrap_or(false), "Should be marked as an error response");
-    }
 }

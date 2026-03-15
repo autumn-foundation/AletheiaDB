@@ -1,0 +1,39 @@
+--- src/mcp/tests.rs
++++ src/mcp/tests.rs
+@@ -2792,4 +2792,26 @@
+         );
+         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+     }
++
++    #[tokio::test]
++    async fn test_invalid_arguments_all_tools() {
++        let server = create_test_server();
++
++        let tools = [
++            "get_node", "create_node", "update_node", "delete_node", "delete_node_cascade", "list_nodes", "count_nodes",
++            "get_edge", "create_edge", "update_edge", "delete_edge", "list_edges", "count_edges", "get_outgoing_edges",
++            "get_incoming_edges", "traverse", "find_similar", "enable_vector_index", "get_node_at_time", "get_edge_at_time",
++            "get_node_at_valid_time", "get_node_at_transaction_time", "get_node_history", "diff_node_versions",
++            "get_edge_at_valid_time", "get_edge_at_transaction_time", "get_edge_history", "diff_edge_versions", "hybrid_query"
++        ];
++
++        let invalid_args = serde_json::json!("this is definitely not a valid struct argument");
++
++        for tool_name in tools.iter() {
++            let req = rmcp::CallToolRequestParam {
++                name: tool_name.to_string(),
++                arguments: Some(invalid_args.as_object().cloned().unwrap_or_default().into_iter().collect()),
++            };
++
++            let ctx = rmcp::RequestContext::default();
++            let result = server.call_tool(req, ctx).await.unwrap();
++            assert!(result.is_error.unwrap_or(false), "Tool {} should have failed with invalid arguments", tool_name);
++
++            let error_msg = match &result.content[0] {
++                rmcp::model::ToolResponseContent::Text { text, .. } => text,
++                _ => panic!("Expected text content"),
++            };
++            assert!(error_msg.contains("Invalid arguments"), "Tool {} error message should indicate invalid arguments, got: {}", tool_name, error_msg);
++        }
++    }
+ }
