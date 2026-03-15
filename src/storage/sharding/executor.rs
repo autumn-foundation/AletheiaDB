@@ -510,7 +510,8 @@ impl<C: ShardClient> QueryExecutor<C> {
             }
             AggregationStrategy::MergeNodes => {
                 // Merge and deduplicate (simplified - real impl would parse nodes)
-                let mut aggregated = Vec::with_capacity(results.iter().map(|r| r.data.len()).sum());
+                let mut aggregated =
+                    Vec::with_capacity(results.iter().map(|r| r.data.len()).max().unwrap_or(0));
                 let mut seen_len = 0;
                 for result in results {
                     if result.data.len() > seen_len {
@@ -852,6 +853,25 @@ mod tests {
         let query = DistributedQuery::new(1, vec![])
             .with_shards(vec![make_shard_id(0), make_shard_id(1)])
             .with_aggregation(AggregationStrategy::Concat);
+
+        let result = executor.execute(query).unwrap();
+        assert!(result.is_complete());
+    }
+
+    #[test]
+    fn test_aggregation_merge_nodes() {
+        let mut executor: QueryExecutor<MockShardClient> =
+            QueryExecutor::new(ExecutorConfig::default(), test_router());
+
+        let client0 = Arc::new(MockShardClient::new(make_shard_id(0)));
+        let client1 = Arc::new(MockShardClient::new(make_shard_id(1)));
+
+        executor.register_client(make_shard_id(0), client0);
+        executor.register_client(make_shard_id(1), client1);
+
+        let query = DistributedQuery::new(1, vec![])
+            .with_shards(vec![make_shard_id(0), make_shard_id(1)])
+            .with_aggregation(AggregationStrategy::MergeNodes);
 
         let result = executor.execute(query).unwrap();
         assert!(result.is_complete());
