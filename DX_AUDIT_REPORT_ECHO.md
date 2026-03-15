@@ -34,3 +34,8 @@ The library is in good shape. The `Debug` implementation for the main struct sig
 
 Signed,
 **Echo** 🗣️
+
+#### 4. NarrativeGenerator Fake Implementation (Major)
+**Scenario:** "Tried to run the `story_demo`. The documentation said it needed `nova` feature. When I created a new project and didn't enable it, the error message I got wasn't helpful in a compiler way, it was just a warning, and it let me compile my code, then crashed at runtime!"
+**Result:** The feature gate `#[cfg(feature = "nova")]` for `NarrativeGenerator` was implemented by providing a deprecated stub that panics at runtime. This compiles successfully but crashes at runtime.
+**Fix:** Removed the `#[cfg(not(feature = "nova"))]` stub implementations and feature gated the module in `src/experimental/mod.rs` so that attempting to use it without the `nova` feature results in a clear compile-time error like `unresolved import` or `struct not found`, which is exactly what the `README.md` says would happen. By having a runtime panic, we violate the documentation's premise and the Rust expectation of failing at compile time for missing features.
