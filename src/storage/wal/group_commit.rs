@@ -111,9 +111,6 @@ struct GroupCommitState {
     /// Recent flush errors, stored as (epoch, error_message).
     /// Used to verify that a specific epoch was successfully flushed.
     recent_errors: VecDeque<(u64, String)>,
-    /// The oldest epoch in the recent_errors list (or older if evicted).
-    /// Used to detect if we've lost history.
-    oldest_error_epoch: u64,
     /// Set of completed epochs that are ahead of flushed_epoch
     completed_epochs: BTreeSet<u64>,
     /// Compact representation of all failed epochs as disjoint ranges [start, end].
@@ -140,7 +137,6 @@ impl GroupCommitCoordinator {
                 batch_count: 0,
                 flushed_epoch: 0,
                 recent_errors: VecDeque::new(),
-                oldest_error_epoch: 0,
                 completed_epochs: BTreeSet::new(),
                 failed_epoch_ranges: Vec::new(),
             }),
@@ -354,12 +350,7 @@ impl GroupCommitCoordinator {
 
             // Keep history limited
             while state.recent_errors.len() > self.config.recent_errors_capacity {
-                if let Some((evicted_epoch, _)) = state.recent_errors.pop_front() {
-                    // Track the newest evicted epoch to know what we've lost
-                    // We set oldest_error_epoch to evicted_epoch + 1 because if
-                    // evicted_epoch is gone, any check for it (or older) is invalid.
-                    state.oldest_error_epoch = evicted_epoch + 1;
-                }
+                state.recent_errors.pop_front();
             }
 
             // Record this epoch in our compact ranges to preserve accurate failure state forever
