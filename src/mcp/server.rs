@@ -872,10 +872,8 @@ impl AletheiaMcpServer {
 
     fn handle_delete_node(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: DeleteNodeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: DeleteNodeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -891,10 +889,8 @@ impl AletheiaMcpServer {
 
     fn handle_delete_node_cascade(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: DeleteNodeCascadeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: DeleteNodeCascadeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -911,10 +907,7 @@ impl AletheiaMcpServer {
 
     fn handle_list_nodes(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-        let req: ListNodesRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return Err(format!("Invalid arguments: {}", e)),
-        };
+        let req: ListNodesRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
         // Apply resource limits
         let limit = req
@@ -1019,10 +1012,8 @@ impl AletheiaMcpServer {
 
     fn handle_count_nodes(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: CountNodesRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: CountNodesRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             if let Some(label) = &req.label {
                 // Use QueryBuilder to count by label efficiently without collecting all rows
@@ -1051,10 +1042,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_edge(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetEdgeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetEdgeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
@@ -1071,10 +1060,8 @@ impl AletheiaMcpServer {
 
     fn handle_create_edge(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: CreateEdgeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: CreateEdgeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let source_id = match NodeId::new(req.source_id) {
                 Ok(id) => id,
@@ -1113,10 +1100,8 @@ impl AletheiaMcpServer {
 
     fn handle_update_edge(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: UpdateEdgeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: UpdateEdgeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
@@ -1141,10 +1126,8 @@ impl AletheiaMcpServer {
 
     fn handle_delete_edge(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: DeleteEdgeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: DeleteEdgeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
@@ -1160,10 +1143,7 @@ impl AletheiaMcpServer {
 
     fn handle_list_edges(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-        let req: ListEdgesRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return Err(format!("Invalid arguments: {}", e)),
-        };
+        let req: ListEdgesRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
         // Apply resource limits
         let limit = req
@@ -1189,10 +1169,8 @@ impl AletheiaMcpServer {
 
     fn handle_count_edges(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: CountEdgesRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: CountEdgesRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             // Note: Counting by label is not efficiently supported without iterating all edges.
             // For now, we only support total count.
@@ -1210,10 +1188,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_outgoing_edges(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetOutgoingEdgesRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetOutgoingEdgesRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -1238,10 +1214,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_incoming_edges(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetIncomingEdgesRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetIncomingEdgesRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -1269,10 +1243,8 @@ impl AletheiaMcpServer {
 
     fn handle_traverse(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: TraverseRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: TraverseRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let start_id = NodeId::new(req.start_node_id).map_err(|e| e.to_string())?;
 
@@ -1371,10 +1343,8 @@ impl AletheiaMcpServer {
 
     fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: FindSimilarRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: FindSimilarRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             // Apply resource limits
             let k = req.k.unwrap_or(DEFAULT_VECTOR_K).min(MAX_VECTOR_K);
@@ -1415,10 +1385,8 @@ impl AletheiaMcpServer {
 
     fn handle_enable_vector_index(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: EnableVectorIndexRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: EnableVectorIndexRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let distance_metric = match req.distance_metric.as_deref().unwrap_or("cosine") {
                 "euclidean" => DistanceMetric::Euclidean,
@@ -1462,10 +1430,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_node_at_time(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetNodeAtTimeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetNodeAtTimeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -1492,10 +1458,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_edge_at_time(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetEdgeAtTimeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetEdgeAtTimeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
@@ -1526,10 +1490,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_node_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetNodeAtValidTimeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetNodeAtValidTimeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -1550,10 +1512,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_node_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetNodeAtTransactionTimeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetNodeAtTransactionTimeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -1574,10 +1534,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_node_history(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetNodeHistoryRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetNodeHistoryRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -1602,10 +1560,8 @@ impl AletheiaMcpServer {
 
     fn handle_diff_node_versions(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: DiffNodeVersionsRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: DiffNodeVersionsRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
@@ -1634,10 +1590,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_edge_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetEdgeAtValidTimeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetEdgeAtValidTimeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
@@ -1658,10 +1612,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_edge_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetEdgeAtTransactionTimeRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetEdgeAtTransactionTimeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
@@ -1682,10 +1634,8 @@ impl AletheiaMcpServer {
 
     fn handle_get_edge_history(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: GetEdgeHistoryRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: GetEdgeHistoryRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
@@ -1710,10 +1660,8 @@ impl AletheiaMcpServer {
 
     fn handle_diff_edge_versions(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-            let req: DiffEdgeVersionsRequest = match serde_json::from_value(args) {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Invalid arguments: {}", e)),
-            };
+            let req: DiffEdgeVersionsRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
@@ -1810,10 +1758,7 @@ impl AletheiaMcpServer {
 
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-        let req: HybridQueryRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return Err(format!("Invalid arguments: {}", e)),
-        };
+        let req: HybridQueryRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
         // Apply resource limits
         let limit = req
