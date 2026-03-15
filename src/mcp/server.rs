@@ -2174,12 +2174,11 @@ impl ServerHandler for AletheiaMcpServer {
     }
 }
 
-
 #[cfg(test)]
 mod additional_coverage_tests {
     use super::*;
-    use serde_json::json;
     use crate::config::AletheiaDBConfig;
+    use serde_json::json;
     use std::sync::Arc;
 
     fn test_server() -> AletheiaMcpServer {
