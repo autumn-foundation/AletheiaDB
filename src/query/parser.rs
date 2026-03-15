@@ -760,48 +760,58 @@ impl Parser {
     }
 
     fn parse_value(&mut self) -> Result<PropertyValue, ParseError> {
-        match self.current() {
-            Some(Token::Null) => {
+        let Some(token) = self.current() else {
+            return Err(self.error("Expected value".to_string(), Some("value".to_string())));
+        };
+
+        match token {
+            Token::Null => {
                 self.advance();
                 Ok(PropertyValue::Null)
             }
-            Some(Token::True) => {
+            Token::True => {
                 self.advance();
                 Ok(PropertyValue::Bool(true))
             }
-            Some(Token::False) => {
+            Token::False => {
                 self.advance();
                 Ok(PropertyValue::Bool(false))
             }
-            Some(Token::IntegerLiteral(n)) => {
+            Token::IntegerLiteral(n) => {
                 let v = PropertyValue::Int(*n);
                 self.advance();
                 Ok(v)
             }
-            Some(Token::FloatLiteral(f)) => {
+            Token::FloatLiteral(f) => {
                 let v = PropertyValue::Float(*f);
                 self.advance();
                 Ok(v)
             }
-            Some(Token::StringLiteral(s)) => {
+            Token::StringLiteral(s) => {
                 let v = PropertyValue::String(s.clone());
                 self.advance();
                 Ok(v)
             }
-            Some(Token::Parameter(p)) => {
+            Token::Parameter(p) => {
                 let v = PropertyValue::Parameter(p.clone());
                 self.advance();
                 Ok(v)
             }
-            Some(Token::Dash) => {
+            Token::Dash => {
                 self.advance();
-                match self.current() {
-                    Some(Token::IntegerLiteral(n)) => {
+                let Some(next_token) = self.current() else {
+                    return Err(self.error(
+                        "Expected number after '-'".to_string(),
+                        Some("number".to_string()),
+                    ));
+                };
+                match next_token {
+                    Token::IntegerLiteral(n) => {
                         let v = PropertyValue::Int(-*n);
                         self.advance();
                         Ok(v)
                     }
-                    Some(Token::FloatLiteral(f)) => {
+                    Token::FloatLiteral(f) => {
                         let v = PropertyValue::Float(-*f);
                         self.advance();
                         Ok(v)
