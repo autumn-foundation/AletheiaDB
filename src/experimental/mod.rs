@@ -227,6 +227,10 @@ pub mod omen;
 pub mod oracle;
 
 #[cfg(feature = "nova")]
+/// Paradox: Contradiction Detection Engine.
+pub mod paradox;
+
+#[cfg(feature = "nova")]
 /// Luna: Semantic Subgraph Synthesis.
 pub mod luna;
 
