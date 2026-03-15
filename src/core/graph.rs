@@ -726,3 +726,282 @@ mod sentry_tests {
         assert!(!edge.connects(other, other));
     }
 }
+
+#[cfg(test)]
+mod sentinel_kill_mutants {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+
+    #[test]
+    fn test_node_get_property_exact() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let mut props = PropertyMapBuilder::new();
+        props = props.insert("name", "Bob");
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props.build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let missing = node.get_property("missing");
+        assert!(
+            missing.is_none(),
+            "Missing property must strictly return None"
+        );
+
+        let existing = node.get_property("name");
+        assert!(
+            existing.is_some(),
+            "Existing property must strictly return Some"
+        );
+        assert_eq!(existing.unwrap().as_str(), Some("Bob"));
+    }
+
+    #[test]
+    fn test_edge_get_property_exact() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let mut props = PropertyMapBuilder::new();
+        props = props.insert("weight", 42i64);
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props.build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let missing = edge.get_property("missing");
+        assert!(
+            missing.is_none(),
+            "Missing property must strictly return None"
+        );
+
+        let existing = edge.get_property("weight");
+        assert!(
+            existing.is_some(),
+            "Existing property must strictly return Some"
+        );
+        assert_eq!(existing.unwrap().as_int(), Some(42));
+    }
+
+    #[test]
+    fn test_node_has_label_exact() {
+        let label1 = GLOBAL_INTERNER.intern("Label1").unwrap();
+        let label2 = GLOBAL_INTERNER.intern("Label2").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label1,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(node.has_label(label1), "has_label must return true exactly");
+        assert!(
+            !node.has_label(label2),
+            "has_label must return false exactly"
+        );
+    }
+
+    #[test]
+    fn test_edge_has_label_exact() {
+        let label1 = GLOBAL_INTERNER.intern("Label1").unwrap();
+        let label2 = GLOBAL_INTERNER.intern("Label2").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label1,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(edge.has_label(label1), "has_label must return true exactly");
+        assert!(
+            !edge.has_label(label2),
+            "has_label must return false exactly"
+        );
+    }
+
+    #[test]
+    fn test_node_has_label_str_exact() {
+        let label = GLOBAL_INTERNER.intern("LabelStr1").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            node.has_label_str("LabelStr1"),
+            "has_label_str must return true exactly"
+        );
+        assert!(
+            !node.has_label_str("LabelStr2"),
+            "has_label_str must return false exactly"
+        );
+    }
+
+    #[test]
+    fn test_edge_has_label_str_exact() {
+        let label = GLOBAL_INTERNER.intern("LabelStr1").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            edge.has_label_str("LabelStr1"),
+            "has_label_str must return true exactly"
+        );
+        assert!(
+            !edge.has_label_str("LabelStr2"),
+            "has_label_str must return false exactly"
+        );
+    }
+
+    #[test]
+    fn test_edge_connects_exact() {
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            source,
+            target,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let other1 = NodeId::new(11).unwrap();
+        let other2 = NodeId::new(21).unwrap();
+
+        assert!(
+            edge.connects(source, target),
+            "Must return true when exactly matches"
+        );
+        assert!(
+            !edge.connects(source, other2),
+            "Must return false when target mismatches"
+        );
+        assert!(
+            !edge.connects(other1, target),
+            "Must return false when source mismatches"
+        );
+        assert!(
+            !edge.connects(other1, other2),
+            "Must return false when both mismatch"
+        );
+    }
+
+    #[test]
+    fn test_node_fmt_exact() {
+        let label = GLOBAL_INTERNER.intern("FmtLabel").unwrap();
+        let node = Node::new(
+            NodeId::new(99).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let out = format!("{:?}", node);
+        assert!(
+            out.contains("Node {"),
+            "Debug output must contain struct name"
+        );
+        assert!(
+            out.contains("id: NodeId(99)"),
+            "Debug output must contain exactly id"
+        );
+        assert!(
+            out.contains("label: \"FmtLabel\""),
+            "Debug output must contain exactly label"
+        );
+    }
+
+    #[test]
+    fn test_edge_fmt_exact() {
+        let label = GLOBAL_INTERNER.intern("FmtLabelEdge").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(88).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let out = format!("{:?}", edge);
+        assert!(
+            out.contains("Edge {"),
+            "Debug output must contain struct name"
+        );
+        assert!(
+            out.contains("id: EdgeId(88)"),
+            "Debug output must contain exactly id"
+        );
+        assert!(
+            out.contains("label: \"FmtLabelEdge\""),
+            "Debug output must contain exactly label"
+        );
+        assert!(
+            out.contains("source: NodeId(1)"),
+            "Debug output must contain exactly source"
+        );
+        assert!(
+            out.contains("target: NodeId(2)"),
+            "Debug output must contain exactly target"
+        );
+    }
+
+    #[test]
+    fn test_node_with_metadata_exact() {
+        let label = GLOBAL_INTERNER.intern("MetaNode").unwrap();
+        let meta = crate::core::version::VersionMetadata::new(
+            crate::core::id::TxId::new(42),
+            crate::core::temporal::Timestamp::from(100),
+        );
+        let node = Node::with_metadata(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+            meta,
+        );
+
+        assert_eq!(
+            node.metadata, meta,
+            "with_metadata must exactly assign metadata"
+        );
+    }
+
+    #[test]
+    fn test_edge_with_metadata_exact() {
+        let label = GLOBAL_INTERNER.intern("MetaEdge").unwrap();
+        let meta = crate::core::version::VersionMetadata::new(
+            crate::core::id::TxId::new(42),
+            crate::core::temporal::Timestamp::from(100),
+        );
+        let edge = Edge::with_metadata(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+            meta,
+        );
+
+        assert_eq!(
+            edge.metadata, meta,
+            "with_metadata must exactly assign metadata"
+        );
+    }
+}
