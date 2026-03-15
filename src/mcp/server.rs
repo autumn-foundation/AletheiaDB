@@ -879,13 +879,13 @@ impl AletheiaMcpServer {
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-            match self.db.write(|tx| tx.delete_node(node_id)) {
-                Ok(()) => Ok(json!({
-                    "success": true,
-                    "deleted_node_id": req.node_id
-                })),
-                Err(e) => Err(e.to_string()),
-            }
+            self.db
+                .write(|tx| tx.delete_node(node_id))
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "success": true,
+                "deleted_node_id": req.node_id
+            }))
         })
     }
 
@@ -898,14 +898,14 @@ impl AletheiaMcpServer {
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-            match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
-                Ok(()) => Ok(json!({
-                    "success": true,
-                    "deleted_node_id": req.node_id,
-                    "cascade": true
-                })),
-                Err(e) => Err(e.to_string()),
-            }
+            self.db
+                .write(|tx| tx.delete_node_cascade(node_id))
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "success": true,
+                "deleted_node_id": req.node_id,
+                "cascade": true
+            }))
         })
     }
 
@@ -1148,13 +1148,13 @@ impl AletheiaMcpServer {
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-            match self.db.write(|tx| tx.delete_edge(edge_id)) {
-                Ok(()) => Ok(json!({
-                    "success": true,
-                    "deleted_edge_id": req.edge_id
-                })),
-                Err(e) => Err(e.to_string()),
-            }
+            self.db
+                .write(|tx| tx.delete_edge(edge_id))
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "success": true,
+                "deleted_edge_id": req.edge_id
+            }))
         })
     }
 
