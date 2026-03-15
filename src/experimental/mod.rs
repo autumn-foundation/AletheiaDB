@@ -245,3 +245,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Ouroboros: Semantic Loop & Regression Detection.
+pub mod ouroboros;
