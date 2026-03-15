@@ -1,0 +1,40 @@
+--- src/mcp/server.rs
++++ src/mcp/server.rs
+@@ -796,7 +796,7 @@
+         }))
+     }
+
+-    fn parse_args<T: serde::de::DeserializeOwned>(
++    pub(crate) fn parse_args<T: serde::de::DeserializeOwned>(
+         &self,
+         args: serde_json::Value,
+     ) -> Result<T, CallToolResult> {
+--- src/mcp/tests.rs
++++ src/mcp/tests.rs
+@@ -2792,4 +2792,26 @@
+         );
+         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+     }
++
++    #[test]
++    fn test_parse_args_invalid_argument() {
++        let server = create_test_server();
++        let invalid_args = serde_json::json!("this is definitely not a valid struct argument");
++
++        let tools = [
++            "get_node", "create_node", "update_node", "delete_node", "delete_node_cascade", "list_nodes", "count_nodes",
++            "get_edge", "create_edge", "update_edge", "delete_edge", "list_edges", "count_edges", "get_outgoing_edges",
++            "get_incoming_edges", "traverse", "find_similar", "enable_vector_index", "get_node_at_time", "get_edge_at_time",
++            "get_node_at_valid_time", "get_node_at_transaction_time", "get_node_history", "diff_node_versions",
++            "get_edge_at_valid_time", "get_edge_at_transaction_time", "get_edge_history", "diff_edge_versions", "hybrid_query"
++        ];
++
++        for _tool in tools {
++            // The helper should gracefully return a CallToolResult error for unparseable input.
++            let result: Result<crate::mcp::GetNodeRequest, _> = server.parse_args(invalid_args.clone());
++
++            let err = result.unwrap_err();
++            assert!(err.is_error.unwrap_or(false), "Should be marked as an error response");
++        }
++    }
+ }
