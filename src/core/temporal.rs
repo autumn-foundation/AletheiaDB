@@ -1970,9 +1970,15 @@ mod sentinel_temporal_fast_tests {
         let range_closed = TimeRange::new(ts1, ts2).unwrap();
 
         assert!(range_current.is_current(), "Current range must be current");
-        assert!(!range_closed.is_current(), "Closed range must not be current");
+        assert!(
+            !range_closed.is_current(),
+            "Closed range must not be current"
+        );
 
-        assert!(!range_current.is_closed(), "Current range must not be closed");
+        assert!(
+            !range_current.is_closed(),
+            "Current range must not be closed"
+        );
         assert!(range_closed.is_closed(), "Closed range must be closed");
     }
 
@@ -1984,12 +1990,25 @@ mod sentinel_temporal_fast_tests {
 
         let outer = TimeRange::new(ts1, ts3).unwrap();
         let inner = TimeRange::new(ts1, ts2).unwrap();
-        let disjoint = TimeRange::new(HybridTimestamp::new(400, 0).unwrap(), HybridTimestamp::new(500, 0).unwrap()).unwrap();
+        let disjoint = TimeRange::new(
+            HybridTimestamp::new(400, 0).unwrap(),
+            HybridTimestamp::new(500, 0).unwrap(),
+        )
+        .unwrap();
 
         assert!(outer.contains_range(&inner), "Outer must contain inner");
-        assert!(!inner.contains_range(&outer), "Inner must not contain outer");
-        assert!(!outer.contains_range(&disjoint), "Outer must not contain disjoint");
-        assert!(!disjoint.contains_range(&outer), "Disjoint must not contain outer");
+        assert!(
+            !inner.contains_range(&outer),
+            "Inner must not contain outer"
+        );
+        assert!(
+            !outer.contains_range(&disjoint),
+            "Outer must not contain disjoint"
+        );
+        assert!(
+            !disjoint.contains_range(&outer),
+            "Disjoint must not contain outer"
+        );
     }
 
     #[test]
@@ -2005,7 +2024,11 @@ mod sentinel_temporal_fast_tests {
 
     #[test]
     fn test_timerange_serialization_exact() {
-        let range = TimeRange::new(HybridTimestamp::new(100, 0).unwrap(), HybridTimestamp::new(200, 0).unwrap()).unwrap();
+        let range = TimeRange::new(
+            HybridTimestamp::new(100, 0).unwrap(),
+            HybridTimestamp::new(200, 0).unwrap(),
+        )
+        .unwrap();
         let bytes = range.serialize();
         assert_ne!(bytes, Vec::<u8>::new());
         assert_ne!(bytes, vec![0u8]);
@@ -2020,8 +2043,16 @@ mod sentinel_temporal_fast_tests {
 
     #[test]
     fn test_bitemporal_serialization_exact() {
-        let valid = TimeRange::new(HybridTimestamp::new(100, 0).unwrap(), HybridTimestamp::new(200, 0).unwrap()).unwrap();
-        let tx = TimeRange::new(HybridTimestamp::new(300, 0).unwrap(), HybridTimestamp::new(400, 0).unwrap()).unwrap();
+        let valid = TimeRange::new(
+            HybridTimestamp::new(100, 0).unwrap(),
+            HybridTimestamp::new(200, 0).unwrap(),
+        )
+        .unwrap();
+        let tx = TimeRange::new(
+            HybridTimestamp::new(300, 0).unwrap(),
+            HybridTimestamp::new(400, 0).unwrap(),
+        )
+        .unwrap();
         let interval = BiTemporalInterval::new(valid, tx);
 
         let bytes = interval.serialize();
@@ -2046,14 +2077,26 @@ mod sentinel_temporal_fast_tests {
         let tx_end = HybridTimestamp::new(250, 0).unwrap();
 
         let closed_valid = interval.close_valid_time(valid_end).unwrap();
-        assert_ne!(closed_valid.valid_time().start(), closed_valid.valid_time().end());
+        assert_ne!(
+            closed_valid.valid_time().start(),
+            closed_valid.valid_time().end()
+        );
 
         let closed_tx = interval.close_transaction_time(tx_end).unwrap();
-        assert_ne!(closed_tx.transaction_time().start(), closed_tx.transaction_time().end());
+        assert_ne!(
+            closed_tx.transaction_time().start(),
+            closed_tx.transaction_time().end()
+        );
 
         let closed_both = interval.close_both(valid_end, tx_end).unwrap();
-        assert_ne!(closed_both.valid_time().start(), closed_both.valid_time().end());
-        assert_ne!(closed_both.transaction_time().start(), closed_both.transaction_time().end());
+        assert_ne!(
+            closed_both.valid_time().start(),
+            closed_both.valid_time().end()
+        );
+        assert_ne!(
+            closed_both.transaction_time().start(),
+            closed_both.transaction_time().end()
+        );
     }
 
     #[test]
