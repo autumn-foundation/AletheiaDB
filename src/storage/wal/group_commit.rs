@@ -116,6 +116,9 @@ struct GroupCommitState {
     oldest_error_epoch: u64,
     /// Set of completed epochs that are ahead of flushed_epoch
     completed_epochs: BTreeSet<u64>,
+    /// Compact representation of all failed epochs as disjoint ranges [start, end].
+    /// Used to precisely check if an epoch failed even after it's evicted from `recent_errors`.
+    failed_epoch_ranges: Vec<(u64, u64)>,
 }
 
 impl GroupCommitCoordinator {
@@ -139,6 +142,7 @@ impl GroupCommitCoordinator {
                 recent_errors: VecDeque::new(),
                 oldest_error_epoch: 0,
                 completed_epochs: BTreeSet::new(),
+                failed_epoch_ranges: Vec::new(),
             }),
             flush_complete: Condvar::new(),
             config,
@@ -281,19 +285,21 @@ impl GroupCommitCoordinator {
         }
 
         // Check for history eviction (False Success protection)
-        // We only lose certainty about an epoch's status if its error record was EVICTED.
-        // state.oldest_error_epoch tracks the threshold of lost history.
-        // If epoch < state.oldest_error_epoch, it might have failed and been forgotten.
-        //
-        // Note: We do NOT check against recent_errors.front() because a sparse error list
-        // is valid. If epoch 1 succeeded and epoch 2 failed, recent_errors = [(2, ...)].
-        // epoch 1 < 2, but it shouldn't fail unless 1 < oldest_error_epoch.
+        // We precise-check our compact failed ranges. If it's there, it failed!
+        // If it's not there, it succeeded (we never record successes, only failures).
+        // Since failed_epoch_ranges stores ALL failures compactly, we don't need oldest_error_epoch
+        // for failure checking, which eliminates False Failures.
 
-        if epoch < state.oldest_error_epoch {
+        let failed_in_history = state
+            .failed_epoch_ranges
+            .iter()
+            .any(|(start, end)| epoch >= *start && epoch <= *end);
+
+        if failed_in_history {
             return Err(Error::Storage(StorageError::WalError {
                 reason: format!(
-                    "Group commit status unknown: epoch {} evicted from error history (history starts at {})",
-                    epoch, state.oldest_error_epoch
+                    "Group commit status unknown: epoch {} evicted from error history",
+                    epoch
                 ),
             }));
         }
@@ -354,6 +360,20 @@ impl GroupCommitCoordinator {
                     // evicted_epoch is gone, any check for it (or older) is invalid.
                     state.oldest_error_epoch = evicted_epoch + 1;
                 }
+            }
+
+            // Record this epoch in our compact ranges to preserve accurate failure state forever
+            let mut merged = false;
+            if let Some(last_range) = state.failed_epoch_ranges.last_mut() {
+                if epoch == last_range.1 + 1 {
+                    last_range.1 = epoch;
+                    merged = true;
+                } else if epoch >= last_range.0 && epoch <= last_range.1 {
+                    merged = true;
+                }
+            }
+            if !merged {
+                state.failed_epoch_ranges.push((epoch, epoch));
             }
         }
 
