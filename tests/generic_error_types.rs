@@ -284,3 +284,65 @@ fn test_chained_operations_with_custom_errors() {
     assert_eq!(name, "Frank");
     assert_eq!(age, 30);
 }
+
+#[test]
+fn test_error_other() {
+    use aletheiadb::Error;
+    let err = Error::other("something went wrong");
+    assert!(matches!(err, Error::Other(msg) if msg == "something went wrong"));
+}
+
+#[test]
+fn test_error_not_implemented() {
+    use aletheiadb::Error;
+    let err = Error::not_implemented("feature_x", "not ready");
+    assert!(
+        matches!(err, Error::NotImplemented { feature, reason } if feature == "feature_x" && reason == "not ready")
+    );
+}
+
+#[test]
+fn test_storage_error_io_error() {
+    use aletheiadb::core::error::StorageError;
+    let err = StorageError::io_error("file missing");
+    assert!(matches!(err, StorageError::IoError(msg) if msg == "file missing"));
+}
+
+#[test]
+fn test_storage_error_corruption() {
+    use aletheiadb::core::error::StorageError;
+    let err = StorageError::corruption("bad data");
+    assert!(matches!(err, StorageError::CorruptedData(msg) if msg == "bad data"));
+}
+
+#[test]
+fn test_storage_error_persistence() {
+    use aletheiadb::core::error::StorageError;
+    let err = StorageError::persistence("sync failed");
+    assert!(matches!(err, StorageError::PersistenceError(msg) if msg == "sync failed"));
+}
+
+#[test]
+fn test_format_index_not_found() {
+    use aletheiadb::core::error::QueryError;
+    let err_with_hint = QueryError::IndexNotFound {
+        index_type: "vector".to_string(),
+        property_name: "embedding".to_string(),
+        hint: Some("try creating it".to_string()),
+    };
+    let msg = err_with_hint.to_string();
+    assert!(msg.contains("vector"));
+    assert!(msg.contains("index"));
+    assert!(msg.contains("embedding"));
+    assert!(msg.contains("try creating it"));
+
+    let err_no_hint = QueryError::IndexNotFound {
+        index_type: "scalar".to_string(),
+        property_name: "age".to_string(),
+        hint: None,
+    };
+    let msg = err_no_hint.to_string();
+    assert!(msg.contains("scalar"));
+    assert!(msg.contains("index"));
+    assert!(msg.contains("age"));
+}

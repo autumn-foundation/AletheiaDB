@@ -459,3 +459,89 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn test_clock_skew_direction_as_str() {
+    use aletheiadb::core::hlc::ClockSkewDirection;
+    assert_eq!(ClockSkewDirection::Backward.as_str(), "backward");
+    assert_eq!(ClockSkewDirection::Forward.as_str(), "forward");
+}
+
+#[test]
+fn test_evaluate_clock_skew_boundaries() {
+    use aletheiadb::core::hlc::{
+        ClockSkewDirection, ClockSkewViolation, MAX_BACKWARD_DRIFT_US, evaluate_clock_skew,
+    };
+
+    let limit = MAX_BACKWARD_DRIFT_US;
+    let current_wallclock = 1_000_000_000;
+
+    // Backward drift exactly at limit -> NOT a violation
+    let frontier_wallclock = current_wallclock + limit;
+    let result = evaluate_clock_skew(current_wallclock, frontier_wallclock, None, false);
+    assert!(result.is_ok());
+
+    // Backward drift exceeding limit -> VIOLATION
+    let frontier_wallclock_violation = current_wallclock + limit + 1;
+    let result = evaluate_clock_skew(current_wallclock, frontier_wallclock_violation, None, false);
+    assert!(matches!(
+        result,
+        Err(ClockSkewViolation {
+            direction: ClockSkewDirection::Backward,
+            ..
+        })
+    ));
+
+    // Forward drift exactly at limit -> NOT a violation
+    let max_forward = 100;
+    let frontier_wallclock_fwd = current_wallclock - max_forward;
+    let result = evaluate_clock_skew(
+        current_wallclock,
+        frontier_wallclock_fwd,
+        Some(max_forward),
+        false,
+    );
+    assert!(result.is_ok());
+
+    // Forward drift exceeding limit -> VIOLATION
+    let frontier_wallclock_fwd_violation = current_wallclock - max_forward - 1;
+    let result = evaluate_clock_skew(
+        current_wallclock,
+        frontier_wallclock_fwd_violation,
+        Some(max_forward),
+        false,
+    );
+    assert!(matches!(
+        result,
+        Err(ClockSkewViolation {
+            direction: ClockSkewDirection::Forward,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn test_send_with_overflow_self_heal_branches() {
+    use aletheiadb::core::error::TemporalError;
+    use aletheiadb::core::hlc::{HybridTimestamp, send_with_overflow_self_heal};
+
+    let ts = HybridTimestamp::new(1000, 5).unwrap();
+
+    // Test logic where send returns Ok directly
+    let result = send_with_overflow_self_heal(&ts, 1001, false, |e| e);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().wallclock(), 1001);
+
+    // Test error mapping when initial send fails and self-healing is off
+    let ts_overflow = HybridTimestamp::new(1000, u32::MAX).unwrap();
+    let result = send_with_overflow_self_heal(&ts_overflow, 1000, false, |_| {
+        TemporalError::InvalidTimestamp {
+            timestamp: 0.into(),
+            reason: "".to_string(),
+        }
+    }); // Map to something else
+    assert!(matches!(
+        result,
+        Err(TemporalError::InvalidTimestamp { .. })
+    ));
+}

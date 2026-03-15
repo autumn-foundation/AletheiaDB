@@ -68,3 +68,28 @@
 **Summary:** Potential regression in floating point equality semantics (NaN).
 **Diagnosis:** WEAK_TEST - Explicit verification of `NaN != NaN` (PartialEq) vs `NaN == NaN` (semantically_equal) was needed to prevent regressions.
 **Kill Shot:** Added `test_property_value_partial_eq_nan_semantics` in `src/core/property.rs`.
+
+
+**[Weak Test Coverage in HLC Error Mapping]**
+**Module:** `aletheiadb::core::hlc`
+**Summary:** Mapping logic for errors within `send_with_overflow_self_heal` wasn't completely covered by tests.
+**Diagnosis:** MISSING_COVERAGE - The error mapping fallback block where an error maps an `TemporalError` was not verified to be strictly matching types.
+**Kill Shot:** Added `test_send_with_overflow_self_heal_branches` to `tests/hlc_tests.rs`.
+
+**[Weak Test Coverage in Clock Skew Boundaries]**
+**Module:** `aletheiadb::core::hlc`
+**Summary:** The boundaries of clock skew in `evaluate_clock_skew` had missing exact-edge checks.
+**Diagnosis:** MISSING_COVERAGE - Boundaries for backward and forward drift were not fully bounded.
+**Kill Shot:** Added `test_evaluate_clock_skew_boundaries` to `tests/hlc_tests.rs`.
+
+**[Weak Test Coverage in Error Creation Handlers]**
+**Module:** `aletheiadb::core::error`
+**Summary:** Multiple utility methods for creating StorageError and base Error variants were untested (`Error::other`, `StorageError::io_error`, etc.).
+**Diagnosis:** MISSING_COVERAGE - No explicit unit tests existed to verify that formatting and structural creation behaved as expected.
+**Kill Shot:** Added `test_error_other`, `test_error_not_implemented`, `test_storage_error_io_error`, `test_storage_error_corruption`, `test_storage_error_persistence`, and `test_format_index_not_found` to `tests/generic_error_types.rs`.
+
+**[Weak Test Coverage in Clock Skew Direction Formatting]**
+**Module:** `aletheiadb::core::hlc`
+**Summary:** The formatting for `ClockSkewDirection` variants was not strictly tested for expected outputs.
+**Diagnosis:** MISSING_COVERAGE - No explicit tests verified that `ClockSkewDirection::Backward.as_str()` and `ClockSkewDirection::Forward.as_str()` matched expected string values.
+**Kill Shot:** Added `test_clock_skew_direction_as_str` to `tests/hlc_tests.rs`.
