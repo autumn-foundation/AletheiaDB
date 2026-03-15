@@ -2789,6 +2789,9 @@ mod list_nodes_extended_tests {
         let result: Result<crate::mcp::GetNodeRequest, _> = server.parse_args(invalid_args);
 
         let err = result.unwrap_err();
-        assert!(err.is_error.unwrap_or(false), "Should be marked as an error response");
+        assert!(
+            err.is_error.unwrap_or(false),
+            "Should be marked as an error response"
+        );
     }
 }
