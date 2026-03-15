@@ -1535,22 +1535,20 @@ impl AletheiaMcpServer {
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-            match self.db.get_node_history(node_id) {
-                Ok(history) => {
-                    let versions: Vec<_> = history
-                        .versions
-                        .iter()
-                        .map(|v| self.version_info_to_response(v))
-                        .collect();
-
-                    Ok(json!({
-                        "node_id": req.node_id,
-                        "versions": versions,
-                        "version_count": versions.len()
-                    }))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let history = self
+                .db
+                .get_node_history(node_id)
+                .map_err(|e| e.to_string())?;
+            let versions: Vec<_> = history
+                .versions
+                .iter()
+                .map(|v| self.version_info_to_response(v))
+                .collect();
+            Ok(json!({
+                "node_id": req.node_id,
+                "versions": versions,
+                "version_count": versions.len()
+            }))
         })
     }
 
@@ -1561,26 +1559,16 @@ impl AletheiaMcpServer {
 
             let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-            let from_version = match crate::core::id::VersionId::new(req.from_version) {
-                Ok(id) => id,
-                Err(e) => return Err(e.to_string()),
-            };
-
-            let to_version = match crate::core::id::VersionId::new(req.to_version) {
-                Ok(id) => id,
-                Err(e) => return Err(e.to_string()),
-            };
-
-            match self
+            let from_version =
+                crate::core::id::VersionId::new(req.from_version).map_err(|e| e.to_string())?;
+            let to_version =
+                crate::core::id::VersionId::new(req.to_version).map_err(|e| e.to_string())?;
+            let diff = self
                 .db
                 .diff_node_versions(node_id, from_version, to_version)
-            {
-                Ok(diff) => {
-                    let response = self.version_diff_to_response(&diff);
-                    Ok(json!(response))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+                .map_err(|e| e.to_string())?;
+            let response = self.version_diff_to_response(&diff);
+            Ok(json!(response))
         })
     }
 
@@ -1633,22 +1621,20 @@ impl AletheiaMcpServer {
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-            match self.db.get_edge_history(edge_id) {
-                Ok(history) => {
-                    let versions: Vec<_> = history
-                        .versions
-                        .iter()
-                        .map(|v| self.version_info_to_response(v))
-                        .collect();
-
-                    Ok(json!({
-                        "edge_id": req.edge_id,
-                        "versions": versions,
-                        "version_count": versions.len()
-                    }))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let history = self
+                .db
+                .get_edge_history(edge_id)
+                .map_err(|e| e.to_string())?;
+            let versions: Vec<_> = history
+                .versions
+                .iter()
+                .map(|v| self.version_info_to_response(v))
+                .collect();
+            Ok(json!({
+                "edge_id": req.edge_id,
+                "versions": versions,
+                "version_count": versions.len()
+            }))
         })
     }
 
@@ -1659,26 +1645,16 @@ impl AletheiaMcpServer {
 
             let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-            let from_version = match crate::core::id::VersionId::new(req.from_version) {
-                Ok(id) => id,
-                Err(e) => return Err(e.to_string()),
-            };
-
-            let to_version = match crate::core::id::VersionId::new(req.to_version) {
-                Ok(id) => id,
-                Err(e) => return Err(e.to_string()),
-            };
-
-            match self
+            let from_version =
+                crate::core::id::VersionId::new(req.from_version).map_err(|e| e.to_string())?;
+            let to_version =
+                crate::core::id::VersionId::new(req.to_version).map_err(|e| e.to_string())?;
+            let diff = self
                 .db
                 .diff_edge_versions(edge_id, from_version, to_version)
-            {
-                Ok(diff) => {
-                    let response = self.version_diff_to_response(&diff);
-                    Ok(json!(response))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+                .map_err(|e| e.to_string())?;
+            let response = self.version_diff_to_response(&diff);
+            Ok(json!(response))
         })
     }
 
