@@ -740,6 +740,68 @@ mod tests {
     }
 
     #[test]
+    fn test_hybrid_timestamp_send_receive_bounds_exact() {
+        let ts = HybridTimestamp::new(1000, 0).unwrap();
+
+        // Exact boundary for `send()` against MAX_VALID_TIMESTAMP
+        let send_max = ts.send(MAX_VALID_TIMESTAMP);
+        assert!(send_max.is_ok(), "Should allow exactly MAX_VALID_TIMESTAMP");
+        assert_eq!(send_max.unwrap().wallclock, MAX_VALID_TIMESTAMP);
+
+        let send_over = ts.send(MAX_VALID_TIMESTAMP + 1);
+        assert!(matches!(
+            send_over,
+            Err(TemporalError::InvalidTimestamp { .. })
+        ));
+
+        // Exact boundary for `receive()` against MAX_VALID_TIMESTAMP
+        let msg = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let recv_max = ts.receive(msg, 1000);
+        assert!(recv_max.is_ok(), "Should allow exactly MAX_VALID_TIMESTAMP");
+        assert_eq!(recv_max.unwrap().wallclock, MAX_VALID_TIMESTAMP);
+
+        // Exceed boundary with msg
+        let msg_over = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let recv_over1 = ts.receive(msg_over, 1000);
+        assert!(matches!(
+            recv_over1,
+            Err(TemporalError::InvalidTimestamp { .. })
+        ));
+
+        // Exceed boundary with physical clock
+        let recv_over2 = ts.receive(msg, MAX_VALID_TIMESTAMP + 1);
+        assert!(matches!(
+            recv_over2,
+            Err(TemporalError::InvalidTimestamp { .. })
+        ));
+
+        // Exact boundary combinations for logic selection
+        let msg_same = HybridTimestamp::new_unchecked(1000, 0);
+        let recv_same = ts.receive(msg_same, 1000).unwrap();
+        assert_eq!(recv_same.logical, 1);
+
+        let msg_higher_logical = HybridTimestamp::new_unchecked(1000, 5);
+        let recv_higher = ts.receive(msg_higher_logical, 1000).unwrap();
+        assert_eq!(recv_higher.logical, 6);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_math_exact() {
+        let ts = HybridTimestamp::new_unchecked(5000000, 10);
+        // Explicit exact values to prevent mutation to `%` or `*` or defaults
+        assert_eq!(ts.as_secs(), 5);
+        assert_eq!(ts.as_millis(), 5000);
+
+        let ts_zero = HybridTimestamp::new_unchecked(0, 0);
+        assert_eq!(ts_zero.as_secs(), 0);
+        assert_eq!(ts_zero.as_millis(), 0);
+
+        let ts_neg = HybridTimestamp::new_unchecked(-5000000, 0);
+        assert_eq!(ts_neg.as_secs(), -5);
+        assert_eq!(ts_neg.as_millis(), -5000);
+    }
+
+    #[test]
     fn test_serialization() {
         let ts = HybridTimestamp::new(123456789, 42).unwrap();
         let bytes = ts.serialize();
@@ -917,6 +979,15 @@ mod tests {
 
         let current = 1_000_000;
 
+        // Ensure that removing `diff` logic or replacing `<` fails
+        let frontier_exact = current - 99;
+        let res_exact = evaluate_clock_skew(current, frontier_exact, Some(100), false);
+        assert!(res_exact.is_ok());
+
+        let frontier_over = current - 101;
+        let res_over = evaluate_clock_skew(current, frontier_over, Some(100), false);
+        assert!(matches!(res_over, Err(ClockSkewViolation { .. })));
+
         // Forward boundary: drift == max_jump
         let max_jump = 100;
         let frontier_forward = current - max_jump; // drift = 100
@@ -962,14 +1033,17 @@ mod tests {
         let default = is_clock_skew_self_heal_enabled();
 
         // Override to true
-        let _guard_true = ClockSkewAutoHealTestGuard::force(true);
-        assert!(is_clock_skew_self_heal_enabled());
-        drop(_guard_true);
+        let guard_true = ClockSkewAutoHealTestGuard::force(true);
+        let val_true = is_clock_skew_self_heal_enabled();
+        // Check exact bool return to prevent mutating to unconditional `true` or `false`
+        assert!(val_true);
+        drop(guard_true);
 
         // Override to false
-        let _guard_false = ClockSkewAutoHealTestGuard::force(false);
-        assert!(!is_clock_skew_self_heal_enabled());
-        drop(_guard_false);
+        let guard_false = ClockSkewAutoHealTestGuard::force(false);
+        let val_false = is_clock_skew_self_heal_enabled();
+        assert!(!val_false);
+        drop(guard_false);
 
         // Reverted
         assert_eq!(is_clock_skew_self_heal_enabled(), default);
@@ -985,6 +1059,20 @@ mod tests {
     fn test_hybrid_timestamp_display() {
         let ts = HybridTimestamp::new(123456789, 42).unwrap();
         assert_eq!(ts.to_string(), "123456789.42");
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_display_exact() {
+        let ts1 = HybridTimestamp::new_unchecked(0, 0);
+        assert_eq!(ts1.to_string(), "0.0");
+
+        let ts2 = HybridTimestamp::new_unchecked(1, 1);
+        assert_ne!(ts2.to_string(), "0.0");
+        assert_eq!(ts2.to_string(), "1.1");
+
+        let ts3 = HybridTimestamp::new_unchecked(-1, 5);
+        assert_eq!(ts3.to_string(), "-1.5");
+        assert_eq!(format!("{}", ts3), "-1.5");
     }
 
     #[test]
