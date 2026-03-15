@@ -201,7 +201,12 @@ impl QueryExecutor {
                 k,
                 label_filter,
                 property_key,
-            } => self.execute_hnsw_search(embedding, *k, label_filter.as_deref(), property_key.as_deref()),
+            } => self.execute_hnsw_search(
+                embedding,
+                *k,
+                label_filter.as_deref(),
+                property_key.as_deref(),
+            ),
 
             PhysicalOp::TemporalNodeLookup {
                 node_ids,
@@ -325,7 +330,12 @@ impl QueryExecutor {
                 property_key,
                 k,
                 label_filter,
-            } => self.execute_similar_to_node(*source_node, property_key, *k, label_filter.as_deref()),
+            } => self.execute_similar_to_node(
+                *source_node,
+                property_key,
+                *k,
+                label_filter.as_deref(),
+            ),
 
             // For unsupported operations, return error
             _ => Err(crate::core::error::Error::Query(
@@ -374,16 +384,12 @@ impl QueryExecutor {
         label_filter: Option<&str>,
     ) -> Result<Box<dyn ResultIterator>> {
         // 1. Validate that property_key matches the indexed property
-        let indexed_property =
-            self.current.get_indexed_property_name().ok_or_else(|| {
-                crate::core::error::Error::Query(
-                    crate::core::error::QueryError::ExecutionError {
-                        message:
-                            "No vector index is enabled. Call enable_vector_index() first."
-                                .to_string(),
-                    },
-                )
-            })?;
+        let indexed_property = self.current.get_indexed_property_name().ok_or_else(|| {
+            crate::core::error::Error::Query(crate::core::error::QueryError::ExecutionError {
+                message: "No vector index is enabled. Call enable_vector_index() first."
+                    .to_string(),
+            })
+        })?;
 
         if property_key != indexed_property {
             return Err(crate::core::error::Error::Query(
@@ -399,11 +405,9 @@ impl QueryExecutor {
 
         // 2. Look up the source node
         let node = self.current.get_node(source_node).map_err(|_| {
-            crate::core::error::Error::Query(
-                crate::core::error::QueryError::ExecutionError {
-                    message: format!("Source node {:?} not found", source_node),
-                },
-            )
+            crate::core::error::Error::Query(crate::core::error::QueryError::ExecutionError {
+                message: format!("Source node {:?} not found", source_node),
+            })
         })?;
 
         // 3. Extract the embedding from the specified property
@@ -412,14 +416,12 @@ impl QueryExecutor {
             .get(property_key)
             .and_then(|v: &crate::core::PropertyValue| v.as_vector())
             .ok_or_else(|| {
-                crate::core::error::Error::Query(
-                    crate::core::error::QueryError::ExecutionError {
-                        message: format!(
-                            "Node {:?} does not have a vector property '{}'",
-                            source_node, property_key
-                        ),
-                    },
-                )
+                crate::core::error::Error::Query(crate::core::error::QueryError::ExecutionError {
+                    message: format!(
+                        "Node {:?} does not have a vector property '{}'",
+                        source_node, property_key
+                    ),
+                })
             })?;
 
         // 4. Perform HNSW search with the extracted embedding.
@@ -427,11 +429,8 @@ impl QueryExecutor {
         // Use checked_add to prevent overflow (though k=usize::MAX is extremely unlikely).
         let k_with_source = k.checked_add(1).unwrap_or(k);
         let mut results = if let Some(label) = label_filter {
-            self.current.find_similar_by_embedding_with_label(
-                embedding,
-                label,
-                k_with_source,
-            )?
+            self.current
+                .find_similar_by_embedding_with_label(embedding, label, k_with_source)?
         } else {
             self.current
                 .find_similar_by_embedding(embedding, k_with_source)?
