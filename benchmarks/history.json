@@ -1729,5 +1729,757 @@
         "std_dev_ns": 27171.71107871942
       }
     }
+  },
+  {
+    "timestamp": "2026-03-03T06:54:27.366554+00:00",
+    "commit": "268e122",
+    "branch": "jules-10636708643017105327-54e0d64f",
+    "benchmarks": {
+      "aletheiadb_node_creation": {
+        "point_estimate_ns": 98575.83371273262,
+        "ci_lower_ns": 90689.89329348289,
+        "ci_upper_ns": 106151.5373996296,
+        "std_dev_ns": 313311.27280214935
+      },
+      "aletheiadb_3_hop_traversal": {
+        "point_estimate_ns": 480.9010423276334,
+        "ci_lower_ns": 480.5417492009717,
+        "ci_upper_ns": 481.33038051034123,
+        "std_dev_ns": 2.3207495941495586
+      },
+      "aletheiadb_labeled_traversal": {
+        "point_estimate_ns": 160.24901986729475,
+        "ci_lower_ns": 159.6384037539917,
+        "ci_upper_ns": 161.07461922316912,
+        "std_dev_ns": 4.260224459993823
+      },
+      "aletheiadb_historical_stats": {
+        "point_estimate_ns": 1060.9385541335994,
+        "ci_lower_ns": 1055.3493649473712,
+        "ci_upper_ns": 1068.5488874880652,
+        "std_dev_ns": 78.71544152976732
+      },
+      "aletheiadb_edge_creation": {
+        "point_estimate_ns": 97409.58886371578,
+        "ci_lower_ns": 87690.33032203034,
+        "ci_upper_ns": 106708.90030726204,
+        "std_dev_ns": 326797.8658355379
+      },
+      "aletheiadb_out_degree": {
+        "point_estimate_ns": 106.36308621172634,
+        "ci_lower_ns": 105.72122261233667,
+        "ci_upper_ns": 106.98264964274624,
+        "std_dev_ns": 3.0696262796013087
+      },
+      "aletheiadb_in_degree": {
+        "point_estimate_ns": 99.89096106417895,
+        "ci_lower_ns": 98.83983032997963,
+        "ci_upper_ns": 101.4890018508264,
+        "std_dev_ns": 27.3547178209705
+      },
+      "aletheiadb_batch/batch_node_creation/100": {
+        "point_estimate_ns": 325397029.9,
+        "ci_lower_ns": 322391117.113,
+        "ci_upper_ns": 328390227.99899995,
+        "std_dev_ns": 10922234.024783077
+      },
+      "aletheiadb_batch/batch_node_creation/1000": {
+        "point_estimate_ns": 3302576801.4,
+        "ci_lower_ns": 3236176307.5885,
+        "ci_upper_ns": 3373227124.0645,
+        "std_dev_ns": 249331436.2315026
+      },
+      "aletheiadb_batch/batch_node_creation/10": {
+        "point_estimate_ns": 30397243.23,
+        "ci_lower_ns": 30051096.527125,
+        "ci_upper_ns": 30747962.88375,
+        "std_dev_ns": 1269341.5382926315
+      },
+      "time_travel/with_deltas_v15": {
+        "point_estimate_ns": 161.36243855847692,
+        "ci_lower_ns": 156.47016604612344,
+        "ci_upper_ns": 165.73223148388587,
+        "std_dev_ns": 22.931786683062867
+      },
+      "time_travel/worst_case_v19": {
+        "point_estimate_ns": 137.57487343899757,
+        "ci_lower_ns": 131.7883346207547,
+        "ci_upper_ns": 146.19098668326038,
+        "std_dev_ns": 48.68351712191426
+      },
+      "time_travel/deep_history_v5": {
+        "point_estimate_ns": 124.62564110406889,
+        "ci_lower_ns": 122.39407835499408,
+        "ci_upper_ns": 128.9306329651325,
+        "std_dev_ns": 5.03493091920285
+      },
+      "time_travel/at_anchor_v20": {
+        "point_estimate_ns": 122.05285897715636,
+        "ci_lower_ns": 121.98299425647447,
+        "ci_upper_ns": 122.12011985861746,
+        "std_dev_ns": 0.25384779319637046
+      },
+      "aletheiadb_single_hop/10000_nodes": {
+        "point_estimate_ns": 114.83917503156874,
+        "ci_lower_ns": 114.5414440965101,
+        "ci_upper_ns": 115.13922059594763,
+        "std_dev_ns": 0.6616150284334525
+      },
+      "aletheiadb_single_hop/100_nodes": {
+        "point_estimate_ns": 115.74426168442875,
+        "ci_lower_ns": 115.13513394589454,
+        "ci_upper_ns": 116.48345208749221,
+        "std_dev_ns": 2.0866907558021475
+      },
+      "aletheiadb_single_hop/1000_nodes": {
+        "point_estimate_ns": 114.9620557771512,
+        "ci_lower_ns": 114.79420000440768,
+        "ci_upper_ns": 115.14732947728338,
+        "std_dev_ns": 0.4641603872973116
+      },
+      "aletheiadb_fast_path/node_lookup/100": {
+        "point_estimate_ns": 61.48525363744229,
+        "ci_lower_ns": 61.43927693780358,
+        "ci_upper_ns": 61.54274994360206,
+        "std_dev_ns": 0.19910211941728956
+      },
+      "aletheiadb_fast_path/node_lookup/1000": {
+        "point_estimate_ns": 61.37950341988233,
+        "ci_lower_ns": 61.3206202687698,
+        "ci_upper_ns": 61.43426717903051,
+        "std_dev_ns": 0.16573357778956238
+      },
+      "aletheiadb_fast_path/node_lookup/10000": {
+        "point_estimate_ns": 62.112032963927184,
+        "ci_lower_ns": 61.87530053683396,
+        "ci_upper_ns": 62.397294494807326,
+        "std_dev_ns": 0.8006162483220643
+      }
+    }
+  },
+  {
+    "timestamp": "2026-03-15T02:30:09.832082+00:00",
+    "commit": "268e122",
+    "branch": "jules-10636708643017105327-54e0d64f",
+    "benchmarks": {
+      "aletheiadb_node_creation": {
+        "point_estimate_ns": 98587.62970186095,
+        "ci_lower_ns": 90698.29442179702,
+        "ci_upper_ns": 106173.72371252635,
+        "std_dev_ns": 311649.85990371724
+      },
+      "node_lookup": {
+        "point_estimate_ns": 57.35913619722359,
+        "ci_lower_ns": 56.50455736977553,
+        "ci_upper_ns": 58.057577969288594,
+        "std_dev_ns": 2.478978909261774
+      },
+      "aletheiadb_3_hop_traversal": {
+        "point_estimate_ns": 490.9566824714146,
+        "ci_lower_ns": 486.0911210610184,
+        "ci_upper_ns": 496.89226252026714,
+        "std_dev_ns": 27.204349912522094
+      },
+      "mixed_read_write_80_20": {
+        "point_estimate_ns": 16000283.62,
+        "ci_lower_ns": 15809894.181,
+        "ci_upper_ns": 16190992.190750001,
+        "std_dev_ns": 694296.5083462258
+      },
+      "out_degree": {
+        "point_estimate_ns": 359.75132622830426,
+        "ci_lower_ns": 356.85372429311076,
+        "ci_upper_ns": 362.5014469368608,
+        "std_dev_ns": 7.889877530865651
+      },
+      "labeled_traversal": {
+        "point_estimate_ns": 425.64406262430873,
+        "ci_lower_ns": 420.622228504982,
+        "ci_upper_ns": 431.62721114393304,
+        "std_dev_ns": 23.8432888104791
+      },
+      "aletheiadb_labeled_traversal": {
+        "point_estimate_ns": 157.15374083604598,
+        "ci_lower_ns": 154.35412086249553,
+        "ci_upper_ns": 160.18810752329708,
+        "std_dev_ns": 6.34016989521742
+      },
+      "aletheiadb_historical_stats": {
+        "point_estimate_ns": 943.6866053089475,
+        "ci_lower_ns": 937.0550959101432,
+        "ci_upper_ns": 950.83425962732,
+        "std_dev_ns": 22.104610984163774
+      },
+      "aletheiadb_edge_creation": {
+        "point_estimate_ns": 97436.22900990098,
+        "ci_lower_ns": 87868.1728304804,
+        "ci_upper_ns": 106706.3525712044,
+        "std_dev_ns": 329736.7550253931
+      },
+      "edge_lookup": {
+        "point_estimate_ns": 54.688862384150916,
+        "ci_lower_ns": 54.53080204617688,
+        "ci_upper_ns": 54.85548877609847,
+        "std_dev_ns": 0.6577688944393374
+      },
+      "3_hop_traversal": {
+        "point_estimate_ns": 50499.76467860099,
+        "ci_lower_ns": 50195.45179808302,
+        "ci_upper_ns": 50859.43997623219,
+        "std_dev_ns": 1490.776446113358
+      },
+      "find_neighbors": {
+        "point_estimate_ns": 1138.7508130323538,
+        "ci_lower_ns": 1133.0010882738668,
+        "ci_upper_ns": 1144.9304650388685,
+        "std_dev_ns": 33.00068384786064
+      },
+      "in_degree": {
+        "point_estimate_ns": 353.85812896033354,
+        "ci_lower_ns": 351.1177751389412,
+        "ci_upper_ns": 357.44752522291805,
+        "std_dev_ns": 11.74043677802048
+      },
+      "read_latency_p50_p99": {
+        "point_estimate_ns": 9.255731818014869,
+        "ci_lower_ns": 8.472376505454749,
+        "ci_upper_ns": 10.397560480532274,
+        "std_dev_ns": 46.38946563780239
+      },
+      "aletheiadb_out_degree": {
+        "point_estimate_ns": 100.89695770641809,
+        "ci_lower_ns": 100.08986265539227,
+        "ci_upper_ns": 101.68178816864175,
+        "std_dev_ns": 2.14312779223662
+      },
+      "node_creation": {
+        "point_estimate_ns": 3424.896199580742,
+        "ci_lower_ns": 3265.7409935797023,
+        "ci_upper_ns": 3570.1669011700205,
+        "std_dev_ns": 5232.938710870045
+      },
+      "aletheiadb_in_degree": {
+        "point_estimate_ns": 93.74131073468745,
+        "ci_lower_ns": 92.17469766364088,
+        "ci_upper_ns": 95.18538433100804,
+        "std_dev_ns": 4.109423942380016
+      },
+      "edge_creation": {
+        "point_estimate_ns": 3440.5106951057096,
+        "ci_lower_ns": 3322.669368720461,
+        "ci_upper_ns": 3539.767837277622,
+        "std_dev_ns": 4612.91616683829
+      },
+      "aletheiadb_batch/batch_node_creation/100": {
+        "point_estimate_ns": 320779687.18,
+        "ci_lower_ns": 318032787.8545,
+        "ci_upper_ns": 323449664.4575,
+        "std_dev_ns": 9826482.332096051
+      },
+      "aletheiadb_batch/batch_node_creation/1000": {
+        "point_estimate_ns": 3242852639.9,
+        "ci_lower_ns": 3214890051.227,
+        "ci_upper_ns": 3273274384.0959997,
+        "std_dev_ns": 106175397.50162914
+      },
+      "aletheiadb_batch/batch_node_creation/10": {
+        "point_estimate_ns": 29939598.485,
+        "ci_lower_ns": 29743041.610375,
+        "ci_upper_ns": 30138036.486874998,
+        "std_dev_ns": 722614.5848965567
+      },
+      "cold_batch_write_throughput/zstd/100": {
+        "point_estimate_ns": 7984555.209230771,
+        "ci_lower_ns": 7938082.85973077,
+        "ci_upper_ns": 8035914.551730769,
+        "std_dev_ns": 176757.74135319245
+      },
+      "cold_batch_write_throughput/zstd/1000": {
+        "point_estimate_ns": 67057959.66,
+        "ci_lower_ns": 66660094.097,
+        "ci_upper_ns": 67483061.61999999,
+        "std_dev_ns": 1504887.2352253841
+      },
+      "cold_batch_write_throughput/zstd/10000": {
+        "point_estimate_ns": 183446030.5,
+        "ci_lower_ns": 182197288.48250002,
+        "ci_upper_ns": 184820715.5985,
+        "std_dev_ns": 4794514.962395135
+      },
+      "cold_batch_write_throughput/fast/100": {
+        "point_estimate_ns": 5315076.176726849,
+        "ci_lower_ns": 5278580.774147371,
+        "ci_upper_ns": 5360815.23508413,
+        "std_dev_ns": 166366.75442118396
+      },
+      "cold_batch_write_throughput/fast/1000": {
+        "point_estimate_ns": 47496730.08000001,
+        "ci_lower_ns": 47190056.528333336,
+        "ci_upper_ns": 47822298.563,
+        "std_dev_ns": 1146849.8502744287
+      },
+      "cold_batch_write_throughput/fast/10000": {
+        "point_estimate_ns": 457425994.88,
+        "ci_lower_ns": 455340097.58,
+        "ci_upper_ns": 459588424.4665,
+        "std_dev_ns": 7743969.269904092
+      },
+      "id_generation_current/read_current_approximate": {
+        "point_estimate_ns": 0.3391853652511247,
+        "ci_lower_ns": 0.3380311057358404,
+        "ci_upper_ns": 0.3405628788518511,
+        "std_dev_ns": 0.0054786215669653466
+      },
+      "id_generation_current/read_current": {
+        "point_estimate_ns": 0.33831643589648536,
+        "ci_lower_ns": 0.3371945946733663,
+        "ci_upper_ns": 0.3398494193620269,
+        "std_dev_ns": 0.00542802265524165
+      },
+      "serialization_simulation/resolve_with": {
+        "point_estimate_ns": 98287.18488410018,
+        "ci_lower_ns": 97919.88168313337,
+        "ci_upper_ns": 98634.33624391229,
+        "std_dev_ns": 1792.7067208014626
+      },
+      "serialization_simulation/resolve": {
+        "point_estimate_ns": 160238.28518578917,
+        "ci_lower_ns": 158939.2119208228,
+        "ci_upper_ns": 161410.04941458785,
+        "std_dev_ns": 3855.707324545374
+      },
+      "single_transaction_latency/async": {
+        "point_estimate_ns": 64900.051954701354,
+        "ci_lower_ns": 57170.80987311615,
+        "ci_upper_ns": 71961.69357918137,
+        "std_dev_ns": 36152.03227886931
+      },
+      "single_transaction_latency/synchronous": {
+        "point_estimate_ns": 738790.876715201,
+        "ci_lower_ns": 724415.2182177077,
+        "ci_upper_ns": 751570.2572508124,
+        "std_dev_ns": 62857.96577672319
+      },
+      "single_transaction_latency/group_commit_fast": {
+        "point_estimate_ns": 2005998.2242865462,
+        "ci_lower_ns": 1983871.007169227,
+        "ci_upper_ns": 2031190.052723856,
+        "std_dev_ns": 98480.73259396356
+      },
+      "single_transaction_latency/group_commit_default": {
+        "point_estimate_ns": 3202838.11062318,
+        "ci_lower_ns": 3167055.5776339755,
+        "ci_upper_ns": 3234592.4976296197,
+        "std_dev_ns": 206348.94605099864
+      },
+      "single_transaction_latency/async_batched_default": {
+        "point_estimate_ns": 9242505.828000002,
+        "ci_lower_ns": 9235120.238449996,
+        "ci_upper_ns": 9249805.207549999,
+        "std_dev_ns": 26842.586084467715
+      },
+      "single_transaction_latency/async_batched_aggressive": {
+        "point_estimate_ns": 5099493.626255096,
+        "ci_lower_ns": 5080978.541780118,
+        "ci_upper_ns": 5112408.729099465,
+        "std_dev_ns": 786485.0343885532
+      },
+      "hot_path/resolve_with/100": {
+        "point_estimate_ns": 1901.637951888068,
+        "ci_lower_ns": 1896.8598787370008,
+        "ci_upper_ns": 1907.0474461500407,
+        "std_dev_ns": 27.269522419156583
+      },
+      "hot_path/resolve_with/1000": {
+        "point_estimate_ns": 19530.006934736753,
+        "ci_lower_ns": 19398.531501352805,
+        "ci_upper_ns": 19697.45570992577,
+        "std_dev_ns": 851.7532529460259
+      },
+      "hot_path/resolve_with/10000": {
+        "point_estimate_ns": 193731.4561655157,
+        "ci_lower_ns": 191585.70712623544,
+        "ci_upper_ns": 196210.6015574444,
+        "std_dev_ns": 8895.807252286559
+      },
+      "hot_path/resolve/100": {
+        "point_estimate_ns": 3138.833386011678,
+        "ci_lower_ns": 3126.6970180313406,
+        "ci_upper_ns": 3152.9034587083343,
+        "std_dev_ns": 43.21022831163168
+      },
+      "hot_path/resolve/1000": {
+        "point_estimate_ns": 32127.303872708213,
+        "ci_lower_ns": 31636.61093267416,
+        "ci_upper_ns": 32600.41746161481,
+        "std_dev_ns": 868.9917992627544
+      },
+      "hot_path/resolve/10000": {
+        "point_estimate_ns": 315141.9923336768,
+        "ci_lower_ns": 312444.316501659,
+        "ci_upper_ns": 318045.347875309,
+        "std_dev_ns": 7589.250250671464
+      },
+      "id_generation_concurrent/threads/16": {
+        "point_estimate_ns": 709674.309256455,
+        "ci_lower_ns": 698247.643976185,
+        "ci_upper_ns": 722907.0409910163,
+        "std_dev_ns": 96789.67068012431
+      },
+      "id_generation_concurrent/threads/8": {
+        "point_estimate_ns": 328334.9012302316,
+        "ci_lower_ns": 324672.35345762194,
+        "ci_upper_ns": 332917.9937756368,
+        "std_dev_ns": 43371.33913632645
+      },
+      "id_generation_concurrent/threads/2": {
+        "point_estimate_ns": 111903.96722326904,
+        "ci_lower_ns": 109037.79148129158,
+        "ci_upper_ns": 114817.83265767172,
+        "std_dev_ns": 9270.484902539687
+      },
+      "id_generation_concurrent/threads/4": {
+        "point_estimate_ns": 184963.6136146556,
+        "ci_lower_ns": 183189.95861651443,
+        "ci_upper_ns": 187391.1175102174,
+        "std_dev_ns": 18212.611552273596
+      },
+      "get_outgoing_allocation/degree_100": {
+        "point_estimate_ns": 29.400045193928044,
+        "ci_lower_ns": 29.17944490468543,
+        "ci_upper_ns": 29.636421767818533,
+        "std_dev_ns": 0.6432608744548489
+      },
+      "get_outgoing_allocation/degree_1": {
+        "point_estimate_ns": 29.784490945350733,
+        "ci_lower_ns": 29.588192875573903,
+        "ci_upper_ns": 29.980640318112773,
+        "std_dev_ns": 0.6170122433388732
+      },
+      "get_outgoing_allocation/degree_10": {
+        "point_estimate_ns": 29.358700065504095,
+        "ci_lower_ns": 28.995499444619938,
+        "ci_upper_ns": 29.781735401787035,
+        "std_dev_ns": 0.7077294288663304
+      },
+      "arc_overhead/arc_clone_drop": {
+        "point_estimate_ns": 32.328183794413654,
+        "ci_lower_ns": 32.13436874000657,
+        "ci_upper_ns": 32.5263148522814,
+        "std_dev_ns": 0.6491062414822107
+      },
+      "arc_overhead/direct_access": {
+        "point_estimate_ns": 19.396578117291092,
+        "ci_lower_ns": 19.28828427424887,
+        "ci_upper_ns": 19.4986934367019,
+        "std_dev_ns": 0.48519869061310433
+      },
+      "time_travel/with_deltas_v15": {
+        "point_estimate_ns": 191.21739630911577,
+        "ci_lower_ns": 189.69653850993413,
+        "ci_upper_ns": 192.8624011233218,
+        "std_dev_ns": 5.503763104297013
+      },
+      "time_travel/worst_case_v19": {
+        "point_estimate_ns": 237.05254708231317,
+        "ci_lower_ns": 212.2969783676878,
+        "ci_upper_ns": 260.4385802490558,
+        "std_dev_ns": 38.83559599343729
+      },
+      "time_travel/deep_history_v5": {
+        "point_estimate_ns": 194.3435393463451,
+        "ci_lower_ns": 192.4565934899717,
+        "ci_upper_ns": 196.46573050706243,
+        "std_dev_ns": 5.648887299233414
+      },
+      "time_travel/at_anchor_v20": {
+        "point_estimate_ns": 196.70861146689114,
+        "ci_lower_ns": 193.2373649461988,
+        "ci_upper_ns": 200.0624776112326,
+        "std_dev_ns": 7.500842832237022
+      },
+      "cold_read_latency/single_read/fast_compression": {
+        "point_estimate_ns": 38472.0112284308,
+        "ci_lower_ns": 37829.46620484481,
+        "ci_upper_ns": 39358.866969005845,
+        "std_dev_ns": 3124.3447372824576
+      },
+      "cold_read_latency/single_read/no_compression": {
+        "point_estimate_ns": 3250.170524141374,
+        "ci_lower_ns": 3220.342873230004,
+        "ci_upper_ns": 3281.8449079685233,
+        "std_dev_ns": 99.07774910095385
+      },
+      "cold_read_latency/single_read/zstd_compression": {
+        "point_estimate_ns": 37930.24439795406,
+        "ci_lower_ns": 37432.55855761133,
+        "ci_upper_ns": 38486.62110422454,
+        "std_dev_ns": 3918.78040791088
+      },
+      "compression_ratio/compress/zstd": {
+        "point_estimate_ns": 40949194.79333333,
+        "ci_lower_ns": 40346152.9465,
+        "ci_upper_ns": 41634001.899333335,
+        "std_dev_ns": 2352491.0408831113
+      },
+      "compression_ratio/compress/fast": {
+        "point_estimate_ns": 37084809.88666666,
+        "ci_lower_ns": 36794899.11633332,
+        "ci_upper_ns": 37418278.28533333,
+        "std_dev_ns": 1135964.342782694
+      },
+      "compression_ratio/compress/no_compression": {
+        "point_estimate_ns": 27364011.215,
+        "ci_lower_ns": 27139303.981374998,
+        "ci_upper_ns": 27620779.145375002,
+        "std_dev_ns": 876828.4296574201
+      },
+      "id_generation_lifecycle/create_and_generate_1000": {
+        "point_estimate_ns": 8769.325187039713,
+        "ci_lower_ns": 8735.95246584717,
+        "ci_upper_ns": 8805.331804503474,
+        "std_dev_ns": 182.8318873571135
+      },
+      "checkpoint_load/100": {
+        "point_estimate_ns": 312875.5959213297,
+        "ci_lower_ns": 310506.8141760678,
+        "ci_upper_ns": 315588.33877747087,
+        "std_dev_ns": 6729.39472399416
+      },
+      "checkpoint_load/1000": {
+        "point_estimate_ns": 1490437.5406794797,
+        "ci_lower_ns": 1480874.2774808742,
+        "ci_upper_ns": 1503107.755379563,
+        "std_dev_ns": 35749.571050188126
+      },
+      "checkpoint_load/10000": {
+        "point_estimate_ns": 13147422.8175,
+        "ci_lower_ns": 13079969.189875001,
+        "ci_upper_ns": 13219135.1781875,
+        "std_dev_ns": 254189.1447241819
+      },
+      "recovery/100": {
+        "point_estimate_ns": 412587.27487245196,
+        "ci_lower_ns": 410517.92285266606,
+        "ci_upper_ns": 414941.2544204464,
+        "std_dev_ns": 11160.749810130703
+      },
+      "recovery/1000": {
+        "point_estimate_ns": 612701.4945037025,
+        "ci_lower_ns": 608041.8312649337,
+        "ci_upper_ns": 618572.4958030456,
+        "std_dev_ns": 20692.280031135237
+      },
+      "recovery/10": {
+        "point_estimate_ns": 401830.28163498704,
+        "ci_lower_ns": 392801.88623950374,
+        "ci_upper_ns": 410170.5133658444,
+        "std_dev_ns": 19206.754309456024
+      },
+      "multiple_accesses/resolve_100": {
+        "point_estimate_ns": 3136.695789647006,
+        "ci_lower_ns": 3130.643805816805,
+        "ci_upper_ns": 3143.391174481948,
+        "std_dev_ns": 53.65959967565472
+      },
+      "multiple_accesses/resolve_with_100": {
+        "point_estimate_ns": 1904.1517451492764,
+        "ci_lower_ns": 1897.0812662795802,
+        "ci_upper_ns": 1912.5808409852677,
+        "std_dev_ns": 22.867557705221117
+      },
+      "cold_write_latency/single_write/fast_compression": {
+        "point_estimate_ns": 341138.2491237359,
+        "ci_lower_ns": 337331.9055420343,
+        "ci_upper_ns": 346286.51798405213,
+        "std_dev_ns": 17713.154628067343
+      },
+      "cold_write_latency/single_write/no_compression": {
+        "point_estimate_ns": 288700.7208153757,
+        "ci_lower_ns": 283352.63924269116,
+        "ci_upper_ns": 294103.9113354154,
+        "std_dev_ns": 16063.512086707882
+      },
+      "cold_write_latency/single_write/zstd_compression": {
+        "point_estimate_ns": 450067.5095114217,
+        "ci_lower_ns": 439010.85784309707,
+        "ci_upper_ns": 461751.9020033441,
+        "std_dev_ns": 34555.17363775895
+      },
+      "aletheiadb_single_hop/10000_nodes": {
+        "point_estimate_ns": 104.56842069062493,
+        "ci_lower_ns": 102.9563665718424,
+        "ci_upper_ns": 106.41729698635747,
+        "std_dev_ns": 4.259298809003289
+      },
+      "aletheiadb_single_hop/100_nodes": {
+        "point_estimate_ns": 113.29739403731448,
+        "ci_lower_ns": 110.54215051293805,
+        "ci_upper_ns": 117.00478719681355,
+        "std_dev_ns": 10.915015610403742
+      },
+      "aletheiadb_single_hop/1000_nodes": {
+        "point_estimate_ns": 103.33543710414426,
+        "ci_lower_ns": 102.4425302112672,
+        "ci_upper_ns": 104.37148380507527,
+        "std_dev_ns": 2.370412817889779
+      },
+      "checkpoint_creation/100": {
+        "point_estimate_ns": 4050172.636668608,
+        "ci_lower_ns": 3949305.4544337266,
+        "ci_upper_ns": 4153974.1178758186,
+        "std_dev_ns": 501342.0921502577
+      },
+      "checkpoint_creation/1000": {
+        "point_estimate_ns": 4503956.974327315,
+        "ci_lower_ns": 4308249.538246574,
+        "ci_upper_ns": 4779138.332539268,
+        "std_dev_ns": 1036249.1865353642
+      },
+      "checkpoint_creation/10000": {
+        "point_estimate_ns": 8782351.653846152,
+        "ci_lower_ns": 8644668.41973077,
+        "ci_upper_ns": 8929586.26573077,
+        "std_dev_ns": 518924.9909319285
+      },
+      "aletheiadb_fast_path/node_lookup/100": {
+        "point_estimate_ns": 55.7091008492787,
+        "ci_lower_ns": 55.42447172264897,
+        "ci_upper_ns": 56.02559826085742,
+        "std_dev_ns": 1.3125043284570264
+      },
+      "aletheiadb_fast_path/node_lookup/1000": {
+        "point_estimate_ns": 62.21701260240902,
+        "ci_lower_ns": 61.69015469174057,
+        "ci_upper_ns": 62.87366149923121,
+        "std_dev_ns": 4.688050292788612
+      },
+      "aletheiadb_fast_path/node_lookup/10000": {
+        "point_estimate_ns": 61.496291652368335,
+        "ci_lower_ns": 60.745021414428756,
+        "ci_upper_ns": 62.19819330997648,
+        "std_dev_ns": 2.420109159211571
+      },
+      "string_length/resolve_with": {
+        "point_estimate_ns": 19.255809393842565,
+        "ci_lower_ns": 19.152395186325602,
+        "ci_upper_ns": 19.383044607637057,
+        "std_dev_ns": 0.3150626111918453
+      },
+      "string_length/resolve": {
+        "point_estimate_ns": 31.90334249184791,
+        "ci_lower_ns": 31.69429490883091,
+        "ci_upper_ns": 32.14330715230428,
+        "std_dev_ns": 0.6172536006340448
+      },
+      "string_access_single/resolve_with": {
+        "point_estimate_ns": 20.35724248819866,
+        "ci_lower_ns": 20.27236814837408,
+        "ci_upper_ns": 20.453807889796284,
+        "std_dev_ns": 0.3822012946057436
+      },
+      "string_access_single/resolve": {
+        "point_estimate_ns": 32.818241884097105,
+        "ci_lower_ns": 32.645380020704096,
+        "ci_upper_ns": 32.98610340843367,
+        "std_dev_ns": 0.6434443187760562
+      },
+      "find_nodes_by_property/10000_nodes": {
+        "point_estimate_ns": 636240.7677227723,
+        "ci_lower_ns": 633251.7897069725,
+        "ci_upper_ns": 639761.8916203626,
+        "std_dev_ns": 15768.126485917852
+      },
+      "find_nodes_by_property/100_nodes": {
+        "point_estimate_ns": 4402.218632743769,
+        "ci_lower_ns": 4318.948439429574,
+        "ci_upper_ns": 4475.116267502731,
+        "std_dev_ns": 221.7327757959944
+      },
+      "find_nodes_by_property/1000_nodes": {
+        "point_estimate_ns": 36142.20156129338,
+        "ci_lower_ns": 35785.173598829075,
+        "ci_upper_ns": 36489.693447741134,
+        "std_dev_ns": 974.1706384497136
+      },
+      "batch_throughput/async": {
+        "point_estimate_ns": 52369763.22,
+        "ci_lower_ns": 52319985.3155,
+        "ci_upper_ns": 52420980.13025,
+        "std_dev_ns": 184188.66343654934
+      },
+      "batch_throughput/synchronous": {
+        "point_estimate_ns": 758780473.84,
+        "ci_lower_ns": 736164581.748,
+        "ci_upper_ns": 782289756.237,
+        "std_dev_ns": 83825985.85566933
+      },
+      "property_lookup_vs_scan/manual_label_scan_filter": {
+        "point_estimate_ns": 123678.92628721696,
+        "ci_lower_ns": 121011.41059538366,
+        "ci_upper_ns": 126741.9659046191,
+        "std_dev_ns": 4543.055201351237
+      },
+      "property_lookup_vs_scan/find_nodes_by_property": {
+        "point_estimate_ns": 34448.08784599822,
+        "ci_lower_ns": 34239.84849226928,
+        "ci_upper_ns": 34711.34199670512,
+        "std_dev_ns": 598.10185069911
+      },
+      "sustained_write_throughput/sustained_write_10k_versions_fast_reference": {
+        "point_estimate_ns": 458794148.95,
+        "ci_lower_ns": 456505203.7854167,
+        "ci_upper_ns": 461358424.9558334,
+        "std_dev_ns": 5706069.508446738
+      },
+      "sustained_write_throughput/sustained_write_10k_versions": {
+        "point_estimate_ns": 188724560.78333333,
+        "ci_lower_ns": 187325765.16979167,
+        "ci_upper_ns": 190176897.50479165,
+        "std_dev_ns": 3347370.1890176446
+      },
+      "id_generation_single_thread/sequential_10000": {
+        "point_estimate_ns": 63473.55253348864,
+        "ci_lower_ns": 63171.719199662795,
+        "ci_upper_ns": 63790.83584480766,
+        "std_dev_ns": 2620.243169220623
+      },
+      "id_generation_single_thread/sequential_1000": {
+        "point_estimate_ns": 6257.837940631038,
+        "ci_lower_ns": 6224.98239430881,
+        "ci_upper_ns": 6291.19886309539,
+        "std_dev_ns": 220.03936315799098
+      },
+      "single_hop_traversal/10000_nodes": {
+        "point_estimate_ns": 393.8347018356106,
+        "ci_lower_ns": 391.6432289532886,
+        "ci_upper_ns": 396.43115827687944,
+        "std_dev_ns": 9.855025669911928
+      },
+      "single_hop_traversal/100_nodes": {
+        "point_estimate_ns": 398.9846451310958,
+        "ci_lower_ns": 393.92418528622085,
+        "ci_upper_ns": 404.95239220421456,
+        "std_dev_ns": 19.63077225862747
+      },
+      "single_hop_traversal/1000_nodes": {
+        "point_estimate_ns": 412.45091885429673,
+        "ci_lower_ns": 408.7035430090078,
+        "ci_upper_ns": 416.7949170507843,
+        "std_dev_ns": 22.108862576618293
+      },
+      "string_comparison/resolve_with": {
+        "point_estimate_ns": 20.227907610077125,
+        "ci_lower_ns": 20.027186316174348,
+        "ci_upper_ns": 20.436556302310265,
+        "std_dev_ns": 0.4849035243422935
+      },
+      "string_comparison/resolve": {
+        "point_estimate_ns": 31.086784872762486,
+        "ci_lower_ns": 30.912788961032273,
+        "ci_upper_ns": 31.290283474344655,
+        "std_dev_ns": 1.1676686002666379
+      }
+    }
   }
 ]
