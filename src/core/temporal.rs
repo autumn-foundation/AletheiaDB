@@ -1945,3 +1945,163 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_temporal_fast_tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+
+    #[test]
+    fn test_timerange_is_empty_exact() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let range_empty = TimeRange::at(ts1);
+        let range_full = TimeRange::new(ts1, ts2).unwrap();
+
+        assert!(range_empty.is_empty(), "Empty range must be empty");
+        assert!(!range_full.is_empty(), "Full range must not be empty");
+    }
+
+    #[test]
+    fn test_timerange_is_current_closed_exact() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let range_current = TimeRange::from(ts1);
+        let range_closed = TimeRange::new(ts1, ts2).unwrap();
+
+        assert!(range_current.is_current(), "Current range must be current");
+        assert!(!range_closed.is_current(), "Closed range must not be current");
+
+        assert!(!range_current.is_closed(), "Current range must not be closed");
+        assert!(range_closed.is_closed(), "Closed range must be closed");
+    }
+
+    #[test]
+    fn test_timerange_contains_range_exact() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let ts3 = HybridTimestamp::new(300, 0).unwrap();
+
+        let outer = TimeRange::new(ts1, ts3).unwrap();
+        let inner = TimeRange::new(ts1, ts2).unwrap();
+        let disjoint = TimeRange::new(HybridTimestamp::new(400, 0).unwrap(), HybridTimestamp::new(500, 0).unwrap()).unwrap();
+
+        assert!(outer.contains_range(&inner), "Outer must contain inner");
+        assert!(!inner.contains_range(&outer), "Inner must not contain outer");
+        assert!(!outer.contains_range(&disjoint), "Outer must not contain disjoint");
+        assert!(!disjoint.contains_range(&outer), "Disjoint must not contain outer");
+    }
+
+    #[test]
+    fn test_timerange_close_at_exact() {
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let end = HybridTimestamp::new(200, 0).unwrap();
+        let range = TimeRange::from(start);
+
+        let closed = range.close_at(end).unwrap();
+        assert_ne!(closed.start(), closed.end()); // Prevent Default::default()
+        assert_eq!(closed.end(), end);
+    }
+
+    #[test]
+    fn test_timerange_serialization_exact() {
+        let range = TimeRange::new(HybridTimestamp::new(100, 0).unwrap(), HybridTimestamp::new(200, 0).unwrap()).unwrap();
+        let bytes = range.serialize();
+        assert_ne!(bytes, Vec::<u8>::new());
+        assert_ne!(bytes, vec![0u8]);
+        assert_ne!(bytes, vec![1u8]);
+
+        let (deserialized, size) = TimeRange::deserialize(&bytes).unwrap();
+        assert_ne!(size, 0);
+        assert_ne!(size, 1);
+        assert_eq!(size, 24);
+        assert_eq!(deserialized, range);
+    }
+
+    #[test]
+    fn test_bitemporal_serialization_exact() {
+        let valid = TimeRange::new(HybridTimestamp::new(100, 0).unwrap(), HybridTimestamp::new(200, 0).unwrap()).unwrap();
+        let tx = TimeRange::new(HybridTimestamp::new(300, 0).unwrap(), HybridTimestamp::new(400, 0).unwrap()).unwrap();
+        let interval = BiTemporalInterval::new(valid, tx);
+
+        let bytes = interval.serialize();
+        assert_ne!(bytes, Vec::<u8>::new());
+        assert_ne!(bytes, vec![0u8]);
+        assert_ne!(bytes, vec![1u8]);
+
+        let (deserialized, size) = BiTemporalInterval::deserialize(&bytes).unwrap();
+        assert_ne!(size, 0);
+        assert_ne!(size, 1);
+        assert_eq!(size, 48);
+        assert_eq!(deserialized, interval);
+    }
+
+    #[test]
+    fn test_bitemporal_close_exact() {
+        let valid_start = HybridTimestamp::new(100, 0).unwrap();
+        let tx_start = HybridTimestamp::new(200, 0).unwrap();
+        let interval = BiTemporalInterval::now(valid_start, tx_start);
+
+        let valid_end = HybridTimestamp::new(150, 0).unwrap();
+        let tx_end = HybridTimestamp::new(250, 0).unwrap();
+
+        let closed_valid = interval.close_valid_time(valid_end).unwrap();
+        assert_ne!(closed_valid.valid_time().start(), closed_valid.valid_time().end());
+
+        let closed_tx = interval.close_transaction_time(tx_end).unwrap();
+        assert_ne!(closed_tx.transaction_time().start(), closed_tx.transaction_time().end());
+
+        let closed_both = interval.close_both(valid_end, tx_end).unwrap();
+        assert_ne!(closed_both.valid_time().start(), closed_both.valid_time().end());
+        assert_ne!(closed_both.transaction_time().start(), closed_both.transaction_time().end());
+    }
+
+    #[test]
+    fn test_bitemporal_constructors_exact() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let interval_now = BiTemporalInterval::now(ts1, ts2);
+        assert_eq!(interval_now.valid_time().start(), ts1);
+        assert_eq!(interval_now.transaction_time().start(), ts2);
+        assert_ne!(interval_now.valid_time().end(), ts1);
+
+        let interval_with = BiTemporalInterval::with_valid_time(ts1, ts2);
+        assert_eq!(interval_with.valid_time().start(), ts1);
+        assert_eq!(interval_with.transaction_time().start(), ts2);
+        assert_ne!(interval_with.valid_time().end(), ts1);
+    }
+
+    #[test]
+    fn test_temporal_display_exact() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let range = TimeRange::new(ts1, ts2).unwrap();
+        let display = format!("{}", range);
+        assert!(!display.is_empty());
+        assert!(display.contains("100"));
+
+        let interval = BiTemporalInterval::now(ts1, ts2);
+        let display_bi = format!("{}", interval);
+        assert!(!display_bi.is_empty());
+        assert!(display_bi.contains("valid:"));
+    }
+
+    #[test]
+    fn test_time_try_now_exact() {
+        let ts = time::try_now().unwrap();
+        assert_ne!(ts, HybridTimestamp::new_unchecked(0, 0));
+        assert!(ts.wallclock() > 0);
+    }
+
+    #[test]
+    fn test_time_from_secs_millis_exact() {
+        let ts_secs = time::from_secs(100);
+        assert_ne!(ts_secs, HybridTimestamp::new_unchecked(0, 0));
+        assert_eq!(ts_secs.wallclock(), 100_000_000);
+
+        let ts_millis = time::from_millis(100);
+        assert_ne!(ts_millis, HybridTimestamp::new_unchecked(0, 0));
+        assert_eq!(ts_millis.wallclock(), 100_000);
+    }
+}
