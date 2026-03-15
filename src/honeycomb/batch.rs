@@ -193,6 +193,12 @@ impl BatchBuffer {
     ///
     /// Returns `true` if there are events in the buffer and the timeout has expired.
     pub fn is_timeout_expired(&self) -> bool {
+        // Lock `events` first to maintain consistent lock ordering and prevent deadlocks
+        let _events = match self.events.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+
         let batch_start = match self.batch_start.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
@@ -604,6 +610,33 @@ mod tests {
         // Some events may have been batched out, so just verify stats
         let stats = buffer.stats().snapshot();
         assert_eq!(stats.events_added, 1000);
+    }
+
+    #[test]
+    fn test_batch_buffer_timeout_deadlock() {
+        use std::thread;
+
+        let options = TransmissionOptions::default()
+            .with_max_batch_size(100)
+            .with_batch_timeout(Duration::from_millis(100));
+        let buffer = Arc::new(BatchBuffer::new(options));
+
+        let buffer_add = Arc::clone(&buffer);
+        let add_thread = thread::spawn(move || {
+            for _ in 0..1000 {
+                let _ = buffer_add.add(Event::new());
+            }
+        });
+
+        let buffer_timeout = Arc::clone(&buffer);
+        let timeout_thread = thread::spawn(move || {
+            for _ in 0..1000 {
+                let _ = buffer_timeout.is_timeout_expired();
+            }
+        });
+
+        add_thread.join().unwrap();
+        timeout_thread.join().unwrap();
     }
 
     #[test]
