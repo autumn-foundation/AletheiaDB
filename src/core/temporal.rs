@@ -1945,3 +1945,179 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod tests_sentry_exact {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+
+    #[test]
+    fn test_timerange_is_closed_exact() {
+        let ts = 100_000.into();
+
+        let current_range = TimeRange::from(ts);
+        assert!(!current_range.is_closed());
+
+        let closed_range = TimeRange::new(ts, 200_000.into()).unwrap();
+        assert!(closed_range.is_closed());
+
+        let almost_max =
+            TimeRange::new(ts, HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap()).unwrap();
+        assert!(almost_max.is_closed(), "almost max should be closed");
+    }
+
+    #[test]
+    fn test_timerange_contains_exact() {
+        let start = 100_000.into();
+        let end = 200_000.into();
+        let range = TimeRange::new(start, end).unwrap();
+
+        assert!(range.contains(start), "contains start");
+        assert!(
+            !range.contains(99_999.into()),
+            "does not contain before start"
+        );
+
+        assert!(!range.contains(end), "does not contain end (exclusive)");
+        assert!(range.contains(199_999.into()), "contains right before end");
+    }
+
+    #[test]
+    fn test_timerange_contains_or_after_exact() {
+        let start = 100_000.into();
+        let range = TimeRange::from(start);
+
+        assert!(range.contains_or_after(start), "contains start");
+        assert!(
+            !range.contains_or_after(99_999.into()),
+            "does not contain before start"
+        );
+        assert!(
+            range.contains_or_after(200_000.into()),
+            "contains after start"
+        );
+    }
+
+    #[test]
+    fn test_timerange_overlaps_exact() {
+        let start1 = 100.into();
+        let end1 = 200.into();
+        let r1 = TimeRange::new(start1, end1).unwrap();
+
+        let r2 = TimeRange::new(150.into(), 250.into()).unwrap();
+        assert!(r1.overlaps(&r2));
+        assert!(r2.overlaps(&r1));
+
+        let touch_right = TimeRange::new(200.into(), 300.into()).unwrap();
+        assert!(!r1.overlaps(&touch_right), "touch right no overlap");
+
+        let touch_left = TimeRange::new(0.into(), 100.into()).unwrap();
+        assert!(!r1.overlaps(&touch_left), "touch left no overlap");
+
+        let empty1 = TimeRange::at(150.into());
+        assert!(!r1.overlaps(&empty1), "empty internal no overlap");
+
+        let r_valid = TimeRange::new(10.into(), 20.into()).unwrap();
+        let empty_other = TimeRange::at(50.into());
+        assert!(!empty_other.overlaps(&r_valid));
+    }
+
+    #[test]
+    fn test_timerange_close_at_boundaries_exact() {
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let range = TimeRange::from(start);
+
+        let before_start = HybridTimestamp::new(99, 0).unwrap();
+        assert!(range.close_at(before_start).is_err());
+
+        let at_start = HybridTimestamp::new(100, 0).unwrap();
+        let res = range.close_at(at_start).unwrap();
+        assert_eq!(res.end(), at_start);
+
+        let max_valid_plus_one = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        assert!(range.close_at(max_valid_plus_one).is_err());
+
+        let max_range = range.close_at(TIMESTAMP_MAX).unwrap();
+        assert_eq!(max_range.end(), TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_timerange_contains_range_exact() {
+        let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        let exact_match = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(r1.contains_range(&exact_match), "contains exact match");
+
+        let past_start = TimeRange::new(99.into(), 200.into()).unwrap();
+        assert!(!r1.contains_range(&past_start), "past start");
+
+        let past_end = TimeRange::new(100.into(), 201.into()).unwrap();
+        assert!(!r1.contains_range(&past_end), "past end");
+
+        let partial_inside = TimeRange::new(101.into(), 199.into()).unwrap();
+        assert!(r1.contains_range(&partial_inside), "internal subset");
+    }
+
+    #[test]
+    fn test_timerange_is_empty_exact() {
+        let r1 = TimeRange::at(100.into());
+        assert!(r1.is_empty());
+
+        let r2 = TimeRange::new(100.into(), 101.into()).unwrap();
+        assert!(!r2.is_empty());
+    }
+
+    #[test]
+    fn test_bitemporal_is_current_exact() {
+        let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+        let tx_ts = HybridTimestamp::new(200, 0).unwrap();
+
+        // Both current
+        let b1 = BiTemporalInterval::current(valid_ts);
+        assert!(b1.is_current());
+
+        // One closed
+        let b2 = BiTemporalInterval::new(
+            TimeRange::new(valid_ts, 150.into()).unwrap(),
+            TimeRange::from(tx_ts),
+        );
+        assert!(!b2.is_current());
+
+        let b3 = BiTemporalInterval::new(
+            TimeRange::from(valid_ts),
+            TimeRange::new(tx_ts, 250.into()).unwrap(),
+        );
+        assert!(!b3.is_current());
+
+        // Both closed
+        let b4 = BiTemporalInterval::new(
+            TimeRange::new(valid_ts, 150.into()).unwrap(),
+            TimeRange::new(tx_ts, 250.into()).unwrap(),
+        );
+        assert!(!b4.is_current());
+    }
+
+    #[test]
+    fn test_bitemporal_is_visible_at_exact() {
+        let valid_start = 1000.into();
+        let valid_end = 2000.into();
+        let tx_start = 3000.into();
+        let tx_end = 4000.into();
+
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(valid_start, valid_end).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap(),
+        );
+
+        // Inside both
+        assert!(interval.is_visible_at(1500.into(), 3500.into()));
+
+        // Outside valid
+        assert!(!interval.is_visible_at(500.into(), 3500.into()));
+        assert!(!interval.is_visible_at(2500.into(), 3500.into()));
+
+        // Outside tx
+        assert!(!interval.is_visible_at(1500.into(), 2500.into()));
+        assert!(!interval.is_visible_at(1500.into(), 4500.into()));
+    }
+}
