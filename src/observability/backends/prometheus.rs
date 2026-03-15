@@ -98,14 +98,38 @@ fn sync_metrics_to_prometheus() {
 }
 
 #[cfg(not(feature = "observability-prometheus"))]
+/// The Void Backend (Prometheus is Disabled)
+///
+/// This is a stub implementation used when AletheiaDB is compiled without the
+/// `observability-prometheus` feature flag. It exists solely to satisfy the type checker
+/// and ensure the broader application compiles without peppering `#[cfg]` flags everywhere.
+///
+/// ## Panics
+///
+/// It does not panic, but attempting to start it will unconditionally return an `Error::Other`.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::observability::backends::prometheus::{PrometheusBackend, PrometheusConfig};
+///
+/// let config = PrometheusConfig { bind_address: "127.0.0.1:9090".to_string() };
+/// let backend = PrometheusBackend::new(config);
+///
+/// // Trying to start it without the feature enabled returns an error!
+/// let result = backend.start();
+/// assert!(result.is_err());
+/// ```
 pub struct PrometheusBackend;
 
 #[cfg(not(feature = "observability-prometheus"))]
 impl PrometheusBackend {
+    #[doc(hidden)]
     pub fn new(_config: PrometheusConfig) -> Self {
         Self
     }
 
+    #[doc(hidden)]
     pub fn start(self) -> Result<(), Error> {
         Err(Error::other(
             "Prometheus support not compiled in. Enable the 'observability-prometheus' feature.",

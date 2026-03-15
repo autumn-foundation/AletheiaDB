@@ -274,6 +274,15 @@ impl std::fmt::Debug for SnapshotIndex {
 }
 
 impl SnapshotIndex {
+    /// Dispatches a vector search query to the underlying memory structure.
+    ///
+    /// The search algorithm automatically adapts depending on whether this snapshot
+    /// represents a dense `Full` reconstruction (utilizing HNSW for rapid traversal)
+    /// or a sparse `Delta` overlay (performing an exhaustive scan across recent changes).
+    ///
+    /// ## Performance
+    /// Search time on a `Full` index is $O(log N)$, while a `Delta` index is $O(M)$
+    /// where $M$ is the number of changes since the last full snapshot.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
         match self {
             SnapshotIndex::Full(index) => index.search(query, k),
@@ -281,6 +290,15 @@ impl SnapshotIndex {
         }
     }
 
+    /// Narrow the search universe with an explicit node filter.
+    ///
+    /// This forces the underlying index (either HNSW or sparse array) to skip candidates
+    /// that do not satisfy the provided predicate, enabling pre-filtering functionality
+    /// like `SIMILAR TO [0.1, 0.2] WHERE age > 18`.
+    ///
+    /// ## Performance
+    /// Pre-filtering can significantly degrade search throughput if the predicate is highly
+    /// restrictive, causing the index to traverse deeper neighborhoods.
     pub fn search_with_filter(
         &self,
         query: &[f32],

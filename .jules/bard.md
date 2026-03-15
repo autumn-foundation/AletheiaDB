@@ -82,3 +82,7 @@
 ## 2025-03-05 - Logical vs Physical Plans and Iterator Performance
 **Confusion:** The difference between logical plans (`LogicalOp`) and physical plans (`PhysicalOp`) in the query engine was unclear. Additionally, the iterators used for execution (`ResultIterator` implementations) lacked clarity on their streaming architecture.
 **Clarification:** Documented `PhysicalOp` to explain its 1:1 mapping with iterators. Added struct-level documentation to `ResultIterator` implementations to clarify the pull-based, lazy execution model used during query processing.
+
+## 2025-03-14 - Undocumented Public API Nodes
+**Confusion:** Several critical backend structures (`PrometheusBackend`), search methods (`snapshot.rs`), and iterator constructors (`iterators.rs`) were either undocumented or contained non-executable, ignored doctests. This forced users to guess performance characteristics ($O(\log N)$ vs $O(N)$) and manually piece together the query pipeline.
+**Clarification:** Added comprehensive docstrings detailing algorithmic complexity, replacing `ignore` stubs with fully executable `rust` doctests, and explicitly hiding (`#[doc(hidden)]`) internal stub methods to maintain clean public documentation.

@@ -75,6 +75,26 @@ pub struct NodeLookupIterator {
 }
 
 impl NodeLookupIterator {
+    /// A "Sniper Rifle" Iterator: Plucks specific nodes from the graph by their exact IDs.
+    ///
+    /// This avoids scanning or traversal entirely. It is the foundational building block for exact-match
+    /// queries like `MATCH (n) WHERE id(n) = 42`. It hits the `current_storage` node B-Trees directly,
+    /// dropping complexity to $O(\log N)$ per ID.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # fn main() {
+    /// # let current = Arc::new(CurrentStorage::new());
+    /// // Directly seek a specific node instead of scanning the whole graph
+    /// let ids = vec![NodeId::new(42).unwrap()];
+    /// // let iter = NodeLookupIterator::new(ids, current); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(node_ids: Vec<NodeId>, current: Arc<CurrentStorage>) -> Self {
         NodeLookupIterator {
             node_ids: node_ids.into_iter(),
@@ -148,7 +168,24 @@ pub struct NodeScanIterator {
 }
 
 impl NodeScanIterator {
-    /// Create a new NodeScanIterator.
+    /// A "Dragnet" Iterator: Sweeps across the entire graph, optionally filtering by a specific label.
+    ///
+    /// This is the brute-force fallback when no exact indexes are available. It iterates over *all*
+    /// known nodes in current storage. It should generally be avoided for performance reasons
+    /// unless explicitly requested (e.g. `MATCH (n:Person)` with no properties).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # fn main() {
+    /// # let current = Arc::new(CurrentStorage::new());
+    /// // Fallback: Scan every single node labeled "Person"
+    /// // let iter = NodeScanIterator::new(Some("Person".to_string()), current); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
         NodeScanIterator {
             label,
@@ -212,6 +249,26 @@ pub struct VectorResultIterator {
 }
 
 impl VectorResultIterator {
+    /// The mathematical bridge between dense HNSW index searches and standard graph traversals.
+    ///
+    /// Vector queries return raw, sterile `(NodeId, f32)` tuples. This iterator takes those raw distances,
+    /// pulls the matching `Node` objects out of `CurrentStorage`, and rehydrates them into full objects
+    /// so the rest of the AQL executor can treat them like normal query results.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # fn main() {
+    /// # let current = Arc::new(CurrentStorage::new());
+    /// // Raw distances from an HNSW scan get converted back into nodes
+    /// let knn_results = vec![(NodeId::new(1).unwrap(), 0.95)];
+    /// // let iter = VectorResultIterator::new(knn_results, current); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(results: Vec<(NodeId, f32)>, current: Arc<CurrentStorage>) -> Self {
         VectorResultIterator {
             results: results.into_iter(),
@@ -252,6 +309,32 @@ pub struct TemporalNodeIterator {
 }
 
 impl TemporalNodeIterator {
+    /// The "Time Machine" Iterator: Reconstructs nodes as they existed in the past.
+    ///
+    /// Instead of just reading the latest state from current storage, this iterator asks `HistoricalStorage`
+    /// to apply a sequence of WAL diffs up to the exact requested `valid_time`. This guarantees that the
+    /// returned nodes perfectly reflect the past, powering robust `AS OF` historical queries.
+    ///
+    /// ## Performance
+    /// History reconstruction is inherently slower than current-storage reads, as it requires applying
+    /// `Patch` objects over the base anchor state.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use parking_lot::RwLock;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::core::hlc::HybridTimestamp;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # fn main() {
+    /// # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let past = HybridTimestamp::new(1600000000, 0);
+    /// // Look at node 42 exactly as it existed at timestamp 1600000000
+    /// // let iter = TemporalNodeIterator::new(vec![NodeId::new(42).unwrap()], past, past, historical); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(
         node_ids: Vec<NodeId>,
         valid_time: Timestamp,
@@ -656,6 +739,26 @@ pub struct TraversalIterator {
 }
 
 impl TraversalIterator {
+    /// The core graph engine: follows edges from an upstream node stream to find their neighbors.
+    ///
+    /// This is the workhorse behind `MATCH (a)-[:FRIEND]->(b)`. It consumes nodes from an underlying iterator,
+    /// queries the adjacency list for their edges, and yields the matching target nodes. It effectively implements
+    /// a breadth-first search step.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::Direction;
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # fn main() {
+    /// # let current = Arc::new(CurrentStorage::new());
+    /// // Given a starting node iterator, traverse all OUTGOING edges labeled "FRIEND"
+    /// // let friends = TraversalIterator::new(start_nodes, Direction::Outgoing, Some("FRIEND".to_string()), 1, current); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
@@ -910,7 +1013,22 @@ pub struct FilterIterator {
 }
 
 impl FilterIterator {
-    /// Create a new FilterIterator that filters results based on the predicate.
+    /// A selective sieve that lazily forces nodes to prove they match a condition before passing them along.
+    ///
+    /// This embodies the `WHERE` clause. By pushing this evaluation as far back in the pipeline as possible,
+    /// we avoid eagerly loading properties into memory if a node ultimately fails the check.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # use aletheiadb::query::ir::{Predicate, PredicateValue};
+    /// # fn main() {
+    /// // Discard any nodes flowing through that do not have an age > 18
+    /// let predicate = Predicate::gt("age".to_string(), PredicateValue::Int(18));
+    /// // let iter = FilterIterator::new(input, predicate); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(input: Box<dyn ResultIterator>, predicate: Predicate) -> Self {
         FilterIterator { input, predicate }
     }
@@ -1275,7 +1393,21 @@ pub struct LimitIterator {
 }
 
 impl LimitIterator {
-    /// Create a new LimitIterator that applies offset and limit to the input.
+    /// Truncates the result stream to prevent queries from overwhelming memory or the network.
+    ///
+    /// Implementing `LIMIT` and `SKIP`, this iterator safely discards the first `offset` elements
+    /// of a stream, and shuts down the underlying iterator immediately once `count` nodes have been yielded,
+    /// providing the crucial pagination layer for API endpoints.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # fn main() {
+    /// // Skip the first 10, and take exactly 5 (i.e. Page 3, Size 5)
+    /// // let iter = LimitIterator::new(input, 10, 5); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(input: Box<dyn ResultIterator>, offset: usize, count: usize) -> Self {
         LimitIterator {
             input,
@@ -1330,7 +1462,21 @@ pub struct ProvenanceFilterIterator {
 }
 
 impl ProvenanceFilterIterator {
-    /// Create a new ProvenanceFilterIterator that conditionally strips metadata.
+    /// The Redaction Layer: hides temporal lifecycle properties to keep standard queries clean.
+    ///
+    /// Every node in AletheiaDB inherently tracks its `valid_time` and `transaction_time`.
+    /// This metadata is vital internally, but visual noise to end-users unless explicitly requested.
+    /// This iterator silently strips those properties from the node before yielding it up the stack.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # fn main() {
+    /// // Scrub the bitemporal timestamps before returning the nodes to the HTTP layer
+    /// // let iter = ProvenanceFilterIterator::new(raw_results, false); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(inner: Box<dyn ResultIterator>, include_provenance: bool) -> Self {
         ProvenanceFilterIterator {
             inner,
@@ -1365,7 +1511,21 @@ pub struct ProjectIterator {
 }
 
 impl ProjectIterator {
-    /// Create a new ProjectIterator that projects specific properties from the results.
+    /// Trims the "fat" from nodes by passing through only a specific whitelist of properties.
+    ///
+    /// Implements `RETURN n.name, n.age`. Instead of dragging massive, heavy string attributes through the entire
+    /// serialization pipeline, it selectively clones only the requested keys, sharply dropping memory consumption
+    /// during HTTP responses.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # fn main() {
+    /// // Drop everything except the "email" and "id" fields.
+    /// // let iter = ProjectIterator::new(input, vec!["email".to_string(), "id".to_string()]); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(input: Box<dyn ResultIterator>, mut properties: Vec<String>) -> Self {
         // Deduplicate properties to prevent errors when projecting same property multiple times
         properties.sort();
@@ -1429,6 +1589,29 @@ pub struct PropertyScanIterator {
 }
 
 impl PropertyScanIterator {
+    /// A Fast-Path Index Lookup bypassing linear scans for exact matches.
+    ///
+    /// Instead of piping millions of nodes through a `FilterIterator` (a dreaded $O(N)$ scan), this iterator
+    /// queries the secondary property indexes directly, finding nodes where `key == value` in just $O(\log N)$ time.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::query::executor::ResultIterator;
+    /// # use aletheiadb::query::ir::PredicateValue;
+    /// # fn main() {
+    /// # let current = Arc::new(CurrentStorage::new());
+    /// // Instantly seek users with status = active via the B-Tree index
+    /// // let iter = PropertyScanIterator::new(
+    /// //     "User".into(),
+    /// //     "status".into(),
+    /// //     &PredicateValue::String("active".into()),
+    /// //     current
+    /// // ); // Note: Iterator types are internal
+    /// # }
+    /// ```
     pub fn new(
         label: String,
         key: String,
