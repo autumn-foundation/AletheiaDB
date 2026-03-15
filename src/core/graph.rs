@@ -726,3 +726,221 @@ mod sentry_tests {
         assert!(!edge.connects(other, other));
     }
 }
+
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+    use crate::core::id::{EdgeId, NodeId, VersionId};
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::version::VersionMetadata;
+
+    #[test]
+    fn test_node_get_property() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(100).unwrap(),
+        );
+
+        assert!(node.get_property("name").is_some());
+        assert_eq!(node.get_property("name").unwrap().as_str(), Some("Alice"));
+        assert!(node.get_property("missing").is_none());
+    }
+
+    #[test]
+    fn test_node_has_label() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let other_label = GLOBAL_INTERNER.intern("Animal").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(100).unwrap(),
+        );
+
+        assert!(node.has_label(label));
+        assert!(!node.has_label(other_label));
+    }
+
+    #[test]
+    fn test_node_has_label_str() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(100).unwrap(),
+        );
+
+        assert!(node.has_label_str("Person"));
+        assert!(!node.has_label_str("Animal"));
+    }
+
+    #[test]
+    fn test_node_with_metadata_exact() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let metadata = VersionMetadata::new(
+            crate::core::id::TxId::new(123),
+            crate::core::hlc::HybridTimestamp::new(100, 0).unwrap(),
+        );
+        let node = Node::with_metadata(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(100).unwrap(),
+            metadata,
+        );
+
+        assert_eq!(node.metadata, metadata);
+    }
+
+    #[test]
+    fn test_node_debug_exact() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let metadata = VersionMetadata::new(
+            crate::core::id::TxId::new(123),
+            crate::core::hlc::HybridTimestamp::new(100, 0).unwrap(),
+        );
+        let node = Node::with_metadata(
+            NodeId::new(1).unwrap(),
+            label,
+            props.clone(),
+            VersionId::new(100).unwrap(),
+            metadata,
+        );
+
+        let debug_str = format!("{:?}", node);
+        assert!(debug_str.contains("Node"));
+        assert!(debug_str.contains("id: NodeId(1)"));
+        assert!(debug_str.contains("label: \"Person\""));
+        assert!(debug_str.contains("properties: "));
+        assert!(debug_str.contains("current_version: VersionId(100)"));
+        assert!(debug_str.contains("metadata: "));
+    }
+
+    #[test]
+    fn test_edge_get_property() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(200).unwrap(),
+        );
+
+        assert!(edge.get_property("since").is_some());
+        assert_eq!(edge.get_property("since").unwrap().as_int(), Some(2020));
+        assert!(edge.get_property("missing").is_none());
+    }
+
+    #[test]
+    fn test_edge_has_label() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let other_label = GLOBAL_INTERNER.intern("LIKES").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(200).unwrap(),
+        );
+
+        assert!(edge.has_label(label));
+        assert!(!edge.has_label(other_label));
+    }
+
+    #[test]
+    fn test_edge_has_label_str() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(200).unwrap(),
+        );
+
+        assert!(edge.has_label_str("KNOWS"));
+        assert!(!edge.has_label_str("LIKES"));
+    }
+
+    #[test]
+    fn test_edge_with_metadata_exact() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let metadata = VersionMetadata::new(
+            crate::core::id::TxId::new(123),
+            crate::core::hlc::HybridTimestamp::new(100, 0).unwrap(),
+        );
+        let edge = Edge::with_metadata(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(200).unwrap(),
+            metadata,
+        );
+
+        assert_eq!(edge.metadata, metadata);
+    }
+
+    #[test]
+    fn test_edge_connects_exact() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(200).unwrap(),
+        );
+
+        assert!(edge.connects(NodeId::new(1).unwrap(), NodeId::new(2).unwrap()));
+        assert!(!edge.connects(NodeId::new(2).unwrap(), NodeId::new(1).unwrap()));
+        assert!(!edge.connects(NodeId::new(1).unwrap(), NodeId::new(3).unwrap()));
+        assert!(!edge.connects(NodeId::new(3).unwrap(), NodeId::new(2).unwrap()));
+    }
+
+    #[test]
+    fn test_edge_debug_exact() {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
+        let metadata = VersionMetadata::new(
+            crate::core::id::TxId::new(123),
+            crate::core::hlc::HybridTimestamp::new(100, 0).unwrap(),
+        );
+        let edge = Edge::with_metadata(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props.clone(),
+            VersionId::new(200).unwrap(),
+            metadata,
+        );
+
+        let debug_str = format!("{:?}", edge);
+        assert!(debug_str.contains("Edge"));
+        assert!(debug_str.contains("id: EdgeId(1)"));
+        assert!(debug_str.contains("label: \"KNOWS\""));
+        assert!(debug_str.contains("source: NodeId(1)"));
+        assert!(debug_str.contains("target: NodeId(2)"));
+        assert!(debug_str.contains("properties: "));
+        assert!(debug_str.contains("current_version: VersionId(200)"));
+        assert!(debug_str.contains("metadata: "));
+    }
+}
