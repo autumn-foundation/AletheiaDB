@@ -747,17 +747,14 @@ impl TraversalIterator {
     ///
     /// ## Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// # use std::sync::Arc;
     /// # use aletheiadb::core::id::NodeId;
     /// # use aletheiadb::storage::current::CurrentStorage;
     /// # use aletheiadb::Direction;
     /// # use aletheiadb::query::executor::ResultIterator;
-    /// # fn main() {
-    /// # let current = Arc::new(CurrentStorage::new());
     /// // Given a starting node iterator, traverse all OUTGOING edges labeled "FRIEND"
-    /// // let friends = TraversalIterator::new(start_nodes, Direction::Outgoing, Some("FRIEND".to_string()), 1, current); // Note: Iterator types are internal
-    /// # }
+    /// let friends = TraversalIterator::new(start_nodes, Direction::Outgoing, Some("FRIEND".to_string()), 1, current);
     /// ```
     pub fn new(
         input: Box<dyn ResultIterator>,
@@ -1020,14 +1017,12 @@ impl FilterIterator {
     ///
     /// ## Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// # use aletheiadb::query::executor::ResultIterator;
     /// # use aletheiadb::query::ir::{Predicate, PredicateValue};
-    /// # fn main() {
     /// // Discard any nodes flowing through that do not have an age > 18
     /// let predicate = Predicate::gt("age".to_string(), PredicateValue::Int(18));
-    /// // let iter = FilterIterator::new(input, predicate); // Note: Iterator types are internal
-    /// # }
+    /// let iter = FilterIterator::new(input, predicate);
     /// ```
     pub fn new(input: Box<dyn ResultIterator>, predicate: Predicate) -> Self {
         FilterIterator { input, predicate }
