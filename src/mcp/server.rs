@@ -792,7 +792,10 @@ impl AletheiaMcpServer {
         )])
     }
 
-    fn parse_args<T: serde::de::DeserializeOwned>(&self, args: serde_json::Value) -> Result<T, CallToolResult> {
+    fn parse_args<T: serde::de::DeserializeOwned>(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<T, CallToolResult> {
         match serde_json::from_value(args) {
             Ok(r) => Ok(r),
             Err(e) => Err(self.error_json(&format!("Invalid arguments: {}", e))),
