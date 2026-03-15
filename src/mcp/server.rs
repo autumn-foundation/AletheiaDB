@@ -907,105 +907,105 @@ impl AletheiaMcpServer {
 
     fn handle_list_nodes(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-        let req: ListNodesRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
+            let req: ListNodesRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
-        // Apply resource limits
-        let limit = req
-            .limit
-            .unwrap_or(DEFAULT_RESULT_LIMIT)
-            .min(MAX_RESULT_LIMIT);
-        let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
+            // Apply resource limits
+            let limit = req
+                .limit
+                .unwrap_or(DEFAULT_RESULT_LIMIT)
+                .min(MAX_RESULT_LIMIT);
+            let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
 
-        // Validate property filter: both key and value are required together with label
-        if req.property_key.is_some() != req.property_value.is_some() {
-            return Err("Both 'property_key' and 'property_value' are required together".to_string());
-        }
-        if req.property_key.is_some() && req.label.is_none() {
-            return Err("Property filtering requires 'label' to be specified".to_string());
-        }
-
-        // Property-based lookup: label + property_key + property_value
-        if let (Some(label), Some(prop_key), Some(prop_val)) =
-            (&req.label, &req.property_key, &req.property_value)
-        {
-            let property_value =
-                match self.json_to_property_value(prop_val) {
-                    Some(v) => v,
-                    None => return Err(
-                        "Unsupported property_value type. Use strings, numbers, booleans, or null.".to_string(),
-                    ),
-                };
-
-            let node_ids = self
-                .db
-                .find_nodes_by_property(label, prop_key, &property_value);
-
-            let mut nodes = Vec::with_capacity(limit);
-            for node_id in node_ids.into_iter().skip(offset).take(limit) {
-                if let Ok(node) = self.db.get_node(node_id) {
-                    nodes.push(self.node_to_response(&node));
-                }
+            // Validate property filter: both key and value are required together with label
+            if req.property_key.is_some() != req.property_value.is_some() {
+                return Err("Both 'property_key' and 'property_value' are required together".to_string());
+            }
+            if req.property_key.is_some() && req.label.is_none() {
+                return Err("Property filtering requires 'label' to be specified".to_string());
             }
 
-            return Ok(json!({
-                "nodes": nodes,
-                "count": nodes.len(),
-                "offset": offset,
-                "limit": limit
-            }));
-        }
+            // Property-based lookup: label + property_key + property_value
+            if let (Some(label), Some(prop_key), Some(prop_val)) =
+                (&req.label, &req.property_key, &req.property_value)
+            {
+                let property_value =
+                    match self.json_to_property_value(prop_val) {
+                        Some(v) => v,
+                        None => return Err(
+                            "Unsupported property_value type. Use strings, numbers, booleans, or null.".to_string(),
+                        ),
+                    };
 
-        // Label-only scan
-        if let Some(label) = &req.label {
-            let builder = crate::query::QueryBuilder::new().scan_label(label);
+                let node_ids = self
+                    .db
+                    .find_nodes_by_property(label, prop_key, &property_value);
 
-            // Note: We fetch offset+limit rows then skip offset.
-            // Offset is capped to prevent excessive memory use.
-            match builder.limit(limit + offset).execute(&self.db) {
-                Ok(results) => {
-                    // Use iterator-based approach to avoid allocating full Vec
-                    let mut nodes = Vec::with_capacity(limit);
-                    let mut skipped = 0;
+                let mut nodes = Vec::with_capacity(limit);
+                for node_id in node_ids.into_iter().skip(offset).take(limit) {
+                    if let Ok(node) = self.db.get_node(node_id) {
+                        nodes.push(self.node_to_response(&node));
+                    }
+                }
 
-                    for row_result in results {
-                        match row_result {
-                            Ok(row) => {
-                                if skipped < offset {
-                                    skipped += 1;
-                                    continue;
-                                }
-                                if let EntityResult::Node(node) = row.entity {
-                                    nodes.push(self.node_to_response(&node));
-                                    if nodes.len() >= limit {
-                                        break;
+                return Ok(json!({
+                    "nodes": nodes,
+                    "count": nodes.len(),
+                    "offset": offset,
+                    "limit": limit
+                }));
+            }
+
+            // Label-only scan
+            if let Some(label) = &req.label {
+                let builder = crate::query::QueryBuilder::new().scan_label(label);
+
+                // Note: We fetch offset+limit rows then skip offset.
+                // Offset is capped to prevent excessive memory use.
+                match builder.limit(limit + offset).execute(&self.db) {
+                    Ok(results) => {
+                        // Use iterator-based approach to avoid allocating full Vec
+                        let mut nodes = Vec::with_capacity(limit);
+                        let mut skipped = 0;
+
+                        for row_result in results {
+                            match row_result {
+                                Ok(row) => {
+                                    if skipped < offset {
+                                        skipped += 1;
+                                        continue;
+                                    }
+                                    if let EntityResult::Node(node) = row.entity {
+                                        nodes.push(self.node_to_response(&node));
+                                        if nodes.len() >= limit {
+                                            break;
+                                        }
                                     }
                                 }
+                                Err(e) => return Err(e.to_string()),
                             }
-                            Err(e) => return Err(e.to_string()),
                         }
-                    }
 
-                    Ok(json!({
-                        "nodes": nodes,
-                        "count": nodes.len(),
-                        "offset": offset,
-                        "limit": limit
-                    }))
+                        Ok(json!({
+                            "nodes": nodes,
+                            "count": nodes.len(),
+                            "offset": offset,
+                            "limit": limit
+                        }))
+                    }
+                    Err(e) => Err(e.to_string()),
                 }
-                Err(e) => Err(e.to_string()),
+            } else {
+                // Without a label filter, we cannot efficiently list all nodes
+                // Return a helpful message
+                Ok(json!({
+                    "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
+                    "total_count": self.db.node_count(),
+                    "nodes": [],
+                    "count": 0,
+                    "offset": offset,
+                    "limit": limit
+                }))
             }
-        } else {
-            // Without a label filter, we cannot efficiently list all nodes
-            // Return a helpful message
-            Ok(json!({
-                "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
-                "total_count": self.db.node_count(),
-                "nodes": [],
-                "count": 0,
-                "offset": offset,
-                "limit": limit
-            }))
-        }
 
         })
     }
@@ -1143,26 +1143,26 @@ impl AletheiaMcpServer {
 
     fn handle_list_edges(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-        let req: ListEdgesRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
+            let req: ListEdgesRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
-        // Apply resource limits
-        let limit = req
-            .limit
-            .unwrap_or(DEFAULT_RESULT_LIMIT)
-            .min(MAX_RESULT_LIMIT);
-        let offset = req.offset.unwrap_or(0);
+            // Apply resource limits
+            let limit = req
+                .limit
+                .unwrap_or(DEFAULT_RESULT_LIMIT)
+                .min(MAX_RESULT_LIMIT);
+            let offset = req.offset.unwrap_or(0);
 
-        // Edges cannot be efficiently listed without knowing source/target nodes.
-        // Provide helpful guidance to use get_outgoing_edges or get_incoming_edges.
-        Ok(json!({
-            "message": "Use 'get_outgoing_edges' or 'get_incoming_edges' from a known node to list edges",
-            "total_count": self.db.edge_count(),
-            "edges": [],
-            "count": 0,
-            "offset": offset,
-            "limit": limit,
-            "label_filter": req.label
-        }))
+            // Edges cannot be efficiently listed without knowing source/target nodes.
+            // Provide helpful guidance to use get_outgoing_edges or get_incoming_edges.
+            Ok(json!({
+                "message": "Use 'get_outgoing_edges' or 'get_incoming_edges' from a known node to list edges",
+                "total_count": self.db.edge_count(),
+                "edges": [],
+                "count": 0,
+                "offset": offset,
+                "limit": limit,
+                "label_filter": req.label
+            }))
 
         })
     }
@@ -1415,9 +1415,9 @@ impl AletheiaMcpServer {
                 .into_iter()
                 .map(|info| {
                     json!({
-                        "property_name": info.property_name,
-                        "dimensions": info.dimensions,
-                        "distance_metric": format!("{:?}", info.distance_metric)
+                                        "property_name": info.property_name,
+                                        "dimensions": info.dimensions,
+                                        "distance_metric": format!("{:?}", info.distance_metric)
                     })
                 })
                 .collect();
@@ -1442,17 +1442,16 @@ impl AletheiaMcpServer {
                 Err(e) => return Err(e.to_string()),
             };
 
-            match self.db.get_node_at_time(node_id, valid_time, tx_time) {
-                Ok(node) => {
-                    let response = self.node_to_response(&node);
-                    Ok(json!({
-                        "node": response,
-                        "valid_time": req.valid_time,
-                        "transaction_time": Self::format_tx_time_response(req.transaction_time)
-                    }))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let node = self
+                .db
+                .get_node_at_time(node_id, valid_time, tx_time)
+                .map_err(|e| e.to_string())?;
+            let response = self.node_to_response(&node);
+            Ok(json!({
+                "node": response,
+                "valid_time": req.valid_time,
+                "transaction_time": Self::format_tx_time_response(req.transaction_time)
+            }))
         })
     }
 
@@ -1470,17 +1469,16 @@ impl AletheiaMcpServer {
                 Err(e) => return Err(e.to_string()),
             };
 
-            match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
-                Ok(edge) => {
-                    let response = self.edge_to_response(&edge);
-                    Ok(json!({
-                        "edge": response,
-                        "valid_time": req.valid_time,
-                        "transaction_time": Self::format_tx_time_response(req.transaction_time)
-                    }))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let edge = self
+                .db
+                .get_edge_at_time(edge_id, valid_time, tx_time)
+                .map_err(|e| e.to_string())?;
+            let response = self.edge_to_response(&edge);
+            Ok(json!({
+                "edge": response,
+                "valid_time": req.valid_time,
+                "transaction_time": Self::format_tx_time_response(req.transaction_time)
+            }))
         })
     }
 
@@ -1497,16 +1495,15 @@ impl AletheiaMcpServer {
 
             let valid_time = self.parse_timestamp(&req.valid_time)?;
 
-            match self.db.get_node_at_valid_time(node_id, valid_time) {
-                Ok(node) => {
-                    let response = self.node_to_response(&node);
-                    Ok(json!({
-                        "node": response,
-                        "valid_time": req.valid_time
-                    }))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let node = self
+                .db
+                .get_node_at_valid_time(node_id, valid_time)
+                .map_err(|e| e.to_string())?;
+            let response = self.node_to_response(&node);
+            Ok(json!({
+                "node": response,
+                "valid_time": req.valid_time
+            }))
         })
     }
 
@@ -1519,16 +1516,15 @@ impl AletheiaMcpServer {
 
             let tx_time = self.parse_timestamp(&req.transaction_time)?;
 
-            match self.db.get_node_at_transaction_time(node_id, tx_time) {
-                Ok(node) => {
-                    let response = self.node_to_response(&node);
-                    Ok(json!({
-                        "node": response,
-                        "transaction_time": req.transaction_time
-                    }))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let node = self
+                .db
+                .get_node_at_transaction_time(node_id, tx_time)
+                .map_err(|e| e.to_string())?;
+            let response = self.node_to_response(&node);
+            Ok(json!({
+                "node": response,
+                "transaction_time": req.transaction_time
+            }))
         })
     }
 
@@ -1597,16 +1593,15 @@ impl AletheiaMcpServer {
 
             let valid_time = self.parse_timestamp(&req.valid_time)?;
 
-            match self.db.get_edge_at_valid_time(edge_id, valid_time) {
-                Ok(edge) => {
-                    let response = self.edge_to_response(&edge);
-                    Ok(json!({
-                        "edge": response,
-                        "valid_time": req.valid_time
-                    }))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let edge = self
+                .db
+                .get_edge_at_valid_time(edge_id, valid_time)
+                .map_err(|e| e.to_string())?;
+            let response = self.edge_to_response(&edge);
+            Ok(json!({
+                "edge": response,
+                "valid_time": req.valid_time
+            }))
         })
     }
 
@@ -1619,16 +1614,15 @@ impl AletheiaMcpServer {
 
             let tx_time = self.parse_timestamp(&req.transaction_time)?;
 
-            match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
-                Ok(edge) => {
-                    let response = self.edge_to_response(&edge);
-                    Ok(json!({
-                        "edge": response,
-                        "transaction_time": req.transaction_time
-                    }))
-                }
-                Err(e) => Err(e.to_string()),
-            }
+            let edge = self
+                .db
+                .get_edge_at_transaction_time(edge_id, tx_time)
+                .map_err(|e| e.to_string())?;
+            let response = self.edge_to_response(&edge);
+            Ok(json!({
+                "edge": response,
+                "transaction_time": req.transaction_time
+            }))
         })
     }
 
@@ -1758,50 +1752,50 @@ impl AletheiaMcpServer {
 
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         self.with_result(|| {
-        let req: HybridQueryRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
+            let req: HybridQueryRequest = serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
-        // Apply resource limits
-        let limit = req
-            .limit
-            .unwrap_or(DEFAULT_RESULT_LIMIT)
-            .min(MAX_RESULT_LIMIT);
-        let depth = req.traverse_depth.unwrap_or(1).min(MAX_TRAVERSAL_DEPTH);
-        let k = req.top_k.unwrap_or(DEFAULT_VECTOR_K).min(MAX_VECTOR_K);
+            // Apply resource limits
+            let limit = req
+                .limit
+                .unwrap_or(DEFAULT_RESULT_LIMIT)
+                .min(MAX_RESULT_LIMIT);
+            let depth = req.traverse_depth.unwrap_or(1).min(MAX_TRAVERSAL_DEPTH);
+            let k = req.top_k.unwrap_or(DEFAULT_VECTOR_K).min(MAX_VECTOR_K);
 
-        // Parse temporal parameters if provided
-        let valid_time = if let Some(ref vt) = req.valid_time {
-            match self.parse_timestamp(vt) {
-                Ok(t) => Some(t),
-                Err(e) => return Err(format!("Invalid valid_time: {}", e)),
-            }
-        } else {
-            None
-        };
+            // Parse temporal parameters if provided
+            let valid_time = if let Some(ref vt) = req.valid_time {
+                match self.parse_timestamp(vt) {
+                    Ok(t) => Some(t),
+                    Err(e) => return Err(format!("Invalid valid_time: {}", e)),
+                }
+            } else {
+                None
+            };
 
-        let tx_time = if let Some(ref tt) = req.transaction_time {
-            match self.parse_timestamp(tt) {
-                Ok(t) => Some(t),
-                Err(e) => return Err(format!("Invalid transaction_time: {}", e)),
-            }
-        } else {
-            None
-        };
+            let tx_time = if let Some(ref tt) = req.transaction_time {
+                match self.parse_timestamp(tt) {
+                    Ok(t) => Some(t),
+                    Err(e) => return Err(format!("Invalid transaction_time: {}", e)),
+                }
+            } else {
+                None
+            };
 
-        // Helper to convert rows to hybrid results with temporal info
-        let rows_to_results =
-            |rows: Vec<crate::query::executor::QueryRow>| -> Vec<HybridQueryResult> {
-                rows.into_iter()
-                    .filter_map(|row| {
-                        if let EntityResult::Node(node) = row.entity {
-                            Some(HybridQueryResult {
-                                node: self.node_to_response(&node),
-                                similarity_score: row.score,
-                                traversal_path: row.path.map(|p| {
-                                    p.iter()
-                                        .map(|e| match e {
-                                            ResultEntityId::Node(id) => id.as_u64(),
-                                            ResultEntityId::Edge(id) => id.as_u64(),
-                                        })
+            // Helper to convert rows to hybrid results with temporal info
+            let rows_to_results =
+                |rows: Vec<crate::query::executor::QueryRow>| -> Vec<HybridQueryResult> {
+                    rows.into_iter()
+                        .filter_map(|row| {
+                            if let EntityResult::Node(node) = row.entity {
+                                Some(HybridQueryResult {
+                                    node: self.node_to_response(&node),
+                                    similarity_score: row.score,
+                                    traversal_path: row.path.map(|p| {
+                                        p.iter()
+                                            .map(|e| match e {
+                                                ResultEntityId::Node(id) => id.as_u64(),
+                                                ResultEntityId::Edge(id) => id.as_u64(),
+        })
                                         .collect()
                                 }),
                                 timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
