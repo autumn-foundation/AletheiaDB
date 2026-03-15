@@ -796,138 +796,124 @@ impl AletheiaMcpServer {
         CallToolResult::error(vec![Content::text(json!({"error": msg}).to_string())])
     }
 
+    /// Evaluates a closure that returns a Result and converts it into a CallToolResult.
+    /// This flattens error handling and avoids the "Pyramid of Doom".
+    fn with_result<F>(&self, f: F) -> CallToolResult
+    where
+        F: FnOnce() -> Result<serde_json::Value, String>,
+    {
+        match f() {
+            Ok(val) => self.success_json(val),
+            Err(e) => self.error_json(&e),
+        }
+    }
+
     // ========================================================================
     // Tool Implementations
     // ========================================================================
 
     fn handle_get_node(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetNodeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetNodeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        match self.db.get_node(node_id) {
-            Ok(node) => {
-                let response = self.node_to_response(&node);
-                self.success_json(
-                    serde_json::to_value(&response)
-                        .expect("response serialization should not fail"),
-                )
-            }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            let node = self.db.get_node(node_id).map_err(|e| e.to_string())?;
+            let response = self.node_to_response(&node);
+
+            Ok(serde_json::to_value(&response).expect("response serialization should not fail"))
+        })
     }
 
     fn handle_create_node(&self, args: serde_json::Value) -> CallToolResult {
-        let req: CreateNodeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: CreateNodeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
-        let properties = match req.properties {
-            Some(p) => match self.json_to_property_map(&p) {
-                Ok(map) => map,
-                Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
-            },
-            None => PropertyMap::default(),
-        };
+            let properties = match req.properties {
+                Some(p) => self
+                    .json_to_property_map(&p)
+                    .map_err(|e| format!("Invalid properties: {}", e))?,
+                None => PropertyMap::default(),
+            };
 
-        match self.db.create_node(&req.label, properties) {
-            Ok(node_id) => match self.db.get_node(node_id) {
-                Ok(node) => {
-                    let response = self.node_to_response(&node);
-                    self.success_json(
-                        serde_json::to_value(&response)
-                            .expect("response serialization should not fail"),
-                    )
-                }
-                Err(e) => self.error_json(&e.to_string()),
-            },
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            let node_id = self
+                .db
+                .create_node(&req.label, properties)
+                .map_err(|e| e.to_string())?;
+            let node = self.db.get_node(node_id).map_err(|e| e.to_string())?;
+            let response = self.node_to_response(&node);
+
+            Ok(serde_json::to_value(&response).expect("response serialization should not fail"))
+        })
     }
 
     fn handle_update_node(&self, args: serde_json::Value) -> CallToolResult {
-        let req: UpdateNodeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: UpdateNodeRequest =
+                serde_json::from_value(args).map_err(|e| format!("Invalid arguments: {}", e))?;
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        let properties = match self.json_to_property_map(&req.properties) {
-            Ok(map) => map,
-            Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
-        };
+            let properties = self
+                .json_to_property_map(&req.properties)
+                .map_err(|e| format!("Invalid properties: {}", e))?;
 
-        match self.db.write(|tx| tx.update_node(node_id, properties)) {
-            Ok(()) => match self.db.get_node(node_id) {
-                Ok(node) => {
-                    let response = self.node_to_response(&node);
-                    self.success_json(
-                        serde_json::to_value(&response)
-                            .expect("response serialization should not fail"),
-                    )
-                }
-                Err(e) => self.error_json(&e.to_string()),
-            },
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            self.db
+                .write(|tx| tx.update_node(node_id, properties))
+                .map_err(|e| e.to_string())?;
+            let node = self.db.get_node(node_id).map_err(|e| e.to_string())?;
+            let response = self.node_to_response(&node);
+
+            Ok(serde_json::to_value(&response).expect("response serialization should not fail"))
+        })
     }
 
     fn handle_delete_node(&self, args: serde_json::Value) -> CallToolResult {
-        let req: DeleteNodeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: DeleteNodeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        match self.db.write(|tx| tx.delete_node(node_id)) {
-            Ok(()) => self.success_json(json!({
-                "success": true,
-                "deleted_node_id": req.node_id
-            })),
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            match self.db.write(|tx| tx.delete_node(node_id)) {
+                Ok(()) => Ok(json!({
+                    "success": true,
+                    "deleted_node_id": req.node_id
+                })),
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     fn handle_delete_node_cascade(&self, args: serde_json::Value) -> CallToolResult {
-        let req: DeleteNodeCascadeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: DeleteNodeCascadeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
-            Ok(()) => self.success_json(json!({
-                "success": true,
-                "deleted_node_id": req.node_id,
-                "cascade": true
-            })),
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
+                Ok(()) => Ok(json!({
+                    "success": true,
+                    "deleted_node_id": req.node_id,
+                    "cascade": true
+                })),
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     fn handle_list_nodes(&self, args: serde_json::Value) -> CallToolResult {
+        self.with_result(|| {
         let req: ListNodesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return Err(format!("Invalid arguments: {}", e)),
         };
 
         // Apply resource limits
@@ -939,11 +925,10 @@ impl AletheiaMcpServer {
 
         // Validate property filter: both key and value are required together with label
         if req.property_key.is_some() != req.property_value.is_some() {
-            return self
-                .error_json("Both 'property_key' and 'property_value' are required together");
+            return Err("Both 'property_key' and 'property_value' are required together".to_string());
         }
         if req.property_key.is_some() && req.label.is_none() {
-            return self.error_json("Property filtering requires 'label' to be specified");
+            return Err("Property filtering requires 'label' to be specified".to_string());
         }
 
         // Property-based lookup: label + property_key + property_value
@@ -953,8 +938,8 @@ impl AletheiaMcpServer {
             let property_value =
                 match self.json_to_property_value(prop_val) {
                     Some(v) => v,
-                    None => return self.error_json(
-                        "Unsupported property_value type. Use strings, numbers, booleans, or null.",
+                    None => return Err(
+                        "Unsupported property_value type. Use strings, numbers, booleans, or null.".to_string(),
                     ),
                 };
 
@@ -969,7 +954,7 @@ impl AletheiaMcpServer {
                 }
             }
 
-            return self.success_json(json!({
+            return Ok(json!({
                 "nodes": nodes,
                 "count": nodes.len(),
                 "offset": offset,
@@ -1003,23 +988,23 @@ impl AletheiaMcpServer {
                                     }
                                 }
                             }
-                            Err(e) => return self.error_json(&e.to_string()),
+                            Err(e) => return Err(e.to_string()),
                         }
                     }
 
-                    self.success_json(json!({
+                    Ok(json!({
                         "nodes": nodes,
                         "count": nodes.len(),
                         "offset": offset,
                         "limit": limit
                     }))
                 }
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => Err(e.to_string()),
             }
         } else {
             // Without a label filter, we cannot efficiently list all nodes
             // Return a helpful message
-            self.success_json(json!({
+            Ok(json!({
                 "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
                 "total_count": self.db.node_count(),
                 "nodes": [],
@@ -1028,158 +1013,156 @@ impl AletheiaMcpServer {
                 "limit": limit
             }))
         }
+
+        })
     }
 
     fn handle_count_nodes(&self, args: serde_json::Value) -> CallToolResult {
-        let req: CountNodesRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: CountNodesRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        if let Some(label) = &req.label {
-            // Use QueryBuilder to count by label efficiently without collecting all rows
-            let builder = crate::query::QueryBuilder::new().scan_label(label);
-            match builder.execute(&self.db) {
-                Ok(mut results) => {
-                    // Efficiently count without allocating a Vec
-                    match results.try_fold(0usize, |acc, row| row.map(|_| acc + 1)) {
-                        Ok(count) => self.success_json(json!({"count": count, "label": label})),
-                        Err(e) => self.error_json(&format!(
-                            "Error counting nodes with label '{}': {}",
-                            label, e
-                        )),
+            if let Some(label) = &req.label {
+                // Use QueryBuilder to count by label efficiently without collecting all rows
+                let builder = crate::query::QueryBuilder::new().scan_label(label);
+                match builder.execute(&self.db) {
+                    Ok(mut results) => {
+                        // Efficiently count without allocating a Vec
+                        match results.try_fold(0usize, |acc, row| row.map(|_| acc + 1)) {
+                            Ok(count) => Ok(json!({"count": count, "label": label})),
+                            Err(e) => Err(format!(
+                                "Error counting nodes with label '{}': {}",
+                                label, e
+                            )),
+                        }
                     }
+                    Err(e) => Err(format!(
+                        "Error executing count query for label '{}': {}",
+                        label, e
+                    )),
                 }
-                Err(e) => self.error_json(&format!(
-                    "Error executing count query for label '{}': {}",
-                    label, e
-                )),
+            } else {
+                Ok(json!({"count": self.db.node_count()}))
             }
-        } else {
-            self.success_json(json!({"count": self.db.node_count()}))
-        }
+        })
     }
 
     fn handle_get_edge(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetEdgeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetEdgeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let edge_id = match EdgeId::new(req.edge_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-        match self.db.get_edge(edge_id) {
-            Ok(edge) => {
-                let response = self.edge_to_response(&edge);
-                self.success_json(
-                    serde_json::to_value(&response)
-                        .expect("response serialization should not fail"),
-                )
+            match self.db.get_edge(edge_id) {
+                Ok(edge) => {
+                    let response = self.edge_to_response(&edge);
+                    Ok(serde_json::to_value(&response)
+                        .expect("response serialization should not fail"))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_create_edge(&self, args: serde_json::Value) -> CallToolResult {
-        let req: CreateEdgeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: CreateEdgeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let source_id = match NodeId::new(req.source_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&format!("Invalid source_id: {}", e)),
-        };
+            let source_id = match NodeId::new(req.source_id) {
+                Ok(id) => id,
+                Err(e) => return Err(format!("Invalid source_id: {}", e)),
+            };
 
-        let target_id = match NodeId::new(req.target_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&format!("Invalid target_id: {}", e)),
-        };
+            let target_id = match NodeId::new(req.target_id) {
+                Ok(id) => id,
+                Err(e) => return Err(format!("Invalid target_id: {}", e)),
+            };
 
-        let properties = match req.properties {
-            Some(p) => match self.json_to_property_map(&p) {
-                Ok(map) => map,
-                Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
-            },
-            None => PropertyMap::default(),
-        };
+            let properties = match req.properties {
+                Some(p) => match self.json_to_property_map(&p) {
+                    Ok(map) => map,
+                    Err(e) => return Err(format!("Invalid properties: {}", e)),
+                },
+                None => PropertyMap::default(),
+            };
 
-        match self
-            .db
-            .create_edge(source_id, target_id, &req.label, properties)
-        {
-            Ok(edge_id) => match self.db.get_edge(edge_id) {
-                Ok(edge) => {
-                    let response = self.edge_to_response(&edge);
-                    self.success_json(
-                        serde_json::to_value(&response)
-                            .expect("response serialization should not fail"),
-                    )
-                }
-                Err(e) => self.error_json(&e.to_string()),
-            },
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            match self
+                .db
+                .create_edge(source_id, target_id, &req.label, properties)
+            {
+                Ok(edge_id) => match self.db.get_edge(edge_id) {
+                    Ok(edge) => {
+                        let response = self.edge_to_response(&edge);
+                        Ok(serde_json::to_value(&response)
+                            .expect("response serialization should not fail"))
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     fn handle_update_edge(&self, args: serde_json::Value) -> CallToolResult {
-        let req: UpdateEdgeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: UpdateEdgeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let edge_id = match EdgeId::new(req.edge_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-        let properties = match self.json_to_property_map(&req.properties) {
-            Ok(map) => map,
-            Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
-        };
+            let properties = match self.json_to_property_map(&req.properties) {
+                Ok(map) => map,
+                Err(e) => return Err(format!("Invalid properties: {}", e)),
+            };
 
-        match self.db.write(|tx| tx.update_edge(edge_id, properties)) {
-            Ok(()) => match self.db.get_edge(edge_id) {
-                Ok(edge) => {
-                    let response = self.edge_to_response(&edge);
-                    self.success_json(
-                        serde_json::to_value(&response)
-                            .expect("response serialization should not fail"),
-                    )
-                }
-                Err(e) => self.error_json(&e.to_string()),
-            },
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            match self.db.write(|tx| tx.update_edge(edge_id, properties)) {
+                Ok(()) => match self.db.get_edge(edge_id) {
+                    Ok(edge) => {
+                        let response = self.edge_to_response(&edge);
+                        Ok(serde_json::to_value(&response)
+                            .expect("response serialization should not fail"))
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     fn handle_delete_edge(&self, args: serde_json::Value) -> CallToolResult {
-        let req: DeleteEdgeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: DeleteEdgeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let edge_id = match EdgeId::new(req.edge_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-        match self.db.write(|tx| tx.delete_edge(edge_id)) {
-            Ok(()) => self.success_json(json!({
-                "success": true,
-                "deleted_edge_id": req.edge_id
-            })),
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            match self.db.write(|tx| tx.delete_edge(edge_id)) {
+                Ok(()) => Ok(json!({
+                    "success": true,
+                    "deleted_edge_id": req.edge_id
+                })),
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     fn handle_list_edges(&self, args: serde_json::Value) -> CallToolResult {
+        self.with_result(|| {
         let req: ListEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return Err(format!("Invalid arguments: {}", e)),
         };
 
         // Apply resource limits
@@ -1191,7 +1174,7 @@ impl AletheiaMcpServer {
 
         // Edges cannot be efficiently listed without knowing source/target nodes.
         // Provide helpful guidance to use get_outgoing_edges or get_incoming_edges.
-        self.success_json(json!({
+        Ok(json!({
             "message": "Use 'get_outgoing_edges' or 'get_incoming_edges' from a known node to list edges",
             "total_count": self.db.edge_count(),
             "edges": [],
@@ -1200,342 +1183,341 @@ impl AletheiaMcpServer {
             "limit": limit,
             "label_filter": req.label
         }))
+
+        })
     }
 
     fn handle_count_edges(&self, args: serde_json::Value) -> CallToolResult {
-        let req: CountEdgesRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: CountEdgesRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        // Note: Counting by label is not efficiently supported without iterating all edges.
-        // For now, we only support total count.
-        if req.label.is_some() {
-            self.success_json(json!({
-                "message": "Counting edges by label is not supported. Use total_count instead.",
-                "total_count": self.db.edge_count(),
-                "count": null
-            }))
-        } else {
-            self.success_json(json!({"count": self.db.edge_count()}))
-        }
+            // Note: Counting by label is not efficiently supported without iterating all edges.
+            // For now, we only support total count.
+            if req.label.is_some() {
+                Ok(json!({
+                    "message": "Counting edges by label is not supported. Use total_count instead.",
+                    "total_count": self.db.edge_count(),
+                    "count": null
+                }))
+            } else {
+                Ok(json!({"count": self.db.edge_count()}))
+            }
+        })
     }
 
     fn handle_get_outgoing_edges(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetOutgoingEdgesRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetOutgoingEdgesRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        let edge_ids = if let Some(label) = &req.label {
-            self.db.get_outgoing_edges_with_label(node_id, label)
-        } else {
-            self.db.get_outgoing_edges(node_id)
-        };
+            let edge_ids = if let Some(label) = &req.label {
+                self.db.get_outgoing_edges_with_label(node_id, label)
+            } else {
+                self.db.get_outgoing_edges(node_id)
+            };
 
-        let edges: Vec<EdgeResponse> = edge_ids
-            .into_iter()
-            .filter_map(|eid| self.db.get_edge(eid).ok())
-            .map(|e| self.edge_to_response(&e))
-            .collect();
+            let edges: Vec<EdgeResponse> = edge_ids
+                .into_iter()
+                .filter_map(|eid| self.db.get_edge(eid).ok())
+                .map(|e| self.edge_to_response(&e))
+                .collect();
 
-        self.success_json(json!({
-            "edges": edges,
-            "count": edges.len()
-        }))
+            Ok(json!({
+                "edges": edges,
+                "count": edges.len()
+            }))
+        })
     }
 
     fn handle_get_incoming_edges(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetIncomingEdgesRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetIncomingEdgesRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        let edge_ids = self.db.get_incoming_edges(node_id);
+            let edge_ids = self.db.get_incoming_edges(node_id);
 
-        // Filter by label if provided
-        let edges: Vec<EdgeResponse> = edge_ids
-            .into_iter()
-            .filter_map(|eid| self.db.get_edge(eid).ok())
-            .filter(|e| {
-                req.label
-                    .as_ref()
-                    .map(|l| self.matches_label(e.label, l))
-                    .unwrap_or(true)
-            })
-            .map(|e| self.edge_to_response(&e))
-            .collect();
+            // Filter by label if provided
+            let edges: Vec<EdgeResponse> = edge_ids
+                .into_iter()
+                .filter_map(|eid| self.db.get_edge(eid).ok())
+                .filter(|e| {
+                    req.label
+                        .as_ref()
+                        .map(|l| self.matches_label(e.label, l))
+                        .unwrap_or(true)
+                })
+                .map(|e| self.edge_to_response(&e))
+                .collect();
 
-        self.success_json(json!({
-            "edges": edges,
-            "count": edges.len()
-        }))
+            Ok(json!({
+                "edges": edges,
+                "count": edges.len()
+            }))
+        })
     }
 
     fn handle_traverse(&self, args: serde_json::Value) -> CallToolResult {
-        let req: TraverseRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: TraverseRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let start_id = match NodeId::new(req.start_node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let start_id = NodeId::new(req.start_node_id).map_err(|e| e.to_string())?;
 
-        // Apply resource limits to prevent DoS
-        let depth = req.depth.unwrap_or(1).min(MAX_TRAVERSAL_DEPTH);
-        let limit = req
-            .limit
-            .unwrap_or(DEFAULT_RESULT_LIMIT)
-            .min(MAX_RESULT_LIMIT);
-        let direction = req.direction.as_deref().unwrap_or("outgoing");
+            // Apply resource limits to prevent DoS
+            let depth = req.depth.unwrap_or(1).min(MAX_TRAVERSAL_DEPTH);
+            let limit = req
+                .limit
+                .unwrap_or(DEFAULT_RESULT_LIMIT)
+                .min(MAX_RESULT_LIMIT);
+            let direction = req.direction.as_deref().unwrap_or("outgoing");
 
-        // Use depth-first search (DFS) traversal.
-        // DFS is chosen for memory efficiency: it processes nodes immediately rather than
-        // queuing all nodes at each level. For large graphs with high branching factors,
-        // this significantly reduces peak memory usage compared to BFS.
-        let mut results: Vec<TraversalResult> = Vec::new();
-        let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        let mut frontier: Vec<(NodeId, Vec<u64>, usize)> =
-            vec![(start_id, vec![start_id.as_u64()], 0)];
+            // Use depth-first search (DFS) traversal.
+            // DFS is chosen for memory efficiency: it processes nodes immediately rather than
+            // queuing all nodes at each level. For large graphs with high branching factors,
+            // this significantly reduces peak memory usage compared to BFS.
+            let mut results: Vec<TraversalResult> = Vec::new();
+            let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut frontier: Vec<(NodeId, Vec<u64>, usize)> =
+                vec![(start_id, vec![start_id.as_u64()], 0)];
 
-        while let Some((current_id, path, current_depth)) = frontier.pop() {
-            if current_depth > 0 && !visited.contains(&current_id.as_u64()) {
-                visited.insert(current_id.as_u64());
-                if let Ok(node) = self.db.get_node(current_id) {
-                    results.push(TraversalResult {
-                        node: self.node_to_response(&node),
-                        path: path.clone(),
-                        depth: current_depth,
-                    });
-                    if results.len() >= limit {
-                        break;
+            while let Some((current_id, path, current_depth)) = frontier.pop() {
+                if current_depth > 0 && !visited.contains(&current_id.as_u64()) {
+                    visited.insert(current_id.as_u64());
+                    if let Ok(node) = self.db.get_node(current_id) {
+                        results.push(TraversalResult {
+                            node: self.node_to_response(&node),
+                            path: path.clone(),
+                            depth: current_depth,
+                        });
+                        if results.len() >= limit {
+                            break;
+                        }
                     }
                 }
-            }
 
-            if current_depth < depth {
-                let edge_ids: Vec<EdgeId> = match direction {
-                    "incoming" => {
-                        // Filter incoming edges by label manually
-                        self.db
-                            .get_incoming_edges(current_id)
-                            .into_iter()
-                            .filter(|eid| {
-                                self.db
-                                    .get_edge(*eid)
-                                    .map(|e| self.matches_label(e.label, &req.edge_label))
-                                    .unwrap_or(false)
-                            })
-                            .collect()
-                    }
-                    "both" => {
-                        let mut edges = self
+                if current_depth < depth {
+                    let edge_ids: Vec<EdgeId> = match direction {
+                        "incoming" => {
+                            // Filter incoming edges by label manually
+                            self.db
+                                .get_incoming_edges(current_id)
+                                .into_iter()
+                                .filter(|eid| {
+                                    self.db
+                                        .get_edge(*eid)
+                                        .map(|e| self.matches_label(e.label, &req.edge_label))
+                                        .unwrap_or(false)
+                                })
+                                .collect()
+                        }
+                        "both" => {
+                            let mut edges = self
+                                .db
+                                .get_outgoing_edges_with_label(current_id, &req.edge_label);
+                            let incoming: Vec<EdgeId> = self
+                                .db
+                                .get_incoming_edges(current_id)
+                                .into_iter()
+                                .filter(|eid| {
+                                    self.db
+                                        .get_edge(*eid)
+                                        .map(|e| self.matches_label(e.label, &req.edge_label))
+                                        .unwrap_or(false)
+                                })
+                                .collect();
+                            edges.extend(incoming);
+                            edges
+                        }
+                        _ => self
                             .db
-                            .get_outgoing_edges_with_label(current_id, &req.edge_label);
-                        let incoming: Vec<EdgeId> = self
-                            .db
-                            .get_incoming_edges(current_id)
-                            .into_iter()
-                            .filter(|eid| {
-                                self.db
-                                    .get_edge(*eid)
-                                    .map(|e| self.matches_label(e.label, &req.edge_label))
-                                    .unwrap_or(false)
-                            })
-                            .collect();
-                        edges.extend(incoming);
-                        edges
-                    }
-                    _ => self
-                        .db
-                        .get_outgoing_edges_with_label(current_id, &req.edge_label),
-                };
+                            .get_outgoing_edges_with_label(current_id, &req.edge_label),
+                    };
 
-                for edge_id in edge_ids {
-                    if let Ok(edge) = self.db.get_edge(edge_id) {
-                        let next_id = match direction {
-                            "incoming" => edge.source,
-                            _ => edge.target,
-                        };
-                        if !visited.contains(&next_id.as_u64()) {
-                            let mut new_path = path.clone();
-                            new_path.push(next_id.as_u64());
-                            frontier.push((next_id, new_path, current_depth + 1));
+                    for edge_id in edge_ids {
+                        if let Ok(edge) = self.db.get_edge(edge_id) {
+                            let next_id = match direction {
+                                "incoming" => edge.source,
+                                _ => edge.target,
+                            };
+                            if !visited.contains(&next_id.as_u64()) {
+                                let mut new_path = path.clone();
+                                new_path.push(next_id.as_u64());
+                                frontier.push((next_id, new_path, current_depth + 1));
+                            }
                         }
                     }
                 }
             }
-        }
 
-        self.success_json(json!({
-            "results": results,
-            "count": results.len()
-        }))
+            Ok(json!({
+                "results": results,
+                "count": results.len()
+            }))
+        })
     }
 
     fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
-        let req: FindSimilarRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: FindSimilarRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        // Apply resource limits
-        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).min(MAX_VECTOR_K);
+            // Apply resource limits
+            let k = req.k.unwrap_or(DEFAULT_VECTOR_K).min(MAX_VECTOR_K);
 
-        if !self.db.is_vector_index_enabled_for(&req.property_name) {
-            return self.error_json(&format!(
-                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
-                req.property_name
-            ));
-        }
-
-        // Validate embedding dimensions
-        if let Err(e) = self.validate_embedding_dimensions(&req.embedding, &req.property_name) {
-            return self.error_json(&e);
-        }
-
-        match self.db.find_similar_by_embedding(&req.embedding, k) {
-            Ok(results) => {
-                let similarity_results: Vec<SimilarityResult> = results
-                    .into_iter()
-                    .filter_map(|(node_id, score)| {
-                        self.db.get_node(node_id).ok().map(|node| SimilarityResult {
-                            node: self.node_to_response(&node),
-                            score,
-                        })
-                    })
-                    .collect();
-
-                self.success_json(json!({
-                    "results": similarity_results,
-                    "count": similarity_results.len()
-                }))
+            if !self.db.is_vector_index_enabled_for(&req.property_name) {
+                return Err(format!(
+                    "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                    req.property_name
+                ));
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+
+            // Validate embedding dimensions
+            if let Err(e) = self.validate_embedding_dimensions(&req.embedding, &req.property_name) {
+                return Err(e.to_string());
+            }
+
+            match self.db.find_similar_by_embedding(&req.embedding, k) {
+                Ok(results) => {
+                    let similarity_results: Vec<SimilarityResult> = results
+                        .into_iter()
+                        .filter_map(|(node_id, score)| {
+                            self.db.get_node(node_id).ok().map(|node| SimilarityResult {
+                                node: self.node_to_response(&node),
+                                score,
+                            })
+                        })
+                        .collect();
+
+                    Ok(json!({
+                        "results": similarity_results,
+                        "count": similarity_results.len()
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     fn handle_enable_vector_index(&self, args: serde_json::Value) -> CallToolResult {
-        let req: EnableVectorIndexRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: EnableVectorIndexRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let distance_metric = match req.distance_metric.as_deref().unwrap_or("cosine") {
-            "euclidean" => DistanceMetric::Euclidean,
-            "dot" | "dot_product" => DistanceMetric::DotProduct,
-            _ => DistanceMetric::Cosine,
-        };
+            let distance_metric = match req.distance_metric.as_deref().unwrap_or("cosine") {
+                "euclidean" => DistanceMetric::Euclidean,
+                "dot" | "dot_product" => DistanceMetric::DotProduct,
+                _ => DistanceMetric::Cosine,
+            };
 
-        let config = HnswConfig::new(req.dimensions, distance_metric);
+            let config = HnswConfig::new(req.dimensions, distance_metric);
 
-        match self.db.enable_vector_index(&req.property_name, config) {
-            Ok(()) => self.success_json(json!({
-                "success": true,
-                "property_name": req.property_name,
-                "dimensions": req.dimensions,
-                "distance_metric": req.distance_metric.unwrap_or_else(|| "cosine".to_string())
-            })),
-            Err(e) => self.error_json(&e.to_string()),
-        }
+            match self.db.enable_vector_index(&req.property_name, config) {
+                Ok(()) => Ok(json!({
+                    "success": true,
+                    "property_name": req.property_name,
+                    "dimensions": req.dimensions,
+                    "distance_metric": req.distance_metric.unwrap_or_else(|| "cosine".to_string())
+                })),
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     fn handle_list_vector_indexes(&self, _args: serde_json::Value) -> CallToolResult {
-        let indexes = self.db.list_vector_indexes();
-        let index_list: Vec<serde_json::Value> = indexes
-            .into_iter()
-            .map(|info| {
-                json!({
-                    "property_name": info.property_name,
-                    "dimensions": info.dimensions,
-                    "distance_metric": format!("{:?}", info.distance_metric)
+        self.with_result(|| {
+            let indexes = self.db.list_vector_indexes();
+            let index_list: Vec<serde_json::Value> = indexes
+                .into_iter()
+                .map(|info| {
+                    json!({
+                        "property_name": info.property_name,
+                        "dimensions": info.dimensions,
+                        "distance_metric": format!("{:?}", info.distance_metric)
+                    })
                 })
-            })
-            .collect();
-        self.success_json(json!({
-            "indexes": index_list,
-            "count": index_list.len()
-        }))
+                .collect();
+            Ok(json!({
+                "indexes": index_list,
+                "count": index_list.len()
+            }))
+        })
     }
 
     fn handle_get_node_at_time(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetNodeAtTimeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetNodeAtTimeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        let valid_time = match self.parse_timestamp(&req.valid_time) {
-            Ok(t) => t,
-            Err(e) => return self.error_json(&e),
-        };
+            let valid_time = self.parse_timestamp(&req.valid_time)?;
 
-        let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
-            Ok(t) => t,
-            Err(e) => return self.error_json(&e),
-        };
+            let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
+                Ok(t) => t,
+                Err(e) => return Err(e.to_string()),
+            };
 
-        match self.db.get_node_at_time(node_id, valid_time, tx_time) {
-            Ok(node) => {
-                let response = self.node_to_response(&node);
-                self.success_json(json!({
-                    "node": response,
-                    "valid_time": req.valid_time,
-                    "transaction_time": Self::format_tx_time_response(req.transaction_time)
-                }))
+            match self.db.get_node_at_time(node_id, valid_time, tx_time) {
+                Ok(node) => {
+                    let response = self.node_to_response(&node);
+                    Ok(json!({
+                        "node": response,
+                        "valid_time": req.valid_time,
+                        "transaction_time": Self::format_tx_time_response(req.transaction_time)
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_get_edge_at_time(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetEdgeAtTimeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetEdgeAtTimeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let edge_id = match EdgeId::new(req.edge_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-        let valid_time = match self.parse_timestamp(&req.valid_time) {
-            Ok(t) => t,
-            Err(e) => return self.error_json(&e),
-        };
+            let valid_time = self.parse_timestamp(&req.valid_time)?;
 
-        let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
-            Ok(t) => t,
-            Err(e) => return self.error_json(&e),
-        };
+            let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
+                Ok(t) => t,
+                Err(e) => return Err(e.to_string()),
+            };
 
-        match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
-            Ok(edge) => {
-                let response = self.edge_to_response(&edge);
-                self.success_json(json!({
-                    "edge": response,
-                    "valid_time": req.valid_time,
-                    "transaction_time": Self::format_tx_time_response(req.transaction_time)
-                }))
+            match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
+                Ok(edge) => {
+                    let response = self.edge_to_response(&edge);
+                    Ok(json!({
+                        "edge": response,
+                        "valid_time": req.valid_time,
+                        "transaction_time": Self::format_tx_time_response(req.transaction_time)
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     // ============================================================================
@@ -1543,239 +1525,219 @@ impl AletheiaMcpServer {
     // ============================================================================
 
     fn handle_get_node_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetNodeAtValidTimeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetNodeAtValidTimeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        let valid_time = match self.parse_timestamp(&req.valid_time) {
-            Ok(t) => t,
-            Err(e) => return self.error_json(&e),
-        };
+            let valid_time = self.parse_timestamp(&req.valid_time)?;
 
-        match self.db.get_node_at_valid_time(node_id, valid_time) {
-            Ok(node) => {
-                let response = self.node_to_response(&node);
-                self.success_json(json!({
-                    "node": response,
-                    "valid_time": req.valid_time
-                }))
+            match self.db.get_node_at_valid_time(node_id, valid_time) {
+                Ok(node) => {
+                    let response = self.node_to_response(&node);
+                    Ok(json!({
+                        "node": response,
+                        "valid_time": req.valid_time
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_get_node_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetNodeAtTransactionTimeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetNodeAtTransactionTimeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        let tx_time = match self.parse_timestamp(&req.transaction_time) {
-            Ok(t) => t,
-            Err(e) => return self.error_json(&e),
-        };
+            let tx_time = self.parse_timestamp(&req.transaction_time)?;
 
-        match self.db.get_node_at_transaction_time(node_id, tx_time) {
-            Ok(node) => {
-                let response = self.node_to_response(&node);
-                self.success_json(json!({
-                    "node": response,
-                    "transaction_time": req.transaction_time
-                }))
+            match self.db.get_node_at_transaction_time(node_id, tx_time) {
+                Ok(node) => {
+                    let response = self.node_to_response(&node);
+                    Ok(json!({
+                        "node": response,
+                        "transaction_time": req.transaction_time
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_get_node_history(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetNodeHistoryRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetNodeHistoryRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        match self.db.get_node_history(node_id) {
-            Ok(history) => {
-                let versions: Vec<_> = history
-                    .versions
-                    .iter()
-                    .map(|v| self.version_info_to_response(v))
-                    .collect();
+            match self.db.get_node_history(node_id) {
+                Ok(history) => {
+                    let versions: Vec<_> = history
+                        .versions
+                        .iter()
+                        .map(|v| self.version_info_to_response(v))
+                        .collect();
 
-                self.success_json(json!({
-                    "node_id": req.node_id,
-                    "versions": versions,
-                    "version_count": versions.len()
-                }))
+                    Ok(json!({
+                        "node_id": req.node_id,
+                        "versions": versions,
+                        "version_count": versions.len()
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_diff_node_versions(&self, args: serde_json::Value) -> CallToolResult {
-        let req: DiffNodeVersionsRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: DiffNodeVersionsRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let node_id = match NodeId::new(req.node_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let node_id = NodeId::new(req.node_id).map_err(|e| e.to_string())?;
 
-        let from_version = match crate::core::id::VersionId::new(req.from_version) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let from_version = match crate::core::id::VersionId::new(req.from_version) {
+                Ok(id) => id,
+                Err(e) => return Err(e.to_string()),
+            };
 
-        let to_version = match crate::core::id::VersionId::new(req.to_version) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let to_version = match crate::core::id::VersionId::new(req.to_version) {
+                Ok(id) => id,
+                Err(e) => return Err(e.to_string()),
+            };
 
-        match self
-            .db
-            .diff_node_versions(node_id, from_version, to_version)
-        {
-            Ok(diff) => {
-                let response = self.version_diff_to_response(&diff);
-                self.success_json(json!(response))
+            match self
+                .db
+                .diff_node_versions(node_id, from_version, to_version)
+            {
+                Ok(diff) => {
+                    let response = self.version_diff_to_response(&diff);
+                    Ok(json!(response))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_get_edge_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetEdgeAtValidTimeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetEdgeAtValidTimeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let edge_id = match EdgeId::new(req.edge_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-        let valid_time = match self.parse_timestamp(&req.valid_time) {
-            Ok(t) => t,
-            Err(e) => return self.error_json(&e),
-        };
+            let valid_time = self.parse_timestamp(&req.valid_time)?;
 
-        match self.db.get_edge_at_valid_time(edge_id, valid_time) {
-            Ok(edge) => {
-                let response = self.edge_to_response(&edge);
-                self.success_json(json!({
-                    "edge": response,
-                    "valid_time": req.valid_time
-                }))
+            match self.db.get_edge_at_valid_time(edge_id, valid_time) {
+                Ok(edge) => {
+                    let response = self.edge_to_response(&edge);
+                    Ok(json!({
+                        "edge": response,
+                        "valid_time": req.valid_time
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_get_edge_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetEdgeAtTransactionTimeRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetEdgeAtTransactionTimeRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let edge_id = match EdgeId::new(req.edge_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-        let tx_time = match self.parse_timestamp(&req.transaction_time) {
-            Ok(t) => t,
-            Err(e) => return self.error_json(&e),
-        };
+            let tx_time = self.parse_timestamp(&req.transaction_time)?;
 
-        match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
-            Ok(edge) => {
-                let response = self.edge_to_response(&edge);
-                self.success_json(json!({
-                    "edge": response,
-                    "transaction_time": req.transaction_time
-                }))
+            match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
+                Ok(edge) => {
+                    let response = self.edge_to_response(&edge);
+                    Ok(json!({
+                        "edge": response,
+                        "transaction_time": req.transaction_time
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_get_edge_history(&self, args: serde_json::Value) -> CallToolResult {
-        let req: GetEdgeHistoryRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: GetEdgeHistoryRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let edge_id = match EdgeId::new(req.edge_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-        match self.db.get_edge_history(edge_id) {
-            Ok(history) => {
-                let versions: Vec<_> = history
-                    .versions
-                    .iter()
-                    .map(|v| self.version_info_to_response(v))
-                    .collect();
+            match self.db.get_edge_history(edge_id) {
+                Ok(history) => {
+                    let versions: Vec<_> = history
+                        .versions
+                        .iter()
+                        .map(|v| self.version_info_to_response(v))
+                        .collect();
 
-                self.success_json(json!({
-                    "edge_id": req.edge_id,
-                    "versions": versions,
-                    "version_count": versions.len()
-                }))
+                    Ok(json!({
+                        "edge_id": req.edge_id,
+                        "versions": versions,
+                        "version_count": versions.len()
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     fn handle_diff_edge_versions(&self, args: serde_json::Value) -> CallToolResult {
-        let req: DiffEdgeVersionsRequest = match serde_json::from_value(args) {
-            Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
-        };
+        self.with_result(|| {
+            let req: DiffEdgeVersionsRequest = match serde_json::from_value(args) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Invalid arguments: {}", e)),
+            };
 
-        let edge_id = match EdgeId::new(req.edge_id) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let edge_id = EdgeId::new(req.edge_id).map_err(|e| e.to_string())?;
 
-        let from_version = match crate::core::id::VersionId::new(req.from_version) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let from_version = match crate::core::id::VersionId::new(req.from_version) {
+                Ok(id) => id,
+                Err(e) => return Err(e.to_string()),
+            };
 
-        let to_version = match crate::core::id::VersionId::new(req.to_version) {
-            Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
-        };
+            let to_version = match crate::core::id::VersionId::new(req.to_version) {
+                Ok(id) => id,
+                Err(e) => return Err(e.to_string()),
+            };
 
-        match self
-            .db
-            .diff_edge_versions(edge_id, from_version, to_version)
-        {
-            Ok(diff) => {
-                let response = self.version_diff_to_response(&diff);
-                self.success_json(json!(response))
+            match self
+                .db
+                .diff_edge_versions(edge_id, from_version, to_version)
+            {
+                Ok(diff) => {
+                    let response = self.version_diff_to_response(&diff);
+                    Ok(json!(response))
+                }
+                Err(e) => Err(e.to_string()),
             }
-            Err(e) => self.error_json(&e.to_string()),
-        }
+        })
     }
 
     // Helper methods for converting internal types to response types
@@ -1847,9 +1809,10 @@ impl AletheiaMcpServer {
     }
 
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
+        self.with_result(|| {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return Err(format!("Invalid arguments: {}", e)),
         };
 
         // Apply resource limits
@@ -1864,7 +1827,7 @@ impl AletheiaMcpServer {
         let valid_time = if let Some(ref vt) = req.valid_time {
             match self.parse_timestamp(vt) {
                 Ok(t) => Some(t),
-                Err(e) => return self.error_json(&format!("Invalid valid_time: {}", e)),
+                Err(e) => return Err(format!("Invalid valid_time: {}", e)),
             }
         } else {
             None
@@ -1873,7 +1836,7 @@ impl AletheiaMcpServer {
         let tx_time = if let Some(ref tt) = req.transaction_time {
             match self.parse_timestamp(tt) {
                 Ok(t) => Some(t),
-                Err(e) => return self.error_json(&format!("Invalid transaction_time: {}", e)),
+                Err(e) => return Err(format!("Invalid transaction_time: {}", e)),
             }
         } else {
             None
@@ -1907,10 +1870,7 @@ impl AletheiaMcpServer {
 
         // Use QueryBuilder for hybrid queries
         if let Some(start_id) = req.start_node_id {
-            let node_id = match NodeId::new(start_id) {
-                Ok(id) => id,
-                Err(e) => return self.error_json(&e.to_string()),
-            };
+            let node_id = NodeId::new(start_id).map_err(|e| e.to_string())?;
 
             // If temporal filtering requested, use temporal query
             if let (Some(vt), Some(tt)) = (valid_time, tx_time) {
@@ -1918,7 +1878,7 @@ impl AletheiaMcpServer {
                 return match self.db.get_node_at_time(node_id, vt, tt) {
                     Ok(node) => {
                         let response = self.node_to_response(&node);
-                        self.success_json(json!({
+                        Ok(json!({
                             "results": [HybridQueryResult {
                                 node: response,
                                 similarity_score: None,
@@ -1932,7 +1892,7 @@ impl AletheiaMcpServer {
                             }
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => Err(e.to_string()),
                 };
             }
 
@@ -1950,7 +1910,7 @@ impl AletheiaMcpServer {
                 return match self.db.get_node(node_id) {
                     Ok(node) => {
                         let response = self.node_to_response(&node);
-                        self.success_json(json!({
+                        Ok(json!({
                             "results": [HybridQueryResult {
                                 node: response,
                                 similarity_score: None,
@@ -1960,7 +1920,7 @@ impl AletheiaMcpServer {
                             "count": 1
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => Err(e.to_string()),
                 };
             };
 
@@ -1969,14 +1929,14 @@ impl AletheiaMcpServer {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let hybrid_results = rows_to_results(rows);
-                        self.success_json(json!({
+                        Ok(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => Err(e.to_string()),
                 },
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => Err(e.to_string()),
             }
         } else if let Some(ref embedding) = req.query_embedding {
             // Vector-first query
@@ -1985,7 +1945,7 @@ impl AletheiaMcpServer {
 
             // Check if vector index is enabled for the property
             if !self.db.is_vector_index_enabled_for(property_name) {
-                return self.error_json(&format!(
+                return Err(format!(
                     "Vector index not enabled for property '{}'. Use enable_vector_index first.",
                     property_name
                 ));
@@ -1993,7 +1953,7 @@ impl AletheiaMcpServer {
 
             // Validate embedding dimensions
             if let Err(e) = self.validate_embedding_dimensions(embedding, property_name) {
-                return self.error_json(&e);
+                return Err(e.to_string());
             }
 
             let builder = crate::query::QueryBuilder::new().find_similar(embedding, k);
@@ -2002,15 +1962,15 @@ impl AletheiaMcpServer {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let hybrid_results = rows_to_results(rows);
-                        self.success_json(json!({
+                        Ok(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len(),
                             "vector_property": property_name
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => Err(e.to_string()),
                 },
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => Err(e.to_string()),
             }
         } else if let Some(ref label) = req.filter_label {
             // Label scan query
@@ -2020,18 +1980,20 @@ impl AletheiaMcpServer {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let hybrid_results = rows_to_results(rows);
-                        self.success_json(json!({
+                        Ok(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => Err(e.to_string()),
                 },
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => Err(e.to_string()),
             }
         } else {
-            self.error_json("Must specify either start_node_id, query_embedding, or filter_label")
+            Err("Must specify either start_node_id, query_embedding, or filter_label".to_string())
         }
+
+        })
     }
 }
 
