@@ -343,7 +343,7 @@ impl<C: ShardClient> QueryExecutor<C> {
         }
 
         // Scatter: Execute query on all target shards
-        let mut results: Vec<ShardResult> = Vec::new();
+        let mut results: Vec<ShardResult> = Vec::with_capacity(target_shards.len());
         let mut failures: Vec<(ShardId, NetworkError)> = Vec::new();
 
         for shard_id in &target_shards {
@@ -493,7 +493,7 @@ impl<C: ShardClient> QueryExecutor<C> {
         match query.aggregation {
             AggregationStrategy::Concat => {
                 // Simple concatenation
-                let mut aggregated = Vec::new();
+                let mut aggregated = Vec::with_capacity(results.iter().map(|r| r.data.len()).sum());
                 for result in results {
                     aggregated.extend(&result.data);
                 }
@@ -510,7 +510,7 @@ impl<C: ShardClient> QueryExecutor<C> {
             }
             AggregationStrategy::MergeNodes => {
                 // Merge and deduplicate (simplified - real impl would parse nodes)
-                let mut aggregated = Vec::new();
+                let mut aggregated = Vec::with_capacity(results.iter().map(|r| r.data.len()).sum());
                 let mut seen_len = 0;
                 for result in results {
                     if result.data.len() > seen_len {
@@ -547,7 +547,8 @@ impl<C: ShardClient> QueryExecutor<C> {
             }
             AggregationStrategy::ByShard => {
                 // Return results separately (serialize shard -> data mapping)
-                let mut aggregated = Vec::new();
+                let capacity: usize = results.iter().map(|r| r.data.len()).sum();
+                let mut aggregated = Vec::with_capacity(capacity + 4 + (results.len() * 6));
                 aggregated.extend_from_slice(&(results.len() as u32).to_le_bytes());
                 for result in results {
                     aggregated.extend_from_slice(&result.shard_id.as_u16().to_le_bytes());
