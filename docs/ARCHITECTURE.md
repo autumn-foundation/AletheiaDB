@@ -88,6 +88,9 @@ classDiagram
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+        class StorageEngine {
+            <<trait>>
+        }
     }
     namespace Storage {
         class CurrentStorage
@@ -103,11 +106,26 @@ classDiagram
 
     MCPServer --> QueryEngine : Uses
     QueryEngine --> AletheiaDB : Uses
-    AletheiaDB --> CurrentStorage : "Owns (Arc)"
-    AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
+    AletheiaDB --> StorageEngine : Uses (Trait Bound)
     %% Removed the circular dependency arrow
+    CurrentStorage ..|> StorageEngine : Implements
+    HistoricalStorage ..|> StorageEngine : Implements
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
+```
+
+**Storage Decoupling Flow**
+
+```mermaid
+sequenceDiagram
+    participant API as Core.QueryEngine
+    participant StorageTrait as Core.StorageEngine
+    participant ConcreteStorage as Storage.CurrentStorage
+
+    API->>StorageTrait: get_node(id)
+    StorageTrait->>ConcreteStorage: Dispatch
+    ConcreteStorage-->>StorageTrait: Node DTO
+    StorageTrait-->>API: Node Model
 ```
 
 **When to Use Each:**
