@@ -240,3 +240,187 @@ fn test_timerange_contains_exact_boundary() {
         "Touching ranges should NOT overlap (exact boundary check reverse)"
     );
 }
+
+#[test]
+fn test_timerange_contains_range_mutant_bounds() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    // Mutants replace && with || and <= with >
+    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+
+    // Exact inner matching
+    let r2 = TimeRange::new(100.into(), 200.into()).unwrap();
+    assert!(
+        r1.contains_range(&r2),
+        "Identical range should be contained"
+    );
+
+    // Left boundary failure (start > start) - tests left side of &&
+    let r3 = TimeRange::new(99.into(), 150.into()).unwrap();
+    assert!(
+        !r1.contains_range(&r3),
+        "Range starting before should NOT be contained"
+    );
+
+    // Right boundary failure (end < end) - tests right side of &&
+    let r4 = TimeRange::new(150.into(), 201.into()).unwrap();
+    assert!(
+        !r1.contains_range(&r4),
+        "Range ending after should NOT be contained"
+    );
+
+    // Entirely outside
+    let r5 = TimeRange::new(300.into(), 400.into()).unwrap();
+    assert!(
+        !r1.contains_range(&r5),
+        "Entirely outside range should NOT be contained"
+    );
+}
+
+#[test]
+fn test_timerange_is_current_closed_empty_mutant_bounds() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    let current_range = TimeRange::from(100.into());
+    let closed_range = TimeRange::new(100.into(), 200.into()).unwrap();
+    let empty_range = TimeRange::at(100.into());
+
+    // is_current (end == TIMESTAMP_MAX)
+    assert!(
+        current_range.is_current(),
+        "Current range should be current"
+    );
+    assert!(
+        !closed_range.is_current(),
+        "Closed range should NOT be current"
+    );
+
+    // is_closed (end < TIMESTAMP_MAX)
+    assert!(
+        !current_range.is_closed(),
+        "Current range should NOT be closed"
+    );
+    assert!(closed_range.is_closed(), "Closed range should be closed");
+
+    // Mutators on is_closed: replace `<` with `==` or `>`
+    // The exact check against `!current_range.is_closed()` specifically catches `==`
+    // because current_range.end is exactly TIMESTAMP_MAX.
+
+    // is_empty (start == end)
+    assert!(
+        !current_range.is_empty(),
+        "Current range should NOT be empty"
+    );
+    assert!(!closed_range.is_empty(), "Closed range should NOT be empty");
+    assert!(empty_range.is_empty(), "Empty range should be empty");
+}
+
+#[test]
+fn test_bitemporal_close_methods_mutants() {
+    use aletheiadb::core::error::TemporalError;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_start = 1000.into();
+    let tx_start = 2000.into();
+
+    let interval = BiTemporalInterval::now(valid_start, tx_start);
+
+    // Test close_valid_time
+    let close_valid_ts = 1500.into();
+    let closed_valid = interval.close_valid_time(close_valid_ts).unwrap();
+    assert_eq!(
+        closed_valid.valid_time().end(),
+        close_valid_ts,
+        "valid time should be exactly updated"
+    );
+    assert!(
+        closed_valid.is_currently_recorded(),
+        "tx time should remain open"
+    );
+
+    // Test close_transaction_time
+    let close_tx_ts = 2500.into();
+    let closed_tx = interval.close_transaction_time(close_tx_ts).unwrap();
+    assert_eq!(
+        closed_tx.transaction_time().end(),
+        close_tx_ts,
+        "tx time should be exactly updated"
+    );
+    assert!(
+        closed_tx.is_currently_valid(),
+        "valid time should remain open"
+    );
+
+    // Test close_both
+    let closed_both = interval.close_both(close_valid_ts, close_tx_ts).unwrap();
+    assert_eq!(
+        closed_both.valid_time().end(),
+        close_valid_ts,
+        "valid time should be exactly updated"
+    );
+    assert_eq!(
+        closed_both.transaction_time().end(),
+        close_tx_ts,
+        "tx time should be exactly updated"
+    );
+    assert!(
+        !closed_both.is_currently_valid() && !closed_both.is_currently_recorded(),
+        "both should be closed"
+    );
+
+    // Invalid closures should return TemporalError exactly rather than panicking or Ok(Default)
+    let invalid_close_ts = 500.into(); // Before start
+    assert!(
+        matches!(
+            interval.close_valid_time(invalid_close_ts),
+            Err(TemporalError::InvalidTimeRange { .. })
+        ),
+        "Closing before start should return InvalidTimeRange"
+    );
+}
+
+#[test]
+fn test_bitemporal_serialization_mutants() {
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let interval = BiTemporalInterval::now(1000.into(), 2000.into());
+    let serialized = interval.serialize();
+
+    // Kill mutants replacing serialize body with vec![] or vec![0]/vec![1]
+    assert_eq!(
+        serialized.len(),
+        48,
+        "BiTemporalInterval serialization length must be exactly 48 bytes"
+    );
+
+    // Verify deserialization limits
+    let mut bad_buffer = serialized.clone();
+    bad_buffer.truncate(47); // Just 1 byte short
+    assert!(
+        BiTemporalInterval::deserialize(&bad_buffer).is_err(),
+        "Deserialization of < 48 bytes must return error"
+    );
+}
+
+#[test]
+fn test_timerange_serialization_mutants() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::from(1000.into());
+    let serialized = range.serialize();
+
+    // Kill mutants replacing serialize body with vec![] or vec![0]/vec![1]
+    assert_eq!(
+        serialized.len(),
+        24,
+        "TimeRange serialization length must be exactly 24 bytes"
+    );
+
+    // Verify deserialization limits
+    let mut bad_buffer = serialized.clone();
+    bad_buffer.truncate(23); // Just 1 byte short
+    assert!(
+        TimeRange::deserialize(&bad_buffer).is_err(),
+        "Deserialization of < 24 bytes must return error"
+    );
+}
