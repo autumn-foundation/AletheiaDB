@@ -44,6 +44,99 @@ fn test_bitemporal_methods_exact() {
 }
 
 #[test]
+fn test_timerange_between_start_end_exact() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+
+    // TimeRange::between
+    let range = TimeRange::between(start, end).unwrap();
+
+    // Exact checking for start and end methods
+    let default_ts = HybridTimestamp::new(0, 0).unwrap();
+
+    let actual_start = range.start();
+    assert_eq!(actual_start, start);
+    assert_ne!(
+        actual_start, default_ts,
+        "start() should not return default"
+    );
+
+    let actual_end = range.end();
+    assert_eq!(actual_end, end);
+    assert_ne!(actual_end, default_ts, "end() should not return default");
+
+    // Explicit check that between doesn't return default
+    let default_range = TimeRange::new(default_ts, default_ts).unwrap();
+    assert_ne!(range, default_range, "between() should not return default");
+}
+
+#[test]
+fn test_bitemporal_valid_transaction_time_exact() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let valid_start = HybridTimestamp::new(100, 0).unwrap();
+    let valid_end = HybridTimestamp::new(200, 0).unwrap();
+    let valid_range = TimeRange::new(valid_start, valid_end).unwrap();
+
+    let tx_start = HybridTimestamp::new(300, 0).unwrap();
+    let tx_end = HybridTimestamp::new(400, 0).unwrap();
+    let tx_range = TimeRange::new(tx_start, tx_end).unwrap();
+
+    let interval = BiTemporalInterval::new(valid_range, tx_range);
+
+    let default_ts = HybridTimestamp::new(0, 0).unwrap();
+    let default_range = TimeRange::new(default_ts, default_ts).unwrap();
+
+    let actual_valid_time = interval.valid_time();
+    assert_eq!(actual_valid_time, valid_range);
+    assert_ne!(
+        actual_valid_time, default_range,
+        "valid_time() should not return default"
+    );
+
+    let actual_tx_time = interval.transaction_time();
+    assert_eq!(actual_tx_time, tx_range);
+    assert_ne!(
+        actual_tx_time, default_range,
+        "transaction_time() should not return default"
+    );
+}
+
+#[test]
+fn test_timerange_is_closed_exact() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TimeRange};
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let closed_end = HybridTimestamp::new(200, 0).unwrap();
+
+    let closed = TimeRange::new(start, closed_end).unwrap();
+    let open = TimeRange::from(start);
+
+    let edge_closed_end = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let edge_closed = TimeRange::new(start, edge_closed_end).unwrap();
+
+    // Exact bound check for is_closed: end < TIMESTAMP_MAX
+    // Open range: end == TIMESTAMP_MAX (should be false)
+    assert!(!open.is_closed(), "Open range should not be closed");
+
+    // Closed range: end < TIMESTAMP_MAX (should be true)
+    assert!(closed.is_closed(), "Closed range should be closed");
+
+    // Edge case: end right at MAX_VALID_TIMESTAMP < TIMESTAMP_MAX
+    assert!(
+        edge_closed.is_closed(),
+        "Edge closed range should be closed"
+    );
+
+    // Mutants replacing < with >, >=, == will fail at least one of these exact boundary checks
+}
+
+#[test]
 fn test_bitemporal_is_currently_methods() {
     use aletheiadb::core::temporal::BiTemporalInterval;
     use aletheiadb::core::temporal::TimeRange;
