@@ -1921,6 +1921,435 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_sentry_timerange_is_empty_exact() {
+        // 🛡️ Sentry Test: Verify TimeRange::is_empty() exact boundary logic.
+        // Covers mutants returning true/false defaults or modifying `==` to `!=`.
+        let ts1 = 100.into();
+        let ts2 = 200.into();
+
+        let empty_range = TimeRange::at(ts1);
+        assert!(empty_range.is_empty(), "Point range must be empty");
+
+        let not_empty = TimeRange::new(ts1, ts2).unwrap();
+        assert!(
+            !not_empty.is_empty(),
+            "Valid range [100, 200) must not be empty"
+        );
+
+        let current = TimeRange::from(ts1);
+        assert!(!current.is_empty(), "Current range must not be empty");
+    }
+
+    #[test]
+    fn test_sentry_timerange_is_current_closed_exact() {
+        // 🛡️ Sentry Test: Verify TimeRange::is_current() and is_closed() exact boundary logic.
+        // Covers returning true/false defaults or modifying `<` to `<=`, `>`, `==`.
+        let ts1 = 100.into();
+        let ts2 = 200.into();
+
+        let current = TimeRange::from(ts1);
+        assert!(current.is_current(), "TimeRange::from must be current");
+        assert!(!current.is_closed(), "Current range is not closed");
+
+        let closed = TimeRange::new(ts1, ts2).unwrap();
+        assert!(
+            !closed.is_current(),
+            "TimeRange::new with bounded end must not be current"
+        );
+        assert!(
+            closed.is_closed(),
+            "TimeRange::new with bounded end must be closed"
+        );
+
+        let point = TimeRange::at(ts1);
+        assert!(!point.is_current(), "Point range must not be current");
+        assert!(point.is_closed(), "Point range must be closed");
+    }
+
+    #[test]
+    fn test_sentry_timerange_contains_range_exact() {
+        // 🛡️ Sentry Test: Verify TimeRange boundary inclusions and overlaps exact operators.
+        // Covers mutants like modifying `>=` to `<`, `&&` to `||`, etc in contains, contains_or_after, overlaps, contains_range.
+        let r100_200 = TimeRange::new(100.into(), 200.into()).unwrap();
+        let ts_99 = 99.into();
+        let ts_100 = 100.into();
+        let ts_199 = 199.into();
+        let ts_200 = 200.into();
+        let ts_201 = 201.into();
+
+        // contains
+        assert!(
+            !r100_200.contains(ts_99),
+            "Contains strict boundary check left failed"
+        );
+        assert!(
+            r100_200.contains(ts_100),
+            "Contains strict boundary check left failed"
+        );
+        assert!(
+            r100_200.contains(ts_199),
+            "Contains strict boundary check right failed"
+        );
+        assert!(
+            !r100_200.contains(ts_200),
+            "Contains strict boundary check right failed"
+        );
+
+        // contains_or_after
+        assert!(
+            !r100_200.contains_or_after(ts_99),
+            "Contains_or_after strict check left failed"
+        );
+        assert!(
+            r100_200.contains_or_after(ts_100),
+            "Contains_or_after strict check left failed"
+        );
+        assert!(
+            r100_200.contains_or_after(ts_201),
+            "Contains_or_after strict check right failed"
+        );
+
+        // overlaps and contains_range operators
+        let r50_100 = TimeRange::new(50.into(), 100.into()).unwrap();
+        let r200_300 = TimeRange::new(200.into(), 300.into()).unwrap();
+        let r100_150 = TimeRange::new(100.into(), 150.into()).unwrap();
+
+        assert!(
+            !r100_200.overlaps(&r50_100),
+            "Strict < check in overlaps left failed"
+        );
+        assert!(
+            !r100_200.overlaps(&r200_300),
+            "Strict < check in overlaps right failed"
+        );
+        assert!(
+            r100_200.contains_range(&r100_150),
+            "Strict <= check in contains_range left failed"
+        );
+    }
+
+    #[test]
+    fn test_sentry_timerange_close_at_exact() {
+        // 🛡️ Sentry Test: Verify TimeRange::close_at exact bounds logic.
+        // Covers mutants like modifying `<` to `==`, `>` to `>=` and returning Ok(Default::default()).
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let end_valid = HybridTimestamp::new(200, 0).unwrap();
+        let end_invalid_low = HybridTimestamp::new(99, 0).unwrap();
+        let end_invalid_high = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+
+        let range = TimeRange::from(start);
+
+        let result_valid = range.close_at(end_valid);
+        assert!(
+            result_valid.is_ok(),
+            "close_at should succeed with valid timestamp"
+        );
+        let closed = result_valid.unwrap();
+        assert_ne!(
+            closed,
+            TimeRange::from(0.into()),
+            "Should not return Default::default()"
+        );
+        assert_eq!(
+            closed.end(),
+            end_valid,
+            "close_at must set the exact end timestamp"
+        );
+
+        let result_low = range.close_at(end_invalid_low);
+        assert!(
+            matches!(result_low, Err(TemporalError::InvalidTimeRange { .. })),
+            "close_at must reject end < start"
+        );
+
+        // Use another range with same start just to re-verify the exact `self.start` copy behavior
+        let range2 = TimeRange::from(start);
+        let result_high = range2.close_at(end_invalid_high);
+        assert!(
+            matches!(result_high, Err(TemporalError::InvalidTimestamp { .. })),
+            "close_at must reject end > MAX_VALID_TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn test_sentry_timerange_serialization_exact() {
+        // 🛡️ Sentry Test: Verify exactly TimeRange serialization paths.
+        // Covers mutants like `serialize -> Vec<u8> with vec![]`, `deserialize -> Ok((Default::default(), 0))`.
+        let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+        let bytes = r1.serialize();
+        let empty_vec: Vec<u8> = vec![];
+        assert_ne!(bytes, empty_vec, "serialize should not return empty vec");
+        assert_ne!(bytes, vec![0u8], "serialize should not return vec![0]");
+        assert_ne!(bytes, vec![1u8], "serialize should not return vec![1]");
+
+        let (deser, count) = TimeRange::deserialize(&bytes).unwrap();
+        assert_eq!(count, 24, "deserialize count should be 24");
+        assert_eq!(deser.start(), 100.into(), "start must exactly match");
+        assert_eq!(deser.end(), 200.into(), "end must exactly match");
+
+        // Mutants replacing `deserialize` `<` check
+        let too_short = [0u8; 23];
+        let err_res = TimeRange::deserialize(&too_short);
+        assert!(
+            matches!(err_res, Err(StorageError::CorruptedData(_))),
+            "deserialize should explicitly reject < 24"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_serialization_exact() {
+        // 🛡️ Sentry Test: Verify BiTemporalInterval serialization exact bounds.
+        // Covers mutants like `serialize -> Vec<u8> with vec![]`, `deserialize -> Ok((Default::default(), 0))` and bounds checking.
+        let bt = BiTemporalInterval::new(
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+            TimeRange::new(300.into(), 400.into()).unwrap(),
+        );
+        let bytes = bt.serialize();
+        let empty_vec: Vec<u8> = vec![];
+        assert_ne!(
+            bytes, empty_vec,
+            "BiTemporalInterval::serialize should not return empty vec"
+        );
+        assert_ne!(
+            bytes,
+            vec![0u8],
+            "BiTemporalInterval::serialize should not return vec![0]"
+        );
+        assert_ne!(
+            bytes,
+            vec![1u8],
+            "BiTemporalInterval::serialize should not return vec![1]"
+        );
+
+        let (deser, count) = BiTemporalInterval::deserialize(&bytes).unwrap();
+        assert_eq!(count, 48, "deserialize count should be exactly 48");
+        assert_eq!(
+            deser.valid_time().start(),
+            100.into(),
+            "valid_time start exact match"
+        );
+        assert_eq!(
+            deser.transaction_time().end(),
+            400.into(),
+            "tx_time end exact match"
+        );
+
+        // Bounds `< 48`
+        let too_short = [0u8; 47];
+        let err_res = BiTemporalInterval::deserialize(&too_short);
+        assert!(
+            matches!(err_res, Err(StorageError::CorruptedData(_))),
+            "deserialize should explicitly reject < 48"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_close_exact() {
+        // 🛡️ Sentry Test: Verify close_valid_time, close_transaction_time, and close_both don't return defaults.
+        let bt = BiTemporalInterval::now(100.into(), 200.into());
+
+        let cv = bt.close_valid_time(150.into()).unwrap();
+        assert_ne!(
+            cv.valid_time().start(),
+            0.into(),
+            "close_valid_time shouldn't return default"
+        );
+        assert_eq!(
+            cv.valid_time().end(),
+            150.into(),
+            "close_valid_time must close exactly"
+        );
+        assert_eq!(
+            cv.transaction_time().start(),
+            200.into(),
+            "close_valid_time must preserve tx start"
+        );
+
+        let ct = bt.close_transaction_time(250.into()).unwrap();
+        assert_ne!(
+            ct.transaction_time().start(),
+            0.into(),
+            "close_transaction_time shouldn't return default"
+        );
+        assert_eq!(
+            ct.transaction_time().end(),
+            250.into(),
+            "close_transaction_time must close exactly"
+        );
+        assert_eq!(
+            ct.valid_time().start(),
+            100.into(),
+            "close_transaction_time must preserve valid start"
+        );
+
+        let cb = bt.close_both(150.into(), 250.into()).unwrap();
+        assert_ne!(
+            cb.valid_time().start(),
+            0.into(),
+            "close_both shouldn't return default"
+        );
+        assert_eq!(
+            cb.valid_time().end(),
+            150.into(),
+            "close_both must close valid exactly"
+        );
+        assert_eq!(
+            cb.transaction_time().end(),
+            250.into(),
+            "close_both must close tx exactly"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_constructors_exact() {
+        // 🛡️ Sentry Test: Verify BiTemporalInterval constructors do not yield defaults.
+        let ts1 = 100.into();
+        let ts2 = 200.into();
+
+        let bc = BiTemporalInterval::current(ts1);
+        assert_ne!(
+            bc.valid_time().start(),
+            0.into(),
+            "current shouldn't yield default"
+        );
+        assert_eq!(bc.valid_time().start(), ts1, "current must match timestamp");
+
+        let bn = BiTemporalInterval::now(ts1, ts2);
+        assert_ne!(
+            bn.valid_time().start(),
+            0.into(),
+            "now shouldn't yield default"
+        );
+        assert_eq!(bn.valid_time().start(), ts1, "now valid start must match");
+        assert_eq!(
+            bn.transaction_time().start(),
+            ts2,
+            "now tx start must match"
+        );
+
+        let bw = BiTemporalInterval::with_valid_time(ts1, ts2);
+        assert_ne!(
+            bw.valid_time().start(),
+            0.into(),
+            "with_valid_time shouldn't yield default"
+        );
+        assert_eq!(
+            bw.valid_time().start(),
+            ts1,
+            "with_valid_time valid start must match"
+        );
+        assert_eq!(
+            bw.transaction_time().start(),
+            ts2,
+            "with_valid_time tx start must match"
+        );
+
+        let valid_time = bw.valid_time();
+        assert_ne!(
+            valid_time.start(),
+            0.into(),
+            "valid_time shouldn't yield default"
+        );
+
+        let tx_time = bw.transaction_time();
+        assert_ne!(
+            tx_time.start(),
+            0.into(),
+            "transaction_time shouldn't yield default"
+        );
+    }
+
+    #[test]
+    fn test_sentry_temporal_display_exact() {
+        // 🛡️ Sentry Test: Verify `fmt::Display` outputs correctly without returning Ok(Default::default()) blanks.
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let range = TimeRange::new(ts1, ts2).unwrap();
+        let range_str = range.to_string();
+        assert!(
+            !range_str.is_empty(),
+            "TimeRange Display shouldn't yield empty string"
+        );
+        assert!(
+            range_str.contains("100"),
+            "TimeRange Display must contain ts1"
+        );
+        assert!(
+            range_str.contains("200"),
+            "TimeRange Display must contain ts2"
+        );
+
+        let bt = BiTemporalInterval::new(range, range);
+        let bt_str = bt.to_string();
+        assert!(
+            !bt_str.is_empty(),
+            "BiTemporalInterval Display shouldn't yield empty string"
+        );
+        assert!(
+            bt_str.contains("BiTemporal[valid:"),
+            "BiTemporalInterval Display must contain valid string component"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_try_now_exact() {
+        // 🛡️ Sentry Test: Verify `try_now` and `now` don't yield Default::default().
+        let n = time::now();
+        assert_ne!(
+            n,
+            HybridTimestamp::new_unchecked(0, 0),
+            "time::now should not return default 0"
+        );
+        assert!(
+            n.wallclock() > 1_000_000_000,
+            "time::now wallclock should be reasonably large"
+        );
+
+        let tn = time::try_now().unwrap();
+        assert_ne!(
+            tn,
+            HybridTimestamp::new_unchecked(0, 0),
+            "time::try_now should not return default 0"
+        );
+        assert!(
+            tn.wallclock() > 1_000_000_000,
+            "time::try_now wallclock should be reasonably large"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_from_secs_millis_exact() {
+        // 🛡️ Sentry Test: Verify `from_secs` and `from_millis` strict math scaling.
+        // Covers mutants returning defaults and replacing `*` with `+` or `/`.
+        let secs = 12345;
+        let ts_secs = time::from_secs(secs);
+        assert_ne!(
+            ts_secs,
+            HybridTimestamp::new_unchecked(0, 0),
+            "from_secs should not return default"
+        );
+        assert_eq!(
+            ts_secs.wallclock(),
+            secs * 1_000_000,
+            "from_secs must multiply exactly by 1,000,000"
+        );
+
+        let millis = 12345678;
+        let ts_millis = time::from_millis(millis);
+        assert_ne!(
+            ts_millis,
+            HybridTimestamp::new_unchecked(0, 0),
+            "from_millis should not return default"
+        );
+        assert_eq!(
+            ts_millis.wallclock(),
+            millis * 1_000,
+            "from_millis must multiply exactly by 1,000"
+        );
+    }
+
+    #[test]
     fn test_sentry_deserialize_rejects_inverted_range() {
         // 🛡️ Sentry Test: Verify TimeRange::deserialize rejects inverted ranges (start > end).
         // This targets mutants that remove or weaken the validation check in deserialize.
