@@ -2893,4 +2893,35 @@ mod mutant_kill_tests {
             "Difference < EPSILON should be considered equal"
         );
     }
+
+    #[test]
+    fn test_edge_version_entity_version_trait_methods_exact() {
+        let mut edge = make_edge_anchor();
+
+        // Test prev_version / set_prev_version
+        EntityVersion::set_prev_version(&mut edge, Some(VersionId::new(42).unwrap()));
+        assert_eq!(
+            EntityVersion::prev_version(&edge),
+            Some(VersionId::new(42).unwrap()),
+            "EntityVersion::prev_version should return the exactly set prev_version"
+        );
+
+        // Test next_version / set_next_version
+        EntityVersion::set_next_version(&mut edge, Some(VersionId::new(43).unwrap()));
+        assert_eq!(
+            EntityVersion::next_version(&edge),
+            Some(VersionId::new(43).unwrap()),
+            "EntityVersion::next_version should return the exactly set next_version"
+        );
+
+        // Test data_mut
+        let data = EntityVersion::data_mut(&mut edge);
+        data.set_vector_snapshot_id(12345);
+
+        assert_eq!(
+            edge.data.get_vector_snapshot_id(),
+            Some(12345),
+            "EntityVersion::data_mut should allow modifying the underlying data"
+        );
+    }
 }
