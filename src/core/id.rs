@@ -1665,4 +1665,35 @@ mod sentinel_id_generator_tests {
         assert_eq!(unchecked.as_u64(), 42);
         assert_ne!(unchecked.as_u64(), 0);
     }
+
+    #[test]
+    fn test_entity_id_node_display() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_id = EntityId::Node(node_id);
+        assert_eq!(format!("{}", entity_id), "Node(42)");
+    }
+
+    #[test]
+    fn test_entity_id_edge_display() {
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_id = EntityId::Edge(edge_id);
+        assert_eq!(format!("{}", entity_id), "Edge(42)");
+    }
+
+    #[test]
+    fn test_tx_id_new_and_as_u64() {
+        let tx_id = TxId::new(12345);
+        assert_eq!(tx_id.as_u64(), 12345);
+    }
+
+    #[test]
+    fn test_entity_id_from_id() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_id: EntityId = node_id.into();
+        assert_eq!(entity_id.as_node(), Some(node_id));
+
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_id2: EntityId = edge_id.into();
+        assert_eq!(entity_id2.as_edge(), Some(edge_id));
+    }
 }
