@@ -726,3 +726,187 @@ mod sentry_tests {
         assert!(!edge.connects(other, other));
     }
 }
+
+#[cfg(test)]
+mod sentinel_graph_tests {
+    use super::*;
+    use crate::core::id::TxId;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::property::PropertyValue;
+    use crate::core::temporal::Timestamp;
+    use crate::core::version::VersionMetadata;
+
+    #[test]
+    fn test_matches_label_exact() {
+        let label_str = "SentinelLabel";
+        let label_id = GLOBAL_INTERNER.intern(label_str).unwrap();
+
+        // Kill: replace matches_label -> bool with true / false, and == with !=
+        assert!(
+            matches_label(label_id, label_str),
+            "Exact match should return true"
+        );
+        assert!(
+            !matches_label(label_id, "DifferentLabel"),
+            "Mismatch should return false"
+        );
+
+        let raw_invalid = InternedString::from_raw(u32::MAX - 10);
+        assert!(
+            !matches_label(raw_invalid, label_str),
+            "Invalid interned ID should return false"
+        );
+    }
+
+    #[test]
+    fn test_node_exact() {
+        let label = GLOBAL_INTERNER.intern("NodeLabel").unwrap();
+        let props = PropertyMapBuilder::new().insert("key", "value").build();
+        let meta = VersionMetadata::new(TxId::new(5), Timestamp::from(100));
+
+        // Kill: replace Node::with_metadata with Default::default()
+        let node = Node::with_metadata(
+            NodeId::new(42).unwrap(),
+            label,
+            props.clone(),
+            VersionId::new(7).unwrap(),
+            meta,
+        );
+
+        assert_eq!(node.id, NodeId::new(42).unwrap());
+        assert_eq!(node.label, label);
+        assert_eq!(node.current_version, VersionId::new(7).unwrap());
+        assert_eq!(node.metadata, meta);
+        assert_ne!(
+            node.metadata,
+            VersionMetadata::default(),
+            "Should retain exact metadata"
+        );
+
+        // Kill: replace Node::get_property with None or Default::default()
+        match node.get_property("key") {
+            Some(PropertyValue::String(val)) => assert_eq!(&**val, "value"),
+            _ => panic!("Expected Some(String('value'))"),
+        }
+        assert!(node.get_property("missing").is_none());
+
+        // Kill: replace Node::has_label -> bool with true / false, and == with !=
+        assert!(
+            node.has_label(label),
+            "Exact interned label should return true"
+        );
+        assert!(
+            !node.has_label(GLOBAL_INTERNER.intern("OtherLabel").unwrap()),
+            "Different interned label should return false"
+        );
+
+        // Kill: replace Node::has_label_str -> bool with true / false
+        assert!(
+            node.has_label_str("NodeLabel"),
+            "Exact string label should return true"
+        );
+        assert!(
+            !node.has_label_str("OtherLabel"),
+            "Different string label should return false"
+        );
+
+        // Kill: replace <impl std::fmt::Debug for Node>::fmt -> std::fmt::Result with Ok(Default::default())
+        let debug_str = format!("{:?}", node);
+        assert!(debug_str.contains("NodeLabel"));
+        assert!(debug_str.contains("key"));
+        assert!(debug_str.contains("value"));
+        assert!(debug_str.contains("42"));
+        assert!(!debug_str.is_empty(), "Debug string should not be empty");
+    }
+
+    #[test]
+    fn test_edge_exact() {
+        let label = GLOBAL_INTERNER.intern("EdgeLabel").unwrap();
+        let props = PropertyMapBuilder::new()
+            .insert("edge_key", "edge_value")
+            .build();
+        let meta = VersionMetadata::new(TxId::new(8), Timestamp::from(200));
+
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
+
+        // Kill: replace Edge::with_metadata with Default::default()
+        let edge = Edge::with_metadata(
+            EdgeId::new(99).unwrap(),
+            label,
+            source,
+            target,
+            props.clone(),
+            VersionId::new(3).unwrap(),
+            meta,
+        );
+
+        assert_eq!(edge.id, EdgeId::new(99).unwrap());
+        assert_eq!(edge.label, label);
+        assert_eq!(edge.source, source);
+        assert_eq!(edge.target, target);
+        assert_eq!(edge.current_version, VersionId::new(3).unwrap());
+        assert_eq!(edge.metadata, meta);
+        assert_ne!(
+            edge.metadata,
+            VersionMetadata::default(),
+            "Should retain exact metadata"
+        );
+
+        // Kill: replace Edge::get_property with None or Default::default()
+        match edge.get_property("edge_key") {
+            Some(PropertyValue::String(val)) => assert_eq!(&**val, "edge_value"),
+            _ => panic!("Expected Some(String('edge_value'))"),
+        }
+        assert!(edge.get_property("missing").is_none());
+
+        // Kill: replace Edge::has_label -> bool with true / false, and == with !=
+        assert!(
+            edge.has_label(label),
+            "Exact interned label should return true"
+        );
+        assert!(
+            !edge.has_label(GLOBAL_INTERNER.intern("OtherEdgeLabel").unwrap()),
+            "Different interned label should return false"
+        );
+
+        // Kill: replace Edge::has_label_str -> bool with true / false
+        assert!(
+            edge.has_label_str("EdgeLabel"),
+            "Exact string label should return true"
+        );
+        assert!(
+            !edge.has_label_str("OtherEdgeLabel"),
+            "Different string label should return false"
+        );
+
+        // Kill: replace Edge::connects -> bool with true / false, || vs &&, == vs !=
+        assert!(
+            edge.connects(source, target),
+            "Exact source and target should connect"
+        );
+        assert!(
+            !edge.connects(NodeId::new(999).unwrap(), target),
+            "Mismatch source should not connect"
+        );
+        assert!(
+            !edge.connects(source, NodeId::new(999).unwrap()),
+            "Mismatch target should not connect"
+        );
+        assert!(
+            !edge.connects(NodeId::new(999).unwrap(), NodeId::new(888).unwrap()),
+            "Mismatch both should not connect"
+        );
+
+        // Kill: replace <impl std::fmt::Debug for Edge>::fmt -> std::fmt::Result with Ok(Default::default())
+        let debug_str = format!("{:?}", edge);
+        assert!(debug_str.contains("EdgeLabel"));
+        assert!(debug_str.contains("edge_key"));
+        assert!(debug_str.contains("edge_value"));
+        assert!(debug_str.contains("99"));
+        assert!(debug_str.contains("10"));
+        assert!(debug_str.contains("20"));
+        assert!(!debug_str.is_empty(), "Debug string should not be empty");
+    }
+}
