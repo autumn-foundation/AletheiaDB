@@ -1002,7 +1002,12 @@ fn test_get_node_nonexistent() {
     let db = AletheiaDB::new().unwrap();
     let fake_id = NodeId::new(9999).unwrap();
     let result = db.get_node(fake_id);
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(Error::Storage(
+            crate::core::error::StorageError::NodeNotFound(_)
+        ))
+    ));
 }
 
 #[test]
@@ -1010,7 +1015,12 @@ fn test_get_edge_nonexistent() {
     let db = AletheiaDB::new().unwrap();
     let fake_id = crate::core::id::EdgeId::new(9999).unwrap();
     let result = db.get_edge(fake_id);
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(Error::Storage(
+            crate::core::error::StorageError::EdgeNotFound(_)
+        ))
+    ));
 }
 
 #[test]
@@ -1018,7 +1028,12 @@ fn test_get_edge_source_nonexistent() {
     let db = AletheiaDB::new().unwrap();
     let fake_id = crate::core::id::EdgeId::new(9999).unwrap();
     let result = db.get_edge_source(fake_id);
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(Error::Storage(
+            crate::core::error::StorageError::EdgeNotFound(_)
+        ))
+    ));
 }
 
 #[test]
@@ -1026,7 +1041,12 @@ fn test_get_edge_target_nonexistent() {
     let db = AletheiaDB::new().unwrap();
     let fake_id = crate::core::id::EdgeId::new(9999).unwrap();
     let result = db.get_edge_target(fake_id);
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(Error::Storage(
+            crate::core::error::StorageError::EdgeNotFound(_)
+        ))
+    ));
 }
 
 #[test]
@@ -1063,7 +1083,12 @@ fn test_create_edge_invalid_source() {
         "KNOWS",
         PropertyMapBuilder::new().build(),
     );
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(Error::Transaction(
+            crate::core::error::TransactionError::ValidationFailed { .. }
+        ))
+    ));
 }
 
 #[test]
@@ -1079,7 +1104,12 @@ fn test_create_edge_invalid_target() {
         "KNOWS",
         PropertyMapBuilder::new().build(),
     );
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(Error::Transaction(
+            crate::core::error::TransactionError::ValidationFailed { .. }
+        ))
+    ));
 }
 
 #[test]
@@ -1091,7 +1121,12 @@ fn test_create_edge_both_invalid() {
         "KNOWS",
         PropertyMapBuilder::new().build(),
     );
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(Error::Transaction(
+            crate::core::error::TransactionError::ValidationFailed { .. }
+        ))
+    ));
 }
 
 #[test]

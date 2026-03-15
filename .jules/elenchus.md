@@ -311,3 +311,10 @@
 **Finding:** The doc test example in `src/query/planner/rules/predicate_pushdown.rs` contained a weak assertion using `matches!`, which failed to verify the full AST structure after optimization. Furthermore, several unit tests (`test_push_filter_below_vector_rank_no_limit`, `test_push_filter_below_sort`, `test_binary_op_recursion_logic`, and `test_binary_op_partial_optimization`) included redundant and weak `assert!(result.is_some())` assertions.
 **Evidence:** The doc test used `assert!(matches!(optimized_plan.root, LogicalOp::Unary { op: UnaryOp::Sort { .. }, input: _ }));`, only verifying the root node type. The unit tests redundantly asserted `is_some()` before checking equality.
 **Recommendation:** Fixed the doc test to use an exact `expected_plan` and `assert_eq!(optimized_plan, expected_plan)` for complete structural verification (condensing the tree into single line structure to avoid Codecov issues). Updated the four unit tests to replace `assert!(result.is_some())` and `assert_eq!(result.unwrap(), expected_plan)` with a single robust `assert_eq!(result, Some(expected_plan))` check.
+
+**[Weak Assertions: Error Masking]**
+**Module:** `src/db/tests.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Multiple tests for non-existent entities (nodes, edges) and invalid relationships used the weak assertion `assert!(result.is_err())`. This asserts only that *some* error occurred, masking potential regressions where the operation fails for the wrong reason (e.g. a panic caught as an error, or a validation error instead of a not-found error).
+**Evidence:** Tests like `test_get_node_nonexistent`, `test_create_edge_invalid_target` simply asserted `is_err()` without checking the inner `StorageError` or `TransactionError` variants.
+**Recommendation:** Refactored these tests to use `assert!(matches!(result, Err(ExpectedVariant)))` to enforce strict error variant matching (e.g. `StorageError::NodeNotFound`, `StorageError::EdgeNotFound`, `TransactionError::ValidationFailed`).
