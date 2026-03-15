@@ -885,7 +885,7 @@ impl ShardCoordinator {
             let log = self.commit_log.read().expect("Commit log lock poisoned");
             log.pending_commits()
                 .into_iter()
-                .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
+                .map(|d| (d.tx_id, d.participants, d.commit_timestamp))
                 .collect::<Vec<_>>()
         };
 
@@ -1015,7 +1015,7 @@ impl ShardCoordinator {
             log.pending_commits()
                 .into_iter()
                 .filter(|d| d.tx_id == tx_id)
-                .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
+                .map(|d| (d.tx_id, d.participants, d.commit_timestamp))
                 .collect::<Vec<_>>()
         };
 
