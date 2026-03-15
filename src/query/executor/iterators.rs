@@ -56,12 +56,27 @@ impl ResultIterator for EmptyIterator {
 /// Direct node lookup iterator.
 ///
 /// Yields nodes corresponding to a specific list of IDs. O(1) per node.
+/// Iterator that performs O(1) lookups for a specific list of node IDs.
+///
+/// Yields nodes corresponding to a specific list of IDs.
 pub struct NodeLookupIterator {
     node_ids: std::vec::IntoIter<NodeId>,
     current: Arc<CurrentStorage>,
 }
 
 impl NodeLookupIterator {
+    /// Initializes the direct node lookup materialization stream.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::query::executor::NodeLookupIterator;
+    /// # let storage = Arc::new(CurrentStorage::new());
+    /// let iter = NodeLookupIterator::new(vec![], storage);
+    /// ```
     pub fn new(node_ids: Vec<NodeId>, current: Arc<CurrentStorage>) -> Self {
         NodeLookupIterator {
             node_ids: node_ids.into_iter(),
@@ -124,7 +139,20 @@ pub struct NodeScanIterator {
 }
 
 impl NodeScanIterator {
-    /// Create a new NodeScanIterator.
+    /// Initializes the node scanner.
+    ///
+    /// Depending on the `label` provided, this will either trigger a full table scan
+    /// (if `None`) or an index-accelerated scan restricted to the given label.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::query::executor::NodeScanIterator;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # let storage = Arc::new(CurrentStorage::new());
+    /// let iter = NodeScanIterator::new(Some("Person".to_string()), storage);
+    /// ```
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
         NodeScanIterator {
             label,
@@ -182,12 +210,28 @@ impl ResultIterator for NodeScanIterator {
 }
 
 /// Iterator for vector search results.
+/// Iterator that yields nodes from a vector similarity search.
+///
+/// Takes a list of `(NodeId, score)` pairs from the vector index
+/// and fetches the corresponding full nodes from storage.
 pub struct VectorResultIterator {
     results: std::vec::IntoIter<(NodeId, f32)>,
     current: Arc<CurrentStorage>,
 }
 
 impl VectorResultIterator {
+    /// Initializes the vector search materializer.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::query::executor::VectorResultIterator;
+    /// # let storage = Arc::new(CurrentStorage::new());
+    /// let iter = VectorResultIterator::new(vec![(NodeId::new(42).unwrap(), 0.95)], storage);
+    /// ```
     pub fn new(results: Vec<(NodeId, f32)>, current: Arc<CurrentStorage>) -> Self {
         VectorResultIterator {
             results: results.into_iter(),
@@ -228,6 +272,23 @@ pub struct TemporalNodeIterator {
 }
 
 impl TemporalNodeIterator {
+    /// Create a new `TemporalNodeIterator`.
+    ///
+    /// Initializes the temporal node scanner.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use parking_lot::RwLock;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::query::executor::TemporalNodeIterator;
+    /// # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let time: Timestamp = 1000.into();
+    /// let iter = TemporalNodeIterator::new(vec![], time, time, historical);
+    /// ```
     pub fn new(
         node_ids: Vec<NodeId>,
         valid_time: Timestamp,
@@ -596,7 +657,12 @@ impl ResultIterator for TemporalNodeScanIterator {
     }
 }
 
-/// Iterator for graph traversal using BFS.
+/// The Path Finder: Structural Graph Traversal.
+///
+/// This is the engine behind `MATCH (a)-[e]->(b)`. It takes an upstream stream of nodes,
+/// and explores the structural topology of the graph out to a specified depth.
+/// It maintains a BFS queue and a visited set per starting node to prevent infinite loops
+/// in cyclic graphs while ensuring shortest-path discovery.
 ///
 /// # Deduplication Semantics
 ///
@@ -615,6 +681,10 @@ impl ResultIterator for TemporalNodeScanIterator {
 ///
 /// Output: [C (from A), C (from B)]  // C appears twice
 /// ```
+/// Iterator for graph traversal using Breadth-First Search (BFS).
+///
+/// Follows edges from the input nodes up to a specified depth, optionally
+/// filtered by edge label and direction.
 pub struct TraversalIterator {
     input: Box<dyn ResultIterator>,
     direction: Direction,
@@ -632,6 +702,31 @@ pub struct TraversalIterator {
 }
 
 impl TraversalIterator {
+    /// Create a new `TraversalIterator`.
+    ///
+    /// Configures the BFS graph traversal engine.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use parking_lot::RwLock;
+    /// # use aletheiadb::query::ir::Direction;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::query::executor::{TraversalIterator, EmptyIterator};
+    /// # let current = Arc::new(CurrentStorage::new());
+    /// # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let iter = TraversalIterator::new(
+    ///     Box::new(EmptyIterator),
+    ///     Direction::Outgoing,
+    ///     Some("KNOWS".to_string()),
+    ///     2,
+    ///     current,
+    ///     historical,
+    ///     None
+    /// );
+    /// ```
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
@@ -886,7 +981,19 @@ pub struct FilterIterator {
 }
 
 impl FilterIterator {
-    /// Create a new FilterIterator that filters results based on the predicate.
+    /// Wraps an upstream iterator with a conditional predicate logic.
+    ///
+    /// Every row yielded by `input` will be evaluated against the `predicate`
+    /// abstract syntax tree. Only rows evaluating to `true` pass through.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::{FilterIterator, EmptyIterator};
+    /// # use aletheiadb::query::ir::Predicate;
+    /// let pred = Predicate::eq("name", "Alice");
+    /// let iter = FilterIterator::new(Box::new(EmptyIterator), pred);
+    /// ```
     pub fn new(input: Box<dyn ResultIterator>, predicate: Predicate) -> Self {
         FilterIterator { input, predicate }
     }
@@ -1085,6 +1192,10 @@ impl Ord for ScoredRow {
 }
 
 /// Iterator for vector reranking.
+/// Iterator that reranks results using vector similarity.
+///
+/// Consumes an input iterator and yields the top-k results sorted by
+/// their semantic similarity to a target vector.
 pub struct VectorRerankIterator {
     sorted: Option<std::vec::IntoIter<(QueryRow, f32)>>,
     input: Option<Box<dyn ResultIterator>>,
@@ -1096,14 +1207,18 @@ pub struct VectorRerankIterator {
 }
 
 impl VectorRerankIterator {
-    /// Create a new VectorRerankIterator.
+    /// Initializes the reranking funnel.
     ///
-    /// # Arguments
-    /// * `input` - The input iterator to rerank
-    /// * `embedding` - The target embedding for similarity comparison
-    /// * `k` - Maximum number of results to keep
-    /// * `current` - Reference to current storage
-    /// * `property_key` - Optional property to use for reranking. If None, uses default.
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::query::executor::{VectorRerankIterator, EmptyIterator};
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # let storage = Arc::new(CurrentStorage::new());
+    /// let target_vector: Arc<[f32]> = Arc::from(vec![0.1, 0.2, 0.3].into_boxed_slice());
+    /// let iter = VectorRerankIterator::new(Box::new(EmptyIterator), target_vector, 10, storage, Some("embedding".to_string()));
+    /// ```
     pub fn new(
         input: Box<dyn ResultIterator>,
         embedding: Arc<[f32]>,
@@ -1251,7 +1366,17 @@ pub struct LimitIterator {
 }
 
 impl LimitIterator {
-    /// Create a new LimitIterator that applies offset and limit to the input.
+    /// Configures the pagination window.
+    ///
+    /// The iterator will silently pull and discard exactly `offset` elements
+    /// before it begins yielding up to `count` actual results.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::{LimitIterator, EmptyIterator};
+    /// let iter = LimitIterator::new(Box::new(EmptyIterator), 50, 10);
+    /// ```
     pub fn new(input: Box<dyn ResultIterator>, offset: usize, count: usize) -> Self {
         LimitIterator {
             input,
@@ -1306,7 +1431,17 @@ pub struct ProvenanceFilterIterator {
 }
 
 impl ProvenanceFilterIterator {
-    /// Create a new ProvenanceFilterIterator that conditionally strips metadata.
+    /// Wraps the iterator to selectively strip query lineage data.
+    ///
+    /// If `include_provenance` is false, heavy metadata (like historical paths and origin timestamps)
+    /// are stripped from the `QueryRow` to optimize downstream memory usage.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::{ProvenanceFilterIterator, EmptyIterator};
+    /// let iter = ProvenanceFilterIterator::new(Box::new(EmptyIterator), false);
+    /// ```
     pub fn new(inner: Box<dyn ResultIterator>, include_provenance: bool) -> Self {
         ProvenanceFilterIterator {
             inner,
@@ -1335,13 +1470,26 @@ impl ResultIterator for ProvenanceFilterIterator {
 }
 
 /// Iterator for projecting specific properties from query results.
+/// Iterator that projects specific properties from the result nodes.
+///
+/// Filters out all properties except those specified in the projection list.
 pub struct ProjectIterator {
     input: Box<dyn ResultIterator>,
     properties: Vec<String>,
 }
 
 impl ProjectIterator {
-    /// Create a new ProjectIterator that projects specific properties from the results.
+    /// Compiles the property extraction list.
+    ///
+    /// The input `properties` vector is sorted and deduplicated during initialization
+    /// to guarantee deterministic and highly efficient `O(1)` lookups during the projection phase.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::{ProjectIterator, EmptyIterator};
+    /// let iter = ProjectIterator::new(Box::new(EmptyIterator), vec!["name".to_string()]);
+    /// ```
     pub fn new(input: Box<dyn ResultIterator>, mut properties: Vec<String>) -> Self {
         // Deduplicate properties to prevent errors when projecting same property multiple times
         properties.sort();
@@ -1395,6 +1543,9 @@ fn predicate_to_property_value(pv: &PredicateValue) -> PropertyValue {
 ///
 /// Calls `CurrentStorage::find_nodes_by_property` to get matching node IDs,
 /// then resolves each to a full `Node` for the query result.
+/// Iterator for scanning nodes by an exact property match.
+///
+/// Uses property indices to quickly find nodes matching `label.property = value`.
 pub struct PropertyScanIterator {
     current: Arc<CurrentStorage>,
     initialized: bool,
@@ -1405,6 +1556,21 @@ pub struct PropertyScanIterator {
 }
 
 impl PropertyScanIterator {
+    /// Create a new `PropertyScanIterator`.
+    ///
+    /// Initializes the exact-match property index scanner.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::query::ir::PredicateValue;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::query::executor::PropertyScanIterator;
+    /// # let storage = Arc::new(CurrentStorage::new());
+    /// let val = PredicateValue::String("alice@example.com".to_string());
+    /// let iter = PropertyScanIterator::new("Person".to_string(), "email".to_string(), &val, storage);
+    /// ```
     pub fn new(
         label: String,
         key: String,
