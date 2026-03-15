@@ -573,3 +573,252 @@ fn test_time_from_secs_millis_exact() {
         "from_millis should not return default"
     );
 }
+
+#[test]
+fn test_timerange_is_closed_exact_bounds() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    // A point in time is implicitly closed unless it is MAX_VALID_TIMESTAMP? Wait, `is_closed` checks `< MAX_VALID_TIMESTAMP`.
+    let start = 100_000.into();
+    let end = 200_000.into();
+    let closed_range = TimeRange::new(start, end).unwrap();
+    assert!(
+        closed_range.is_closed(),
+        "range with end < MAX_VALID_TIMESTAMP should be closed"
+    );
+
+    let open_range = TimeRange::from(start);
+    assert!(
+        !open_range.is_closed(),
+        "range with end == MAX_VALID_TIMESTAMP should NOT be closed"
+    );
+}
+
+#[test]
+fn test_timerange_contains_or_after_exact_bounds() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = 100_000.into();
+    let end = 200_000.into();
+    let range = TimeRange::new(start, end).unwrap();
+
+    assert!(
+        range.contains_or_after(start),
+        "range should contain or be after its start"
+    );
+    let after_start = 100_001.into();
+    assert!(
+        range.contains_or_after(after_start),
+        "range should contain or be after points after its start"
+    );
+
+    let before_start = 99_999.into();
+    assert!(
+        !range.contains_or_after(before_start),
+        "range should not contain or be after points before its start"
+    );
+}
+
+#[test]
+fn test_timerange_overlaps_exact_bounds() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+    let empty = TimeRange::at(100.into());
+
+    assert!(!r1.overlaps(&empty), "cannot overlap with empty");
+    assert!(!empty.overlaps(&r1), "cannot overlap with empty");
+}
+
+#[test]
+fn test_bitemporal_is_visible_at_exact_bounds() {
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_start = 100.into();
+    let tx_start = 200.into();
+    let interval = BiTemporalInterval::now(valid_start, tx_start);
+
+    assert!(
+        interval.is_visible_at(100.into(), 200.into()),
+        "should be visible at exact start bounds"
+    );
+    assert!(
+        !interval.is_visible_at(99.into(), 200.into()),
+        "should not be visible before valid start"
+    );
+    assert!(
+        !interval.is_visible_at(100.into(), 199.into()),
+        "should not be visible before tx start"
+    );
+}
+
+#[test]
+fn test_time_to_secs_millis_exact_math_strict() {
+    use aletheiadb::core::temporal::time;
+
+    // Test exact math (not just round trip, but exact result for a known value)
+    let ts_us: i64 = 5_000_000;
+
+    assert_eq!(
+        time::to_secs(ts_us.into()),
+        5,
+        "to_secs should exactly divide by 1_000_000"
+    );
+    assert_ne!(
+        time::to_secs(ts_us.into()),
+        0,
+        "to_secs should not return default 0"
+    );
+    assert_ne!(
+        time::to_secs(ts_us.into()),
+        1,
+        "to_secs should not return default 1"
+    );
+    assert_ne!(
+        time::to_secs(ts_us.into()),
+        -1,
+        "to_secs should not return default -1"
+    );
+
+    assert_eq!(
+        time::to_millis(ts_us.into()),
+        5_000,
+        "to_millis should exactly divide by 1_000"
+    );
+    assert_ne!(
+        time::to_millis(ts_us.into()),
+        0,
+        "to_millis should not return default 0"
+    );
+    assert_ne!(
+        time::to_millis(ts_us.into()),
+        1,
+        "to_millis should not return default 1"
+    );
+    assert_ne!(
+        time::to_millis(ts_us.into()),
+        -1,
+        "to_millis should not return default -1"
+    );
+}
+
+#[test]
+fn test_timerange_close_at_invalid_timestamp_strict() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
+    let range = TimeRange::from(100.into());
+    let err = range
+        .close_at((MAX_VALID_TIMESTAMP + 1).into())
+        .unwrap_err();
+
+    match err {
+        aletheiadb::core::error::TemporalError::InvalidTimestamp { timestamp, .. } => {
+            assert_eq!(timestamp.wallclock(), MAX_VALID_TIMESTAMP + 1);
+        }
+        _ => panic!("Expected InvalidTimestamp error"),
+    }
+}
+
+#[test]
+fn test_timerange_deserialize_exact_bounds() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    // Test exact deserialization byte length boundaries
+    // Deserialization expects exactly 24 bytes: 12 for start, 12 for end.
+    let range = TimeRange::new(100.into(), 200.into()).unwrap();
+    let bytes = range.serialize();
+
+    // Exactly 24 bytes should be OK
+    let (_deserialized, read_len) = TimeRange::deserialize(&bytes).unwrap();
+    assert_eq!(read_len, 24);
+
+    // Less than 24 bytes should err cleanly
+    let err_short = TimeRange::deserialize(&bytes[0..23]).unwrap_err();
+    assert!(matches!(
+        err_short,
+        aletheiadb::core::error::StorageError::CorruptedData(_)
+    ));
+
+    // More than 24 bytes should be OK, only reading 24
+    let mut long_bytes = bytes.clone();
+    long_bytes.push(0xFF);
+    let (_, read_len_long) = TimeRange::deserialize(&long_bytes).unwrap();
+    assert_eq!(read_len_long, 24);
+}
+
+#[test]
+fn test_bitemporal_deserialize_exact_bounds() {
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let interval = BiTemporalInterval::now(100.into(), 200.into());
+    let bytes = interval.serialize();
+
+    // Exactly 48 bytes should be OK
+    let (_, read_len) = BiTemporalInterval::deserialize(&bytes).unwrap();
+    assert_eq!(read_len, 48);
+
+    // Less than 48 bytes should err cleanly
+    let err_short = BiTemporalInterval::deserialize(&bytes[0..47]).unwrap_err();
+    assert!(matches!(
+        err_short,
+        aletheiadb::core::error::StorageError::CorruptedData(_)
+    ));
+}
+
+#[test]
+fn test_timerange_duration_micros_logic_strict() {
+    use aletheiadb::core::temporal::TimeRange;
+    // duration_micros calculates (end.wallclock - start.wallclock) ignoring logical
+    let ts_start = aletheiadb::core::hlc::HybridTimestamp::new(100, 10).unwrap();
+    let ts_end = aletheiadb::core::hlc::HybridTimestamp::new(100, 20).unwrap();
+
+    let range = TimeRange::new(ts_start, ts_end).unwrap();
+
+    let duration = range.duration_micros().expect("Duration should be some");
+    assert_eq!(
+        duration, 0,
+        "Duration only measures wallclock differences, ignoring logical counters in microseconds output"
+    );
+
+    assert_ne!(duration, 1, "Duration should not be default 1");
+    assert_ne!(duration, -1, "Duration should not be default -1");
+}
+
+#[test]
+fn test_timerange_contains_range_strict_bounds() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    // contains_range is true if self.start <= other.start && other.end <= self.end
+    // So if self.start > other.start OR other.end > self.end, it's false
+
+    let self_range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+    // Exactly same bounds => contains
+    let other_exact = TimeRange::new(100.into(), 200.into()).unwrap();
+    assert!(
+        self_range.contains_range(&other_exact),
+        "Must contain exact match"
+    );
+
+    // other.start < self.start by exactly 1 => not contains
+    let other_early_start = TimeRange::new(99.into(), 200.into()).unwrap();
+    assert!(
+        !self_range.contains_range(&other_early_start),
+        "Must not contain if other starts 1 unit before"
+    );
+
+    // other.end > self.end by exactly 1 => not contains
+    let other_late_end = TimeRange::new(100.into(), 201.into()).unwrap();
+    assert!(
+        !self_range.contains_range(&other_late_end),
+        "Must not contain if other ends 1 unit after"
+    );
+
+    // Inverted bounds just in case (should fail to construct anyway, but `from` allows unbounded end)
+    let unbounded = TimeRange::from(150.into());
+    assert!(
+        !self_range.contains_range(&unbounded),
+        "Bounded range cannot contain unbounded range"
+    );
+}
