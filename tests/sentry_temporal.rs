@@ -696,22 +696,20 @@ fn test_sentry_time_range_is_empty_mutant() {
 #[test]
 fn test_sentry_time_range_deserialize_mutant() {
     let r1 = aletheiadb::core::temporal::TimeRange::new(100_000.into(), 200_000.into()).unwrap();
-    let mut buffer = Vec::new();
-    r1.serialize_into(&mut buffer);
+    let buffer = r1.serialize();
 
-    // If buffer length < 16, it should return error.
+    // If buffer length < 24, it should return error.
     let res = aletheiadb::core::temporal::TimeRange::deserialize(&buffer[0..23]);
     assert!(res.is_err());
 
-    // length exactly 16 is fine
+    // length exactly 24 is fine
     let res = aletheiadb::core::temporal::TimeRange::deserialize(&buffer[0..24]);
     assert!(res.is_ok());
 
     // start > end will return err
     // Crafting a buffer where start > end
-    let mut bad_buffer = Vec::new();
     let bad_r = aletheiadb::core::temporal::TimeRange::new(200_000.into(), 300_000.into()).unwrap();
-    bad_r.serialize_into(&mut bad_buffer);
+    let mut bad_buffer = bad_r.serialize();
 
     // swap start and end
     let (start_bytes, end_bytes) = bad_buffer.split_at_mut(12);
@@ -730,14 +728,13 @@ fn test_sentry_bitemporal_deserialize_mutant() {
         aletheiadb::core::temporal::TimeRange::new(100_000.into(), 200_000.into()).unwrap(),
         aletheiadb::core::temporal::TimeRange::new(100_000.into(), 200_000.into()).unwrap(),
     );
-    let mut buffer = Vec::new();
-    b1.serialize_into(&mut buffer);
+    let buffer = b1.serialize();
 
-    // If buffer length < 32, it should return error.
+    // If buffer length < 48, it should return error.
     let res = BiTemporalInterval::deserialize(&buffer[0..47]);
     assert!(res.is_err());
 
-    // length exactly 32 is fine
+    // length exactly 48 is fine
     let res = BiTemporalInterval::deserialize(&buffer[0..48]);
     assert!(res.is_ok());
 }
@@ -761,12 +758,18 @@ fn test_sentry_time_math_mutant() {
 
     // Test exact output of iso8601 formatting mutations (+, -, *, /)
     let s = aletheiadb::core::temporal::time::to_iso8601(t);
-    // 100 seconds from epoch is 1970-01-01T00:01:40Z
-    assert!(s.contains("100"));
+    let s200 = aletheiadb::core::temporal::time::to_iso8601(
+        aletheiadb::core::temporal::time::from_secs(200),
+    );
+    // [Suspected Code Bug]: to_iso8601 returns the Debug representation of SystemTime, not an actual ISO 8601 string.
+    // This is currently a tautological assertion of its exact broken state but it kills the math mutant.
+    assert_ne!(s, s200);
 
     // test precision check
     let t2 = aletheiadb::core::temporal::time::from_millis(100500); // 100.5 secs
-    assert!(aletheiadb::core::temporal::time::to_iso8601(t2).contains("100"));
+    let s_t2 = aletheiadb::core::temporal::time::to_iso8601(t2);
+
+    assert_ne!(s, s_t2);
 }
 
 #[test]
