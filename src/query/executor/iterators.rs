@@ -3223,3 +3223,189 @@ mod tests {
         assert_eq!(results.len(), 0);
     }
 }
+
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+    use crate::core::id::{NodeId, VersionId};
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::storage::current::CurrentStorage;
+
+    fn test_node(id: u64, name: &str) -> Node {
+        let props = PropertyMapBuilder::new().insert("name", name).build();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        Node::new(
+            NodeId::new(id).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    struct MockIter;
+    impl ResultIterator for MockIter {
+        fn next(&mut self) -> Option<Result<QueryRow>> {
+            None
+        }
+    }
+
+    #[test]
+    fn test_default_size_hint() {
+        // ResultIterator has a default size_hint() returning (0, None).
+        let iter = MockIter;
+        assert_eq!(iter.size_hint(), (0, None));
+    }
+
+    #[test]
+    fn test_empty_iterator_size_hint() {
+        let iter = EmptyIterator;
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_node_lookup_iterator_empty() {
+        let current = Arc::new(CurrentStorage::new());
+        let mut iter = NodeLookupIterator::new(vec![], current);
+        assert!(iter.next().is_none());
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_node_scan_iterator_no_match() {
+        let current = Arc::new(CurrentStorage::new());
+        current
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
+
+        let mut iter = NodeScanIterator::new(Some("Person".to_string()), current);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_vector_result_iterator_empty() {
+        let current = Arc::new(CurrentStorage::new());
+        let mut iter = VectorResultIterator::new(vec![], current);
+        assert!(iter.next().is_none());
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_filter_iterator_eval_type_mismatch() {
+        let node = test_node(1, "Alice"); // String property
+        let predicate = Predicate::eq("name", 10i64); // Integer predicate
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_iterator_eval_float_comparison() {
+        let props = PropertyMapBuilder::new().insert("score", 3.5f64).build();
+        let label = GLOBAL_INTERNER.intern("Score").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        let filter_eq =
+            FilterIterator::new(Box::new(EmptyIterator), Predicate::eq("score", 3.5f64));
+        assert!(filter_eq.evaluate(&node));
+
+        let filter_neq =
+            FilterIterator::new(Box::new(EmptyIterator), Predicate::ne("score", 3.5f64));
+        assert!(!filter_neq.evaluate(&node));
+
+        let filter_neq2 =
+            FilterIterator::new(Box::new(EmptyIterator), Predicate::ne("score", 4.0f64));
+        assert!(filter_neq2.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_iterator_evaluate_in() {
+        let node = test_node(1, "Alice");
+        let filter1 = FilterIterator::new(
+            Box::new(EmptyIterator),
+            Predicate::In {
+                key: "name".to_string(),
+                values: vec![PredicateValue::String("Alice".to_string())],
+            },
+        );
+        assert!(filter1.evaluate(&node));
+
+        let filter2 = FilterIterator::new(
+            Box::new(EmptyIterator),
+            Predicate::In {
+                key: "name".to_string(),
+                values: vec![PredicateValue::String("Bob".to_string())],
+            },
+        );
+        assert!(!filter2.evaluate(&node));
+    }
+
+    #[test]
+    fn test_project_iterator_empty() {
+        let mut project = ProjectIterator::new(Box::new(EmptyIterator), vec!["name".to_string()]);
+        assert!(project.next().is_none());
+        assert_eq!(project.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_property_scan_iterator_empty() {
+        let current = Arc::new(CurrentStorage::new());
+        let mut iter = PropertyScanIterator::new(
+            "Person".to_string(),
+            "name".to_string(),
+            &PredicateValue::String("Alice".to_string()),
+            current,
+        );
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_provenance_filter_iterator() {
+        // Mock a row with provenance
+        let mut row = QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()));
+        row.timestamp = Some(crate::core::Timestamp::from(100));
+        row.path = Some(vec![]);
+
+        struct MockProvIter {
+            row: Option<QueryRow>,
+        }
+        impl ResultIterator for MockProvIter {
+            fn next(&mut self) -> Option<Result<QueryRow>> {
+                self.row.take().map(Ok)
+            }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (1, Some(1))
+            }
+        }
+
+        // include_provenance = false -> strips metadata
+        let mut iter_false = ProvenanceFilterIterator::new(
+            Box::new(MockProvIter {
+                row: Some(row.clone()),
+            }),
+            false,
+        );
+        assert_eq!(iter_false.size_hint(), (1, Some(1)));
+        let res_false = iter_false.next().unwrap().unwrap();
+        assert!(res_false.timestamp.is_none());
+        assert!(res_false.path.is_none());
+
+        // include_provenance = true -> keeps metadata
+        let mut iter_true = ProvenanceFilterIterator::new(
+            Box::new(MockProvIter {
+                row: Some(row.clone()),
+            }),
+            true,
+        );
+        let res_true = iter_true.next().unwrap().unwrap();
+        assert!(res_true.timestamp.is_some());
+        assert!(res_true.path.is_some());
+    }
+}

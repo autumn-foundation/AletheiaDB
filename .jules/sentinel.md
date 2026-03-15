@@ -125,3 +125,9 @@
 **Summary:** Mutants regarding strict bounds on `MAX_VALID_TIMESTAMP` (`>` mutated to `>=` or `==`) within `TimeRange::from` and `TimeRange::at` survived, alongside strict math operators (`*`, `/`, `%`) inside `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods. Finally, specific bounding checks involving exclusive interval boundaries in `contains` and `overlaps` were weakly asserted allowing `>` to mutate into `>=`.
 **Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests tested positive path boundary logic well, but neglected specific maximum boundary exact values (`MAX_VALID_TIMESTAMP`), exact conversion validation that strictly broke if `/` turned into `%`, and exact exclusion of boundaries inside interval intersections.
 **Kill Shot:** Appended explicit exact boundary tests `test_timerange_from_at_exact_boundaries`, `test_time_to_secs_millis_exact_math`, `test_time_to_iso8601_exact_content`, and `test_timerange_contains_exact_boundary` directly to `tests/sentry_temporal.rs`.
+
+**[Targeted Unit Testing Iterator Coverage Gaps]**
+**Module:** `src/query/executor/iterators.rs`
+**Summary:** Added comprehensive testing coverage for missing boundary conditions across multiple iterators (`EmptyIterator`, `ProjectIterator`, `FilterIterator`, etc.) including `size_hint` defaults and inverted logic mutations (`!=` to `==` in `compare_eq`).
+**Diagnosis:** Weak Test/Missing Test. The `cargo mutants --list` output exposed roughly 200 untargeted cases for iterator default values and boundary match statements.
+**Kill Shot:** Implemented `sentinel_tests` module injecting 11 specific assertions addressing the static gaps.
