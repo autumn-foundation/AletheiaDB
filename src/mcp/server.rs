@@ -2173,3 +2173,70 @@ impl ServerHandler for AletheiaMcpServer {
         Ok(result)
     }
 }
+
+
+#[cfg(test)]
+mod additional_coverage_tests {
+    use super::*;
+    use serde_json::json;
+    use crate::config::AletheiaDBConfig;
+    use std::sync::Arc;
+
+    fn test_server() -> AletheiaMcpServer {
+        let mut config = AletheiaDBConfig::default();
+        config.wal.wal_dir = tempfile::tempdir().unwrap().path().to_path_buf();
+        let db = Arc::new(crate::db::AletheiaDB::with_unified_config(config).unwrap());
+        AletheiaMcpServer::new(db)
+    }
+
+    #[test]
+    fn test_handler_error_paths() {
+        let srv = test_server();
+
+        // 1. Invalid args for handle_get_node
+        let res = srv.handle_get_node(json!({"invalid": "json"}));
+        assert!(res.is_error.unwrap_or(false));
+
+        // 2. Invalid Node ID
+        let res = srv.handle_get_node(json!({"node_id": 999999999999999999_u64})); // or just valid ID that isn't found
+        assert!(res.is_error.unwrap_or(false));
+
+        // Call every handler with invalid json to trigger the `map_err` branch immediately!
+        let funcs = [
+            AletheiaMcpServer::handle_get_node,
+            AletheiaMcpServer::handle_create_node,
+            AletheiaMcpServer::handle_update_node,
+            AletheiaMcpServer::handle_delete_node,
+            AletheiaMcpServer::handle_delete_node_cascade,
+            AletheiaMcpServer::handle_list_nodes,
+            AletheiaMcpServer::handle_count_nodes,
+            AletheiaMcpServer::handle_get_edge,
+            AletheiaMcpServer::handle_create_edge,
+            AletheiaMcpServer::handle_update_edge,
+            AletheiaMcpServer::handle_delete_edge,
+            AletheiaMcpServer::handle_list_edges,
+            AletheiaMcpServer::handle_count_edges,
+            AletheiaMcpServer::handle_get_outgoing_edges,
+            AletheiaMcpServer::handle_get_incoming_edges,
+            AletheiaMcpServer::handle_traverse,
+            AletheiaMcpServer::handle_find_similar,
+            AletheiaMcpServer::handle_enable_vector_index,
+            AletheiaMcpServer::handle_get_node_at_time,
+            AletheiaMcpServer::handle_get_edge_at_time,
+            AletheiaMcpServer::handle_get_node_at_valid_time,
+            AletheiaMcpServer::handle_get_node_at_transaction_time,
+            AletheiaMcpServer::handle_get_node_history,
+            AletheiaMcpServer::handle_diff_node_versions,
+            AletheiaMcpServer::handle_get_edge_at_valid_time,
+            AletheiaMcpServer::handle_get_edge_at_transaction_time,
+            AletheiaMcpServer::handle_get_edge_history,
+            AletheiaMcpServer::handle_diff_edge_versions,
+            AletheiaMcpServer::handle_hybrid_query,
+        ];
+
+        for func in &funcs {
+            let res = func(&srv, json!("malformed string not an object"));
+            assert!(res.is_error.unwrap_or(false));
+        }
+    }
+}
