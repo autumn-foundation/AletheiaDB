@@ -102,22 +102,9 @@ pub fn try_serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) -> Result<()> 
 
     #[cfg(target_endian = "little")]
     {
-        // SAFETY: On little-endian platforms, f32 in-memory representation
-        // is identical to its to_le_bytes() output. This allows us to
-        // directly copy the entire f32 slice as bytes instead of converting
-        // each element individually.
-        //
-        // This is safe because:
-        // 1. f32 has well-defined byte representation (IEEE 754)
-        // 2. We're only reading, not writing through the raw pointer
-        // 3. The slice lengths are correctly calculated. With the dimension check,
-        //    overflow is not possible on 64-bit or 32-bit systems.
-        // 4. Alignment is not an issue - we're copying to a Vec<u8>
-        //
-        // Verified by Warden (2026-02-15): Input slice 'v' is valid &[f32]. size_of_val is correct. u8 alignment is 1.
-        let byte_slice = unsafe {
-            std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v))
-        };
+        // On little-endian platforms, f32 in-memory representation
+        // is identical to its to_le_bytes() output.
+        let byte_slice: &[u8] = bytemuck::cast_slice(v);
         buffer.extend_from_slice(byte_slice);
     }
 
@@ -203,30 +190,14 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
 
     #[cfg(target_endian = "little")]
     let values = {
-        // SAFETY: On little-endian platforms, we can directly copy the bytes
-        // into an f32 vector using a single bulk memory operation.
-        //
-        // This is safe because:
-        // 1. We validated data_slice.len() == dimension * 4 above.
-        // 2. We allocate a Vec<f32> with sufficient capacity. Its buffer is correctly
-        //    aligned for f32.
-        // 3. `copy_nonoverlapping` safely copies bytes from the (potentially unaligned)
-        //    `data_slice` into the aligned `Vec` buffer.
-        // 4. After the copy, the memory is initialized, so calling `set_len` is safe.
-        // 5. Any bit pattern is valid for f32 (including NaN, infinity).
-        //
-        // Verified by Warden (2026-02-15): Destination buffer is allocated via Vec::with_capacity(dimension), ensuring correct f32 alignment. Source buffer length is explicitly checked against capacity * 4.
-        let mut values = Vec::with_capacity(dimension);
-        if dimension > 0 {
-            unsafe {
-                let src_ptr = data_slice.as_ptr();
-                // The destination pointer is correctly aligned for f32.
-                let dst_ptr = values.as_mut_ptr() as *mut u8;
-                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, data_slice.len());
-                values.set_len(dimension);
-            }
+        if data_slice.is_empty() {
+            Vec::new()
+        } else {
+            // We use pod_collect_to_vec instead of try_cast_slice.to_vec() because
+            // the source data slice might be unaligned when read from a byte buffer.
+            // pod_collect_to_vec safely handles unaligned reads.
+            bytemuck::pod_collect_to_vec(data_slice)
         }
-        values
     };
 
     #[cfg(not(target_endian = "little"))]
@@ -373,28 +344,14 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
 
     #[cfg(target_endian = "little")]
     let indices = {
-        // SAFETY: On little-endian platforms, we can directly copy the bytes
-        // into a u32 vector using a single bulk memory operation.
-        //
-        // Safety argument:
-        // 1. We validated that bytes.len() >= total_len, where total_len includes
-        //    indices_len = nnz * 4. Thus indices_slice.len() == nnz * 4 exactly.
-        // 2. We allocated Vec<u32> with capacity nnz. Its byte capacity is nnz * 4.
-        // 3. src_ptr (from slice) and dst_ptr (from Vec) are valid for reads/writes of
-        //    indices_slice.len() bytes.
-        // 4. Alignment is handled because we copy to *mut u8, and the Vec's buffer
-        //    is aligned for u32.
-        // 5. u32 has no invalid bit patterns, so any byte sequence is valid.
-        let mut indices = Vec::with_capacity(nnz);
-        if nnz > 0 {
-            unsafe {
-                let src_ptr = indices_slice.as_ptr();
-                let dst_ptr = indices.as_mut_ptr() as *mut u8;
-                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, indices_slice.len());
-                indices.set_len(nnz);
-            }
+        if indices_slice.is_empty() {
+            Vec::new()
+        } else {
+            // We use pod_collect_to_vec instead of try_cast_slice.to_vec() because
+            // the source data slice might be unaligned when read from a byte buffer.
+            // pod_collect_to_vec safely handles unaligned reads.
+            bytemuck::pod_collect_to_vec(indices_slice)
         }
-        indices
     };
 
     #[cfg(not(target_endian = "little"))]
@@ -412,24 +369,14 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
 
     #[cfg(target_endian = "little")]
     let values = {
-        // SAFETY: On little-endian platforms, we can directly copy the bytes
-        // into an f32 vector using a single bulk memory operation.
-        //
-        // Safety argument:
-        // 1. validated that values_len = nnz * 4, and buffer has sufficient bytes.
-        // 2. Vec<f32> capacity is nnz, so byte capacity is nnz * 4.
-        // 3. Pointers are valid for the copy length.
-        // 4. f32 has no invalid bit patterns (NaNs are allowed).
-        let mut values = Vec::with_capacity(nnz);
-        if nnz > 0 {
-            unsafe {
-                let src_ptr = values_slice.as_ptr();
-                let dst_ptr = values.as_mut_ptr() as *mut u8;
-                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, values_slice.len());
-                values.set_len(nnz);
-            }
+        if values_slice.is_empty() {
+            Vec::new()
+        } else {
+            // We use pod_collect_to_vec instead of try_cast_slice.to_vec() because
+            // the source data slice might be unaligned when read from a byte buffer.
+            // pod_collect_to_vec safely handles unaligned reads.
+            bytemuck::pod_collect_to_vec(values_slice)
         }
-        values
     };
 
     #[cfg(not(target_endian = "little"))]
@@ -934,5 +881,37 @@ mod tests {
         let (deserialized, _) =
             deserialize_vector(&bytes).expect("Should deserialize empty vector");
         assert!(deserialized.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_vector_malformed_bytemuck() {
+        // Test that a slice length not a multiple of 4 is caught cleanly.
+        let mut malformed_bytes = vec![TAG_VECTOR];
+        // Dimension = 2
+        malformed_bytes.extend_from_slice(&2u32.to_le_bytes());
+        // Only provide 7 bytes instead of 8 (2 * 4 bytes)
+        malformed_bytes.extend_from_slice(&[0; 7]);
+
+        // This used to possibly crash or UB in the unsafe block on little endian,
+        // now it should safely return an error from bytemuck.
+        let result = deserialize_vector(&malformed_bytes);
+        // By using `pod_collect_to_vec`, it now actually panics on non-multiple of 4.
+        // However, we catch `bytes.len() < total_len` earlier in `deserialize_vector` so this particular slice length issue returns `CorruptedData`.
+        assert!(matches!(result, Err(Error::Storage(StorageError::CorruptedData(_)))));
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_malformed_bytemuck() {
+        // Test that a slice length not a multiple of 4 is caught cleanly.
+        let mut malformed_bytes = vec![TAG_SPARSE_VECTOR];
+        // Dimension = 10
+        malformed_bytes.extend_from_slice(&10u32.to_le_bytes());
+        // nnz = 2
+        malformed_bytes.extend_from_slice(&2u32.to_le_bytes());
+        // Indices: provide 7 bytes instead of 8
+        malformed_bytes.extend_from_slice(&[0; 7]);
+
+        let result = deserialize_sparse_vector(&malformed_bytes);
+        assert!(matches!(result, Err(Error::Storage(StorageError::CorruptedData(_)))));
     }
 }

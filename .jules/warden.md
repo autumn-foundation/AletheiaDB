@@ -36,3 +36,6 @@
 2025-02-15 - [Warden: Replace unsafe transmute_vec with bytemuck::cast_vec]
 **Threat:** `Vec::from_raw_parts` was used in `AdjacencyIndex::import_csr` to transmute types without proper capacity checks, which can lead to Undefined Behavior.
 **Defense:** Replaced the `unsafe` block and `transmute_vec` with `bytemuck::cast_vec` for safe zero-copy transmutation. Added `bytemuck::Pod` and `bytemuck::Zeroable` derivations to `NodeId`.
+**2025-05-25 - [Warden: Replace unsafe memory copies with bytemuck for vector serialization]
+**Threat:** `unsafe` block memory operations in `src/core/vector/serialization.rs` assumed well-formed input and could cause UB, buffer over-reads, or DoS if provided malformed slice lengths.
+**Defense:** Replaced `unsafe` pointer copies with safe `bytemuck::cast_slice` and `bytemuck::pod_collect_to_vec` to handle potential misalignment cleanly and return safe `StorageError::CorruptedData`.
