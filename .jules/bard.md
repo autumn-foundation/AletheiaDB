@@ -82,3 +82,6 @@
 ## 2025-03-05 - Logical vs Physical Plans and Iterator Performance
 **Confusion:** The difference between logical plans (`LogicalOp`) and physical plans (`PhysicalOp`) in the query engine was unclear. Additionally, the iterators used for execution (`ResultIterator` implementations) lacked clarity on their streaming architecture.
 **Clarification:** Documented `PhysicalOp` to explain its 1:1 mapping with iterators. Added struct-level documentation to `ResultIterator` implementations to clarify the pull-based, lazy execution model used during query processing.
+## 2025-03-05 - Opaque Persistence Architecture
+**Confusion:** The `src/index/vector/hnsw/persistence.rs` module lacked documentation explaining the two-file architecture (the usearch `.bin` file vs the AletheiaDB `.idx` file), making it difficult to understand how and why index mapping was persisted. Furthermore, the DoS protections (like `MAX_MAPPINGS_COUNT`) were not clearly highlighted at the module level.
+**Clarification:** Added a module-level `//!` documentation block detailing the architecture and security protections. Additionally, documented the `IndexMetadata` struct to explain why exact configuration matching is required.
