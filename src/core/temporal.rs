@@ -1945,3 +1945,32 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod additional_tests_at {
+    use super::*;
+
+    #[test]
+    fn test_time_range_from_max_timestamp() {
+        // 🛡️ Elenchus Test: Kill `replace != with == in TimeRange::from`
+        // We must ensure that calling `from` with TIMESTAMP_MAX works correctly
+        // and doesn't trigger the `start.wallclock() > MAX_VALID_TIMESTAMP` panic,
+        // specifically checking the boundary condition.
+        let ts = TIMESTAMP_MAX;
+        let range = TimeRange::from(ts);
+        assert_eq!(range.start(), TIMESTAMP_MAX);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_time_range_at_boundary() {
+        use crate::core::hlc::HybridTimestamp;
+        // 🛡️ Elenchus Test: Kill `replace > with ==` and `replace > with >=` in `TimeRange::at`
+        // We must ensure that calling `at` with EXACTLY `MAX_VALID_TIMESTAMP` works correctly
+        // and doesn't trigger the `timestamp.wallclock() > MAX_VALID_TIMESTAMP` panic.
+        let ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let range = TimeRange::at(ts);
+        assert_eq!(range.start(), ts);
+        assert_eq!(range.end(), ts);
+    }
+}
