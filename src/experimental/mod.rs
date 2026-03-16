@@ -231,6 +231,10 @@ pub mod oracle;
 pub mod luna;
 
 #[cfg(feature = "nova")]
+/// Solstice: Semantic Cyclicality Detector.
+pub mod solstice;
+
+#[cfg(feature = "nova")]
 /// Spectre: Semantic Perspective Engine.
 pub mod spectre;
 
