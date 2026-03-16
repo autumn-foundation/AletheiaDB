@@ -164,6 +164,9 @@ pub mod prism;
 #[cfg(feature = "nova")]
 pub mod prophet;
 #[cfg(feature = "nova")]
+/// Reverb: Semantic Echo Chamber Detector.
+pub mod reverb;
+#[cfg(feature = "nova")]
 /// Ripple: Semantic Causality Detector.
 pub mod ripple;
 #[cfg(feature = "nova")]
