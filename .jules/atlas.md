@@ -75,3 +75,10 @@
 ## 2025-03-10 - Breaking VersionMetadata Dependency Cycle
 **Tangle:** Both `src/index/temporal.rs` and `src/core/version.rs` contained structs named `VersionMetadata`, causing naming collisions and semantic ambiguity ("The Leak" architectural smell).
 **Blueprint:** Renamed `src/index/temporal.rs::VersionMetadata` to `TimelineVersionMetadata` (and the associated index alias) to strictly enforce domain boundaries and clarify that the index-level struct serves temporal timelines, whereas `core` defines the global domain version primitive.
+
+## 2026-03-16 - Splitting The Blob Test Modules
+**Tangle:** `src/index/vector/temporal/mod.rs` and `src/query/planner/mod.rs` grew too large and became "Blob" modules containing tests directly alongside core logic. This made them difficult to navigate.
+**Blueprint:**
+1. Extracted tests from `src/index/vector/temporal/mod.rs` into `src/index/vector/temporal/tests.rs`.
+2. Extracted tests from `src/query/planner/mod.rs` into `src/query/planner/tests.rs`.
+3. Updated the parent `mod.rs` files to declare the extracted test modules.
