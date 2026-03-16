@@ -14,6 +14,16 @@ use crate::core::id::NodeId;
 use std::collections::HashMap;
 
 /// A point in 2D space.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::kaleidoscope::Point;
+///
+/// let p1 = Point::new(0.0, 0.0);
+/// let p2 = Point::new(3.0, 4.0);
+/// assert_eq!(p1.distance(&p2), 5.0);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     /// X coordinate
@@ -60,6 +70,19 @@ impl Point {
 }
 
 /// Configuration for the simulation.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::kaleidoscope::LayoutConfig;
+///
+/// let config = LayoutConfig {
+///     width: 800.0,
+///     height: 600.0,
+///     optimal_distance: 100.0,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct LayoutConfig {
     /// Ideal distance between nodes (k).
@@ -96,6 +119,32 @@ impl Default for LayoutConfig {
 }
 
 /// The Layout Engine.
+///
+/// Computes a force-directed layout iteratively, incorporating semantic similarity
+/// (vector gravity) into the node positions.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::kaleidoscope::{LayoutEngine, LayoutConfig};
+/// use aletheiadb::core::id::NodeId;
+///
+/// let config = LayoutConfig::default();
+/// let mut engine = LayoutEngine::new(config);
+///
+/// let node1 = NodeId::new(1);
+/// let node2 = NodeId::new(2);
+///
+/// engine.add_node(node1);
+/// engine.add_node(node2);
+/// engine.add_edge(node1, node2);
+/// engine.add_semantic_link(node1, node2, 0.9); // High similarity
+///
+/// engine.run();
+///
+/// let p1 = engine.get_position(node1).unwrap();
+/// let p2 = engine.get_position(node2).unwrap();
+/// ```
 pub struct LayoutEngine {
     config: LayoutConfig,
     nodes: Vec<NodeId>,

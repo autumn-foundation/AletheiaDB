@@ -228,6 +228,7 @@ impl fmt::Display for Token {
 /// Error type for lexer errors.
 ///
 /// Indicates a syntax error or unexpected character encountered during tokenization.
+/// Provides precise information on where the syntax error occurred to aid error reporting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError {
     /// Error message describing what went wrong.

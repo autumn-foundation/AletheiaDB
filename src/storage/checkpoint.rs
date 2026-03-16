@@ -70,6 +70,22 @@ fn persistence_err(e: IndexPersistenceError) -> crate::core::error::Error {
 }
 
 /// Configuration for checkpoint behavior.
+///
+/// Use `CheckpointConfig::default()` and builder methods to
+/// configure the data directory and intervals.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::time::Duration;
+/// use aletheiadb::storage::checkpoint::CheckpointConfig;
+///
+/// let config = CheckpointConfig::default()
+///     .data_dir("custom/data/path")
+///     .checkpoint_interval(Duration::from_secs(600)) // 10 minutes
+///     .min_wal_entries(5000)
+///     .enable_compression(true);
+/// ```
 #[derive(Debug, Clone)]
 pub struct CheckpointConfig {
     /// Base data directory for persistence
@@ -166,6 +182,38 @@ impl RecoveryResult {
 ///
 /// This is the main coordinator between checkpoints and index persistence,
 /// enabling fast recovery by loading indexes from disk instead of replaying WAL.
+///
+/// The `CheckpointManager` regularly saves memory-state graph data and temporal
+/// history down into persistent storage, truncating the WAL so it does not grow infinitely.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use std::sync::Arc;
+/// use parking_lot::RwLock;
+/// use std::time::Duration;
+///
+/// use aletheiadb::storage::checkpoint::{CheckpointManager, CheckpointConfig};
+/// use aletheiadb::storage::current::CurrentStorage;
+/// use aletheiadb::storage::historical::HistoricalStorage;
+/// use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+/// use aletheiadb::storage::wal::LSN;
+/// use aletheiadb::core::interning::StringInterner;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let current = CurrentStorage::new();
+/// let historical = HistoricalStorage::new();
+/// let interner = StringInterner::new();
+/// let redb = Arc::new(RwLock::new(RedbColdStorage::new("data/cold.redb", RedbConfig::default())?));
+///
+/// let config = CheckpointConfig::default();
+/// let mut manager = CheckpointManager::new(config)?;
+///
+/// // Later, coordinate a checkpoint given a WAL LSN...
+/// manager.create_checkpoint(LSN(100), &current, &historical, &interner, Some(redb))?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct CheckpointManager {
     /// Configuration for checkpoint behavior
     config: CheckpointConfig,

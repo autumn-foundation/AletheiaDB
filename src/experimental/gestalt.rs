@@ -19,6 +19,24 @@ use crate::core::id::{EdgeId, NodeId};
 use std::collections::{HashMap, HashSet};
 
 /// A node in the pattern graph.
+///
+/// This defines the requirements for a single entity within the semantic subgraph match.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::gestalt::{PatternNode, VectorConstraint};
+///
+/// let node = PatternNode {
+///     id: 0,
+///     label: Some("Person".to_string()),
+///     vector_constraint: Some(VectorConstraint {
+///         property: "embedding".to_string(),
+///         vector: vec![0.1, 0.2, 0.3],
+///         threshold: 0.85,
+///     }),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct PatternNode {
     /// The ID of the node within the pattern (0, 1, 2...).
@@ -30,6 +48,9 @@ pub struct PatternNode {
 }
 
 /// A vector constraint on a pattern node.
+///
+/// Specifies that a node must have a vector property that is semantically
+/// similar to a target concept vector.
 #[derive(Debug, Clone)]
 pub struct VectorConstraint {
     /// The property containing the vector.
