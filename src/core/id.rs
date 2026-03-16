@@ -1598,6 +1598,33 @@ mod sentinel_id_generator_tests {
     }
 
     #[test]
+    fn test_id_generator_next_error_case_exact() {
+        let generator = IdGenerator::with_start(MAX_VALID_ID + 1);
+        let res = generator.next();
+        assert!(res.is_err());
+        assert!(
+            matches!(res, Err(crate::core::error::StorageError::InvalidId { id, .. }) if id == MAX_VALID_ID + 1)
+        );
+
+        let generator2 = IdGenerator::with_start(MAX_VALID_ID);
+        let res2 = generator2.next();
+        assert!(res2.is_ok());
+        assert_eq!(res2.unwrap(), MAX_VALID_ID);
+        let res3 = generator2.next();
+        assert!(res3.is_err());
+    }
+
+    #[test]
+    fn test_tx_id_generator_exact_bounds() {
+        let generator = TxIdGenerator::new();
+        let _ = generator.next(); // tx 1
+        let val = generator.next(); // tx 2
+        assert_eq!(val.as_u64(), 2);
+        assert_ne!(val.as_u64(), 1);
+        assert_ne!(val.as_u64(), 0);
+    }
+
+    #[test]
     fn test_id_generator_next_boundaries() {
         // Kill "> with == / < / >="
         // We set generator right to MAX_VALID_ID
