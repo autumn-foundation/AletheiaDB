@@ -1121,8 +1121,7 @@ impl WriteOps for WriteTransaction {
             // Delete all connected edges first to maintain referential integrity
             // This prevents orphaned edges that reference a deleted node
             for edge_id in outgoing_edges.into_iter().chain(incoming_edges) {
-                // Ignore errors here if the edge was already deleted
-                let _ = self.delete_edge_with_valid_time(edge_id, valid_from);
+                self.delete_edge_with_valid_time(edge_id, valid_from)?;
             }
 
             // If the node being deleted contains vector properties, mark the buffer

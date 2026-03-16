@@ -287,27 +287,28 @@ impl WriteBuffer {
         // Deduplicate DeleteEdge and DeleteNode operations to prevent panics/errors
         // if an entity is deleted multiple times in the same transaction
         // (e.g. from cascading deletes)
+        #[allow(clippy::collapsible_if)]
         match &write {
             BufferedWrite::DeleteEdge { edge_id, .. } => {
-                if let Some(&existing_idx) = self.modified_edges.get(edge_id)
-                    && matches!(
+                if let Some(&existing_idx) = self.modified_edges.get(edge_id) {
+                    if matches!(
                         self.operations[existing_idx],
                         BufferedWrite::DeleteEdge { .. }
-                    )
-                {
-                    // Already deleted in this transaction buffer, safely ignore
-                    return Ok(());
+                    ) {
+                        // Already deleted in this transaction buffer, safely ignore
+                        return Ok(());
+                    }
                 }
             }
             BufferedWrite::DeleteNode { node_id, .. } => {
-                if let Some(&existing_idx) = self.modified_nodes.get(node_id)
-                    && matches!(
+                if let Some(&existing_idx) = self.modified_nodes.get(node_id) {
+                    if matches!(
                         self.operations[existing_idx],
                         BufferedWrite::DeleteNode { .. }
-                    )
-                {
-                    // Already deleted in this transaction buffer, safely ignore
-                    return Ok(());
+                    ) {
+                        // Already deleted in this transaction buffer, safely ignore
+                        return Ok(());
+                    }
                 }
             }
             _ => {}
@@ -454,6 +455,72 @@ mod tests {
         assert!(!buffer.is_empty());
         assert!(buffer.has_modified_node(node_id));
         assert!(!buffer.has_modified_node(NodeId::new(2).unwrap()));
+    }
+
+    #[test]
+    fn test_write_buffer_deduplicate_deletes() {
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let valid_from = time::now();
+
+        let op1 = BufferedWrite::DeleteNode {
+            node_id,
+            valid_from,
+        };
+        let op2 = BufferedWrite::DeleteNode {
+            node_id,
+            valid_from,
+        };
+
+        buffer.add(op1).unwrap();
+        assert_eq!(buffer.len(), 1);
+
+        // Second duplicate delete should be ignored
+        buffer.add(op2).unwrap();
+        assert_eq!(buffer.len(), 1);
+
+        // And for edges
+        let edge_id = EdgeId::new(1).unwrap();
+        let op3 = BufferedWrite::DeleteEdge {
+            edge_id,
+            valid_from,
+        };
+        let op4 = BufferedWrite::DeleteEdge {
+            edge_id,
+            valid_from,
+        };
+
+        buffer.add(op3).unwrap();
+        assert_eq!(buffer.len(), 2);
+
+        // Second duplicate delete should be ignored
+        buffer.add(op4).unwrap();
+        assert_eq!(buffer.len(), 2);
+
+        // Test non-delete operations fall through `_ => {}` branch without deduplication
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        let op5 = BufferedWrite::CreateNode {
+            node_id: NodeId::new(2).unwrap(),
+            version_id,
+            label,
+            properties: PropertyMap::new(),
+            valid_from,
+        };
+        let op6 = BufferedWrite::CreateNode {
+            node_id: NodeId::new(2).unwrap(),
+            version_id,
+            label,
+            properties: PropertyMap::new(),
+            valid_from,
+        };
+
+        buffer.add(op5).unwrap();
+        assert_eq!(buffer.len(), 3);
+        buffer.add(op6).unwrap();
+        assert_eq!(buffer.len(), 4);
     }
 
     #[test]
