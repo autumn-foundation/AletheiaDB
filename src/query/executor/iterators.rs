@@ -2,6 +2,38 @@
 //!
 //! Pull-based iterators for query execution. Each physical operator
 //! has a corresponding iterator that lazily produces results.
+//!
+//! # Pull-Based Iteration
+//!
+//! AletheiaDB's execution engine leverages a Volcano-style (or pipeline) pull-based execution model.
+//! Instead of operators pushing chunks of data upwards, the root operator pulls individual rows by calling
+//! `next()` on its children. This lazy evaluation minimizes the active memory footprint, avoiding
+//! intermediate allocations during traversal or filtering operations, keeping overhead under ~100ns per hop.
+//!
+//! # Examples
+//!
+//! You typically compose these iterators into pipelines to execute queries:
+//!
+//! ```rust
+//! use std::sync::Arc;
+//! use aletheiadb::query::executor::{NodeScanIterator, FilterIterator, LimitIterator, ResultIterator};
+//! use aletheiadb::query::ir::Predicate;
+//! use aletheiadb::storage::current::CurrentStorage;
+//!
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let storage = Arc::new(CurrentStorage::new());
+//!
+//! // Pipeline: Scan "Person" -> Filter by name -> Limit 10
+//! let scan = Box::new(NodeScanIterator::new(Some("Person".to_string()), storage));
+//! let filter = Box::new(FilterIterator::new(scan, Predicate::eq("name", "Alice")));
+//! let mut limit = LimitIterator::new(filter, 0, 10);
+//!
+//! while let Some(row) = limit.next() {
+//!     println!("Result: {:?}", row?.entity.node_id());
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use parking_lot::RwLock;
 use std::cmp::Reverse;

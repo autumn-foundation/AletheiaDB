@@ -3,6 +3,50 @@
 //! Executes physical query plans using a pull-based iterator model.
 //! The executor transforms physical operators into iterators that
 //! lazily produce results.
+//!
+//! # Architecture
+//!
+//! The query executor ([`QueryExecutor`]) sits between the query planner and the storage engine.
+//! Its responsibility is to take a compiled [`PhysicalPlan`] and orchestrate its execution by translating
+//! the plan's [`PhysicalOp`] nodes into a chain of [`ResultIterator`] implementations.
+//!
+//! This pull-based (or Pipeline/Volcano) model means that data flows through the query engine
+//! lazily. A record is only pulled from the storage layer when `next()` is called on the outermost iterator,
+//! keeping memory usage low for operations like `LIMIT`.
+//!
+//! # Execution Flow
+//!
+//! 1. A client submits an AST or uses the Query Builder.
+//! 2. The Planner converts the intent into a [`PhysicalPlan`].
+//! 3. The [`QueryExecutor`] recursively translates the [`PhysicalPlan`]'s [`PhysicalOp`] root into a Boxed [`ResultIterator`].
+//! 4. The Executor wraps the iterator in [`QueryResults`] which the client iterates over.
+//!
+//! # Example: Execution Configuration
+//!
+//! You can fine-tune query execution using [`ExecutionConfig`]:
+//!
+//! ```rust
+//! use std::sync::Arc;
+//! use parking_lot::RwLock;
+//! use aletheiadb::query::executor::{QueryExecutor, ExecutionConfig};
+//! use aletheiadb::storage::current::CurrentStorage;
+//! use aletheiadb::storage::historical::HistoricalStorage;
+//! use aletheiadb::core::version::AnchorConfig;
+//!
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let current = Arc::new(CurrentStorage::new());
+//! let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(AnchorConfig::default())));
+//!
+//! let config = ExecutionConfig {
+//!     max_buffer_size: 50_000,
+//!     parallel: true,
+//!     timeout_ms: 5000,
+//! };
+//!
+//! let executor = QueryExecutor::with_config(current, historical, config);
+//! # Ok(())
+//! # }
+//! ```
 
 mod iterators;
 mod results;

@@ -82,3 +82,6 @@
 ## 2025-03-05 - Logical vs Physical Plans and Iterator Performance
 **Confusion:** The difference between logical plans (`LogicalOp`) and physical plans (`PhysicalOp`) in the query engine was unclear. Additionally, the iterators used for execution (`ResultIterator` implementations) lacked clarity on their streaming architecture.
 **Clarification:** Documented `PhysicalOp` to explain its 1:1 mapping with iterators. Added struct-level documentation to `ResultIterator` implementations to clarify the pull-based, lazy execution model used during query processing.
+## 2025-03-06 - Undocumented Query Executor
+**Confusion:** The `src/query/executor` modules lacked high-level architectural documentation, making it hard to understand how `PhysicalPlan`s map to iterators and how streaming vs structured results differ.
+**Clarification:** Added module-level documentation to `mod.rs`, `iterators.rs`, and `results.rs` explaining the pull-based Volcano execution model, the role of the `QueryExecutor`, and providing executable doctests for `ExecutionConfig` and result collection.

@@ -1,6 +1,83 @@
 //! Query Result Types
 //!
 //! Defines the result types returned by query execution.
+//!
+//! # Streaming vs. Structured Results
+//!
+//! The query executor returns a [`QueryResults`] instance, which acts as a wrapper around the
+//! underlying execution iterators. This provides a streaming, lazy mechanism to consume data as
+//! it is fetched from the storage layers.
+//!
+//! Alternatively, if you need the entire result set in memory simultaneously (e.g. for JSON
+//! serialization in an HTTP API or for batch processing), you can materialize the results into
+//! a structured format using [`QueryResults::collect_structured()`]. This yields a [`QueryResult`]
+//! struct containing parallel arrays of nodes, scores, and temporal metadata.
+//!
+//! # Examples
+//!
+//! Using the streaming iterator:
+//!
+//! ```rust
+//! # use std::sync::Arc;
+//! # use parking_lot::RwLock;
+//! # use aletheiadb::storage::current::CurrentStorage;
+//! # use aletheiadb::storage::historical::HistoricalStorage;
+//! # use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+//! # use aletheiadb::query::planner::PhysicalOp;
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! # let current = Arc::new(CurrentStorage::new());
+//! # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+//! # let executor = QueryExecutor::new(current, historical);
+//! # let plan = PhysicalPlan {
+//! #     root: PhysicalOp::Empty,
+//! #     estimated_cost: Default::default(),
+//! #     temporal_context: None,
+//! #     parallel: false,
+//! #     include_provenance: true,
+//! # };
+//! let results = executor.execute(plan)?;
+//!
+//! // Process rows one at a time without allocating the full dataset
+//! for row in results {
+//!     let row = row?;
+//!     println!("Found node: {:?}", row.entity.node_id());
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Using structured collection:
+//!
+//! ```rust
+//! # use std::sync::Arc;
+//! # use parking_lot::RwLock;
+//! # use aletheiadb::storage::current::CurrentStorage;
+//! # use aletheiadb::storage::historical::HistoricalStorage;
+//! # use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+//! # use aletheiadb::query::planner::PhysicalOp;
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! # let current = Arc::new(CurrentStorage::new());
+//! # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+//! # let executor = QueryExecutor::new(current, historical);
+//! # let plan = PhysicalPlan {
+//! #     root: PhysicalOp::Empty,
+//! #     estimated_cost: Default::default(),
+//! #     temporal_context: None,
+//! #     parallel: false,
+//! #     include_provenance: true,
+//! # };
+//! let results = executor.execute(plan)?;
+//!
+//! // Materialize all rows into memory simultaneously
+//! let structured = results.collect_structured()?;
+//!
+//! println!("Found {} nodes", structured.nodes.len());
+//! if let Some(scores) = structured.scores {
+//!     println!("Highest score: {}", scores[0]);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
