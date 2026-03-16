@@ -22,3 +22,6 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+## ISO 8601 Format Panic Risk on Pre-Epoch Timestamps
+**Learning:** The `to_iso8601` function in `src/core/temporal.rs` used naive conversion casting `i64` wallclock microseconds to `u64` seconds and adding it to `UNIX_EPOCH`. This caused a `SystemTime` overflow panic when passing negative wallclocks (timestamps before 1970).
+**Action:** Always test temporal logic with negative wallclock values to ensure calculations correctly handle pre-epoch times, using `.abs()` and conditional subtraction (`UNIX_EPOCH - duration`) instead of unchecked casting.

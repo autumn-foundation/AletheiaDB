@@ -673,11 +673,16 @@ pub mod time {
 
         let wallclock = timestamp.wallclock();
         // Convert microseconds to seconds and nanoseconds
-        let secs = wallclock / 1_000_000;
-        let nanos = ((wallclock % 1_000_000) * 1000) as u32;
+        let secs = wallclock.abs() / 1_000_000;
+        let nanos = ((wallclock.abs() % 1_000_000) * 1000) as u32;
 
+        let duration = std::time::Duration::new(secs as u64, nanos);
         // This is a simplified conversion - for production use chrono crate
-        let datetime = UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos);
+        let datetime = if wallclock >= 0 {
+            UNIX_EPOCH + duration
+        } else {
+            UNIX_EPOCH - duration
+        };
         format!("{:?}", datetime) // Simplified - use chrono for proper formatting
     }
 
@@ -1631,6 +1636,21 @@ mod sentry_tests {
             !interval.is_current(),
             "is_current() should be false if one dimension is closed"
         );
+    }
+
+    #[test]
+    fn test_sentry_iso8601_before_epoch() {
+        // 🛡️ Sentry Test: Verify time::to_iso8601 handles timestamps before 1970 without panicking.
+        // This targets the bug where casting negative seconds to u64 panics and adding to UNIX_EPOCH panics.
+
+        // 1969-12-31 23:59:59 UTC
+        let secs = -1;
+        let ts = time::from_secs(secs);
+        let output = time::to_iso8601(ts);
+
+        // Output format is platform dependent, but shouldn't panic.
+        // It should contain the 1 sec offset or a system time.
+        assert!(!output.is_empty());
     }
 
     #[test]
