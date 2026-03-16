@@ -150,6 +150,7 @@ pub fn create_app() -> App<
     let cors_config = CorsConfig::permissive();
     let rate_limit_config = RateLimitConfig::default();
     App::new()
+        .app_data(web::JsonConfig::default().limit(256 * 1024))
         .wrap(Logger::default())
         .wrap(build_security_headers())
         .wrap(build_cors(&cors_config))
@@ -213,6 +214,7 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
             .expect("Rate limit configuration should be valid after pre-validation");
 
         App::new()
+            .app_data(web::JsonConfig::default().limit(256 * 1024))
             .wrap(Logger::default())
             .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
@@ -278,6 +280,7 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
             .expect("Rate limit configuration should be valid after pre-validation");
 
         App::new()
+            .app_data(web::JsonConfig::default().limit(256 * 1024))
             .wrap(Logger::default())
             .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))

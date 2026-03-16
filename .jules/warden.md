@@ -36,3 +36,4 @@
 2025-02-15 - [Warden: Replace unsafe transmute_vec with bytemuck::cast_vec]
 **Threat:** `Vec::from_raw_parts` was used in `AdjacencyIndex::import_csr` to transmute types without proper capacity checks, which can lead to Undefined Behavior.
 **Defense:** Replaced the `unsafe` block and `transmute_vec` with `bytemuck::cast_vec` for safe zero-copy transmutation. Added `bytemuck::Pod` and `bytemuck::Zeroable` derivations to `NodeId`.
+**YYYY-MM-DD - [DoS Prevention] \n**Threat:** Unbounded memory allocation DoS via unbounded JSON limits on Actix HTTP Server\n**Defense:** Replaced default (2MB) JSON payload limit with strict 256KB limit using `.app_data(web::JsonConfig::default().limit(256 * 1024))` in `App::new()` setup.
