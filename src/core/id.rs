@@ -1558,6 +1558,8 @@ mod sentinel_id_generator_tests {
 
         let current = generator.current_approximate();
         assert_eq!(current, 42);
+        // Explicitly check it doesn't return constants 0 or 1, catching those mutants.
+        assert!(current > 1, "Must not return default hardcoded values");
 
         generator.next().unwrap();
         let current2 = generator.current_approximate();
@@ -1575,6 +1577,18 @@ mod sentinel_id_generator_tests {
         // This fails if `>` was replaced with `<` (since 40 < 50 is true, it would update)
         generator.ensure_at_least(40);
         assert_eq!(generator.current(), 50);
+
+        // Note: mutating `>` to `>=` is an equivalent mutant because updating 50 to 50 is a no-op
+        // from the outside observable state.
+
+        // Test ensure_at_least empty body / return ()
+        let gen2 = IdGenerator::with_start(10);
+        gen2.ensure_at_least(100);
+        assert_eq!(
+            gen2.current(),
+            100,
+            "ensure_at_least must update the current value to the provided minimum if it's larger"
+        );
     }
 
     #[test]
@@ -1586,15 +1600,27 @@ mod sentinel_id_generator_tests {
         assert_eq!(first, TxId::new(1));
 
         // Kill "replace + with -" or "*"
+        // If it was '-', 1 - 1 = 0.
+        // If it was '*', 1 * 1 = 1.
         let second = generator.next();
         assert_eq!(second, TxId::new(2));
 
         // Kill "replace == with !=" for u64::MAX check
         // If it were `!=`, it would panic immediately because 1 != u64::MAX
+        // This is handled by the test completing without panic.
 
         // Ensure returning default current doesn't pass
         let generator_current = generator.current();
         assert_eq!(generator_current, TxId::new(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "Transaction ID overflow")]
+    fn test_tx_id_generator_overflow_panic() {
+        let generator = TxIdGenerator::new();
+        generator.set_counter(u64::MAX);
+        // Should panic
+        generator.next();
     }
 
     #[test]
