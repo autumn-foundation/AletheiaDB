@@ -22,3 +22,6 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+## JSON Array Converter Edge Cases
+**Learning:** In `src/http/converters.rs`, the recursive json to `PropertyValue` converter correctly implements limitations and type fallbacks, but some paths like `Value::Object` returning an error directly or mixed-type arrays falling back to generic `PropertyValue::Array` instead of numeric Vectors lacked explicit test coverage. Testing these edge cases ensures no regressions on unsupported types or boundary arrays like `[]`.
+**Action:** Always add explicit tests for `serde_json::Value` parsing edge cases, even if they seem trivial, to ensure the API boundary behaves predictably when confronted with malformed or unsupported JSON inputs.

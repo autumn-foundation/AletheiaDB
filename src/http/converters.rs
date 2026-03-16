@@ -473,6 +473,50 @@ mod tests {
     }
 
     #[test]
+    fn test_json_object_error() {
+        // 🎯 Target: json_to_property_value_recursive
+        // 💣 Risk: Missing test for unsupported Object variant
+        let value = json!({"key": "value"});
+        let result = json_to_property_value(&value);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Nested objects are not supported"));
+    }
+
+    #[test]
+    fn test_json_invalid_float_in_array() {
+        // 🎯 Target: json_to_property_value_recursive array processing
+        // 💣 Risk: Array values masquerading as numbers but failing f64 conversion.
+        // Actually, serde_json guarantees .is_number() corresponds to .as_f64() or similar,
+        // but we'll try to trigger the "Invalid float in array" error.
+        // We'll create an array of values where .is_number() is true but .as_f64() is false.
+        // `serde_json::Number` might not convert to f64 if it's too large for u64/i64/f64?
+        // It's hard to trigger .as_f64() returning None if .is_number() is true,
+        // but let's test a mixed array which falls back to generic PropertyValue::Array.
+        let value = json!([1.0, "string"]);
+        let result = json_to_property_value(&value);
+        assert!(result.is_ok());
+        if let PropertyValue::Array(ref arr) = result.unwrap() {
+            assert_eq!(arr.len(), 2);
+        } else {
+            panic!("Expected generic array");
+        }
+    }
+
+    #[test]
+    fn test_json_empty_array() {
+        // 🎯 Target: json_to_property_value_recursive empty array
+        // 💣 Risk: Should produce empty PropertyValue::Array, not panic
+        let value = json!([]);
+        let result = json_to_property_value(&value);
+        assert!(result.is_ok());
+        if let PropertyValue::Array(ref arr) = result.unwrap() {
+            assert_eq!(arr.len(), 0);
+        } else {
+            panic!("Expected generic array");
+        }
+    }
+
+    #[test]
     fn test_json_vector_pre_allocation_limit() {
         use crate::core::property::MAX_ARRAY_ELEMENTS;
         use crate::core::property::MAX_VECTOR_DIMENSIONS;
