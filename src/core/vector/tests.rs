@@ -2870,6 +2870,19 @@ fn test_sparse_euclidean_distance_pythagorean() {
 }
 
 #[test]
+fn test_sparse_euclidean_distance_dimension_mismatch() {
+    let a = SparseVec::new(vec![0], vec![1.0], 5).unwrap();
+    let b = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+
+    let result = sparse_euclidean_distance(&a, &b);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        Error::Vector(VectorError::DimensionMismatch { .. })
+    ));
+}
+
+#[test]
 fn test_sparse_similarity_with_bm25_like_vectors() {
     // Simulate BM25 document vectors
     let doc1 = SparseVec::new(vec![10, 42, 100, 257], vec![2.5, 1.8, 3.2, 1.2], 10000).unwrap();

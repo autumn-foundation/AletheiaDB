@@ -22,3 +22,7 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+
+## Sparse Euclidean Distance Dimension Mismatch Coverage Gap
+**Learning:** `sparse_euclidean_distance` acts as a wrapper around `sparse_squared_euclidean_distance`, but didn't have an explicit test checking if `DimensionMismatch` errors properly propagated from the squared variant up through the square root mapping operation.
+**Action:** Always ensure that when one metric function wraps another and propagates its errors (e.g. via `?` or `.map()`), there is an explicit test verifying the error pathway in the wrapper, guaranteeing it handles the `Result` type correctly.
