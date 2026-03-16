@@ -1322,3 +1322,228 @@ mod tests {
         assert!(msg.contains("by 0"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_error_tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn test_error_other_exhaustive() {
+        let err = Error::other("something went wrong");
+        match err {
+            Error::Other(msg) => assert_eq!(msg, "something went wrong"),
+            _ => panic!("Expected Error::Other variant"),
+        }
+    }
+
+    #[test]
+    fn test_error_not_implemented_exhaustive() {
+        let err = Error::not_implemented("feature x", "some reason");
+        match err {
+            Error::NotImplemented { feature, reason } => {
+                assert_eq!(feature, "feature x");
+                assert_eq!(reason, "some reason");
+            }
+            _ => panic!("Expected Error::NotImplemented variant"),
+        }
+    }
+
+    #[cfg(feature = "observability")]
+    #[test]
+    fn test_error_record_metric_exhaustive() {
+        crate::observability::METRICS.reset();
+
+        // This targets the default override that does nothing.
+        let err = Error::other("test");
+        err.record_metric();
+
+        let snapshot = crate::observability::METRICS.snapshot();
+        assert_eq!(snapshot.error_other_total, 1);
+    }
+
+    #[cfg(not(feature = "observability"))]
+    #[test]
+    fn test_error_record_metric_exhaustive_no_op() {
+        let err = Error::other("test");
+        err.record_metric(); // just ensure it doesn't panic
+    }
+
+    #[test]
+    fn test_result_ext_record_error_metric_exhaustive() {
+        // Kill replacing `record_error_metric -> Self with Default::default()`
+        // The default implementation of a `Result` returning a unit error would lose the original error.
+        let original_err: crate::core::error::Result<()> = Err(Error::other("original"));
+
+        let returned = original_err.record_error_metric();
+        match returned {
+            Err(Error::Other(msg)) => assert_eq!(msg, "original"),
+            Ok(_) => panic!("Expected Err"),
+            _ => panic!("Expected Error::Other with 'original'"),
+        }
+    }
+
+    #[test]
+    fn test_from_conversions_exhaustive() {
+        // StorageError -> Error
+        let err: Error = StorageError::io_error("test").into();
+        assert!(matches!(err, Error::Storage(StorageError::IoError(msg)) if msg == "test"));
+
+        // TemporalError -> Error
+        let err: Error = TemporalError::InvalidTimestamp {
+            timestamp: 0.into(),
+            reason: "test".into(),
+        }
+        .into();
+        assert!(
+            matches!(err, Error::Temporal(TemporalError::InvalidTimestamp { reason, .. }) if reason == "test")
+        );
+
+        // QueryError -> Error
+        let err: Error = QueryError::SyntaxError {
+            message: "test".into(),
+        }
+        .into();
+        assert!(
+            matches!(err, Error::Query(QueryError::SyntaxError { message }) if message == "test")
+        );
+
+        // io::Error -> Error
+        let err: Error = io::Error::new(io::ErrorKind::NotFound, "test").into();
+        assert!(matches!(err, Error::Io(_)));
+
+        // TransactionError -> Error
+        let err: Error = TransactionError::Aborted { tx_id: 1 }.into();
+        assert!(matches!(
+            err,
+            Error::Transaction(TransactionError::Aborted { tx_id: 1 })
+        ));
+
+        // VectorError -> Error
+        let err: Error = VectorError::NotFound { id: "test".into() }.into();
+        assert!(matches!(err, Error::Vector(VectorError::NotFound { id }) if id == "test"));
+
+        // ConfigError -> Error
+        let err: Error = crate::config::ConfigError::InvalidValue("test".into()).into();
+        assert!(matches!(
+            err,
+            Error::Other(msg) if msg.contains("Invalid value") || msg.contains("test")
+        ));
+
+        // SqlError -> Error
+        #[cfg(feature = "sql")]
+        {
+            let err: Error = crate::sql::SqlError::ParseError("test".into()).into();
+            assert!(matches!(err, Error::Query(QueryError::SyntaxError { .. })));
+        }
+
+        // IndexPersistenceError -> PersistenceErrorKind
+        let ipe = crate::storage::index_persistence::IndexPersistenceError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "test",
+        ));
+        let pek: PersistenceErrorKind = (&ipe).into();
+        assert!(matches!(pek, PersistenceErrorKind::Io));
+
+        // IndexPersistenceError -> StorageError
+        let ipe = crate::storage::index_persistence::IndexPersistenceError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "test",
+        ));
+        let se: StorageError = ipe.into();
+        assert!(matches!(
+            se,
+            StorageError::PersistenceErrorWithKind {
+                kind: PersistenceErrorKind::Io,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_storage_error_constructors_exhaustive() {
+        let io_err = StorageError::io_error("io err");
+        assert!(matches!(io_err, StorageError::IoError(msg) if msg == "io err"));
+
+        let corr_err = StorageError::corruption("corrupt");
+        assert!(matches!(corr_err, StorageError::CorruptedData(msg) if msg == "corrupt"));
+
+        let pers_err = StorageError::persistence("persist");
+        assert!(matches!(pers_err, StorageError::PersistenceError(msg) if msg == "persist"));
+
+        let pwk_err =
+            StorageError::persistence_with_kind(PersistenceErrorKind::Serialization, "pwk");
+        assert!(matches!(
+            pwk_err,
+            StorageError::PersistenceErrorWithKind { kind: PersistenceErrorKind::Serialization, message } if message == "pwk"
+        ));
+    }
+
+    #[test]
+    fn test_persistence_error_kind_display_exhaustive() {
+        assert_eq!(PersistenceErrorKind::Corrupted.to_string(), "corrupted");
+        assert_eq!(
+            PersistenceErrorKind::InternerMismatch.to_string(),
+            "interner_mismatch"
+        );
+        assert_eq!(
+            PersistenceErrorKind::UnsupportedVersion.to_string(),
+            "unsupported_version"
+        );
+        assert_eq!(
+            PersistenceErrorKind::MissingIndex.to_string(),
+            "missing_index"
+        );
+        assert_eq!(
+            PersistenceErrorKind::InvalidMagic.to_string(),
+            "invalid_magic"
+        );
+        assert_eq!(
+            PersistenceErrorKind::SizeLimitExceeded.to_string(),
+            "size_limit_exceeded"
+        );
+        assert_eq!(PersistenceErrorKind::Io.to_string(), "io");
+        assert_eq!(
+            PersistenceErrorKind::Serialization.to_string(),
+            "serialization"
+        );
+        assert_eq!(PersistenceErrorKind::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn test_format_index_not_found_exhaustive() {
+        let msg1 = format_index_not_found("VECTOR", "embedding", &None);
+        assert_eq!(
+            msg1,
+            "Query requires VECTOR index on 'embedding' property which is not enabled"
+        );
+
+        let msg2 = format_index_not_found("VECTOR", "embedding", &Some("create one".into()));
+        assert_eq!(
+            msg2,
+            "Query requires VECTOR index on 'embedding' property which is not enabled. Hint: create one"
+        );
+    }
+
+    #[test]
+    fn test_format_clock_skew_exhaustive() {
+        // Kill replacing `< with <=`, `>` or `==`
+        // When drift < 0, it's backward. When drift == 0, it's forward.
+        let backward = format_clock_skew(100, 200, -100, 50);
+        assert!(backward.contains("backward"));
+
+        let exact_zero = format_clock_skew(100, 100, 0, 50);
+        assert!(exact_zero.contains("forward"));
+        assert!(!exact_zero.contains("backward"));
+
+        let forward = format_clock_skew(200, 100, 100, 50);
+        assert!(forward.contains("forward"));
+        assert!(!forward.contains("backward"));
+
+        // Make sure it wasn't replaced by "xyzzy" or String::new()
+        assert_eq!(
+            backward,
+            "Clock skew too large: system clock jumped backward by 100 \u{b5}s (max allowed: 50 \u{b5}s). Wallclock: 100, Previous: 200. This may indicate NTP adjustment or manual clock change."
+        );
+    }
+}
