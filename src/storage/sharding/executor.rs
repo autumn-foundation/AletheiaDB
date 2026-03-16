@@ -493,7 +493,10 @@ impl<C: ShardClient> QueryExecutor<C> {
         match query.aggregation {
             AggregationStrategy::Concat => {
                 // Simple concatenation
-                let mut aggregated = Vec::new();
+                // ⚡ Bolt: Pre-allocate the vector to exactly match the sum of all result data lengths,
+                // avoiding multiple reallocations on this hot path.
+                let capacity: usize = results.iter().map(|r| r.data.len()).sum();
+                let mut aggregated = Vec::with_capacity(capacity);
                 for result in results {
                     aggregated.extend(&result.data);
                 }
@@ -547,7 +550,11 @@ impl<C: ShardClient> QueryExecutor<C> {
             }
             AggregationStrategy::ByShard => {
                 // Return results separately (serialize shard -> data mapping)
-                let mut aggregated = Vec::new();
+                // ⚡ Bolt: Pre-calculate the exact capacity needed for all shards:
+                // 4 bytes for count + per result (2 bytes shard_id + 4 bytes len + data.len()).
+                let capacity: usize =
+                    4 + results.iter().map(|r| 2 + 4 + r.data.len()).sum::<usize>();
+                let mut aggregated = Vec::with_capacity(capacity);
                 aggregated.extend_from_slice(&(results.len() as u32).to_le_bytes());
                 for result in results {
                     aggregated.extend_from_slice(&result.shard_id.as_u16().to_le_bytes());
