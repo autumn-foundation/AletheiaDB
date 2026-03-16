@@ -118,6 +118,7 @@ pub mod chameleon;
 #[cfg(feature = "nova")]
 /// Chimera: Hybrid Entity Synthesis Engine.
 pub mod chimera;
+#[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
 #[cfg(feature = "nova")]
@@ -129,6 +130,7 @@ pub mod dissonance;
 #[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
+#[cfg(feature = "nova")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
 #[cfg(feature = "nova")]
@@ -169,6 +171,7 @@ pub mod ripple;
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
+#[cfg(feature = "nova")]
 /// Sherlock: Temporal Pattern Matching Engine.
 pub mod sherlock;
 #[cfg(feature = "nova")]
@@ -185,6 +188,7 @@ pub mod telepathy;
 #[cfg(feature = "nova")]
 /// Temporal Diff Engine for computing snapshot differences.
 pub mod temporal_diff;
+#[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
 

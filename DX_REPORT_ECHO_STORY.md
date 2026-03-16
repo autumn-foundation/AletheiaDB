@@ -1,46 +1,7 @@
-# Echo's DX Audit Report: Story Feature & Experimental Modules 🗣️
+# 🗣️ Echo: Getting Started example is broken
 
-**Date:** 2025-05-24
-**Auditor:** Echo (The Impatient User)
+**Scenario:** "I am a new user trying to add `Nova`'s story feature."
 
-## Summary
-
-I audited the "Story" feature (Narrative Generation) and other experimental modules. I found that while the `nova` feature flag is generally well-documented, there are inconsistencies in how modules are gated, and a friction point with `Result` types in the prelude.
-
-## 🟢 The Good
-
-- **Narrative Generator**: The example code works as advertised when the `nova` feature is enabled.
-- **Error Messages**: When `nova` is missing, the compiler error correctly identifies that `temporal_narrative` is configured out.
-
-## 🔴 The Bad
-
-### 1. `Result` Shadowing in Prelude
-
-The `aletheiadb::prelude` module exports `Result` (which is `Result<T, aletheiadb::Error>`). This shadows `std::result::Result`.
-
-**The Friction:**
-A user copy-pasting code into `fn main()` naturally writes:
-```rust
-fn main() -> Result<(), Box<dyn std::error::Error>> { ... }
-```
-This fails to compile because `Result` expects 1 type argument, not 2.
-
-**The Fix:**
-- Document this behavior clearly.
-- Update examples to use explicit `std::result::Result` for `main` or show the full file context.
-
-### 2. Inconsistent Feature Gating (Muse & Metaphor)
-
-The documentation states that all experimental features are gated behind the `nova` feature flag. However, `muse` and `metaphor` were accessible without it.
-
-**The Friction:**
-- Inconsistent API surface.
-- Users might rely on these modules without enabling the feature, leading to breakage if they are later gated (which they should be).
-
-**The Fix:**
-- Apply `#[cfg(feature = "nova")]` to `mod muse;` and `mod metaphor;` in `src/experimental/mod.rs`.
-
-## Action Items
-
-- [x] Fix inconsistent gating in `src/experimental/mod.rs`.
-- [ ] Update README to clarify `Result` usage in examples (future task).
+* 🤦 **The Confusion:** "Tried to run the `story_demo` example from README by copy-pasting the code blocks into a fresh project. First it didn't compile. Wait, I checked `Cargo.toml` and saw the `nova` feature, but even without it, `NarrativeGenerator` *does* compile because it's exported unconditionally in `src/experimental/mod.rs`! It just gives a deprecation warning and then panics at runtime when `new()` is called with `NarrativeGenerator requires the 'nova' feature...`."
+* 🕵️ **The Reality:** "Turns out the experimental modules `chronos`, `echo`, `sherlock`, and `temporal_narrative` are exported unconditionally in `src/experimental/mod.rs`. Inside these modules, there are stub implementations `#[cfg(not(feature = "nova"))]` that panic at runtime! This is terrible Developer Experience (DX). Users get a compilation success (with just a warning) but a runtime panic, rather than a clear compiler error about an unresolved import."
+* 💡 **The Fix:** "Feature-gate the `chronos`, `echo`, `sherlock`, and `temporal_narrative` modules in `src/experimental/mod.rs` using `#[cfg(feature = "nova")]`. Then, delete all the dummy stub implementations (`#[cfg(not(feature = "nova"))]`) inside those modules. This will ensure the compiler catches missing features immediately with an `unresolved import` error."
