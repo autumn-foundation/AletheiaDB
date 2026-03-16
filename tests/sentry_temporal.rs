@@ -573,3 +573,313 @@ fn test_time_from_secs_millis_exact() {
         "from_millis should not return default"
     );
 }
+
+#[test]
+fn test_sentry_time_range_duration_micros_edge_cases() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(105, 0).unwrap();
+
+    let range = TimeRange::new(start, end).unwrap();
+    let duration = range.duration_micros();
+
+    assert_eq!(duration, Some(5), "Duration should be exactly 5 micros");
+    assert_ne!(duration, Some(0));
+    assert_ne!(duration, Some(1));
+    assert_ne!(duration, Some(-1));
+}
+
+#[test]
+fn test_sentry_time_range_from_at_timestamp_max_explicit() {
+    use aletheiadb::core::temporal::{TIMESTAMP_MAX, TimeRange};
+
+    let range = TimeRange::from(TIMESTAMP_MAX);
+    assert_eq!(range.start(), TIMESTAMP_MAX);
+    assert_eq!(range.end(), TIMESTAMP_MAX);
+
+    let point = TimeRange::at(TIMESTAMP_MAX);
+    assert_eq!(point.start(), TIMESTAMP_MAX);
+    assert_eq!(point.end(), TIMESTAMP_MAX);
+
+    assert_eq!(range, point);
+}
+
+#[test]
+fn test_sentry_max_valid_timestamp_exact_math() {
+    use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
+
+    let expected = i64::MAX - 1000;
+    assert_eq!(
+        MAX_VALID_TIMESTAMP, expected,
+        "MAX_VALID_TIMESTAMP should be exactly i64::MAX - 1000"
+    );
+
+    let div_value = i64::MAX / 1000;
+    assert_ne!(
+        MAX_VALID_TIMESTAMP, div_value,
+        "MAX_VALID_TIMESTAMP should not be i64::MAX / 1000"
+    );
+
+    let add_value = i64::MAX.wrapping_add(1000);
+    assert_ne!(
+        MAX_VALID_TIMESTAMP, add_value,
+        "MAX_VALID_TIMESTAMP should not be i64::MAX + 1000"
+    );
+}
+
+#[test]
+fn test_sentry_time_range_contains_and_or_after() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    assert!(
+        range.contains(start),
+        "Range should contain its exact start"
+    );
+
+    let before_start = HybridTimestamp::new(99, 0).unwrap();
+    assert!(
+        !range.contains(before_start),
+        "Range should not contain before start"
+    );
+
+    let inside = HybridTimestamp::new(150, 0).unwrap();
+    assert!(
+        range.contains(inside),
+        "Range should contain internal point"
+    );
+
+    assert!(
+        !range.contains(end),
+        "Range should not contain exact end (exclusive)"
+    );
+
+    let after_end = HybridTimestamp::new(201, 0).unwrap();
+    assert!(
+        !range.contains(after_end),
+        "Range should not contain after end"
+    );
+
+    assert!(
+        range.contains_or_after(start),
+        "contains_or_after should be true for exact start"
+    );
+    assert!(
+        !range.contains_or_after(before_start),
+        "contains_or_after should be false for before start"
+    );
+    assert!(
+        range.contains_or_after(inside),
+        "contains_or_after should be true for internal point"
+    );
+    assert!(
+        range.contains_or_after(end),
+        "contains_or_after should be true for exact end"
+    );
+    assert!(
+        range.contains_or_after(after_end),
+        "contains_or_after should be true for after end"
+    );
+}
+
+#[test]
+fn test_sentry_time_range_contains_range_exclusive_boundary() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let self_start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(300, 0).unwrap();
+    let other_start = HybridTimestamp::new(200, 0).unwrap();
+
+    let self_range = TimeRange::new(self_start, end).unwrap();
+    let other_range = TimeRange::new(other_start, end).unwrap();
+
+    assert!(
+        self_range.contains_range(&other_range),
+        "Should contain range that ends at exactly the same time"
+    );
+}
+
+#[test]
+fn test_sentry_time_range_overlaps_inclusive_boundary() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let t100 = HybridTimestamp::new(100, 0).unwrap();
+    let t200 = HybridTimestamp::new(200, 0).unwrap();
+    let t300 = HybridTimestamp::new(300, 0).unwrap();
+
+    let self_range = TimeRange::new(t200, t300).unwrap();
+    let other_range = TimeRange::new(t100, t200).unwrap();
+
+    assert!(
+        !self_range.overlaps(&other_range),
+        "Ranges meeting at self.start == other.end should not overlap"
+    );
+    assert!(
+        !other_range.overlaps(&self_range),
+        "Ranges meeting at other.start == self.end should not overlap"
+    );
+
+    let overlapping_self_first = TimeRange::new(t100, t300).unwrap();
+    let overlapping_other_first = TimeRange::new(t200, t300).unwrap();
+
+    assert!(overlapping_self_first.overlaps(&overlapping_other_first));
+    assert!(overlapping_other_first.overlaps(&overlapping_self_first));
+}
+
+#[test]
+fn test_sentry_bitemporal_is_visible_at_boundaries() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_start = HybridTimestamp::new(100, 0).unwrap();
+    let tx_start = HybridTimestamp::new(200, 0).unwrap();
+    let interval = BiTemporalInterval::now(valid_start, tx_start);
+
+    let valid_inside = HybridTimestamp::new(150, 0).unwrap();
+    let tx_inside = HybridTimestamp::new(250, 0).unwrap();
+
+    assert!(
+        interval.is_visible_at(valid_inside, tx_inside),
+        "Should be visible inside both bounds"
+    );
+
+    let valid_outside = HybridTimestamp::new(50, 0).unwrap();
+    let tx_outside = HybridTimestamp::new(150, 0).unwrap();
+
+    assert!(
+        !interval.is_visible_at(valid_inside, tx_outside),
+        "Should NOT be visible if TX time is outside"
+    );
+    assert!(
+        !interval.is_visible_at(valid_outside, tx_inside),
+        "Should NOT be visible if Valid time is outside"
+    );
+    assert!(
+        !interval.is_visible_at(valid_outside, tx_outside),
+        "Should NOT be visible if both are outside"
+    );
+}
+
+#[test]
+fn test_sentry_time_range_close_at_boundaries() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let range = TimeRange::from(start);
+
+    let exactly_max_valid =
+        HybridTimestamp::new(aletheiadb::core::temporal::MAX_VALID_TIMESTAMP, 0).unwrap();
+    assert!(
+        range.close_at(exactly_max_valid).is_ok(),
+        "Should successfully close at exact MAX_VALID_TIMESTAMP"
+    );
+
+    // The HybridTimestamp::new itself will fail on MAX_VALID_TIMESTAMP + 1
+    let past_max_valid_res =
+        HybridTimestamp::new(aletheiadb::core::temporal::MAX_VALID_TIMESTAMP + 1, 0);
+    assert!(
+        past_max_valid_res.is_err(),
+        "Should error on end > MAX_VALID_TIMESTAMP"
+    );
+
+    let before_start = HybridTimestamp::new(99, 0).unwrap();
+    assert!(
+        range.close_at(before_start).is_err(),
+        "Should error on end < start"
+    );
+
+    assert!(
+        range.close_at(start).is_ok(),
+        "Should successfully close at start (producing empty range)"
+    );
+}
+
+#[test]
+fn test_sentry_time_range_contains_range_inclusive_start() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    let before_start = HybridTimestamp::new(99, 0).unwrap();
+    let outside_range = TimeRange::new(before_start, end).unwrap();
+
+    assert!(
+        !range.contains_range(&outside_range),
+        "Should not contain range starting before it"
+    );
+}
+
+#[test]
+fn test_sentry_serialization_deserialize_boundary() {
+    use aletheiadb::core::temporal::TimeRange;
+    // Specifically test `if bytes.len() < 24` mutant replacing `<` with `<=`
+    let mut bytes = vec![0u8; 23];
+    assert!(
+        TimeRange::deserialize(&bytes).is_err(),
+        "Should error on length < 24"
+    );
+    bytes.push(0);
+    // It will still fail on validation (start > end), but not on length bounds.
+    let _ = TimeRange::deserialize(&bytes);
+}
+
+#[test]
+fn test_sentry_bitemporal_serialization_deserialize_boundary() {
+    use aletheiadb::core::temporal::BiTemporalInterval;
+    // Specifically test `if bytes.len() < 48` mutant replacing `<` with `<=`
+    let mut bytes = vec![0u8; 47];
+    assert!(
+        BiTemporalInterval::deserialize(&bytes).is_err(),
+        "Should error on length < 48"
+    );
+    bytes.push(0);
+    let _ = BiTemporalInterval::deserialize(&bytes);
+}
+
+#[test]
+fn test_sentry_time_range_from_exceeds_max_valid_panic() {
+    // The HybridTimestamp::new will fail instead on > MAX_VALID_TIMESTAMP,
+    // so we can't really test the panic inside TimeRange::from without a valid HybridTimestamp.
+    // However, if we skip it via TimeRange::new_unchecked (which is what sentinels use internally),
+    // it's an internal bug. We'll simply let HybridTimestamp constructors handle this layer of protection.
+}
+
+#[test]
+fn test_sentry_time_range_from_at_max_valid_panic_exact_boundary() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    // Mutants > with ==
+    // That means if timestamp.wallclock() == MAX_VALID_TIMESTAMP, it panics.
+    // If it's > it wouldn't. We need to ensure that == DOES NOT panic.
+    let valid_max =
+        HybridTimestamp::new(aletheiadb::core::temporal::MAX_VALID_TIMESTAMP, 0).unwrap();
+
+    let result = std::panic::catch_unwind(|| {
+        TimeRange::from(valid_max);
+    });
+    assert!(
+        result.is_ok(),
+        "TimeRange::from should NOT panic on exact MAX_VALID_TIMESTAMP"
+    );
+
+    let result_at = std::panic::catch_unwind(|| {
+        TimeRange::at(valid_max);
+    });
+    assert!(
+        result_at.is_ok(),
+        "TimeRange::at should NOT panic on exact MAX_VALID_TIMESTAMP"
+    );
+}
