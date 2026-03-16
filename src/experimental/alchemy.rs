@@ -213,8 +213,8 @@ impl<'a> Alchemist<'a> {
                 }
 
                 // 2c. Delete Victim
-                // delete_node_cascade removes the victim and cleans up its old edges
-                tx.delete_node_cascade(victim)?;
+                // delete_node removes the victim and automatically cleans up its old edges
+                tx.delete_node(victim)?;
                 count += 1;
             }
             Ok::<_, crate::core::error::Error>(count)

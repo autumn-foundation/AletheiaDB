@@ -336,7 +336,7 @@ impl AletheiaMcpServer {
     /// Delete a node.
     ///
     /// Permanently removes the node from the current state. Historical versions remain accessible via time-travel queries.
-    /// Fails if the node has connected edges (unless `delete_node_cascade` is used).
+    /// Automatically cascades the deletion to all connected edges to maintain referential integrity.
     pub fn delete_node(&self, req: DeleteNodeRequest) -> String {
         Self::extract_text(self.handle_delete_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -346,6 +346,10 @@ impl AletheiaMcpServer {
     /// Delete a node and all its connected edges (cascade delete).
     ///
     /// Removes the node and any edges connected to it, maintaining referential integrity.
+    #[deprecated(
+        since = "0.1.0",
+        note = "delete_node now cascades by default. Use delete_node instead."
+    )]
     pub fn delete_node_cascade(&self, req: DeleteNodeCascadeRequest) -> String {
         Self::extract_text(self.handle_delete_node_cascade(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -914,6 +918,7 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
+        #[allow(deprecated)]
         match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
             Ok(()) => self.success_json(json!({
                 "success": true,
@@ -2085,13 +2090,12 @@ impl ServerHandler for AletheiaMcpServer {
                 ),
                 Tool::new(
                     "delete_node",
-                    "Delete a node by its ID.",
+                    "Delete a node by its ID. Automatically cascades deletion to all connected edges to maintain referential integrity.",
                     make_input_schema::<DeleteNodeRequest>(),
                 ),
                 Tool::new(
                     "delete_node_cascade",
-                    "Delete a node and all its connected edges (cascade delete). \
-                     This maintains referential integrity by removing orphaned edges.",
+                    "(Deprecated: use delete_node instead) Delete a node and all its connected edges (cascade delete).",
                     make_input_schema::<DeleteNodeCascadeRequest>(),
                 ),
                 Tool::new(

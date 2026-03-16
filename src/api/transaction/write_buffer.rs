@@ -284,6 +284,35 @@ impl WriteBuffer {
             .into());
         }
 
+        // Deduplicate DeleteEdge and DeleteNode operations to prevent panics/errors
+        // if an entity is deleted multiple times in the same transaction
+        // (e.g. from cascading deletes)
+        match &write {
+            BufferedWrite::DeleteEdge { edge_id, .. } => {
+                if let Some(&existing_idx) = self.modified_edges.get(edge_id)
+                    && matches!(
+                        self.operations[existing_idx],
+                        BufferedWrite::DeleteEdge { .. }
+                    )
+                {
+                    // Already deleted in this transaction buffer, safely ignore
+                    return Ok(());
+                }
+            }
+            BufferedWrite::DeleteNode { node_id, .. } => {
+                if let Some(&existing_idx) = self.modified_nodes.get(node_id)
+                    && matches!(
+                        self.operations[existing_idx],
+                        BufferedWrite::DeleteNode { .. }
+                    )
+                {
+                    // Already deleted in this transaction buffer, safely ignore
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+
         let index = self.operations.len();
 
         // Track which entities are modified for conflict detection

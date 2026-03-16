@@ -1114,9 +1114,7 @@ fn test_delete_node_via_transaction() {
 }
 
 #[test]
-fn test_delete_node_with_edges_creates_orphans() {
-    // Current behavior: deleting a node with edges succeeds but leaves orphaned edges.
-    // This documents the current system behavior (see issue comments about orphaned edges).
+fn test_delete_node_cascades_edges_by_default() {
     let db = AletheiaDB::new().unwrap();
 
     let alice = db
@@ -1129,20 +1127,19 @@ fn test_delete_node_with_edges_creates_orphans() {
         .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
         .unwrap();
 
-    // Deleting a node with edges succeeds (creates orphaned edges)
+    // Deleting a node with edges now automatically cascades
     db.write(|tx| tx.delete_node(alice)).unwrap();
 
     // Node is deleted
     assert_eq!(db.node_count(), 1);
     assert!(db.get_node(alice).is_err());
 
-    // Edge still exists as an orphan (documents current behavior)
-    let edge = db.get_edge(edge_id).unwrap();
-    assert_eq!(edge.source, alice);
+    // Edge should be deleted as well
+    assert!(db.get_edge(edge_id).is_err());
 }
 
 #[test]
-fn test_delete_node_cascade() {
+fn test_delete_node_cascades() {
     let db = AletheiaDB::new().unwrap();
 
     let alice = db
@@ -1162,8 +1159,8 @@ fn test_delete_node_cascade() {
 
     assert_eq!(db.edge_count(), 2);
 
-    // Cascade delete should remove alice and all connected edges
-    db.write(|tx| tx.delete_node_cascade(alice)).unwrap();
+    // Default delete_node should remove alice and all connected edges via cascade
+    db.write(|tx| tx.delete_node(alice)).unwrap();
 
     assert_eq!(db.node_count(), 2); // bob and charlie remain
     assert_eq!(db.edge_count(), 0); // both edges removed

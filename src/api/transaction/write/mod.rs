@@ -1113,6 +1113,18 @@ impl WriteOps for WriteTransaction {
             // Verify node exists and check for vector properties
             let node = self.current.get_node(node_id)?;
 
+            // Collect all edges connected to this node (both outgoing and incoming)
+            // We do this before any deletions to avoid borrowing issues
+            let outgoing_edges = self.get_outgoing_edges(node_id);
+            let incoming_edges = self.get_incoming_edges(node_id);
+
+            // Delete all connected edges first to maintain referential integrity
+            // This prevents orphaned edges that reference a deleted node
+            for edge_id in outgoing_edges.into_iter().chain(incoming_edges) {
+                // Ignore errors here if the edge was already deleted
+                let _ = self.delete_edge_with_valid_time(edge_id, valid_from);
+            }
+
             // If the node being deleted contains vector properties, mark the buffer
             // to ensure the temporal vector index is notified on commit
             if !self.buffer.has_vector_operations() && node.properties.contains_vector() {
@@ -1150,44 +1162,6 @@ impl WriteOps for WriteTransaction {
         })();
 
         result.record_error_metric()
-    }
-
-    fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()> {
-        // Check transaction state
-        if self.state != TxState::Active {
-            return Err(TransactionError::InvalidState {
-                current: format!("{:?}", self.state),
-                expected: "Active".to_string(),
-            }
-            .into());
-        }
-
-        // Verify node exists before attempting deletion
-        let _node = self.current.get_node(node_id)?;
-
-        // Collect all edges connected to this node (both outgoing and incoming)
-        // We do this before any deletions to avoid borrowing issues
-        //
-        // LIMITATION: This uses ReadOps methods which currently don't support
-        // read-your-writes semantics for edge traversal. This means edges created
-        // in the same transaction (but not yet committed) won't be found and deleted.
-        // This is consistent with the existing ReadOps behavior but may leave orphaned
-        // edges in same-transaction scenarios. See issue for future improvement.
-        let outgoing_edges = self.get_outgoing_edges(node_id);
-        let incoming_edges = self.get_incoming_edges(node_id);
-
-        // Delete all connected edges first to maintain referential integrity
-        // This prevents orphaned edges that reference a deleted node
-        // Performance: O(degree) where degree is the number of connected edges
-        for edge_id in outgoing_edges.into_iter().chain(incoming_edges) {
-            self.delete_edge(edge_id)?;
-        }
-
-        // Finally, delete the node itself
-        // This is safe now because all edges referencing this node have been removed
-        self.delete_node(node_id)?;
-
-        Ok(())
     }
 
     fn delete_edge_with_valid_time(

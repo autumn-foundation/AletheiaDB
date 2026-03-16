@@ -1149,30 +1149,39 @@ mod general_tests {
         )
         .unwrap();
 
-        // Delete operations: 2 nodes + 2 edges = 4 tombstones needed
-        tx.delete_node(node3).unwrap(); // This will also require tombstone for node
-        tx.delete_node(node4).unwrap(); // This will also require tombstone for node
-        tx.delete_edge(edge1).unwrap(); // Tombstone for edge
-        tx.delete_edge(edge2).unwrap(); // Tombstone for edge
+        // Delete operations:
+        // node3 is connected to edge2 and edge3
+        // The node deletions will cascade and delete edge2 and edge3.
+        // We will explicitly delete node3 and node4.
+        tx.delete_node(node3).unwrap(); // cascades and deletes edge2, edge3
+        tx.delete_edge(edge1).unwrap(); // explicit delete of edge1
+        // To avoid "EdgeNotFound" errors, let's only delete edges that are not part of the cascade.
+        let node6 = tx.create_node("Person", props.clone()).unwrap();
+        let edge4 = tx
+            .create_edge(node1, node6, "KNOWS", props.clone())
+            .unwrap();
+        tx.delete_edge(edge4).unwrap(); // Explicit deletion of an edge not involved in cascades
 
         // Commit should succeed without panicking on iterator exhaustion
         let result = tx.commit();
         assert!(
             result.is_ok(),
-            "Commit should succeed with correct tombstone ID count"
+            "Commit should succeed with correct tombstone ID count: {:?}",
+            result
         );
 
         // Verify deletes were applied
         assert!(current.get_node(node3).is_err());
-        assert!(current.get_node(node4).is_err());
-        assert!(current.get_edge(edge1).is_err());
-        assert!(current.get_edge(edge2).is_err());
+        assert!(current.get_edge(edge1).is_err()); // Explicit deletion
+        assert!(current.get_edge(edge2).is_err()); // Deleted via cascade from node3
+        assert!(current.get_edge(edge3).is_err()); // Deleted via cascade from node3
+        assert!(current.get_edge(edge4).is_err()); // Explicit deletion
 
         // Verify non-deleted entities still exist
         assert!(current.get_node(node1).is_ok());
         assert!(current.get_node(node2).is_ok());
+        assert!(current.get_node(node4).is_ok()); // node4 was not deleted
         assert!(current.get_node(node5).is_ok());
-        assert!(current.get_edge(edge3).is_ok());
     }
 
     #[test]
@@ -1219,7 +1228,7 @@ mod general_tests {
     // ===================================================================
 
     #[test]
-    fn test_delete_node_cascade_removes_edges() {
+    fn test_delete_node_removes_edges() {
         let (mut tx, _temp_dir) = create_test_write_tx();
         let current = Arc::clone(&tx.current);
 
@@ -1263,9 +1272,9 @@ mod general_tests {
         assert!(current.get_edge(edge2).is_ok());
         assert!(current.get_edge(edge3).is_ok());
 
-        // Delete the central node with cascade
+        // Delete the node
         let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
-        tx2.delete_node_cascade(central_node).unwrap();
+        tx2.delete_node(central_node).unwrap();
         tx2.commit().unwrap();
 
         // Verify the node was deleted
@@ -1292,7 +1301,7 @@ mod general_tests {
     }
 
     #[test]
-    fn test_delete_node_no_cascade_keeps_edges() {
+    fn test_delete_node_cascades_by_default() {
         let (mut tx, _temp_dir) = create_test_write_tx();
         let current = Arc::clone(&tx.current);
 
@@ -1316,7 +1325,7 @@ mod general_tests {
         // Verify edge exists
         assert!(current.get_edge(edge1).is_ok());
 
-        // Delete the node WITHOUT cascade (default behavior)
+        // Delete the node (now cascades by default)
         let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
         tx2.delete_node(central_node).unwrap();
         tx2.commit().unwrap();
@@ -1324,16 +1333,15 @@ mod general_tests {
         // Verify the node was deleted
         assert!(current.get_node(central_node).is_err());
 
-        // Verify edge still exists (NO CASCADE - current behavior)
-        // Note: This creates an orphaned edge, which is the problem issue #364 addresses
+        // Verify edge is also deleted due to cascading behavior
         assert!(
-            current.get_edge(edge1).is_ok(),
-            "Edge should remain when cascade is not enabled (current behavior)"
+            current.get_edge(edge1).is_err(),
+            "Edge should be deleted when cascade is enabled"
         );
     }
 
     #[test]
-    fn test_delete_node_cascade_with_bidirectional_edges() {
+    fn test_delete_node_with_bidirectional_edges() {
         let (mut tx, _temp_dir) = create_test_write_tx();
         let current = Arc::clone(&tx.current);
 
@@ -1352,9 +1360,9 @@ mod general_tests {
 
         tx.commit().unwrap();
 
-        // Delete node_a with cascade
+        // Delete node_a
         let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
-        tx2.delete_node_cascade(node_a).unwrap();
+        tx2.delete_node(node_a).unwrap();
         tx2.commit().unwrap();
 
         // Both edges should be deleted
@@ -1366,7 +1374,7 @@ mod general_tests {
     }
 
     #[test]
-    fn test_delete_node_cascade_performance_many_edges() {
+    fn test_delete_node_performance_many_edges() {
         let (mut tx, _temp_dir) = create_test_write_tx();
         let current = Arc::clone(&tx.current);
 
@@ -1427,7 +1435,7 @@ mod general_tests {
         // Delete the central node with cascade - should be performant
         let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
         let start = std::time::Instant::now();
-        tx2.delete_node_cascade(central_node).unwrap();
+        tx2.delete_node(central_node).unwrap();
         tx2.commit().unwrap();
         let elapsed = start.elapsed();
 
@@ -2246,19 +2254,14 @@ mod conflict_detection_tests {
                 "Node should be deleted after successful tx2 commit"
             );
 
-            // Current implementation: edge becomes orphaned but still exists in storage.
-            // This documents a limitation: the system allows orphaned edges.
-            // TODO(issue): Consider adding cascade delete or stricter referential integrity
+            // Cascade delete limitation: tx2's edge lookup happened BEFORE tx1 committed.
+            // Because our current edge traversal (get_outgoing_edges/get_incoming_edges)
+            // does NOT have read-your-writes semantics for concurrent transactions,
+            // tx2 didn't "see" tx1's newly created edge when it collected edges to delete.
+            // Thus, the edge becomes an orphan!
             assert!(
                 harness.current.get_edge(edge_id).is_ok(),
-                "Edge still exists as orphan (documents current behavior)"
-            );
-
-            // Verify the edge references the deleted node (orphaned edge)
-            let edge = harness.current.get_edge(edge_id).unwrap();
-            assert_eq!(
-                edge.target, node2,
-                "Edge still references deleted node (orphaned)"
+                "Edge still exists as orphan (documents limitation of concurrent edge creation vs deletion)"
             );
         }
 

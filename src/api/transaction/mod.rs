@@ -465,17 +465,10 @@ pub trait WriteOps: ReadOps {
         self.update_edge_with_valid_time(edge_id, properties, None)
     }
 
-    /// Delete a node with optional backdated valid_from time (without deleting connected edges).
+    /// Delete a node with optional backdated valid_from time.
     ///
-    /// # Warning
-    ///
-    /// This method does NOT delete edges connected to the node, which may leave
-    /// orphaned edges in the graph. For most use cases, prefer
-    /// [`delete_node_cascade`](Self::delete_node_cascade) which automatically
-    /// removes all connected edges to maintain referential integrity.
-    ///
-    /// Only use this method if you explicitly need to preserve edges for some
-    /// specialized use case.
+    /// This automatically performs a cascading delete on all edges connected
+    /// to the node to maintain referential integrity.
     ///
     /// # Example
     ///
@@ -500,10 +493,10 @@ pub trait WriteOps: ReadOps {
         valid_from: Option<Timestamp>,
     ) -> Result<()>;
 
-    /// Delete a node (leaves connected edges).
+    /// Delete a node and all connected edges.
     ///
-    /// **Warning**: This leaves orphaned edges. Use [`delete_node_cascade`](Self::delete_node_cascade)
-    /// for safe deletion.
+    /// This automatically performs a cascading delete on all edges connected
+    /// to the node to maintain referential integrity.
     ///
     /// ## Examples
     ///
@@ -555,7 +548,13 @@ pub trait WriteOps: ReadOps {
     /// # Ok(())
     /// # }
     /// ```
-    fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()>;
+    #[deprecated(
+        since = "0.1.0",
+        note = "delete_node now cascades by default. Use delete_node instead."
+    )]
+    fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()> {
+        self.delete_node(node_id)
+    }
 
     /// Delete an edge with optional backdated valid_from time
     ///

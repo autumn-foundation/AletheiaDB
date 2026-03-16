@@ -606,9 +606,8 @@ mod tests {
         assert!(path_t0.is_some(), "Path should exist at t0 before deletion");
 
         // Delete "Middle" node at t1 (which should break the path)
-        // Use delete_node_cascade to ensure edges are also deleted from current storage
         let (_, t_delete) = db
-            .write_with_timestamp(|tx| tx.delete_node_cascade(middle))
+            .write_with_timestamp(|tx| tx.delete_node(middle))
             .unwrap();
         let _t1 = t_delete;
 
