@@ -448,7 +448,10 @@ mod tests {
 
     impl StorageObserver for CollectingObserver {
         fn on_event(&self, event: &StorageEvent) -> Result<()> {
-            self.events.lock().unwrap().push(event.clone());
+            self.events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event.clone());
             Ok(())
         }
     }
@@ -559,7 +562,7 @@ mod tests {
         notify_observers(&observers, &event1);
         notify_observers(&observers, &event2);
 
-        let collected = collector.events.lock().unwrap();
+        let collected = collector.events.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0], event1);
         assert_eq!(collected[1], event2);
@@ -589,6 +592,42 @@ mod tests {
         };
 
         notify_observers(&observers, &event);
+    }
+
+    #[test]
+    fn test_collecting_observer_handles_poisoned_lock() {
+        use std::thread;
+
+        let collector = Arc::new(CollectingObserver {
+            events: Mutex::new(Vec::new()),
+        });
+
+        let collector_clone = collector.clone();
+
+        // Intentionally poison the lock
+        let _ = thread::spawn(move || {
+            let _guard = collector_clone.events.lock().unwrap();
+            panic!("Poisoning the lock!");
+        })
+        .join();
+
+        // Verify the lock is indeed poisoned
+        assert!(collector.events.lock().is_err());
+
+        // The observer should still be able to push events using unwrap_or_else
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        // This should not panic
+        let _ = collector.on_event(&event);
+
+        // Verify the event was added
+        let collected = collector.events.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0], event);
     }
 }
 
