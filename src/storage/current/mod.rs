@@ -2131,19 +2131,23 @@ impl CurrentStorage {
         use crate::storage::snapshot::CurrentStorageSnapshot;
         use std::sync::Arc;
 
-        // Collect Arc references to all nodes (cheap, ~8 bytes per node)
-        let nodes: Vec<Arc<Node>> = self
-            .indexes
-            .iter_nodes()
-            .map(|n| Arc::new(n.clone()))
-            .collect();
+        // Collect all nodes into a single contiguous block on the heap, and share it via Arc.
+        // ⚡ Bolt Optimization: Avoids thousands of individual `Arc::new()` heap allocations.
+        let nodes: Arc<Vec<Node>> = Arc::new(
+            self.indexes
+                .iter_nodes()
+                .map(|n| n.clone())
+                .collect()
+        );
 
-        // Collect Arc references to all edges (cheap, ~8 bytes per edge)
-        let edges: Vec<Arc<Edge>> = self
-            .indexes
-            .iter_edges()
-            .map(|e| Arc::new(e.clone()))
-            .collect();
+        // Collect all edges into a single contiguous block on the heap, and share it via Arc.
+        // ⚡ Bolt Optimization: Avoids thousands of individual `Arc::new()` heap allocations.
+        let edges: Arc<Vec<Edge>> = Arc::new(
+            self.indexes
+                .iter_edges()
+                .map(|e| e.clone())
+                .collect()
+        );
 
         CurrentStorageSnapshot::new(lsn, nodes, edges)
     }

@@ -9,3 +9,7 @@
 **Pre-allocated vector sizes based on strategy**
 **Learning:** When pre-allocating vectors based on multiple inputs, be mindful of the aggregation strategy. Concatenating requires `.sum()`, but merging or returning the first/best requires `.max()`. Using `.sum()` for a merge strategy causes severe O(N) memory over-allocation.
 **Action:** Always map the pre-allocation math directly to the behavior of the loop that populates it.
+
+**Optimize Checkpoint Heap Allocations with Arc<Vec<T>>**
+**Learning:** Changing a collection of Arc references (`Vec<Arc<T>>`) into an Arc reference of a collection (`Arc<Vec<T>>`) when read-only sharing is required drastically reduces allocator overhead. Iteration overhead remains similar (or improves due to cache locality), but thousands of individual heap allocations and atomic refcount operations during creation are entirely eliminated.
+**Action:** When capturing large graph structures for snapshots, prefer contiguous vectors wrapped in a single Arc rather than arrays of individual Arc allocations.

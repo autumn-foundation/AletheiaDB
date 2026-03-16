@@ -79,7 +79,8 @@ pub trait StorageSnapshot: Send + Sync {
 /// Snapshot of CurrentStorage at a specific LSN.
 ///
 /// Uses Arc-based COW to provide snapshot isolation without
-/// full data clones. Memory overhead is ~8 bytes per entity.
+/// full data clones. Memory overhead is significantly reduced by
+/// sharing a single contiguous block of heap memory per collection.
 ///
 /// # Isolation Guarantee
 ///
@@ -90,10 +91,14 @@ pub trait StorageSnapshot: Send + Sync {
 pub struct CurrentStorageSnapshot {
     /// LSN at which snapshot was taken
     lsn: LSN,
-    /// Arc references to nodes (cheap, ~8 bytes each)
-    nodes: Vec<Arc<Node>>,
-    /// Arc references to edges (cheap, ~8 bytes each)
-    edges: Vec<Arc<Edge>>,
+    /// Arc reference to a contiguous block of nodes.
+    /// ⚡ Bolt Optimization: Replaces `Vec<Arc<Node>>` to eliminate thousands of
+    /// individual heap allocations and improve cache locality during checkpointing.
+    nodes: Arc<Vec<Node>>,
+    /// Arc reference to a contiguous block of edges.
+    /// ⚡ Bolt Optimization: Replaces `Vec<Arc<Edge>>` to eliminate thousands of
+    /// individual heap allocations and improve cache locality during checkpointing.
+    edges: Arc<Vec<Edge>>,
 }
 
 impl CurrentStorageSnapshot {
@@ -102,21 +107,21 @@ impl CurrentStorageSnapshot {
     /// # Arguments
     ///
     /// * `lsn` - LSN at which snapshot was taken
-    /// * `nodes` - Arc references to nodes at snapshot time
-    /// * `edges` - Arc references to edges at snapshot time
-    pub fn new(lsn: LSN, nodes: Vec<Arc<Node>>, edges: Vec<Arc<Edge>>) -> Self {
+    /// * `nodes` - Arc reference to a vector of nodes at snapshot time
+    /// * `edges` - Arc reference to a vector of edges at snapshot time
+    pub fn new(lsn: LSN, nodes: Arc<Vec<Node>>, edges: Arc<Vec<Edge>>) -> Self {
         Self { lsn, nodes, edges }
     }
 
     /// Get nodes as a slice (for testing/debugging)
     #[cfg(test)]
-    pub fn nodes(&self) -> &[Arc<Node>] {
+    pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
 
     /// Get edges as a slice (for testing/debugging)
     #[cfg(test)]
-    pub fn edges(&self) -> &[Arc<Edge>] {
+    pub fn edges(&self) -> &[Edge] {
         &self.edges
     }
 }
@@ -157,7 +162,7 @@ impl StorageSnapshot for CurrentStorageSnapshot {
 /// Clones nodes from Arc references during iteration (streaming).
 /// No `Vec<Node>` allocation - memory efficient for large graphs.
 pub struct CurrentNodeIterator {
-    nodes: Vec<Arc<Node>>,
+    nodes: Arc<Vec<Node>>,
     index: usize,
 }
 
@@ -166,7 +171,7 @@ impl Iterator for CurrentNodeIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index < self.nodes.len() {
-            let node = (*self.nodes[self.index]).clone();
+            let node = self.nodes[self.index].clone();
             self.index += 1;
             Some(node)
         } else {
@@ -191,7 +196,7 @@ impl ExactSizeIterator for CurrentNodeIterator {
 /// Clones edges from Arc references during iteration (streaming).
 /// No `Vec<Edge>` allocation - memory efficient for large graphs.
 pub struct CurrentEdgeIterator {
-    edges: Vec<Arc<Edge>>,
+    edges: Arc<Vec<Edge>>,
     index: usize,
 }
 
@@ -200,7 +205,7 @@ impl Iterator for CurrentEdgeIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index < self.edges.len() {
-            let edge = (*self.edges[self.index]).clone();
+            let edge = self.edges[self.index].clone();
             self.index += 1;
             Some(edge)
         } else {
@@ -352,13 +357,13 @@ mod tests {
     #[test]
     fn test_current_snapshot_creation() {
         let lsn = LSN(42);
-        let nodes = vec![Arc::new(Node::new(
+        let nodes = Arc::new(vec![Node::new(
             NodeId::new(1).unwrap(),
             InternedString::from_raw(1),
             PropertyMap::new(),
             VersionId::new(1).unwrap(),
-        ))];
-        let edges = vec![];
+        )]);
+        let edges = Arc::new(vec![]);
 
         let snapshot = CurrentStorageSnapshot::new(lsn, nodes, edges);
 
@@ -370,22 +375,22 @@ mod tests {
     #[test]
     fn test_current_snapshot_iteration() {
         let lsn = LSN(10);
-        let nodes = vec![
-            Arc::new(Node::new(
+        let nodes = Arc::new(vec![
+            Node::new(
                 NodeId::new(1).unwrap(),
                 InternedString::from_raw(1),
                 PropertyMap::new(),
                 VersionId::new(1).unwrap(),
-            )),
-            Arc::new(Node::new(
+            ),
+            Node::new(
                 NodeId::new(2).unwrap(),
                 InternedString::from_raw(1),
                 PropertyMap::new(),
                 VersionId::new(2).unwrap(),
-            )),
-        ];
+            ),
+        ]);
 
-        let snapshot = CurrentStorageSnapshot::new(lsn, nodes, vec![]);
+        let snapshot = CurrentStorageSnapshot::new(lsn, nodes, Arc::new(vec![]));
 
         let collected: Vec<Node> = snapshot.iter_nodes().collect();
         assert_eq!(collected.len(), 2);
@@ -396,22 +401,22 @@ mod tests {
     #[test]
     fn test_iterator_exact_size() {
         let lsn = LSN(10);
-        let nodes = vec![
-            Arc::new(Node::new(
+        let nodes = Arc::new(vec![
+            Node::new(
                 NodeId::new(1).unwrap(),
                 InternedString::from_raw(1),
                 PropertyMap::new(),
                 VersionId::new(1).unwrap(),
-            )),
-            Arc::new(Node::new(
+            ),
+            Node::new(
                 NodeId::new(2).unwrap(),
                 InternedString::from_raw(1),
                 PropertyMap::new(),
                 VersionId::new(2).unwrap(),
-            )),
-        ];
+            ),
+        ]);
 
-        let snapshot = CurrentStorageSnapshot::new(lsn, nodes, vec![]);
+        let snapshot = CurrentStorageSnapshot::new(lsn, nodes, Arc::new(vec![]));
         let mut iter = snapshot.iter_nodes();
 
         assert_eq!(iter.len(), 2);
