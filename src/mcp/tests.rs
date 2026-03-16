@@ -1526,7 +1526,6 @@ mod server_handler_tests {
         assert!(instructions.contains("bi-temporal"));
     }
 
-
     #[test]
     fn test_get_info_instructions_content() {
         let server = create_test_server();
