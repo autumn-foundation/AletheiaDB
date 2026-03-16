@@ -49,6 +49,26 @@ impl<'a> Voyager<'a> {
     ///
     /// # Returns
     /// A sequential list of `NodeId`s representing the path taken, starting with `start_node`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::voyager::Voyager;
+    /// use aletheiadb::core::id::NodeId;
+    ///
+    /// let db = AletheiaDB::new()?;
+    /// let voyager = Voyager::new(&db);
+    /// let start_node = NodeId::new(1)?; // Assuming this node exists
+    ///
+    /// // Traverse up to 10 steps, always picking the most semantically novel neighbor
+    /// let path = voyager.traverse(start_node, "embedding", 10)?;
+    ///
+    /// println!("Voyager explored {} nodes.", path.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn traverse(
         &self,
         start_node: NodeId,

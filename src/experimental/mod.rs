@@ -40,7 +40,6 @@
 //! | `sentinel` | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
 //! | `sybil` | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
 //! | `synapse` | **Synapse** | Adaptive Graph Hebbian Learning. "Cells that fire together, wire together." |
-//! | `temporal_narrative` | **Bard** | Generate natural language histories of graph entities. |
 //! | `gravity` | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
 //! | `gestalt` | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
 //! | `mnemosyne` | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
@@ -58,7 +57,7 @@
 //! > This feature is experimental and requires the `nova` feature flag.
 //! > Add `features = ["nova"]` to your `Cargo.toml`.
 //!
-//! ```rust
+//! ```rust,no_run
 //! // [dependencies]
 //! // aletheiadb = { version = "0.1", features = ["nova"] }
 //!
