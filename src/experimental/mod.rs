@@ -233,6 +233,9 @@ pub mod luna;
 #[cfg(feature = "nova")]
 /// Spectre: Semantic Perspective Engine.
 pub mod spectre;
+#[cfg(feature = "nova")]
+/// Tapestry: Semantic Storyline Weaver.
+pub mod tapestry;
 
 #[cfg(feature = "nova")]
 /// Voyager: Maximal Novelty Traversal Engine.
