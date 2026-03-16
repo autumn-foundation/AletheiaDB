@@ -1,3 +1,27 @@
+//! HNSW Index Persistence and Integrity.
+//!
+//! This module handles the serialization, deserialization, and validation of
+//! vector index mapping files. Because the underlying HNSW implementation (usearch)
+//! manages its own binary index file, AletheiaDB must maintain a separate "mapping file"
+//! to translate between external [`NodeId`]s and internal HNSW integer keys.
+//!
+//! # Architecture
+//!
+//! The persistence layer uses a two-file architecture:
+//! 1. **Index File** (`.bin`): The raw HNSW graph managed by `usearch`.
+//! 2. **Mapping File** (`.idx`): The companion file managed by this module, containing
+//!    the bidirectional mappings between [`NodeId`] and `u64` keys, alongside metadata.
+//!
+//! # Security & Integrity
+//!
+//! Mapping files are explicitly designed to resist data corruption and DoS attacks:
+//! - **Magic Bytes & Versioning:** Ensures file type correctness (`GMAP`).
+//! - **Streaming Reads:** Files are loaded via buffered streaming rather than `mmap` or
+//!   loading into memory all at once, preventing OOM crashes on massively oversized files.
+//! - **Checksums:** Every mapping file ends with a CRC32 checksum to verify structural integrity.
+//! - **Pre-allocation limits:** The `MAX_MAPPINGS_COUNT` constant explicitly caps the maximum
+//!   number of entries to prevent Memory Exhaustion DoS attacks.
+
 use super::config::HnswConfig;
 use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
@@ -26,11 +50,19 @@ pub(crate) const MAPPING_VERSION: u8 = 2;
 /// 100M entries * (16 bytes data + ~32 bytes DashMap overhead) ≈ 4.8GB RAM.
 pub(crate) const MAX_MAPPINGS_COUNT: usize = 100_000_000;
 
-/// Metadata stored in the mappings file (Version 2+)
+/// Metadata stored in the mappings file (Version 2+).
+///
+/// This struct holds the critical configuration parameters that must match exactly
+/// between the loaded mapping file and the active [`HnswConfig`]. If these differ,
+/// the index is considered incompatible and will refuse to load to prevent
+/// buffer over-reads or mathematical errors.
 #[derive(Debug)]
 pub(crate) struct IndexMetadata {
+    /// The size of the vector (e.g., 384 for `all-MiniLM-L6-v2`).
     pub dimensions: usize,
+    /// The numeric precision used for storage (e.g., F32, F16).
     pub quantization: Quantization,
+    /// The distance formula used to calculate similarity (e.g., Cosine, Euclidean).
     pub metric: DistanceMetric,
 }
 
