@@ -95,6 +95,20 @@ pub trait ReadOps {
     ///
     /// - **Fast Path**: O(1) lookup in current storage (hash map)
     /// - **Slow Path**: O(log N) lookup in historical storage if not found in current (or version not visible)
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let node = tx.get_node(node_id)?;
+    /// println!("Node label: {:?}", node.label);
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_node(&self, id: NodeId) -> Result<Node>;
 
     /// Get an edge by ID.
@@ -106,6 +120,20 @@ pub trait ReadOps {
     /// If the edge has been modified or deleted by another transaction after this
     /// transaction started, `get_edge` will return the version visible at the start
     /// of this transaction (Snapshot Isolation).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::EdgeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// let edge = tx.get_edge(edge_id)?;
+    /// println!("Edge label: {:?}", edge.label);
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_edge(&self, id: EdgeId) -> Result<Edge>;
 
     /// Get outgoing edges from a node.
@@ -190,6 +218,19 @@ pub trait ReadOps {
     ///
     /// This design choice enables O(1) performance without scanning the entire
     /// database to filter visibility for every node.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// let count = tx.node_count();
+    /// println!("Database contains {} nodes", count);
+    /// # Ok(())
+    /// # }
+    /// ```
     fn node_count(&self) -> usize;
 
     /// Get the approximate number of edges in the database.
@@ -199,6 +240,22 @@ pub trait ReadOps {
     /// This returns the **current** count of committed edges in the storage engine.
     /// Unlike `get_edge()`, this count is **NOT snapshot-isolated**. It may include
     /// edges created by transactions that committed after this read transaction started.
+    ///
+    /// This design choice enables O(1) performance without scanning the entire
+    /// database to filter visibility for every edge.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// let count = tx.edge_count();
+    /// println!("Database contains {} edges", count);
+    /// # Ok(())
+    /// # }
+    /// ```
     fn edge_count(&self) -> usize;
 
     /// Find nodes by label and property value.
