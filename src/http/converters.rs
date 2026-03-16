@@ -479,7 +479,11 @@ mod tests {
         let value = json!({"key": "value"});
         let result = json_to_property_value(&value);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Nested objects are not supported"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Nested objects are not supported")
+        );
     }
 
     #[test]
