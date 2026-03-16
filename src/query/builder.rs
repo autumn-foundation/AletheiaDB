@@ -125,6 +125,17 @@ pub mod state {
 ///
 /// The generic parameter `S` tracks the current state of the query,
 /// which determines what operations are available.
+///
+/// A trait for executing queries, typically implemented by a database instance.
+pub trait QueryExecutable {
+    /// Executes the given query.
+    fn execute_query(
+        &self,
+        query: crate::query::Query,
+    ) -> crate::core::error::Result<crate::query::executor::QueryResults>;
+}
+
+/// Builder for constructing queries safely step-by-step.
 #[derive(Debug, Clone)]
 pub struct QueryBuilder<S: QueryState> {
     ops: Vec<QueryOp>,
@@ -801,7 +812,7 @@ impl<S: QueryState> QueryBuilder<S> {
     /// ```
     pub fn execute(
         self,
-        db: &crate::AletheiaDB,
+        db: &impl QueryExecutable,
     ) -> crate::core::error::Result<super::executor::QueryResults> {
         let query = self.build();
         db.execute_query(query)

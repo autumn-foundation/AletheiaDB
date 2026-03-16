@@ -217,3 +217,15 @@ impl AletheiaDB {
         self.execute_query(query)
     }
 }
+
+impl crate::query::builder::QueryExecutable for AletheiaDB {
+    fn execute_query(&self, query: crate::query::Query) -> Result<QueryResults> {
+        self.execute_query(query)
+    }
+}
+
+impl crate::query::builder::QueryExecutable for std::sync::Arc<AletheiaDB> {
+    fn execute_query(&self, query: crate::query::Query) -> Result<QueryResults> {
+        (**self).execute_query(query)
+    }
+}
