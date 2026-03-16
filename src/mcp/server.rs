@@ -151,6 +151,14 @@ use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 
 use super::tools::*;
 
+struct HybridQueryContext<'a> {
+    req: &'a HybridQueryRequest,
+    valid_time: Option<Timestamp>,
+    tx_time: Option<Timestamp>,
+    depth: usize,
+    limit: usize,
+}
+
 // ============================================================================
 // Resource Limits (to prevent DoS attacks)
 // ============================================================================
@@ -924,6 +932,87 @@ impl AletheiaMcpServer {
         }
     }
 
+    fn handle_list_nodes_with_property_filter(
+        &self,
+        label: &str,
+        prop_key: &str,
+        prop_val: &serde_json::Value,
+        limit: usize,
+        offset: usize,
+    ) -> CallToolResult {
+        let property_value = match self.json_to_property_value(prop_val) {
+            Some(v) => v,
+            None => {
+                return self.error_json(
+                    "Unsupported property_value type. Use strings, numbers, booleans, or null.",
+                );
+            }
+        };
+
+        let node_ids = self
+            .db
+            .find_nodes_by_property(label, prop_key, &property_value);
+
+        let mut nodes = Vec::with_capacity(limit);
+        for node_id in node_ids.into_iter().skip(offset).take(limit) {
+            if let Ok(node) = self.db.get_node(node_id) {
+                nodes.push(self.node_to_response(&node));
+            }
+        }
+
+        self.success_json(json!({
+            "nodes": nodes,
+            "count": nodes.len(),
+            "offset": offset,
+            "limit": limit
+        }))
+    }
+
+    fn handle_list_nodes_with_label_scan(
+        &self,
+        label: &str,
+        limit: usize,
+        offset: usize,
+    ) -> CallToolResult {
+        let builder = crate::query::QueryBuilder::new().scan_label(label);
+
+        // Note: We fetch offset+limit rows then skip offset.
+        // Offset is capped to prevent excessive memory use.
+        match builder.limit(limit + offset).execute(&self.db) {
+            Ok(results) => {
+                // Use iterator-based approach to avoid allocating full Vec
+                let mut nodes = Vec::with_capacity(limit);
+                let mut skipped = 0;
+
+                for row_result in results {
+                    match row_result {
+                        Ok(row) => {
+                            if skipped < offset {
+                                skipped += 1;
+                                continue;
+                            }
+                            if let EntityResult::Node(node) = row.entity {
+                                nodes.push(self.node_to_response(&node));
+                                if nodes.len() >= limit {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => return self.error_json(&e.to_string()),
+                    }
+                }
+
+                self.success_json(json!({
+                    "nodes": nodes,
+                    "count": nodes.len(),
+                    "offset": offset,
+                    "limit": limit
+                }))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
     fn handle_list_nodes(&self, args: serde_json::Value) -> CallToolResult {
         let req: ListNodesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -950,84 +1039,25 @@ impl AletheiaMcpServer {
         if let (Some(label), Some(prop_key), Some(prop_val)) =
             (&req.label, &req.property_key, &req.property_value)
         {
-            let property_value =
-                match self.json_to_property_value(prop_val) {
-                    Some(v) => v,
-                    None => return self.error_json(
-                        "Unsupported property_value type. Use strings, numbers, booleans, or null.",
-                    ),
-                };
-
-            let node_ids = self
-                .db
-                .find_nodes_by_property(label, prop_key, &property_value);
-
-            let mut nodes = Vec::with_capacity(limit);
-            for node_id in node_ids.into_iter().skip(offset).take(limit) {
-                if let Ok(node) = self.db.get_node(node_id) {
-                    nodes.push(self.node_to_response(&node));
-                }
-            }
-
-            return self.success_json(json!({
-                "nodes": nodes,
-                "count": nodes.len(),
-                "offset": offset,
-                "limit": limit
-            }));
+            return self
+                .handle_list_nodes_with_property_filter(label, prop_key, prop_val, limit, offset);
         }
 
         // Label-only scan
         if let Some(label) = &req.label {
-            let builder = crate::query::QueryBuilder::new().scan_label(label);
-
-            // Note: We fetch offset+limit rows then skip offset.
-            // Offset is capped to prevent excessive memory use.
-            match builder.limit(limit + offset).execute(&self.db) {
-                Ok(results) => {
-                    // Use iterator-based approach to avoid allocating full Vec
-                    let mut nodes = Vec::with_capacity(limit);
-                    let mut skipped = 0;
-
-                    for row_result in results {
-                        match row_result {
-                            Ok(row) => {
-                                if skipped < offset {
-                                    skipped += 1;
-                                    continue;
-                                }
-                                if let EntityResult::Node(node) = row.entity {
-                                    nodes.push(self.node_to_response(&node));
-                                    if nodes.len() >= limit {
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => return self.error_json(&e.to_string()),
-                        }
-                    }
-
-                    self.success_json(json!({
-                        "nodes": nodes,
-                        "count": nodes.len(),
-                        "offset": offset,
-                        "limit": limit
-                    }))
-                }
-                Err(e) => self.error_json(&e.to_string()),
-            }
-        } else {
-            // Without a label filter, we cannot efficiently list all nodes
-            // Return a helpful message
-            self.success_json(json!({
-                "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
-                "total_count": self.db.node_count(),
-                "nodes": [],
-                "count": 0,
-                "offset": offset,
-                "limit": limit
-            }))
+            return self.handle_list_nodes_with_label_scan(label, limit, offset);
         }
+
+        // Without a label filter, we cannot efficiently list all nodes
+        // Return a helpful message
+        self.success_json(json!({
+            "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
+            "total_count": self.db.node_count(),
+            "nodes": [],
+            "count": 0,
+            "offset": offset,
+            "limit": limit
+        }))
     }
 
     fn handle_count_nodes(&self, args: serde_json::Value) -> CallToolResult {
@@ -1282,6 +1312,50 @@ impl AletheiaMcpServer {
         }))
     }
 
+    fn get_traverse_edges(
+        &self,
+        current_id: NodeId,
+        direction: &str,
+        edge_label: &str,
+    ) -> Vec<EdgeId> {
+        match direction {
+            "incoming" => {
+                // Filter incoming edges by label manually
+                self.db
+                    .get_incoming_edges(current_id)
+                    .into_iter()
+                    .filter(|eid| {
+                        self.db
+                            .get_edge(*eid)
+                            .map(|e| self.matches_label(e.label, edge_label))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            }
+            "both" => {
+                let mut edges = self
+                    .db
+                    .get_outgoing_edges_with_label(current_id, edge_label);
+                let incoming: Vec<EdgeId> = self
+                    .db
+                    .get_incoming_edges(current_id)
+                    .into_iter()
+                    .filter(|eid| {
+                        self.db
+                            .get_edge(*eid)
+                            .map(|e| self.matches_label(e.label, edge_label))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                edges.extend(incoming);
+                edges
+            }
+            _ => self
+                .db
+                .get_outgoing_edges_with_label(current_id, edge_label),
+        }
+    }
+
     fn handle_traverse(&self, args: serde_json::Value) -> CallToolResult {
         let req: TraverseRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -1326,42 +1400,7 @@ impl AletheiaMcpServer {
             }
 
             if current_depth < depth {
-                let edge_ids: Vec<EdgeId> = match direction {
-                    "incoming" => {
-                        // Filter incoming edges by label manually
-                        self.db
-                            .get_incoming_edges(current_id)
-                            .into_iter()
-                            .filter(|eid| {
-                                self.db
-                                    .get_edge(*eid)
-                                    .map(|e| self.matches_label(e.label, &req.edge_label))
-                                    .unwrap_or(false)
-                            })
-                            .collect()
-                    }
-                    "both" => {
-                        let mut edges = self
-                            .db
-                            .get_outgoing_edges_with_label(current_id, &req.edge_label);
-                        let incoming: Vec<EdgeId> = self
-                            .db
-                            .get_incoming_edges(current_id)
-                            .into_iter()
-                            .filter(|eid| {
-                                self.db
-                                    .get_edge(*eid)
-                                    .map(|e| self.matches_label(e.label, &req.edge_label))
-                                    .unwrap_or(false)
-                            })
-                            .collect();
-                        edges.extend(incoming);
-                        edges
-                    }
-                    _ => self
-                        .db
-                        .get_outgoing_edges_with_label(current_id, &req.edge_label),
-                };
+                let edge_ids = self.get_traverse_edges(current_id, direction, &req.edge_label);
 
                 for edge_id in edge_ids {
                     if let Ok(edge) = self.db.get_edge(edge_id) {
@@ -1846,6 +1885,147 @@ impl AletheiaMcpServer {
         })
     }
 
+    fn hybrid_query_by_node_id(
+        &self,
+        node_id: NodeId,
+        ctx: &HybridQueryContext<'_>,
+        rows_to_results: impl Fn(Vec<crate::query::executor::QueryRow>) -> Vec<HybridQueryResult>,
+    ) -> CallToolResult {
+        // If temporal filtering requested, use temporal query
+        if let (Some(vt), Some(tt)) = (ctx.valid_time, ctx.tx_time) {
+            // Temporal query for a single node
+            return match self.db.get_node_at_time(node_id, vt, tt) {
+                Ok(node) => {
+                    let response = self.node_to_response(&node);
+                    self.success_json(json!({
+                        "results": [HybridQueryResult {
+                            node: response,
+                            similarity_score: None,
+                            traversal_path: Some(vec![node_id.as_u64()]),
+                            timestamp: Some(vt.wallclock().to_string()),
+                        }],
+                        "count": 1,
+                        "temporal_query": {
+                            "valid_time": ctx.req.valid_time,
+                            "transaction_time": ctx.req.transaction_time
+                        }
+                    }))
+                }
+                Err(e) => self.error_json(&e.to_string()),
+            };
+        }
+
+        // Graph-first query with optional vector ranking
+        let builder = crate::query::QueryBuilder::new().start(node_id);
+
+        let builder = if let Some(ref edge_label) = ctx.req.traverse_edge {
+            if ctx.depth > 1 {
+                builder.traverse_n(edge_label, ctx.depth)
+            } else {
+                builder.traverse(edge_label)
+            }
+        } else {
+            // Just return the start node
+            return match self.db.get_node(node_id) {
+                Ok(node) => {
+                    let response = self.node_to_response(&node);
+                    self.success_json(json!({
+                        "results": [HybridQueryResult {
+                            node: response,
+                            similarity_score: None,
+                            traversal_path: Some(vec![node_id.as_u64()]),
+                            timestamp: None,
+                        }],
+                        "count": 1
+                    }))
+                }
+                Err(e) => self.error_json(&e.to_string()),
+            };
+        };
+
+        // Execute and collect results
+        match builder.limit(ctx.limit).execute(&self.db) {
+            Ok(results) => match results.collect_all() {
+                Ok(rows) => {
+                    let hybrid_results = rows_to_results(rows);
+                    self.success_json(json!({
+                        "results": hybrid_results,
+                        "count": hybrid_results.len()
+                    }))
+                }
+                Err(e) => self.error_json(&e.to_string()),
+            },
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn hybrid_query_by_embedding(
+        &self,
+        embedding: &[f32],
+        req: &HybridQueryRequest,
+        k: usize,
+        limit: usize,
+        rows_to_results: impl Fn(Vec<crate::query::executor::QueryRow>) -> Vec<HybridQueryResult>,
+    ) -> CallToolResult {
+        // Vector-first query
+        // Use vector_property if specified
+        let property_name = req.vector_property.as_deref().unwrap_or("embedding");
+
+        // Check if vector index is enabled for the property
+        if !self.db.is_vector_index_enabled_for(property_name) {
+            return self.error_json(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                property_name
+            ));
+        }
+
+        // Validate embedding dimensions
+        if let Err(e) = self.validate_embedding_dimensions(embedding, property_name) {
+            return self.error_json(&e);
+        }
+
+        let builder = crate::query::QueryBuilder::new().find_similar(embedding, k);
+
+        match builder.limit(limit).execute(&self.db) {
+            Ok(results) => match results.collect_all() {
+                Ok(rows) => {
+                    let hybrid_results = rows_to_results(rows);
+                    self.success_json(json!({
+                        "results": hybrid_results,
+                        "count": hybrid_results.len(),
+                        "vector_property": property_name
+                    }))
+                }
+                Err(e) => self.error_json(&e.to_string()),
+            },
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn hybrid_query_by_label(
+        &self,
+        label: &str,
+        limit: usize,
+        rows_to_results: impl Fn(Vec<crate::query::executor::QueryRow>) -> Vec<HybridQueryResult>,
+    ) -> CallToolResult {
+        // Label scan query
+        let builder = crate::query::QueryBuilder::new().scan_label(label);
+
+        match builder.limit(limit).execute(&self.db) {
+            Ok(results) => match results.collect_all() {
+                Ok(rows) => {
+                    let hybrid_results = rows_to_results(rows);
+                    self.success_json(json!({
+                        "results": hybrid_results,
+                        "count": hybrid_results.len()
+                    }))
+                }
+                Err(e) => self.error_json(&e.to_string()),
+            },
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -1911,124 +2091,18 @@ impl AletheiaMcpServer {
                 Ok(id) => id,
                 Err(e) => return self.error_json(&e.to_string()),
             };
-
-            // If temporal filtering requested, use temporal query
-            if let (Some(vt), Some(tt)) = (valid_time, tx_time) {
-                // Temporal query for a single node
-                return match self.db.get_node_at_time(node_id, vt, tt) {
-                    Ok(node) => {
-                        let response = self.node_to_response(&node);
-                        self.success_json(json!({
-                            "results": [HybridQueryResult {
-                                node: response,
-                                similarity_score: None,
-                                traversal_path: Some(vec![node_id.as_u64()]),
-                                timestamp: Some(vt.wallclock().to_string()),
-                            }],
-                            "count": 1,
-                            "temporal_query": {
-                                "valid_time": req.valid_time,
-                                "transaction_time": req.transaction_time
-                            }
-                        }))
-                    }
-                    Err(e) => self.error_json(&e.to_string()),
-                };
-            }
-
-            // Graph-first query with optional vector ranking
-            let builder = crate::query::QueryBuilder::new().start(node_id);
-
-            let builder = if let Some(ref edge_label) = req.traverse_edge {
-                if depth > 1 {
-                    builder.traverse_n(edge_label, depth)
-                } else {
-                    builder.traverse(edge_label)
-                }
-            } else {
-                // Just return the start node
-                return match self.db.get_node(node_id) {
-                    Ok(node) => {
-                        let response = self.node_to_response(&node);
-                        self.success_json(json!({
-                            "results": [HybridQueryResult {
-                                node: response,
-                                similarity_score: None,
-                                traversal_path: Some(vec![node_id.as_u64()]),
-                                timestamp: None,
-                            }],
-                            "count": 1
-                        }))
-                    }
-                    Err(e) => self.error_json(&e.to_string()),
-                };
+            let ctx = HybridQueryContext {
+                req: &req,
+                valid_time,
+                tx_time,
+                depth,
+                limit,
             };
-
-            // Execute and collect results
-            match builder.limit(limit).execute(&self.db) {
-                Ok(results) => match results.collect_all() {
-                    Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
-                        self.success_json(json!({
-                            "results": hybrid_results,
-                            "count": hybrid_results.len()
-                        }))
-                    }
-                    Err(e) => self.error_json(&e.to_string()),
-                },
-                Err(e) => self.error_json(&e.to_string()),
-            }
+            self.hybrid_query_by_node_id(node_id, &ctx, rows_to_results)
         } else if let Some(ref embedding) = req.query_embedding {
-            // Vector-first query
-            // Use vector_property if specified
-            let property_name = req.vector_property.as_deref().unwrap_or("embedding");
-
-            // Check if vector index is enabled for the property
-            if !self.db.is_vector_index_enabled_for(property_name) {
-                return self.error_json(&format!(
-                    "Vector index not enabled for property '{}'. Use enable_vector_index first.",
-                    property_name
-                ));
-            }
-
-            // Validate embedding dimensions
-            if let Err(e) = self.validate_embedding_dimensions(embedding, property_name) {
-                return self.error_json(&e);
-            }
-
-            let builder = crate::query::QueryBuilder::new().find_similar(embedding, k);
-
-            match builder.limit(limit).execute(&self.db) {
-                Ok(results) => match results.collect_all() {
-                    Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
-                        self.success_json(json!({
-                            "results": hybrid_results,
-                            "count": hybrid_results.len(),
-                            "vector_property": property_name
-                        }))
-                    }
-                    Err(e) => self.error_json(&e.to_string()),
-                },
-                Err(e) => self.error_json(&e.to_string()),
-            }
+            self.hybrid_query_by_embedding(embedding, &req, k, limit, rows_to_results)
         } else if let Some(ref label) = req.filter_label {
-            // Label scan query
-            let builder = crate::query::QueryBuilder::new().scan_label(label);
-
-            match builder.limit(limit).execute(&self.db) {
-                Ok(results) => match results.collect_all() {
-                    Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
-                        self.success_json(json!({
-                            "results": hybrid_results,
-                            "count": hybrid_results.len()
-                        }))
-                    }
-                    Err(e) => self.error_json(&e.to_string()),
-                },
-                Err(e) => self.error_json(&e.to_string()),
-            }
+            self.hybrid_query_by_label(label, limit, rows_to_results)
         } else {
             self.error_json("Must specify either start_node_id, query_embedding, or filter_label")
         }
