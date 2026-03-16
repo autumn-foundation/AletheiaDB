@@ -2133,21 +2133,13 @@ impl CurrentStorage {
 
         // Collect all nodes into a single contiguous block on the heap, and share it via Arc.
         // ⚡ Bolt Optimization: Avoids thousands of individual `Arc::new()` heap allocations.
-        let nodes: Arc<Vec<Node>> = Arc::new(
-            self.indexes
-                .iter_nodes()
-                .map(|n| n.clone())
-                .collect()
-        );
+        let nodes: Arc<Vec<Node>> =
+            Arc::new(self.indexes.iter_nodes().map(|n| n.clone()).collect());
 
         // Collect all edges into a single contiguous block on the heap, and share it via Arc.
         // ⚡ Bolt Optimization: Avoids thousands of individual `Arc::new()` heap allocations.
-        let edges: Arc<Vec<Edge>> = Arc::new(
-            self.indexes
-                .iter_edges()
-                .map(|e| e.clone())
-                .collect()
-        );
+        let edges: Arc<Vec<Edge>> =
+            Arc::new(self.indexes.iter_edges().map(|e| e.clone()).collect());
 
         CurrentStorageSnapshot::new(lsn, nodes, edges)
     }
