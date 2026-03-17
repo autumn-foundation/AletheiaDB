@@ -1092,3 +1092,71 @@ fn test_timerange_from_at_mutants_strict() {
     });
     assert!(res.is_ok(), "Mutant test: != -> == in at");
 }
+
+#[test]
+fn test_time_conversions_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TIMESTAMP_MAX;
+    use aletheiadb::core::temporal::time;
+
+    // Test to_iso8601
+    assert_eq!(
+        time::to_iso8601(TIMESTAMP_MAX),
+        "current",
+        "Mutant test: to_iso8601 TIMESTAMP_MAX"
+    );
+
+    // We test that `to_iso8601` performs its internal calculations without hardcoding the
+    // platform-specific `Debug` format of `SystemTime` it currently returns.
+    // The current implementation is known to return `SystemTime` debug strings, not actual ISO8601.
+    // We assert that the output changes when the input timestamp changes, which kills arithmetic mutants.
+
+    let ts_base = HybridTimestamp::new(2_500_000, 0).unwrap();
+    let ts_diff = HybridTimestamp::new(3_500_000, 0).unwrap();
+
+    let iso_base = time::to_iso8601(ts_base);
+    let iso_diff = time::to_iso8601(ts_diff);
+
+    assert_ne!(
+        iso_base, iso_diff,
+        "Mutant test: arithmetic operations in to_iso8601 must affect the final output string"
+    );
+
+    // Let's test from_secs
+    assert_eq!(
+        time::from_secs(2),
+        HybridTimestamp::new(2_000_000, 0).unwrap(),
+        "Mutant test: from_secs * -> +/etc"
+    );
+
+    // Test from_millis
+    assert_eq!(
+        time::from_millis(2000),
+        HybridTimestamp::new(2_000_000, 0).unwrap(),
+        "Mutant test: from_millis * -> +/etc"
+    );
+
+    // Test to_secs
+    assert_eq!(
+        time::to_secs(HybridTimestamp::new(2_000_000, 0).unwrap()),
+        2,
+        "Mutant test: to_secs / -> *"
+    );
+    assert_eq!(
+        time::to_secs(HybridTimestamp::new(3_000_000, 0).unwrap()),
+        3,
+        "Mutant test: to_secs 0 or 1"
+    );
+
+    // Test to_millis
+    assert_eq!(
+        time::to_millis(HybridTimestamp::new(2_000_000, 0).unwrap()),
+        2000,
+        "Mutant test: to_millis / -> *"
+    );
+    assert_eq!(
+        time::to_millis(HybridTimestamp::new(3_000_000, 0).unwrap()),
+        3000,
+        "Mutant test: to_millis 0 or 1"
+    );
+}

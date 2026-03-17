@@ -339,3 +339,17 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[Temporal Time Conversions Coverage Gap]**
+**Module:** `src/core/temporal.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `time::from_secs`, `time::from_millis`, `time::to_secs`, `time::to_millis`, and `time::to_iso8601` methods lacked dedicated strict tests. As a result, many basic mathematical operations (`/` mutated to `*`, etc) within them could be mutated without failing any test cases.
+**Evidence:** Missing explicit test boundaries for internal maths.
+**Recommendation:** Added `test_time_conversions_mutants_strict` which covers exact values for integer conversions and ensures `to_iso8601` doesn't output blank or identical constant outputs.
+
+**[Temporal `to_iso8601` Bug and Weak Test Avoidance]**
+**Module:** `src/core/temporal.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The function `time::to_iso8601` is actively hiding a bug where it outputs a raw `SystemTime` debug string (`SystemTime { tv_sec: ... }`) instead of a valid ISO-8601 string. The initial strict test attempt highlighted this brittle behavior.
+**Evidence:** The output string format depends entirely on the OS implementation of `Debug` for `std::time::SystemTime`.
+**Recommendation:** Documented this bug. In `test_time_conversions_mutants_strict`, we opted for an `assert_ne` check using distinct inputs to catch arithmetic mutations without codifying and asserting against the currently broken, non-ISO-8601 `Debug` output format. The production code should be fixed to output true ISO-8601 (e.g., using `chrono`) as the comments inside the function suggest.
