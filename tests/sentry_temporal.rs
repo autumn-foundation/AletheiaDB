@@ -822,3 +822,273 @@ fn test_timerange_contains_range_strict_bounds() {
         "Bounded range cannot contain unbounded range"
     );
 }
+
+#[test]
+fn test_timerange_contains_range_replace_leq_with_gt_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let outer = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    let inner1 = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(180, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        outer.contains_range(&inner1),
+        "Mutant test: inner start strictly greater than outer start"
+    );
+
+    let not_inner = TimeRange::new(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !outer.contains_range(&not_inner),
+        "Mutant test: should not contain overlapping but strictly wider range"
+    );
+
+    let left_overlapping = TimeRange::new(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(150, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !outer.contains_range(&left_overlapping),
+        "Mutant test: && -> || where 1st is false, 2nd is true"
+    );
+
+    let right_overlapping = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !outer.contains_range(&right_overlapping),
+        "Mutant test: && -> || where 1st is true, 2nd is false"
+    );
+}
+
+#[test]
+fn test_timerange_overlaps_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let self_range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    let overlapping = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(self_range.overlaps(&overlapping), "Should overlap");
+
+    let not_overlapping_right = TimeRange::new(
+        HybridTimestamp::new(200, 0).unwrap(),
+        HybridTimestamp::new(300, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !self_range.overlaps(&not_overlapping_right),
+        "Should not overlap"
+    );
+
+    let empty_self = TimeRange::at(HybridTimestamp::new(150, 0).unwrap());
+    assert!(
+        !empty_self.overlaps(&overlapping),
+        "Empty range should not overlap"
+    );
+
+    let disjoint_right = TimeRange::new(
+        HybridTimestamp::new(250, 0).unwrap(),
+        HybridTimestamp::new(300, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !self_range.overlaps(&disjoint_right),
+        "Disjoint right: && -> || mutant"
+    );
+
+    let disjoint_left = TimeRange::new(
+        HybridTimestamp::new(10, 0).unwrap(),
+        HybridTimestamp::new(50, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !self_range.overlaps(&disjoint_left),
+        "Disjoint left: && -> || mutant"
+    );
+
+    let left_touch = TimeRange::new(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(100, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !self_range.overlaps(&left_touch),
+        "Mutant test: replace < with <= (self.start < other.end)"
+    );
+
+    let right_touch = TimeRange::new(
+        HybridTimestamp::new(200, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !self_range.overlaps(&right_touch),
+        "Mutant test: replace < with <= (other.start < self.end)"
+    );
+
+    assert!(
+        !self_range.overlaps(&disjoint_left),
+        "Mutant test: replace < with > (self.start < other.end)"
+    );
+
+    assert!(
+        self_range.overlaps(&overlapping),
+        "Mutant test: replace < with =="
+    );
+}
+
+#[test]
+fn test_timerange_contains_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    assert!(
+        range.contains(HybridTimestamp::new(150, 0).unwrap()),
+        "Should contain"
+    );
+    assert!(
+        !range.contains(HybridTimestamp::new(250, 0).unwrap()),
+        "Should not contain"
+    );
+    assert!(
+        !range.contains(HybridTimestamp::new(50, 0).unwrap()),
+        "Should not contain"
+    );
+
+    assert!(
+        !range.contains(HybridTimestamp::new(50, 0).unwrap()),
+        "Mutant test: && -> || (50)"
+    );
+    assert!(
+        !range.contains(HybridTimestamp::new(250, 0).unwrap()),
+        "Mutant test: && -> || (250)"
+    );
+
+    assert!(
+        !range.contains(HybridTimestamp::new(50, 0).unwrap()),
+        "Mutant test: >= -> <"
+    );
+
+    assert!(
+        !range.contains(HybridTimestamp::new(200, 0).unwrap()),
+        "Mutant test: < -> <= in contains"
+    );
+
+    assert!(
+        !range.contains(HybridTimestamp::new(200, 0).unwrap()),
+        "Mutant test: < -> == in contains"
+    );
+    assert!(
+        range.contains(HybridTimestamp::new(150, 0).unwrap()),
+        "Mutant test: < -> == (inner)"
+    );
+
+    assert!(
+        !range.contains(HybridTimestamp::new(250, 0).unwrap()),
+        "Mutant test: < -> > in contains"
+    );
+}
+
+#[test]
+fn test_timerange_contains_or_after_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    assert!(
+        range.contains_or_after(HybridTimestamp::new(150, 0).unwrap()),
+        "Should contain_or_after"
+    );
+    assert!(
+        !range.contains_or_after(HybridTimestamp::new(50, 0).unwrap()),
+        "Should not contain_or_after"
+    );
+
+    assert!(
+        !range.contains_or_after(HybridTimestamp::new(50, 0).unwrap()),
+        "Mutant test: >= -> < in contains_or_after"
+    );
+
+    assert!(
+        range.contains_or_after(HybridTimestamp::new(100, 0).unwrap()),
+        "Mutant test boundary: >= -> <"
+    );
+}
+
+#[test]
+fn test_timerange_from_at_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
+
+    let valid_start = HybridTimestamp::new(100, 0).unwrap();
+    let range = TimeRange::from(valid_start);
+
+    assert_eq!(range.start(), valid_start, "Mutant test: from -> default");
+    assert_eq!(range.end(), TIMESTAMP_MAX, "Mutant test: from -> default");
+
+    let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let res = std::panic::catch_unwind(|| {
+        TimeRange::from(max_valid);
+    });
+    assert!(res.is_ok(), "Mutant test: > -> >= (should succeed for ==)");
+
+    let res = std::panic::catch_unwind(|| {
+        TimeRange::from(TIMESTAMP_MAX);
+    });
+    assert!(
+        res.is_ok(),
+        "Mutant test: != -> == (should succeed for TIMESTAMP_MAX)"
+    );
+
+    // For TimeRange::at
+    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+    let range = TimeRange::at(valid_ts);
+
+    assert_eq!(range.start(), valid_ts, "Mutant test: at -> default");
+    assert_eq!(range.end(), valid_ts, "Mutant test: at -> default");
+
+    let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let res = std::panic::catch_unwind(|| {
+        TimeRange::at(max_valid);
+    });
+    assert!(res.is_ok(), "Mutant test: > -> >= in at");
+
+    let res = std::panic::catch_unwind(|| {
+        TimeRange::at(TIMESTAMP_MAX);
+    });
+    assert!(res.is_ok(), "Mutant test: != -> == in at");
+}
