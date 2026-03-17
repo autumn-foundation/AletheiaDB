@@ -326,7 +326,8 @@ impl ReadOps for ReadTransaction {
         property_value: &PropertyValue,
     ) -> Vec<NodeId> {
         // ⚡ Bolt Optimization: Uses `.retain()` to filter in-place and avoid allocating a new `Vec`.
-        let mut node_ids = self.current
+        let mut node_ids = self
+            .current
             .find_nodes_by_property(label, property_key, property_value);
 
         node_ids.retain(|node_id| {
