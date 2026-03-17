@@ -741,7 +741,7 @@ fn test_timerange_deserialize_exact_bounds() {
     ));
 
     // More than 24 bytes should be OK, only reading 24
-    let mut long_bytes = bytes.clone();
+    let mut long_bytes = bytes;
     long_bytes.push(0xFF);
     let (_, read_len_long) = TimeRange::deserialize(&long_bytes).unwrap();
     assert_eq!(read_len_long, 24);
@@ -821,4 +821,105 @@ fn test_timerange_contains_range_strict_bounds() {
         !self_range.contains_range(&unbounded),
         "Bounded range cannot contain unbounded range"
     );
+}
+
+#[test]
+fn test_timerange_overlaps_mutant_kills() {
+    use aletheiadb::core::temporal::TimeRange;
+    // self.start < other.end && other.start < self.end
+
+    // Exact identical
+    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+    let r2 = TimeRange::new(100.into(), 200.into()).unwrap();
+    assert!(r1.overlaps(&r2));
+
+    // other.start == self.end (touching end, no overlap)
+    let r_next = TimeRange::new(200.into(), 300.into()).unwrap();
+    assert!(!r1.overlaps(&r_next));
+
+    // other.end == self.start (touching start, no overlap)
+    let r_prev = TimeRange::new(0.into(), 100.into()).unwrap();
+    assert!(!r1.overlaps(&r_prev));
+}
+
+#[test]
+fn test_bitemporal_is_current_mutant_kills() {
+    use aletheiadb::core::temporal::BiTemporalInterval;
+    use aletheiadb::core::temporal::TimeRange;
+    let valid_start = 1000.into();
+    let tx_start = 3000.into();
+
+    let open_valid = TimeRange::from(valid_start);
+    let open_tx = TimeRange::from(tx_start);
+
+    let both_open = BiTemporalInterval::new(open_valid, open_tx);
+    assert!(both_open.is_current(), "must be true if both open");
+
+    let closed_valid = TimeRange::new(1000.into(), 2000.into()).unwrap();
+    let closed_tx = TimeRange::new(3000.into(), 4000.into()).unwrap();
+
+    let only_valid_open = BiTemporalInterval::new(open_valid, closed_tx);
+    assert!(!only_valid_open.is_current(), "must be false if one closed");
+
+    let only_tx_open = BiTemporalInterval::new(closed_valid, open_tx);
+    assert!(!only_tx_open.is_current(), "must be false if one closed");
+}
+
+#[test]
+fn test_timerange_contains_mutant_kills() {
+    use aletheiadb::core::temporal::TimeRange;
+    let start = 100.into();
+    let end = 200.into();
+    let r1 = TimeRange::new(start, end).unwrap();
+
+    // timestamp >= self.start && timestamp < self.end
+    assert!(r1.contains(100.into()), "must contain exactly start");
+    assert!(!r1.contains(99.into()), "must not contain start - 1");
+    assert!(!r1.contains(200.into()), "must not contain exactly end");
+    assert!(r1.contains(199.into()), "must contain end - 1");
+}
+
+#[test]
+fn test_timerange_contains_or_after_mutant_kills() {
+    use aletheiadb::core::temporal::TimeRange;
+    let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+
+    // timestamp >= self.start
+    assert!(
+        r1.contains_or_after(100.into()),
+        "must be true exactly at start"
+    );
+    assert!(r1.contains_or_after(101.into()), "must be true after start");
+    assert!(r1.contains_or_after(200.into()), "must be true at end");
+    assert!(r1.contains_or_after(300.into()), "must be true after end");
+    assert!(
+        !r1.contains_or_after(99.into()),
+        "must be false before start"
+    );
+}
+
+#[test]
+fn test_timerange_close_at_mutant_kills() {
+    use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
+    use aletheiadb::core::temporal::TimeRange;
+
+    // Testing close_at bounds: end < self.start -> error
+    let range = TimeRange::from(100.into());
+    let res1 = range.close_at(99.into());
+    assert!(res1.is_err(), "must error if end < start");
+
+    let res2 = range.close_at(100.into());
+    assert!(res2.is_ok(), "must succeed if end == start");
+
+    // Testing close_at bounds: end > MAX_VALID_TIMESTAMP
+    let res3 = range.close_at((MAX_VALID_TIMESTAMP + 1).into());
+    assert!(res3.is_err(), "must error if end > MAX");
+
+    let res4 = range.close_at(MAX_VALID_TIMESTAMP.into());
+    assert!(res4.is_ok(), "must succeed if end == MAX");
+
+    // Test end == TIMESTAMP_MAX (should succeed explicitly because of `&& end != TIMESTAMP_MAX`)
+    use aletheiadb::core::temporal::TIMESTAMP_MAX;
+    let res5 = range.close_at(TIMESTAMP_MAX);
+    assert!(res5.is_ok(), "must succeed if end == TIMESTAMP_MAX");
 }
