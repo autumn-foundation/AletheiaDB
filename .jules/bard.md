@@ -85,3 +85,7 @@
 ## 2025-03-05 - Opaque Persistence Architecture
 **Confusion:** The `src/index/vector/hnsw/persistence.rs` module lacked documentation explaining the two-file architecture (the usearch `.bin` file vs the AletheiaDB `.idx` file), making it difficult to understand how and why index mapping was persisted. Furthermore, the DoS protections (like `MAX_MAPPINGS_COUNT`) were not clearly highlighted at the module level.
 **Clarification:** Added a module-level `//!` documentation block detailing the architecture and security protections. Additionally, documented the `IndexMetadata` struct to explain why exact configuration matching is required.
+
+## 2025-03-05 - Query Executor Iterator Architecture
+**Confusion:** The `src/query/executor/mod.rs` module lacked detailed documentation explaining its "pull-based iterator model", leaving the concepts of lazy execution and memory backpressure (via `ExecutionConfig::max_buffer_size`) undocumented at the high level.
+**Clarification:** Added a detailed `//!` module-level "Tale" to `src/query/executor/mod.rs` that explicitly explains the streaming architecture, lazy execution without full-graph buffering, and how the config provides backpressure. Added an example of using a custom execution configuration.

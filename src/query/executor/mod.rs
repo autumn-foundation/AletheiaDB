@@ -1,8 +1,48 @@
 //! Query Executor
 //!
 //! Executes physical query plans using a pull-based iterator model.
-//! The executor transforms physical operators into iterators that
-//! lazily produce results.
+//!
+//! # Architecture
+//!
+//! The executor transforms physical operators (`PhysicalOp`) into iterators (`ResultIterator`) that
+//! lazily produce results. Instead of buffering entire graph traversals into memory, AletheiaDB
+//! uses a streaming architecture where each node in the query plan requests the next row from its child
+//! only when needed.
+//!
+//! # Lazy Execution & Backpressure
+//!
+//! - **Lazy Execution:** No data is fetched from storage until the `QueryResults` iterator is consumed.
+//! - **Backpressure:** The executor respects `ExecutionConfig::max_buffer_size`, applying backpressure to
+//!   prevent out-of-memory crashes on massive queries.
+//!
+//! # Example
+//!
+//! ```rust
+//! # use aletheiadb::core::error::Result;
+//! # fn main() -> Result<()> {
+//! # let current = std::sync::Arc::new(aletheiadb::storage::current::CurrentStorage::new());
+//! # let historical = std::sync::Arc::new(parking_lot::RwLock::new(aletheiadb::storage::historical::HistoricalStorage::new()));
+//! # let plan = PhysicalPlan { root: PhysicalOp::NodeScan { label: None, estimated_rows: 0 }, estimated_cost: Default::default(), temporal_context: None, parallel: false, include_provenance: false };
+//! use std::sync::Arc;
+//! use parking_lot::RwLock;
+//! use aletheiadb::storage::current::CurrentStorage;
+//! use aletheiadb::storage::historical::HistoricalStorage;
+//! use aletheiadb::query::{QueryExecutor, PhysicalPlan};
+//! use aletheiadb::query::planner::PhysicalOp;
+//!
+//! // Create executor with custom config
+//! let mut config = aletheiadb::query::executor::ExecutionConfig::default();
+//! config.max_buffer_size = 1000;
+//! let executor = QueryExecutor::with_config(current, historical, config);
+//!
+//! // Execute physical plan lazily
+//! let results = executor.execute(plan)?;
+//! for row in results {
+//!     println!("Row: {:?}", row?);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 mod iterators;
 mod results;
