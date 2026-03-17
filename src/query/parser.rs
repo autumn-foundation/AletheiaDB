@@ -1572,6 +1572,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_similar_with_euclidean_and_dot_product() {
+        let query_euc = Parser::parse("SIMILAR TO $emb USING EUCLIDEAN LIMIT 1").unwrap();
+        if let SourceClause::VectorSearch { metric, .. } = &query_euc.source {
+            assert_eq!(*metric, Some(DistanceMetric::Euclidean));
+        } else {
+            panic!("Expected VectorSearch clause");
+        }
+
+        let query_dot = Parser::parse("SIMILAR TO $emb USING DOT_PRODUCT LIMIT 1").unwrap();
+        if let SourceClause::VectorSearch { metric, .. } = &query_dot.source {
+            assert_eq!(*metric, Some(DistanceMetric::DotProduct));
+        } else {
+            panic!("Expected VectorSearch clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_similar_with_invalid_metric() {
+        let result = Parser::parse("SIMILAR TO $emb USING INVALID LIMIT 1");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected distance metric"));
+    }
+
+    #[test]
     fn test_parse_find_similar() {
         let query = Parser::parse("FIND SIMILAR TO (node_id) LIMIT 10").unwrap();
 
@@ -1751,6 +1776,21 @@ mod tests {
         if let Some(rank) = &query.rank {
             assert!(matches!(rank.embedding, EmbeddingRef::Parameter(_)));
             assert_eq!(rank.top_k, Some(10));
+        }
+    }
+
+    #[test]
+    fn test_parse_rank_by_similarity_without_top() {
+        let query =
+            Parser::parse("MATCH (a)-[:KNOWS]->(b) RANK BY SIMILARITY TO $embedding RETURN b")
+                .unwrap();
+
+        assert!(query.rank.is_some());
+        if let Some(rank) = &query.rank {
+            assert!(matches!(rank.embedding, EmbeddingRef::Parameter(_)));
+            assert_eq!(rank.top_k, None);
+        } else {
+            panic!("Expected Rank clause");
         }
     }
 
