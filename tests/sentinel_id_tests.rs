@@ -231,3 +231,59 @@ fn test_entity_id_as_edge_exhaustive() {
     // Check node case returns None
     assert_eq!(entity_node.as_edge(), None);
 }
+
+#[test]
+fn test_entity_id_is_node_strict() {
+    let node_id = NodeId::new(42).unwrap();
+    let entity_node: EntityId = node_id.into();
+    let edge_id = EdgeId::new(42).unwrap();
+    let entity_edge: EntityId = edge_id.into();
+
+    // Explicitly test branches
+    assert!(entity_node.is_node());
+
+    assert!(!entity_edge.is_node());
+}
+
+#[test]
+fn test_entity_id_is_edge_strict() {
+    let node_id = NodeId::new(42).unwrap();
+    let entity_node: EntityId = node_id.into();
+    let edge_id = EdgeId::new(42).unwrap();
+    let entity_edge: EntityId = edge_id.into();
+
+    // Explicitly test branches
+    assert!(!entity_node.is_edge());
+
+    assert!(entity_edge.is_edge());
+}
+
+#[test]
+fn test_entity_id_as_node_strict() {
+    let node_id = NodeId::new(42).unwrap();
+    let entity_node: EntityId = node_id.into();
+    let edge_id = EdgeId::new(42).unwrap();
+    let entity_edge: EntityId = edge_id.into();
+
+    match entity_node.as_node() {
+        Some(id) => assert_eq!(id, node_id),
+        None => panic!("Expected Some(NodeId)"),
+    }
+
+    assert_eq!(entity_edge.as_node(), None);
+}
+
+#[test]
+fn test_entity_id_as_edge_strict() {
+    let node_id = NodeId::new(42).unwrap();
+    let entity_node: EntityId = node_id.into();
+    let edge_id = EdgeId::new(42).unwrap();
+    let entity_edge: EntityId = edge_id.into();
+
+    assert_eq!(entity_node.as_edge(), None);
+
+    match entity_edge.as_edge() {
+        Some(id) => assert_eq!(id, edge_id),
+        None => panic!("Expected Some(EdgeId)"),
+    }
+}

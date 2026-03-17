@@ -1666,3 +1666,88 @@ mod sentinel_id_generator_tests {
         assert_ne!(unchecked.as_u64(), 0);
     }
 }
+
+#[cfg(test)]
+mod sentinel_id_generator_tests_extended {
+    use super::*;
+
+    #[test]
+    fn test_id_generator_next_strict() {
+        // Kill `replace IdGenerator::next -> Result<u64, StorageError> with Ok(0)`
+        // Kill `replace IdGenerator::next -> Result<u64, StorageError> with Ok(1)`
+        let generator = IdGenerator::with_start(100);
+        assert_eq!(generator.next().unwrap(), 100);
+        assert_eq!(generator.next().unwrap(), 101); // 101 is not 0 or 1
+
+        // Kill `replace > with ==`, `<`, `>=` in `if id > MAX_VALID_ID`
+        let gen_boundary = IdGenerator::with_start(MAX_VALID_ID);
+        // At MAX_VALID_ID, the generator should return Ok(MAX_VALID_ID)
+        let first = gen_boundary.next();
+        assert_eq!(first, Ok(MAX_VALID_ID));
+        // Next should fail since it's > MAX_VALID_ID
+        let second = gen_boundary.next();
+        assert!(second.is_err());
+        assert!(matches!(
+            second.unwrap_err(),
+            StorageError::InvalidId { .. }
+        ));
+    }
+
+    #[test]
+    fn test_id_generator_current_approximate_strict() {
+        let generator = IdGenerator::with_start(100);
+        // Kill `replace IdGenerator::current_approximate -> u64 with 0` or `1`
+        assert_eq!(generator.current_approximate(), 100);
+    }
+
+    #[test]
+    fn test_id_generator_current_strict() {
+        let generator = IdGenerator::with_start(100);
+        // Kill `replace IdGenerator::current -> u64 with 0` or `1`
+        assert_eq!(generator.current(), 100);
+        let _ = generator.next();
+        assert_eq!(generator.current(), 101);
+    }
+
+    #[test]
+    fn test_id_generator_reset_to_strict() {
+        let generator = IdGenerator::with_start(100);
+        // Kill `replace IdGenerator::reset_to with ()`
+        generator.reset_to(200);
+        assert_eq!(generator.current(), 200);
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least_strict() {
+        let generator = IdGenerator::with_start(100);
+        // Kill `replace IdGenerator::ensure_at_least with ()`
+        generator.ensure_at_least(200);
+        assert_eq!(generator.current(), 200);
+
+        // Kill `replace > with ==`, `<`, `>=` in `if target > current`
+        generator.ensure_at_least(150);
+        // Should remain 200
+        assert_eq!(generator.current(), 200);
+    }
+
+    #[test]
+    fn test_tx_id_generator_next_strict() {
+        let generator = TxIdGenerator::new();
+        generator.set_counter(10);
+        // Kill `replace TxIdGenerator::next -> TxId with Default::default()`
+        let next1 = generator.next();
+        assert_eq!(next1, TxId::new(10));
+
+        // Kill `replace + with -` or `*` in `current + 1`
+        let next2 = generator.next();
+        assert_eq!(next2, TxId::new(11));
+    }
+
+    #[test]
+    fn test_tx_id_generator_current_strict() {
+        let generator = TxIdGenerator::new();
+        generator.set_counter(10);
+        // Kill `replace TxIdGenerator::current -> TxId with Default::default()`
+        assert_eq!(generator.current(), TxId::new(9));
+    }
+}
