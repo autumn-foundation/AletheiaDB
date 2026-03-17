@@ -217,6 +217,10 @@ pub mod metaphor;
 pub mod mnemosyne;
 
 #[cfg(feature = "nova")]
+/// Momentum: Semantic Acceleration & Mass.
+pub mod momentum;
+
+#[cfg(feature = "nova")]
 /// Muse: The Semantic Ideator.
 pub mod muse;
 
