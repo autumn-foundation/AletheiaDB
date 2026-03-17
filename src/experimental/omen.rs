@@ -31,7 +31,8 @@
 //! let omen = Omen::new(&db);
 //!
 //! // Analyze last hour
-//! let window = TimeRange::new(time::now() - 3600 * 1_000_000, time::now())?;
+//! let start = time::from_secs(time::now().wallclock() / 1_000_000 - 3600);
+//! let window = TimeRange::new(start, time::now())?;
 //!
 //! if let Some(encounter) = omen.predict_encounter(node_a, node_b, window, "embedding")? {
 //!     println!("Predicted encounter in {:.2} seconds.", encounter.time_to_encounter.as_secs_f32());
