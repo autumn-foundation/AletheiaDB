@@ -4316,9 +4316,7 @@ mod semantically_equal_tests {
             PropertyValue::Float(42.0),
             PropertyValue::Int(42),
         ]));
-        let arr4 = PropertyValue::Array(Arc::from(vec![
-            PropertyValue::Float(f64::NAN),
-        ]));
+        let arr4 = PropertyValue::Array(Arc::from(vec![PropertyValue::Float(f64::NAN)]));
 
         assert!(arr1.semantically_equal(&arr2));
         assert!(!arr1.semantically_equal(&arr3));
@@ -4339,14 +4337,25 @@ mod semantically_equal_tests {
 
         // Serialization limits
         let ser_err = nested.serialize().unwrap_err();
-        assert!(matches!(ser_err, crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))));
+        assert!(matches!(
+            ser_err,
+            crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))
+        ));
 
-        let est_err = nested.estimated_heap_size_recursive(MAX_RECURSION_DEPTH + 1).unwrap_err();
-        assert!(matches!(est_err, crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))));
+        let est_err = nested
+            .estimated_heap_size_recursive(MAX_RECURSION_DEPTH + 1)
+            .unwrap_err();
+        assert!(matches!(
+            est_err,
+            crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))
+        ));
 
         // Try serialize_into
         let mut buf = Vec::new();
         let ser_into_err = nested.serialize_into(&mut buf).unwrap_err();
-        assert!(matches!(ser_into_err, crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))));
+        assert!(matches!(
+            ser_into_err,
+            crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))
+        ));
     }
 }
