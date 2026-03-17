@@ -2523,11 +2523,11 @@ mod tests {
             PropertyValue::String(Arc::from("")),
             PropertyValue::Bytes(Arc::from([1u8, 2, 3].as_slice())),
             PropertyValue::Bytes(Arc::from([].as_slice())),
-            PropertyValue::Array(Arc::new(vec![
+            PropertyValue::Array(Arc::from(vec![
                 PropertyValue::Int(1),
                 PropertyValue::string("two"),
             ])),
-            PropertyValue::Array(Arc::new(vec![])),
+            PropertyValue::Array(Arc::from(vec![])),
             PropertyValue::Vector(Arc::from([1.0f32, 2.0, 3.0].as_slice())),
             PropertyValue::Vector(Arc::from([].as_slice())),
         ];
@@ -3576,7 +3576,7 @@ mod sentry_tests {
         let mut value = PropertyValue::Int(42);
         // Nest it MAX_RECURSION_DEPTH + 1 times
         for _ in 0..MAX_RECURSION_DEPTH + 1 {
-            value = PropertyValue::Array(Arc::new(vec![value]));
+            value = PropertyValue::Array(Arc::from(vec![value]));
         }
 
         // This should NOT panic (Warden fix)
@@ -3603,7 +3603,7 @@ mod sentry_tests {
     fn test_property_map_builder_try_insert_returns_error_on_deep_recursion() {
         let mut value = PropertyValue::Int(42);
         for _ in 0..MAX_RECURSION_DEPTH + 1 {
-            value = PropertyValue::Array(Arc::new(vec![value]));
+            value = PropertyValue::Array(Arc::from(vec![value]));
         }
 
         // try_insert should return an error, not panic
@@ -3627,7 +3627,7 @@ mod sentry_tests {
     fn test_property_map_builder_try_insert_by_key_returns_error_on_deep_recursion() {
         let mut value = PropertyValue::Int(42);
         for _ in 0..MAX_RECURSION_DEPTH + 1 {
-            value = PropertyValue::Array(Arc::new(vec![value]));
+            value = PropertyValue::Array(Arc::from(vec![value]));
         }
 
         let key = GLOBAL_INTERNER.intern("deep").unwrap();
@@ -3653,7 +3653,7 @@ mod sentry_tests {
     fn test_property_value_estimated_heap_size_penalty() {
         let mut value = PropertyValue::Int(42);
         for _ in 0..MAX_RECURSION_DEPTH + 1 {
-            value = PropertyValue::Array(Arc::new(vec![value]));
+            value = PropertyValue::Array(Arc::from(vec![value]));
         }
 
         // Should swallow the recursion error and return the penalty size
@@ -3771,7 +3771,7 @@ mod sentry_tests {
     fn test_property_map_builder_insert_panic_message() {
         let mut value = PropertyValue::Int(42);
         for _ in 0..MAX_RECURSION_DEPTH + 1 {
-            value = PropertyValue::Array(Arc::new(vec![value]));
+            value = PropertyValue::Array(Arc::from(vec![value]));
         }
         PropertyMapBuilder::new().insert("deep", value);
     }
@@ -4084,12 +4084,12 @@ mod sentry_tests {
     #[test]
     fn test_semantically_equal_nested_array_nan_distinct_allocations() {
         // Create two distinct arrays containing NaN
-        let nan_array_1 = PropertyValue::Array(Arc::new(vec![
+        let nan_array_1 = PropertyValue::Array(Arc::from(vec![
             PropertyValue::Float(1.0),
             PropertyValue::Float(f64::NAN),
         ]));
 
-        let nan_array_2 = PropertyValue::Array(Arc::new(vec![
+        let nan_array_2 = PropertyValue::Array(Arc::from(vec![
             PropertyValue::Float(1.0),
             PropertyValue::Float(f64::NAN),
         ]));
@@ -4268,5 +4268,85 @@ mod sentry_tests {
             f1.semantically_equal(&f2),
             "semantically_equal should treat NaN as equal"
         );
+    }
+}
+
+#[cfg(test)]
+mod semantically_equal_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_semantically_equal_float_nan() {
+        let val1 = PropertyValue::Float(f64::NAN);
+        let val2 = PropertyValue::Float(f64::NAN);
+        let val3 = PropertyValue::Float(42.0);
+
+        assert!(val1.semantically_equal(&val2));
+        assert!(!val1.semantically_equal(&val3));
+    }
+
+    #[test]
+    fn test_semantically_equal_vector() {
+        let vec1 = PropertyValue::Vector(Arc::from(vec![f32::NAN, 1.0, 2.0]));
+        let vec2 = PropertyValue::Vector(Arc::from(vec![f32::NAN, 1.0, 2.0]));
+        let vec3 = PropertyValue::Vector(Arc::from(vec![1.0, f32::NAN, 2.0]));
+        let vec4 = PropertyValue::Vector(Arc::from(vec![f32::NAN, 1.0]));
+
+        assert!(vec1.semantically_equal(&vec2));
+        assert!(!vec1.semantically_equal(&vec3));
+        assert!(!vec1.semantically_equal(&vec4));
+
+        // Same allocation fast path
+        let vec_same = vec1.clone();
+        assert!(vec1.semantically_equal(&vec_same));
+    }
+
+    #[test]
+    fn test_semantically_equal_array() {
+        let arr1 = PropertyValue::Array(Arc::from(vec![
+            PropertyValue::Float(f64::NAN),
+            PropertyValue::Int(42),
+        ]));
+        let arr2 = PropertyValue::Array(Arc::from(vec![
+            PropertyValue::Float(f64::NAN),
+            PropertyValue::Int(42),
+        ]));
+        let arr3 = PropertyValue::Array(Arc::from(vec![
+            PropertyValue::Float(42.0),
+            PropertyValue::Int(42),
+        ]));
+        let arr4 = PropertyValue::Array(Arc::from(vec![
+            PropertyValue::Float(f64::NAN),
+        ]));
+
+        assert!(arr1.semantically_equal(&arr2));
+        assert!(!arr1.semantically_equal(&arr3));
+        assert!(!arr1.semantically_equal(&arr4));
+
+        // Same allocation fast path
+        let arr_same = arr1.clone();
+        assert!(arr1.semantically_equal(&arr_same));
+    }
+
+    #[test]
+    fn test_serialize_deserialize_recursion_depth() {
+        // Build a deeply nested array to hit MAX_RECURSION_DEPTH
+        let mut nested = PropertyValue::Int(42);
+        for _ in 0..=MAX_RECURSION_DEPTH + 1 {
+            nested = PropertyValue::Array(Arc::from(vec![nested]));
+        }
+
+        // Serialization limits
+        let ser_err = nested.serialize().unwrap_err();
+        assert!(matches!(ser_err, crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))));
+
+        let est_err = nested.estimated_heap_size_recursive(MAX_RECURSION_DEPTH + 1).unwrap_err();
+        assert!(matches!(est_err, crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))));
+
+        // Try serialize_into
+        let mut buf = Vec::new();
+        let ser_into_err = nested.serialize_into(&mut buf).unwrap_err();
+        assert!(matches!(ser_into_err, crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))));
     }
 }
