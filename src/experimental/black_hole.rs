@@ -191,8 +191,10 @@ mod tests {
         let outgoing = db.create_node("Node", outgoing_props).unwrap();
 
         // Connect them
-        db.create_edge(incoming, center, "LEADS_TO", Default::default()).unwrap();
-        db.create_edge(center, outgoing, "RELATES_TO", Default::default()).unwrap();
+        db.create_edge(incoming, center, "LEADS_TO", Default::default())
+            .unwrap();
+        db.create_edge(center, outgoing, "RELATES_TO", Default::default())
+            .unwrap();
 
         let detector = BlackHoleDetector::new(&db);
         let result = detector.detect(center, "vec").unwrap();
