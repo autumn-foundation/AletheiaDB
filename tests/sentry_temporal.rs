@@ -1101,7 +1101,10 @@ fn test_bitemporal_deserialize_strict() {
     let bytes = interval.serialize();
 
     let (de, len) = BiTemporalInterval::deserialize(&bytes).unwrap();
-    assert_eq!(de.valid_time().start(), HybridTimestamp::new(100, 0).unwrap());
+    assert_eq!(
+        de.valid_time().start(),
+        HybridTimestamp::new(100, 0).unwrap()
+    );
     assert_eq!(len, 48);
 }
 
@@ -1124,5 +1127,8 @@ fn test_fmt_display_strict() {
         HybridTimestamp::new(200, 0).unwrap(),
     );
     let fmt_interval = format!("{}", interval);
-    assert!(fmt_interval.contains("valid:"), "must format both dimensions");
+    assert!(
+        fmt_interval.contains("valid:"),
+        "must format both dimensions"
+    );
 }
