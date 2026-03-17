@@ -822,3 +822,307 @@ fn test_timerange_contains_range_strict_bounds() {
         "Bounded range cannot contain unbounded range"
     );
 }
+
+#[test]
+fn test_timerange_from_accepts_valid_timestamps() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
+
+    // Should NOT panic
+    let t1 = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let _ = TimeRange::from(t1);
+
+    let t2 = HybridTimestamp::new(MAX_VALID_TIMESTAMP - 1, 0).unwrap();
+    let _ = TimeRange::from(t2);
+
+    let _ = TimeRange::from(TIMESTAMP_MAX);
+}
+
+// We cannot easily create a HybridTimestamp > MAX_VALID_TIMESTAMP safely in an integration test
+// because the constructor and deserialize logic explicitly forbid it. Thus we can't test
+// `TimeRange::from` or `TimeRange::at` directly with a too-large timestamp without UB.
+// Since we have removed the UB and invalid test logic, we remove this test.
+
+#[test]
+fn test_timerange_at_accepts_valid_timestamps() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
+
+    // Should NOT panic
+    let t1 = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let _ = TimeRange::at(t1);
+
+    let t2 = HybridTimestamp::new(MAX_VALID_TIMESTAMP - 1, 0).unwrap();
+    let _ = TimeRange::at(t2);
+
+    let _ = TimeRange::at(TIMESTAMP_MAX);
+}
+
+// Similarly, we remove this test as it's impossible to safely create an invalid HybridTimestamp.
+
+#[test]
+fn test_timerange_contains_strict_inequalities() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    // timestamp >= self.start && timestamp < self.end
+
+    // >= self.start
+    assert!(range.contains(start), "Must contain exact start");
+    let just_before_start = HybridTimestamp::new(99, 0).unwrap();
+    assert!(
+        !range.contains(just_before_start),
+        "Must not contain before start"
+    );
+
+    // < self.end
+    let just_before_end = HybridTimestamp::new(199, 0).unwrap();
+    assert!(
+        range.contains(just_before_end),
+        "Must contain just before end"
+    );
+    assert!(!range.contains(end), "Must not contain exact end");
+
+    let past_end = HybridTimestamp::new(201, 0).unwrap();
+    assert!(!range.contains(past_end), "Must not contain past end");
+
+    // AND / OR check (mutant `&&` replaced with `||`)
+    // If it was ||, containing just_before_start would be true because 99 < 200.
+    // We already asserted that's false!
+    // If it was ||, containing end would be true because 200 >= 100.
+    // We already asserted that's false!
+}
+
+#[test]
+fn test_timerange_is_closed_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TimeRange};
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+
+    let end1 = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let range1 = TimeRange::new(start, end1).unwrap();
+    assert!(
+        range1.is_closed(),
+        "range with end < TIMESTAMP_MAX is closed"
+    );
+
+    // end == TIMESTAMP_MAX
+    let range2 = TimeRange::from(start);
+    assert!(
+        !range2.is_closed(),
+        "range with end == TIMESTAMP_MAX is NOT closed"
+    );
+}
+
+#[test]
+fn test_timerange_overlaps_logical_operators() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    // We want to test `if self.is_empty() || other.is_empty()` where `||` is replaced with `&&`.
+    // If it was `&&`, it would only return false early if BOTH were empty.
+    // So if only ONE is empty, it wouldn't return false early, it would go to the overlap check.
+
+    // For an empty range, start == end.
+    // The overlap check is `self.start < other.end && other.start < self.end`.
+    // Let's craft an empty range and a normal range such that if it falls through, it returns true!
+    let empty = TimeRange::at(HybridTimestamp::new(150, 0).unwrap());
+    let normal = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    // empty.start (150) < normal.end (200) -> true
+    // normal.start (100) < empty.end (150) -> true
+    // So `empty.start < normal.end && normal.start < empty.end` -> true && true = true!
+
+    // Therefore, if the early return `||` is replaced by `&&`, it won't early return for `empty.overlaps(normal)`,
+    // and it will evaluate to true!
+
+    assert!(!empty.overlaps(&normal), "Empty range should not overlap");
+    assert!(
+        !normal.overlaps(&empty),
+        "Normal range should not overlap empty"
+    );
+}
+
+#[test]
+fn test_bitemporal_methods_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+    let tx_ts = HybridTimestamp::new(200, 0).unwrap();
+    let end_ts = HybridTimestamp::new(300, 0).unwrap();
+
+    let interval = BiTemporalInterval::new(
+        TimeRange::new(valid_ts, end_ts).unwrap(),
+        TimeRange::from(tx_ts),
+    );
+
+    // We already have some tests, but let's make sure we assert exact values for every mutant
+    // is_currently_valid: false -> true
+    assert!(!interval.is_currently_valid());
+
+    // is_currently_recorded: true -> false
+    assert!(interval.is_currently_recorded());
+
+    // valid_time -> default
+    let vt = interval.valid_time();
+    assert_eq!(vt.start(), valid_ts);
+    assert_eq!(vt.end(), end_ts);
+
+    // transaction_time -> default
+    let tt = interval.transaction_time();
+    assert_eq!(tt.start(), tx_ts);
+
+    // is_valid_at -> true / false
+    assert!(interval.is_valid_at(HybridTimestamp::new(150, 0).unwrap()));
+    assert!(!interval.is_valid_at(HybridTimestamp::new(50, 0).unwrap()));
+
+    // is_recorded_at -> true / false
+    assert!(interval.is_recorded_at(HybridTimestamp::new(250, 0).unwrap()));
+    assert!(!interval.is_recorded_at(HybridTimestamp::new(150, 0).unwrap()));
+
+    // is_visible_at
+    assert!(interval.is_visible_at(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap()
+    ));
+    // Check AND logic `self.valid_time.contains(valid_time) && self.transaction_time.contains(tx_time)`
+    // replaced with ||
+    assert!(!interval.is_visible_at(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap()
+    )); // False && True -> False (if || this would be True!)
+}
+
+#[test]
+fn test_bitemporal_serialize_into_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let interval = BiTemporalInterval::now(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    );
+
+    // replace BiTemporalInterval::serialize -> Vec<u8> with vec![] / vec![0] / vec![1]
+    let bytes = interval.serialize();
+    // Instead of using assert_ne! we should assert exactly the expected length and content.
+    assert_eq!(bytes.len(), 48);
+
+    // replace BiTemporalInterval::serialize_into with ()
+    let mut buf = vec![];
+    interval.serialize_into(&mut buf);
+    assert_eq!(buf.len(), 48);
+}
+
+#[test]
+fn test_time_to_iso8601_operators() {
+    use aletheiadb::core::temporal::{TIMESTAMP_MAX, time};
+
+    // test `==` vs `!=` with TIMESTAMP_MAX
+    // If `==` is mutated to `!=`, TIMESTAMP_MAX won't return "current", but format normal
+    let max_str = time::to_iso8601(TIMESTAMP_MAX);
+    assert_eq!(max_str, "current");
+
+    // test `/`, `%`, `*`, `+`, `-` with 1609459200
+    // let secs = wallclock / 1_000_000;
+    // let nanos = ((wallclock % 1_000_000) * 1000) as u32;
+    // let datetime = UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos);
+
+    // Ensure that it exactly converts it.
+    let ts = time::from_secs(1609459200);
+    let iso = time::to_iso8601(ts);
+    // Since we know what it should roughly be, let's just make sure it contains "1609459200"
+    // or the windows interval. We already assert this in `test_time_to_iso8601_exact_content`.
+    // Instead of `assert_ne!`, we verify the known structure.
+    assert!(iso.len() > 10, "ISO string should be fully formatted");
+
+    // We already did exact contents check in `test_time_to_iso8601_exact_content`
+}
+
+#[test]
+fn test_timerange_serialize_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    // replace TimeRange::serialize -> Vec<u8> with vec![] / vec![0] / vec![1]
+    let bytes = range.serialize();
+    // Instead of using assert_ne! we should assert exactly the expected length and content.
+    assert_eq!(bytes.len(), 24);
+
+    // replace TimeRange::serialize_into with ()
+    let mut buf = vec![];
+    range.serialize_into(&mut buf);
+    assert_eq!(buf.len(), 24);
+}
+
+#[test]
+fn test_timerange_deserialize_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    let bytes = range.serialize();
+
+    let (de, len) = TimeRange::deserialize(&bytes).unwrap();
+    assert_eq!(de.start(), HybridTimestamp::new(100, 0).unwrap());
+    assert_eq!(de.end(), HybridTimestamp::new(200, 0).unwrap());
+    assert_eq!(len, 24);
+}
+
+#[test]
+fn test_bitemporal_deserialize_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let interval = BiTemporalInterval::now(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    );
+    let bytes = interval.serialize();
+
+    let (de, len) = BiTemporalInterval::deserialize(&bytes).unwrap();
+    assert_eq!(de.valid_time().start(), HybridTimestamp::new(100, 0).unwrap());
+    assert_eq!(len, 48);
+}
+
+#[test]
+fn test_fmt_display_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    let fmt_range = format!("{}", range);
+    assert!(fmt_range.contains("100"), "format must contain bounds");
+    assert!(fmt_range.contains("200"), "format must contain bounds");
+
+    let interval = BiTemporalInterval::now(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    );
+    let fmt_interval = format!("{}", interval);
+    assert!(fmt_interval.contains("valid:"), "must format both dimensions");
+}
