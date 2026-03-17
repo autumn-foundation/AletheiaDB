@@ -1191,3 +1191,38 @@ mod proptests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentinel_evaluate_clock_skew_tests {
+    use super::*;
+
+    #[test]
+    fn test_evaluate_clock_skew_exact_boundaries_strict() {
+        let current = 1_000_000;
+
+        // Forward boundary STRICT: drift == max_jump + 1
+        let max_jump = 100;
+        let frontier_forward_strict = current - max_jump - 1; // drift = 101
+        let result_forward_strict =
+            evaluate_clock_skew(current, frontier_forward_strict, Some(max_jump), false);
+        assert!(
+            result_forward_strict.is_err(),
+            "Exceeding max forward jump by 1 should be rejected"
+        );
+
+        // Backward boundary STRICT: drift == -MAX_BACKWARD_DRIFT_US - 1
+        let frontier_backward_strict = current + MAX_BACKWARD_DRIFT_US + 1; // drift = -MAX_BACKWARD_DRIFT_US - 1
+        let result_backward_strict =
+            evaluate_clock_skew(current, frontier_backward_strict, None, false);
+        assert!(
+            result_backward_strict.is_err(),
+            "Exceeding max backward drift by 1 should be rejected"
+        );
+
+        let err = result_backward_strict.unwrap_err();
+        assert_eq!(err.direction, ClockSkewDirection::Backward);
+
+        let err_f = result_forward_strict.unwrap_err();
+        assert_eq!(err_f.direction, ClockSkewDirection::Forward);
+    }
+}

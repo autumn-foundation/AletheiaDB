@@ -771,57 +771,65 @@ impl TraversalIterator {
                 }
             }
             Direction::Both => {
-                let mut neighbors = Vec::new();
-
                 // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 // Helper closure to process edges and add to neighbors
                 // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                let mut process_outgoing = |edge_id| {
-                    if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                        return;
-                    }
-                    if let Ok(target) = self.current.get_edge_target(edge_id) {
-                        neighbors.push((target, edge_id));
-                    }
-                };
-
-                if let Some(ref label) = self.label {
-                    for edge_id in self
-                        .current
-                        .get_outgoing_edges_with_label_iter(node_id, label)
-                    {
-                        process_outgoing(edge_id);
-                    }
-                } else {
-                    for edge_id in self.current.get_outgoing_edges_iter(node_id) {
-                        process_outgoing(edge_id);
-                    }
-                }
+                let process_outgoing =
+                    |edge_id, neighbors: &mut Vec<(NodeId, crate::core::EdgeId)>| {
+                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                            return;
+                        }
+                        if let Ok(target) = self.current.get_edge_target(edge_id) {
+                            neighbors.push((target, edge_id));
+                        }
+                    };
 
                 // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                let mut process_incoming = |edge_id| {
-                    if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                        return;
-                    }
-                    if let Ok(source) = self.current.get_edge_source(edge_id) {
-                        neighbors.push((source, edge_id));
-                    }
-                };
+                let process_incoming =
+                    |edge_id, neighbors: &mut Vec<(NodeId, crate::core::EdgeId)>| {
+                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                            return;
+                        }
+                        if let Ok(source) = self.current.get_edge_source(edge_id) {
+                            neighbors.push((source, edge_id));
+                        }
+                    };
 
                 if let Some(ref label) = self.label {
-                    for edge_id in self
+                    // ⚡ Bolt Optimization: Instantiate iterators once to avoid duplicate lookups,
+                    // calculate required capacity, and pre-allocate to prevent heap reallocations.
+                    let out_iter = self
                         .current
-                        .get_incoming_edges_with_label_iter(node_id, label)
-                    {
-                        process_incoming(edge_id);
-                    }
-                } else {
-                    for edge_id in self.current.get_incoming_edges_iter(node_id) {
-                        process_incoming(edge_id);
-                    }
-                }
+                        .get_outgoing_edges_with_label_iter(node_id, label);
+                    let in_iter = self
+                        .current
+                        .get_incoming_edges_with_label_iter(node_id, label);
+                    let capacity = out_iter.size_hint().0 + in_iter.size_hint().0;
 
-                neighbors
+                    let mut neighbors = Vec::with_capacity(capacity);
+                    for edge_id in out_iter {
+                        process_outgoing(edge_id, &mut neighbors);
+                    }
+                    for edge_id in in_iter {
+                        process_incoming(edge_id, &mut neighbors);
+                    }
+                    neighbors
+                } else {
+                    // ⚡ Bolt Optimization: Instantiate iterators once to avoid duplicate lookups,
+                    // calculate required capacity, and pre-allocate to prevent heap reallocations.
+                    let out_iter = self.current.get_outgoing_edges_iter(node_id);
+                    let in_iter = self.current.get_incoming_edges_iter(node_id);
+                    let capacity = out_iter.size_hint().0 + in_iter.size_hint().0;
+
+                    let mut neighbors = Vec::with_capacity(capacity);
+                    for edge_id in out_iter {
+                        process_outgoing(edge_id, &mut neighbors);
+                    }
+                    for edge_id in in_iter {
+                        process_incoming(edge_id, &mut neighbors);
+                    }
+                    neighbors
+                }
             }
         }
     }

@@ -1,9 +1,43 @@
 //! Optimized hasher for unique integer keys.
 //!
-//! This module provides `IdentityHasher`, a hasher that passes through integer values
+//! This module provides [`IdentityHasher`], a hasher that passes through integer values
 //! unchanged. It is intended for use with `HashMap` and `HashSet` where the keys
 //! are already high-quality unique identifiers (like `NodeId`, `EdgeId`, or `InternedString`),
 //! avoiding the unnecessary overhead of hashing (SipHash).
+//!
+//! # The Story of IdentityHasher
+//!
+//! In a database engine, we frequently use HashMaps and HashSets to look up entities
+//! by their unique integer IDs. The default Rust hasher (SipHash) is designed to protect
+//! against HashDoS attacks by scrambling the bits using a cryptographic algorithm.
+//!
+//! However, when our keys are already randomly distributed 64-bit integers generated
+//! internally (like a `NodeId` or `EdgeId`), hashing them *again* provides zero benefit
+//! and costs valuable CPU cycles.
+//!
+//! [`IdentityHasher`] bypasses this overhead by simply taking the integer key and using
+//! it directly as the hash value. This single optimization saves a significant amount
+//! of CPU time during massive graph traversals and index lookups.
+//!
+//! # Safety Warning
+//!
+//! **Do not use this hasher for maps exposed to untrusted user input.**
+//! It is intentionally vulnerable to HashDoS attacks. Only use it for internal identifiers
+//! or data where collisions cannot be maliciously crafted.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use std::collections::HashMap;
+//! use std::hash::BuildHasherDefault;
+//! use aletheiadb::core::hasher::IdentityHasher;
+//!
+//! // Create a HashMap optimized for integer keys
+//! let mut map: HashMap<u64, String, BuildHasherDefault<IdentityHasher>> =
+//!     HashMap::with_hasher(BuildHasherDefault::default());
+//!
+//! map.insert(42, "meaning of life".to_string());
+//! ```
 
 use std::hash::Hasher;
 
@@ -45,6 +79,21 @@ const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 pub struct IdentityHasher(u64);
 
 impl IdentityHasher {
+    /// Mixes a new value into the internal state.
+    ///
+    /// The goal of `update_state` is to handle both single-value hashing (like
+    /// hashing a single `u64`) and composite hashing (like a struct with multiple fields).
+    ///
+    /// - **Single Value (Fast Path)**: If this is the first value written (`self.0 == 0`),
+    ///   it simply overwrites the state. This means `hash(42)` is exactly `42`.
+    /// - **Composite Value (Mixing)**: If the state is already dirty, it XORs the new
+    ///   value and multiplies by `FNV_PRIME`. This ensures that `hash((1, 2))` is not
+    ///   the same as `hash((2, 1))` or `hash(3)`, preventing catastrophic collisions
+    ///   when hashing tuples or structs.
+    ///
+    /// # Arguments
+    ///
+    /// * `val` - The 64-bit integer to mix into the current hash state.
     #[inline]
     fn update_state(&mut self, val: u64) {
         if self.0 == 0 {
@@ -60,6 +109,41 @@ impl IdentityHasher {
 }
 
 impl Hasher for IdentityHasher {
+    /// Writes a slice of bytes into the hasher.
+    ///
+    /// While [`IdentityHasher`] is optimized for single integer writes (e.g., [`Self::write_u64`]),
+    /// it must correctly handle arbitrary byte slices to satisfy the [`Hasher`] trait.
+    ///
+    /// # Implementation Details
+    ///
+    /// - **Fast Paths**: Byte slices of exactly 1, 2, 4, 8, or 16 bytes are cast directly
+    ///   to their corresponding integer types and mixed into the state.
+    /// - **Fallback**: For any other length (e.g., strings), the hasher falls back to a
+    ///   standard FNV-1a algorithm. This is significantly slower but guarantees correctness
+    ///   and avoids collisions.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. The internal conversions from byte slices
+    /// to integers use exact length checks.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::hash::Hasher;
+    /// use aletheiadb::core::hasher::IdentityHasher;
+    ///
+    /// let mut hasher = IdentityHasher::default();
+    ///
+    /// // Fast path for 8 bytes
+    /// hasher.write(&42u64.to_le_bytes());
+    /// assert_eq!(hasher.finish(), 42);
+    ///
+    /// // Fallback path for strings
+    /// let mut string_hasher = IdentityHasher::default();
+    /// string_hasher.write(b"hello world");
+    /// assert_ne!(string_hasher.finish(), 0);
+    /// ```
     fn write(&mut self, bytes: &[u8]) {
         // Fallback for types that don't call write_u32/write_u64 directly.
         match bytes.len() {
@@ -109,31 +193,63 @@ impl Hasher for IdentityHasher {
         }
     }
 
+    /// Writes a single `u8` into the hasher.
+    ///
+    /// Casts the value to `u64` and mixes it into the state.
     #[inline]
     fn write_u8(&mut self, i: u8) {
         self.update_state(i as u64);
     }
 
+    /// Writes a single `u16` into the hasher.
+    ///
+    /// Casts the value to `u64` and mixes it into the state.
     #[inline]
     fn write_u16(&mut self, i: u16) {
         self.update_state(i as u64);
     }
 
+    /// Writes a single `u32` into the hasher.
+    ///
+    /// Casts the value to `u64` and mixes it into the state.
     #[inline]
     fn write_u32(&mut self, i: u32) {
         self.update_state(i as u64);
     }
 
+    /// Writes a single `u64` into the hasher.
+    ///
+    /// This is the primary "happy path" for the [`IdentityHasher`]. It mixes
+    /// the value directly into the state. If this is the only value written
+    /// to the hasher, `finish()` will return `i` exactly.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::hash::Hasher;
+    /// use aletheiadb::core::hasher::IdentityHasher;
+    ///
+    /// let mut hasher = IdentityHasher::default();
+    /// hasher.write_u64(999);
+    /// assert_eq!(hasher.finish(), 999);
+    /// ```
     #[inline]
     fn write_u64(&mut self, i: u64) {
         self.update_state(i);
     }
 
+    /// Writes a single `usize` into the hasher.
+    ///
+    /// Casts the value to `u64` and mixes it into the state.
     #[inline]
     fn write_usize(&mut self, i: usize) {
         self.update_state(i as u64);
     }
 
+    /// Returns the computed hash value.
+    ///
+    /// If the hasher was fed a single integer, this will return that exact integer.
+    /// If multiple values were fed, it will return the mixed composite hash.
     #[inline]
     fn finish(&self) -> u64 {
         self.0
