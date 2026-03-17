@@ -1666,3 +1666,86 @@ mod sentinel_id_generator_tests {
         assert_ne!(unchecked.as_u64(), 0);
     }
 }
+
+use std::str::FromStr;
+
+
+impl TryFrom<u64> for NodeId {
+    type Error = StorageError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        NodeId::new(value)
+    }
+}
+
+impl FromStr for NodeId {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<u64>().map_err(|_| StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "NodeId",
+        })?;
+        NodeId::new(value)
+    }
+}
+
+impl TryFrom<u64> for EdgeId {
+    type Error = StorageError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        EdgeId::new(value)
+    }
+}
+
+impl FromStr for EdgeId {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<u64>().map_err(|_| StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "EdgeId",
+        })?;
+        EdgeId::new(value)
+    }
+}
+
+impl TryFrom<u64> for VersionId {
+    type Error = StorageError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        VersionId::new(value)
+    }
+}
+
+impl FromStr for VersionId {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<u64>().map_err(|_| StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "VersionId",
+        })?;
+        VersionId::new(value)
+    }
+}
+
+impl TryFrom<u64> for TxId {
+    type Error = StorageError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Ok(TxId::new(value))
+    }
+}
+
+impl FromStr for TxId {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<u64>().map_err(|_| StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "TxId",
+        })?;
+        Ok(TxId::new(value))
+    }
+}

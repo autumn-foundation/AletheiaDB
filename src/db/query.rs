@@ -7,6 +7,28 @@ use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResult
 use std::sync::Arc;
 
 impl AletheiaDB {
+    /// Execute a Cypher-like AletheiaDB Query Language (AQL) string.
+    ///
+    /// This is a convenience method that parses the query string and executes it.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_string` - The AQL query string to execute
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let results = db.execute_aql("MATCH (n:Person {name: 'Alice'}) RETURN n")?;
+    /// for row in results {
+    ///     println!("{:?}", row);
+    /// }
+    /// ```
+    pub fn execute_aql(&self, query_string: &str) -> Result<QueryResults> {
+        let query = crate::query::parse_query(query_string)?;
+        self.execute_query(query)
+    }
+
+
     /// Create a new query builder for constructing hybrid queries.
     ///
     /// This is the entry point for the fluent query API that enables
