@@ -694,3 +694,195 @@ mod proptests {
         }
     }
 }
+
+#[cfg(test)]
+mod sentinel_identity_hasher_tests {
+    use super::*;
+    use std::hash::Hasher;
+
+    #[test]
+    fn test_identity_hasher_update_state_bitwise_exhaustive() {
+        let mut hasher = IdentityHasher::default();
+
+        // Initial state is 0. Writing 0b1010 overwrites the state.
+        // If `self.0 == 0` was mutated to `self.0 != 0`, it would try to XOR 0 and multiply by FNV_PRIME.
+        // 0 ^ 0b1010 = 0b1010. 0b1010 * FNV_PRIME != 0b1010.
+        hasher.update_state(0b1010);
+        assert_eq!(hasher.finish(), 0b1010);
+
+        // Now state is 0b1010. Writing 0b0101.
+        // XOR: 0b1010 ^ 0b0101 = 0b1111 = 15
+        // OR:  0b1010 | 0b0101 = 0b1111 = 15  (Wait, this doesn't kill OR)
+        // AND: 0b1010 & 0b0101 = 0b0000 = 0
+
+        // Let's use 0b1100 and 0b1010
+        // XOR: 0b1100 ^ 0b1010 = 0b0110 (6)
+        // OR:  0b1100 | 0b1010 = 0b1110 (14)
+        // AND: 0b1100 & 0b1010 = 0b1000 (8)
+
+        let mut h2 = IdentityHasher::default();
+        h2.update_state(0b1100);
+        assert_eq!(h2.finish(), 0b1100);
+
+        h2.update_state(0b1010);
+
+        let expected_xor = 0b0110u64.wrapping_mul(FNV_PRIME);
+        let expected_or  = 0b1110u64.wrapping_mul(FNV_PRIME);
+        let expected_and = 0b1000u64.wrapping_mul(FNV_PRIME);
+
+        assert_eq!(h2.finish(), expected_xor);
+        assert_ne!(h2.finish(), expected_or);
+        assert_ne!(h2.finish(), expected_and);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_empty_body_exhaustive() {
+        let mut h = IdentityHasher::default();
+        // If `write_u8` is empty, finish() is 0
+        h.write_u8(42);
+        assert_eq!(h.finish(), 42);
+        assert_ne!(h.finish(), 0);
+
+        let mut h = IdentityHasher::default();
+        h.write_u16(42);
+        assert_eq!(h.finish(), 42);
+        assert_ne!(h.finish(), 0);
+
+        let mut h = IdentityHasher::default();
+        h.write_u32(42);
+        assert_eq!(h.finish(), 42);
+        assert_ne!(h.finish(), 0);
+
+        let mut h = IdentityHasher::default();
+        h.write_u64(42);
+        assert_eq!(h.finish(), 42);
+        assert_ne!(h.finish(), 0);
+
+        let mut h = IdentityHasher::default();
+        h.write_usize(42);
+        assert_eq!(h.finish(), 42);
+        assert_ne!(h.finish(), 0);
+
+        // If `write` is empty, finish() is 0
+        let mut h = IdentityHasher::default();
+        h.write(&[42]);
+        assert_eq!(h.finish(), 42);
+        assert_ne!(h.finish(), 0);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_match_arms_exhaustive() {
+        // We want to prove the fast path match arms (1, 2, 4, 8, 16) are taken.
+        // If they are deleted, the code falls back to the `_ =>` FNV loop.
+        // For length 1, write(42) fast path gives 42. FNV loop gives FNV_OFFSET_BASIS ^ 42 * FNV_PRIME.
+        let mut h1 = IdentityHasher::default();
+        h1.write(&[42]);
+        assert_eq!(h1.finish(), 42); // Fast path
+        let mut h1_fnv = IdentityHasher(FNV_OFFSET_BASIS);
+        h1_fnv.0 ^= 42;
+        h1_fnv.0 = h1_fnv.0.wrapping_mul(FNV_PRIME);
+        assert_ne!(h1.finish(), h1_fnv.finish());
+
+        let mut h2 = IdentityHasher::default();
+        h2.write(&12345u16.to_le_bytes());
+        assert_eq!(h2.finish(), 12345);
+
+        let mut h4 = IdentityHasher::default();
+        h4.write(&123456789u32.to_le_bytes());
+        assert_eq!(h4.finish(), 123456789);
+
+        let mut h8 = IdentityHasher::default();
+        h8.write(&0x1234567890ABCDEFu64.to_le_bytes());
+        assert_eq!(h8.finish(), 0x1234567890ABCDEFu64);
+
+        // For length 16, we want to prove `low ^ high` is used, and it's XOR, not OR or AND
+        // low: 0b1100, high: 0b1010
+        let low = 0b1100u64;
+        let high = 0b1010u64;
+        let mut h16 = IdentityHasher::default();
+        let mut bytes16 = [0u8; 16];
+        bytes16[0..8].copy_from_slice(&low.to_le_bytes());
+        bytes16[8..16].copy_from_slice(&high.to_le_bytes());
+        h16.write(&bytes16);
+
+        let expected_xor = low ^ high;
+        let expected_or = low | high;
+        let expected_and = low & high;
+
+        assert_eq!(h16.finish(), expected_xor);
+        assert_ne!(h16.finish(), expected_or);
+        assert_ne!(h16.finish(), expected_and);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_fallback_bitwise_exhaustive() {
+        // Test `if self.0 == 0` mutation to `!=`
+        // If it's `!= 0`, it won't set FNV_OFFSET_BASIS, so starting state is 0.
+        let mut h = IdentityHasher::default();
+        let bytes = [42u8, 43u8, 44u8]; // length 3 hits `_ =>`
+        h.write(&bytes);
+
+        let mut expected = FNV_OFFSET_BASIS;
+        expected ^= 42;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        expected ^= 43;
+        expected = expected.wrapping_mul(FNV_PRIME);
+        expected ^= 44;
+        expected = expected.wrapping_mul(FNV_PRIME);
+
+        assert_eq!(h.finish(), expected);
+
+        // Ensure starting from 0 doesn't produce the same result
+        let mut wrong_expected = 0u64;
+        wrong_expected ^= 42;
+        wrong_expected = wrong_expected.wrapping_mul(FNV_PRIME);
+        wrong_expected ^= 43;
+        wrong_expected = wrong_expected.wrapping_mul(FNV_PRIME);
+        wrong_expected ^= 44;
+        wrong_expected = wrong_expected.wrapping_mul(FNV_PRIME);
+        assert_ne!(h.finish(), wrong_expected);
+
+        // Test loop bitwise mutations `^=` to `|=` or `&=`
+        // In the loop, `self.0 ^= *byte as u64;`
+        // We need byte to differentiate ^ from | and & with the current state.
+        // FNV_OFFSET_BASIS is 0xcbf29ce484222325
+        // Let's write `0x25` (the last byte of basis).
+        // XOR: 0x...25 ^ 0x25 = 0x...00
+        // OR:  0x...25 | 0x25 = 0x...25
+        // AND: 0x...25 & 0x25 = 0x...25
+        let mut h_bitwise = IdentityHasher::default();
+        h_bitwise.write(&[0x25, 0x25, 0x25]);
+
+        let mut expected_xor = FNV_OFFSET_BASIS;
+        for &byte in &[0x25, 0x25, 0x25] {
+            expected_xor ^= byte as u64;
+            expected_xor = expected_xor.wrapping_mul(FNV_PRIME);
+        }
+
+        let mut expected_or = FNV_OFFSET_BASIS;
+        for &byte in &[0x25, 0x25, 0x25] {
+            expected_or |= byte as u64;
+            expected_or = expected_or.wrapping_mul(FNV_PRIME);
+        }
+
+        let mut expected_and = FNV_OFFSET_BASIS;
+        for &byte in &[0x25, 0x25, 0x25] {
+            expected_and &= byte as u64;
+            expected_and = expected_and.wrapping_mul(FNV_PRIME);
+        }
+
+        assert_eq!(h_bitwise.finish(), expected_xor);
+        assert_ne!(h_bitwise.finish(), expected_or);
+        assert_ne!(h_bitwise.finish(), expected_and);
+    }
+
+    #[test]
+    fn test_identity_hasher_finish_return_exhaustive() {
+        // Kill `replace finish -> u64 with 0` and `1`
+        let mut h = IdentityHasher::default();
+        h.write_u64(42);
+        assert_eq!(h.finish(), 42);
+        assert_ne!(h.finish(), 0);
+        assert_ne!(h.finish(), 1);
+    }
+}
