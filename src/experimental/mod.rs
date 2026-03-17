@@ -49,6 +49,7 @@
 //! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
 //! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! | `echolocation` | **Echolocation** | Semantic Boundary Detection. "Where does one concept end and another begin?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -244,3 +245,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Echolocation: Semantic Boundary Detection.
+pub mod echolocation;
