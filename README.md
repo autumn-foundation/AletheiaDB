@@ -690,17 +690,21 @@ You can execute these directly using the `execute_aql` method:
 ```rust
 use aletheiadb::prelude::*;
 
-let db = AletheiaDB::new().unwrap();
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
 
-// Basic graph query
-let results = db.execute_aql(
-    "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend:Person) RETURN friend"
-)?;
+    // Basic graph query
+    let results = db.execute_aql(
+        "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend:Person) RETURN friend"
+    )?;
 
-// Bi-temporal query (point-in-time)
-let results = db.execute_aql(
-    "AS OF '2024-01-15T10:00:00Z' MATCH (n:Person {name: 'Alice'}) RETURN n"
-)?;
+    // Bi-temporal query (point-in-time)
+    let results = db.execute_aql(
+        "AS OF '2024-01-15T10:00:00Z' MATCH (n:Person {name: 'Alice'}) RETURN n"
+    )?;
+
+    Ok(())
+}
 ```
 
 Other supported syntax includes:

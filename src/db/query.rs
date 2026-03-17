@@ -28,7 +28,6 @@ impl AletheiaDB {
         self.execute_query(query)
     }
 
-
     /// Create a new query builder for constructing hybrid queries.
     ///
     /// This is the entry point for the fluent query API that enables
@@ -237,5 +236,32 @@ impl AletheiaDB {
             .build();
 
         self.execute_query(query)
+    }
+}
+
+#[cfg(test)]
+mod tests_aql {
+
+    use crate::AletheiaDB;
+    use crate::core::property::PropertyMap;
+
+    #[test]
+    fn test_execute_aql_success() {
+        let db = AletheiaDB::new().unwrap();
+        let _n1 = db.create_node("TestLabel", PropertyMap::new()).unwrap();
+
+        let results = db.execute_aql("MATCH (n:TestLabel) RETURN n").unwrap();
+        let mut count = 0;
+        for _row in results {
+            count += 1;
+        }
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_execute_aql_parse_error() {
+        let db = AletheiaDB::new().unwrap();
+        let err = db.execute_aql("INVALID SYNTAX");
+        assert!(err.is_err());
     }
 }
