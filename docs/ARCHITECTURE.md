@@ -77,34 +77,41 @@ C4Context
 
 ```mermaid
 classDiagram
-    namespace Interfaces {
-        class MCPServer {
-            +serve_stdio()
-            +handle_tool_call()
-        }
+    namespace API {
+        class MCPServer
+        class WriteOps
+        class ReadOps
+    }
+    namespace DB {
+        class AletheiaDB
+        class VectorIndexBuilder
     }
     namespace Core {
-        class AletheiaDB
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+        class VersionMetadata
+        class Error
+        class TxIdGenerator
     }
     namespace Storage {
         class CurrentStorage
         class HistoricalStorage
         class TieredStorage
         class RedbColdStorage
-    }
-    namespace Observability {
-        class HoneycombClient {
-            +send_batch()
-        }
+        class WalFacade
     }
 
-    MCPServer --> QueryEngine : Uses
-    QueryEngine --> AletheiaDB : Uses
-    AletheiaDB --> CurrentStorage : "Owns (Arc)"
-    AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
+    MCPServer --> ReadOps : Uses
+    AletheiaDB --> CurrentStorage : Initializes
+    AletheiaDB --> HistoricalStorage : Initializes
+    AletheiaDB --> WriteOps : Uses
+    WriteOps --> CurrentStorage : Orchestrates
+    WriteOps --> WalFacade : Uses
+    VectorIndexBuilder --> AletheiaDB : Uses
+    AletheiaDB --> TxIdGenerator : Uses
+    CurrentStorage --> Error : Returns
+    CurrentStorage --> VersionMetadata : Uses
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
