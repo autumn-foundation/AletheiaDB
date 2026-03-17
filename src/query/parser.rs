@@ -793,26 +793,28 @@ impl Parser {
                 self.advance();
                 Ok(v)
             }
-            Some(Token::Dash) => {
-                self.advance();
-                match self.current() {
-                    Some(Token::IntegerLiteral(n)) => {
-                        let v = PropertyValue::Int(-*n);
-                        self.advance();
-                        Ok(v)
-                    }
-                    Some(Token::FloatLiteral(f)) => {
-                        let v = PropertyValue::Float(-*f);
-                        self.advance();
-                        Ok(v)
-                    }
-                    _ => Err(self.error(
-                        "Expected number after '-'".to_string(),
-                        Some("number".to_string()),
-                    )),
-                }
-            }
+            Some(Token::Dash) => self.parse_negative_number(),
             _ => Err(self.error("Expected value".to_string(), Some("value".to_string()))),
+        }
+    }
+
+    fn parse_negative_number(&mut self) -> Result<PropertyValue, ParseError> {
+        self.advance(); // consume Dash
+        match self.current() {
+            Some(Token::IntegerLiteral(n)) => {
+                let v = PropertyValue::Int(-*n);
+                self.advance();
+                Ok(v)
+            }
+            Some(Token::FloatLiteral(f)) => {
+                let v = PropertyValue::Float(-*f);
+                self.advance();
+                Ok(v)
+            }
+            _ => Err(self.error(
+                "Expected number after '-'".to_string(),
+                Some("number".to_string()),
+            )),
         }
     }
 
