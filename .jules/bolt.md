@@ -13,3 +13,7 @@
 **[Optimize TraversalIterator Vec Pre-allocation]**
 **Learning:** When using `.size_hint()` to pre-allocate `Vec::with_capacity()`, initializing iterators solely for their size hint and then discarding them causes redundant graph/database lookups, introducing a severe performance regression. Additionally, refactoring closures to take mutable references rather than mutably capturing from the environment means the closures themselves no longer need to be bound with `let mut`, which prevents `clippy::unused_mut` warnings.
 **Action:** Always instantiate iterators once, bind them to variables, calculate capacity using their size hints, and then consume those exact bindings. Carefully review closure bindings for unnecessary `mut` keywords when their captures change.
+
+**[Optimize Filtering with `Vec::retain`]**
+**Learning:** When retrieving a `Vec` from a lower-level API and immediately filtering it, chaining `.into_iter().filter(...).collect()` forces the allocation of a completely new `Vec` on the heap, which is an unnecessary allocation.
+**Action:** Use `.retain(...)` on the existing `Vec` to filter the elements in-place. This preserves the original allocation and prevents unnecessary memory allocations in hot paths like querying the graph structure.

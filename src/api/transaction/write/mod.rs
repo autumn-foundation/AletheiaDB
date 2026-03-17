@@ -834,12 +834,13 @@ impl ReadOps for WriteTransaction {
         use crate::core::interning::GLOBAL_INTERNER;
 
         // 1. Get committed matches, excluding nodes modified in the buffer
-        let mut results: Vec<NodeId> = self
+        // ⚡ Bolt Optimization: Uses `.retain()` to filter in-place and avoid allocating a new `Vec`.
+        let mut results = self
             .current
-            .find_nodes_by_property(label, property_key, property_value)
-            .into_iter()
-            .filter(|node_id| !self.buffer.has_modified_node(*node_id))
-            .filter(|node_id| {
+            .find_nodes_by_property(label, property_key, property_value);
+
+        results.retain(|node_id| {
+            !self.buffer.has_modified_node(*node_id) && {
                 self.current
                     .get_node(*node_id)
                     .map(|node| {
@@ -847,8 +848,8 @@ impl ReadOps for WriteTransaction {
                             .is_visible(&self.snapshot, node.metadata.created_by_tx)
                     })
                     .unwrap_or(false)
-            })
-            .collect();
+            }
+        });
 
         // 2. Scan buffered writes for matching CreateNode/UpdateNode
         let label_id = GLOBAL_INTERNER.get_id(label);
