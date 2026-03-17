@@ -73,6 +73,37 @@ C4Context
 
 ## Design Patterns
 
+### Transaction Architecture
+
+```mermaid
+classDiagram
+    namespace API {
+        class WriteTransaction {
+            +commit()
+            +rollback()
+        }
+    }
+    namespace TransactionInternal {
+        class Validation {
+            +validate_ops()
+        }
+        class Conflict {
+            +detect_mvcc_conflicts()
+        }
+        class Apply {
+            +apply_to_storage()
+        }
+        class Wal {
+            +write_to_log()
+        }
+    }
+
+    WriteTransaction --> Validation : Uses
+    WriteTransaction --> Conflict : Uses
+    WriteTransaction --> Apply : Uses
+    WriteTransaction --> Wal : Uses
+```
+
 ### Hybrid Storage Architecture
 
 ```mermaid
