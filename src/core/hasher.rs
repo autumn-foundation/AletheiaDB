@@ -727,7 +727,7 @@ mod sentinel_identity_hasher_tests {
         h2.update_state(0b1010);
 
         let expected_xor = 0b0110u64.wrapping_mul(FNV_PRIME);
-        let expected_or  = 0b1110u64.wrapping_mul(FNV_PRIME);
+        let expected_or = 0b1110u64.wrapping_mul(FNV_PRIME);
         let expected_and = 0b1000u64.wrapping_mul(FNV_PRIME);
 
         assert_eq!(h2.finish(), expected_xor);
