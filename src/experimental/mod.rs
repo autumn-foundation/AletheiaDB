@@ -245,3 +245,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Black Hole: Semantic Sink Detector.
+pub mod black_hole;
