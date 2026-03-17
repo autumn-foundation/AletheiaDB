@@ -39,11 +39,13 @@
 
 use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::vector::cosine_similarity;
 use dashmap::DashMap;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::hash::BuildHasherDefault;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// Shared state for Synapse weights.
@@ -52,7 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 pub struct SynapseContext {
     /// Maps EdgeId -> Usage Count.
     /// Usage count is monotonic increasing (until manual reset/decay handling).
-    weights: DashMap<EdgeId, AtomicU64>,
+    weights: DashMap<EdgeId, AtomicU64, BuildHasherDefault<IdentityHasher>>,
 }
 
 impl Default for SynapseContext {
@@ -65,7 +67,7 @@ impl SynapseContext {
     /// Create a new empty Synapse context.
     pub fn new() -> Self {
         Self {
-            weights: DashMap::new(),
+            weights: DashMap::with_hasher(BuildHasherDefault::default()),
         }
     }
 
@@ -207,8 +209,10 @@ impl<'a> Synapse<'a> {
             node: start,
         });
 
-        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
-        let mut g_score: HashMap<NodeId, f32> = HashMap::new();
+        let mut came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>> =
+            HashMap::with_hasher(BuildHasherDefault::default());
+        let mut g_score: HashMap<NodeId, f32, BuildHasherDefault<IdentityHasher>> =
+            HashMap::with_hasher(BuildHasherDefault::default());
         g_score.insert(start, 0.0);
 
         while let Some(State {
@@ -279,7 +283,7 @@ impl<'a> Synapse<'a> {
 
     fn reconstruct_path(
         &self,
-        came_from: HashMap<NodeId, NodeId>,
+        came_from: HashMap<NodeId, NodeId, BuildHasherDefault<IdentityHasher>>,
         mut current: NodeId,
     ) -> Vec<NodeId> {
         let mut total_path = vec![current];
