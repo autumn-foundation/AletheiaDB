@@ -75,3 +75,7 @@
 ## 2025-03-10 - Breaking VersionMetadata Dependency Cycle
 **Tangle:** Both `src/index/temporal.rs` and `src/core/version.rs` contained structs named `VersionMetadata`, causing naming collisions and semantic ambiguity ("The Leak" architectural smell).
 **Blueprint:** Renamed `src/index/temporal.rs::VersionMetadata` to `TimelineVersionMetadata` (and the associated index alias) to strictly enforce domain boundaries and clarify that the index-level struct serves temporal timelines, whereas `core` defines the global domain version primitive.
+
+**[Broke Storage-API Dependency Cycle]
+**Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
+**Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
