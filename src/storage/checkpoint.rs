@@ -752,7 +752,7 @@ impl CheckpointManager {
 
         // Extract node versions from snapshot (isolated from concurrent writes)
         for version_arc in snapshot.iter_node_versions() {
-            let version = &version_arc;
+            let version = &*version_arc;
             let version_id = version.id;
             let (version_type, properties, vector_snapshot_id) = match &version.data {
                 VersionData::Anchor {
@@ -829,7 +829,7 @@ impl CheckpointManager {
 
         // Extract edge versions from snapshot (isolated from concurrent writes)
         for version_arc in snapshot.iter_edge_versions() {
-            let version = &version_arc;
+            let version = &*version_arc;
             let version_id = version.id;
             let (version_type, properties) = match &version.data {
                 VersionData::Anchor { properties, .. } => {
