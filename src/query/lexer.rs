@@ -7,6 +7,22 @@
 use std::fmt;
 
 /// A token in the AQL language.
+///
+/// Tokens are the fundamental building blocks of Aletheia Query Language (AQL).
+/// They represent keywords, punctuation, operators, and literal values parsed
+/// from the raw query string.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::lexer::Token;
+///
+/// let token = Token::Match;
+/// assert_eq!(format!("{}", token), "MATCH");
+///
+/// let id = Token::Identifier("Person".to_string());
+/// assert_eq!(format!("{}", id), "Person");
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Keywords - Graph
@@ -228,6 +244,20 @@ impl fmt::Display for Token {
 /// Error type for lexer errors.
 ///
 /// Indicates a syntax error or unexpected character encountered during tokenization.
+/// Provides the exact position, line, and column where the lexer encountered invalid input.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::lexer::Lexer;
+///
+/// // Missing an ending quote triggers a LexerError
+/// let result = Lexer::tokenize("MATCH (n {name: 'Alice})");
+/// assert!(result.is_err());
+/// let error = result.unwrap_err();
+/// assert_eq!(error.line, 1);
+/// assert!(error.message.contains("Unterminated string"));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexerError {
     /// Error message describing what went wrong.
