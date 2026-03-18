@@ -180,15 +180,23 @@ pub struct CheckpointManager {
 impl CheckpointManager {
     /// Create a new checkpoint manager.
     ///
-    /// # Arguments
+    /// # The Spark
+    /// Without checkpoints, recovering a database from a crash would require replaying
+    /// the entire Write-Ahead Log (WAL) from the beginning of time. This manager
+    /// coordinates the periodic flushing of in-memory indexes (like [`crate::index::vector::sharded::ShardedVectorIndex`])
+    /// to disk. This ensures that the recovery process only needs to replay recent
+    /// operations.
     ///
-    /// * `config` - Checkpoint configuration
+    /// # The Details
+    /// Instantiating this manager validates the configuration and initializes the
+    /// underlying [`crate::storage::index_persistence::IndexPersistenceManager`].
+    /// It verifies that the `data_dir` is accessible and ensures the compression
+    /// settings are valid for zstd.
     ///
     /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The data directory cannot be created
-    /// - The compression level is invalid (must be 1-22 for zstd)
+    /// Returns a [`StorageError::CheckpointError`] if:
+    /// - The data directory cannot be created.
+    /// - `enable_compression` is true but `compression_level` is not in the valid zstd range (1-22).
     ///
     /// # Examples
     ///
@@ -227,9 +235,33 @@ impl CheckpointManager {
 
     /// Check if a checkpoint should be created.
     ///
-    /// Returns true if:
-    /// - Time since last checkpoint exceeds `checkpoint_interval`
-    /// - Number of WAL entries since last checkpoint exceeds `min_wal_entries`
+    /// # The Spark
+    /// Creating a checkpoint is an expensive I/O operation. If we checkpoint too often,
+    /// we degrade system performance. If we checkpoint too rarely, recovery times
+    /// become unacceptably long. This function evaluates heuristics to decide the
+    /// optimal moment to pause and flush the state.
+    ///
+    /// # The Details
+    /// This uses a hybrid threshold approach. It returns `true` if *either*:
+    /// 1. The time elapsed since the last checkpoint exceeds the configured `checkpoint_interval`.
+    /// 2. The number of new entries appended to the WAL (calculated via the `current_lsn`
+    ///    minus the last checkpoint's [`LSN`]) exceeds `min_wal_entries`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::storage::checkpoint::{CheckpointManager, CheckpointConfig};
+    /// # use aletheiadb::storage::wal::LSN;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = CheckpointConfig::default();
+    /// let manager = CheckpointManager::new(config)?;
+    ///
+    /// // Initially, should checkpoint because the manager hasn't recorded any checkpoints yet,
+    /// // and the elapsed time effectively exceeds the interval.
+    /// assert_eq!(manager.should_checkpoint(LSN(10)), true);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn should_checkpoint(&self, current_lsn: LSN) -> bool {
         // Check time threshold
         let time_elapsed = SystemTime::now()
