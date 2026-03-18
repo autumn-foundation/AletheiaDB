@@ -1946,7 +1946,6 @@ mod sentry_tests {
     }
 }
 
-
 #[cfg(test)]
 mod more_sentry_tests {
     use super::*;
