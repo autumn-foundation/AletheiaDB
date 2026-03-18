@@ -510,16 +510,12 @@ impl<C: ShardClient> QueryExecutor<C> {
             }
             AggregationStrategy::MergeNodes => {
                 // Merge and deduplicate (simplified - real impl would parse nodes)
-                let mut aggregated =
-                    Vec::with_capacity(results.iter().map(|r| r.data.len()).max().unwrap_or(0));
-                let mut seen_len = 0;
-                for result in results {
-                    if result.data.len() > seen_len {
-                        aggregated = result.data.clone();
-                        seen_len = result.data.len();
-                    }
+                // Avoids O(N) heap allocations by only cloning the largest result once.
+                let best_result = results.iter().max_by_key(|r| r.data.len());
+                match best_result {
+                    Some(res) if !res.data.is_empty() => Ok(res.data.clone()),
+                    _ => Ok(Vec::new()),
                 }
-                Ok(aggregated)
             }
             AggregationStrategy::Sum => {
                 // Sum numeric results
