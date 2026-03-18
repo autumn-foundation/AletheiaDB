@@ -654,6 +654,7 @@ pub struct MockShardClient {
     prepare_response: RwLock<Option<PrepareResponse>>,
     commit_response: RwLock<Option<CommitResponse>>,
     abort_response: RwLock<Option<AbortResponse>>,
+    query_response: RwLock<Vec<u8>>,
     state: RwLock<ShardState>,
     latency: RwLock<Duration>,
     fail_next: RwLock<Option<NetworkError>>,
@@ -672,6 +673,7 @@ impl MockShardClient {
             })),
             commit_response: RwLock::new(Some(CommitResponse { success: true })),
             abort_response: RwLock::new(Some(AbortResponse { acknowledged: true })),
+            query_response: RwLock::new(Vec::new()),
             state: RwLock::new(ShardState::new(shard_id)),
             latency: RwLock::new(Duration::from_micros(100)),
             fail_next: RwLock::new(None),
@@ -697,6 +699,11 @@ impl MockShardClient {
     /// Set the abort response.
     pub fn set_abort_response(&self, response: AbortResponse) {
         *self.abort_response.write().unwrap() = Some(response);
+    }
+
+    /// Set the query response.
+    pub fn set_query_response(&self, response: Vec<u8>) {
+        *self.query_response.write().unwrap() = response;
     }
 
     /// Set the shard state.
@@ -823,7 +830,7 @@ impl ShardClient for MockShardClient {
         }
 
         self.simulate_latency();
-        Ok(Vec::new())
+        Ok(self.query_response.read().unwrap().clone())
     }
 
     fn get_state(&self) -> NetworkResult<ShardState> {
