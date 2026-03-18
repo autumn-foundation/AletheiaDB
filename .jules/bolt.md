@@ -10,6 +10,9 @@
 **Learning:** When pre-allocating vectors based on multiple inputs, be mindful of the aggregation strategy. Concatenating requires `.sum()`, but merging or returning the first/best requires `.max()`. Using `.sum()` for a merge strategy causes severe O(N) memory over-allocation.
 **Action:** Always map the pre-allocation math directly to the behavior of the loop that populates it.
 
+**Optimize Checkpoint Heap Allocations with Arc<Vec<T>>**
+**Learning:** Changing a collection of Arc references (`Vec<Arc<T>>`) into an Arc reference of a collection (`Arc<Vec<T>>`) when read-only sharing is required drastically reduces allocator overhead. Iteration overhead remains similar (or improves due to cache locality), but thousands of individual heap allocations and atomic refcount operations during creation are entirely eliminated.
+**Action:** When capturing large graph structures for snapshots, prefer contiguous vectors wrapped in a single Arc rather than arrays of individual Arc allocations.
 **[Optimize TraversalIterator Vec Pre-allocation]**
 **Learning:** When using `.size_hint()` to pre-allocate `Vec::with_capacity()`, initializing iterators solely for their size hint and then discarding them causes redundant graph/database lookups, introducing a severe performance regression. Additionally, refactoring closures to take mutable references rather than mutably capturing from the environment means the closures themselves no longer need to be bound with `let mut`, which prevents `clippy::unused_mut` warnings.
 **Action:** Always instantiate iterators once, bind them to variables, calculate capacity using their size hints, and then consume those exact bindings. Carefully review closure bindings for unnecessary `mut` keywords when their captures change.
