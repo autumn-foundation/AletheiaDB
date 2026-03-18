@@ -656,6 +656,7 @@ mod tests {
         assert!(entity_id.is_node());
         assert!(!entity_id.is_edge());
         assert_eq!(entity_id.as_node(), Some(node_id));
+        assert_eq!(entity_id.as_edge(), None);
     }
 
     #[test]
@@ -665,8 +666,8 @@ mod tests {
         assert!(!entity_id.is_node());
         assert!(entity_id.is_edge());
         assert_eq!(entity_id.as_edge(), Some(edge_id));
+        assert_eq!(entity_id.as_node(), None);
     }
-
     #[test]
     fn test_id_generator() {
         let generator = IdGenerator::new();
@@ -1825,6 +1826,9 @@ mod tests_conversions {
         let n = NodeId::try_from(42).unwrap();
         assert_eq!(n, NodeId::new(42).unwrap());
 
+        let err = NodeId::try_from(u64::MAX).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+
         let n2 = NodeId::from_str("42").unwrap();
         assert_eq!(n2, n);
 
@@ -1833,6 +1837,9 @@ mod tests_conversions {
 
         let err2 = NodeId::from_str("-1").unwrap_err();
         assert!(matches!(err2, StorageError::InvalidId { .. }));
+
+        let err3 = NodeId::from_str(&u64::MAX.to_string()).unwrap_err();
+        assert!(matches!(err3, StorageError::InvalidId { .. }));
     }
 
     #[test]
@@ -1840,11 +1847,17 @@ mod tests_conversions {
         let e = EdgeId::try_from(42).unwrap();
         assert_eq!(e, EdgeId::new(42).unwrap());
 
+        let err = EdgeId::try_from(u64::MAX).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+
         let e2 = EdgeId::from_str("42").unwrap();
         assert_eq!(e2, e);
 
         let err = EdgeId::from_str("invalid").unwrap_err();
         assert!(matches!(err, StorageError::InvalidId { .. }));
+
+        let err2 = EdgeId::from_str(&u64::MAX.to_string()).unwrap_err();
+        assert!(matches!(err2, StorageError::InvalidId { .. }));
     }
 
     #[test]
@@ -1852,11 +1865,17 @@ mod tests_conversions {
         let v = VersionId::try_from(42).unwrap();
         assert_eq!(v, VersionId::new(42).unwrap());
 
+        let err = VersionId::try_from(u64::MAX).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+
         let v2 = VersionId::from_str("42").unwrap();
         assert_eq!(v2, v);
 
         let err = VersionId::from_str("invalid").unwrap_err();
         assert!(matches!(err, StorageError::InvalidId { .. }));
+
+        let err2 = VersionId::from_str(&u64::MAX.to_string()).unwrap_err();
+        assert!(matches!(err2, StorageError::InvalidId { .. }));
     }
 
     #[test]
@@ -1869,5 +1888,8 @@ mod tests_conversions {
 
         let err = TxId::from_str("invalid").unwrap_err();
         assert!(matches!(err, StorageError::InvalidId { .. }));
+
+        let err2 = TxId::from_str("-1").unwrap_err();
+        assert!(matches!(err2, StorageError::InvalidId { .. }));
     }
 }
