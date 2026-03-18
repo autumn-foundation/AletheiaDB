@@ -1643,24 +1643,21 @@ mod sentry_tests {
         let ts = time::from_secs(secs);
         let output = time::to_iso8601(ts);
 
+        // Verify exact structural equality using independently derived, hardcoded string values
+        // to avoid tautological mirroring of SystemTime debug formatting.
         if cfg!(windows) {
-            // On Windows, SystemTime debug format is "SystemTime { intervals: <count> }"
-            // intervals are 100ns ticks since 1601-01-01
-            // 1609459200 seconds (Unix epoch to 2021) + 11644473600 seconds (1601 to 1970)
-            // = 13253932800 seconds total
-            // * 10,000,000 (ticks per second) = 132539328000000000
-            let expected = "132539328000000000";
-            assert!(
-                output.contains(expected),
-                "to_iso8601 output should contain expected intervals on Windows. Got: {}",
-                output
+            // Windows SystemTime debug format: "SystemTime { intervals: 132539328000000000 }"
+            assert_eq!(
+                output,
+                "SystemTime { intervals: 132539328000000000 }",
+                "to_iso8601 output should match exact expected SystemTime debug string on Windows."
             );
         } else {
-            // On Unix-like systems, Debug format usually contains "tv_sec: <seconds>"
-            assert!(
-                output.contains(&secs.to_string()),
-                "to_iso8601 output should contain the seconds timestamp. Got: {}",
-                output
+            // Unix SystemTime debug format: "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }"
+            assert_eq!(
+                output,
+                "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }",
+                "to_iso8601 output should match exact expected SystemTime debug string on Unix."
             );
         }
     }
@@ -1731,29 +1728,21 @@ mod sentry_tests {
         let ts = HybridTimestamp::new_unchecked(secs * 1_000_000 + micros, 0);
         let output = time::to_iso8601(ts);
 
-        // Expected nanoseconds: 123456000
+        // Verify exact structural equality using independently derived, hardcoded string values
+        // to avoid tautological mirroring of SystemTime debug formatting.
         if cfg!(windows) {
-            // On Windows, SystemTime debug format is "SystemTime { intervals: <count> }"
-            // intervals are 100ns ticks since 1601-01-01.
-            // Base seconds (1601 to 1970) = 11644473600.
-            // Target seconds (1970 to 2021) = 1609459200.
-            // Total seconds = 13253932800.
-            // Total ticks from seconds = 13253932800 * 10_000_000 = 132539328000000000.
-            // Ticks from microseconds = 123456 * 10 = 1234560.
-            // Total ticks = 132539328001234560.
-            // We check for the fractional part contribution or the exact tick count.
-            // Since the output observed is "intervals: 132539328001234560", we check for that suffix.
-            assert!(
-                output.contains("1234560"),
-                "Output should contain the fractional ticks (1234560): {}",
-                output
+            // Windows SystemTime debug format
+            assert_eq!(
+                output,
+                "SystemTime { intervals: 132539328001234560 }",
+                "to_iso8601 output should match exact expected SystemTime debug string with nanoseconds on Windows."
             );
         } else {
-            // On Unix-like systems, Debug format usually contains "tv_nsec: 123456000".
-            assert!(
-                output.contains("123456000"),
-                "Output should contain nanoseconds (123456000): {}",
-                output
+            // Unix SystemTime debug format
+            assert_eq!(
+                output,
+                "SystemTime { tv_sec: 1609459200, tv_nsec: 123456000 }",
+                "to_iso8601 output should match exact expected SystemTime debug string with nanoseconds on Unix."
             );
         }
     }
