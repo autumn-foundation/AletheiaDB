@@ -49,6 +49,7 @@
 //! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
 //! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! | `catalyst` | **Catalyst** | Synergy Maximization. "Who is the missing piece?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -109,8 +110,11 @@ pub mod ariadne;
 /// Aura: Semantic Essence over Time.
 pub mod aura;
 #[cfg(feature = "nova")]
-/// Semantic graph clustering ("Cartographer").
+/// Cartographer: Semantic Graph Clustering.
 pub mod cartographer;
+#[cfg(feature = "nova")]
+/// Catalyst: Synergy Maximization & Team Building.
+pub mod catalyst;
 #[cfg(feature = "nova")]
 /// Chameleon: Context-Aware Faceted Search.
 pub mod chameleon;
