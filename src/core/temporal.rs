@@ -51,7 +51,7 @@
 //! let range = TimeRange::new(start, end)?;
 //!
 //! // ❌ Pitfall: Expecting the end timestamp to be included
-//! assert_eq!(range.contains(end), false);
+//! assert!(!range.contains(end));
 //!
 //! // ✅ Correct: Use end-1 or check < end
 //! assert_eq!(range.contains(time::from_secs(199)), true);
@@ -1943,5 +1943,225 @@ mod sentry_tests {
         // Check error message
         let err = result.unwrap_err();
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
+    }
+}
+
+
+#[cfg(test)]
+mod more_sentry_tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+
+    #[test]
+    fn test_time_range_from_boundary_conditions() {
+        let max_valid = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let range = TimeRange::from(max_valid);
+        assert_eq!(range.start(), max_valid);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+
+        let max_valid_minus_one = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP - 1, 0);
+        let range_minus_one = TimeRange::from(max_valid_minus_one);
+        assert_eq!(range_minus_one.start(), max_valid_minus_one);
+        assert_eq!(range_minus_one.end(), TIMESTAMP_MAX);
+
+        let timestamp_max = TIMESTAMP_MAX;
+        let range_max = TimeRange::from(timestamp_max);
+        assert_eq!(range_max.start(), timestamp_max);
+        assert_eq!(range_max.end(), TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_time_range_at_boundary_conditions() {
+        let max_valid = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let range = TimeRange::at(max_valid);
+        assert_eq!(range.start(), max_valid);
+        assert_eq!(range.end(), max_valid);
+
+        let max_valid_minus_one = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP - 1, 0);
+        let range_minus_one = TimeRange::at(max_valid_minus_one);
+        assert_eq!(range_minus_one.start(), max_valid_minus_one);
+        assert_eq!(range_minus_one.end(), max_valid_minus_one);
+
+        let timestamp_max = TIMESTAMP_MAX;
+        let range_max = TimeRange::at(timestamp_max);
+        assert_eq!(range_max.start(), timestamp_max);
+        assert_eq!(range_max.end(), timestamp_max);
+    }
+
+    #[test]
+    fn test_time_range_is_closed() {
+        let t100 = time::from_secs(100);
+
+        let range_open = TimeRange::from(t100);
+        assert!(!range_open.is_closed());
+
+        let t200 = time::from_secs(200);
+        let range_closed = TimeRange::between(t100, t200).unwrap();
+        assert!(range_closed.is_closed());
+    }
+
+    #[test]
+    fn test_time_range_contains_exact_boundaries() {
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let end = HybridTimestamp::new_unchecked(200, 0);
+        let range = TimeRange::new(start, end).unwrap();
+
+        assert!(!range.contains(HybridTimestamp::new_unchecked(99, 0)));
+        assert!(range.contains(start));
+        assert!(range.contains(HybridTimestamp::new_unchecked(199, 0)));
+        assert!(!range.contains(end));
+        assert!(!range.contains(HybridTimestamp::new_unchecked(201, 0)));
+    }
+
+    #[test]
+    fn test_time_range_contains_or_after_exact_boundaries() {
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let end = HybridTimestamp::new_unchecked(200, 0);
+        let range = TimeRange::new(start, end).unwrap();
+
+        assert!(!range.contains_or_after(HybridTimestamp::new_unchecked(99, 0)));
+        assert!(range.contains_or_after(start));
+        assert!(range.contains_or_after(HybridTimestamp::new_unchecked(101, 0)));
+        assert!(range.contains_or_after(end));
+        assert!(range.contains_or_after(HybridTimestamp::new_unchecked(201, 0)));
+    }
+
+    #[test]
+    fn test_time_range_is_empty_exact_boundaries() {
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let end = HybridTimestamp::new_unchecked(200, 0);
+        let range = TimeRange::new(start, end).unwrap();
+        assert!(!range.is_empty());
+
+        let empty_range = TimeRange::new(start, start).unwrap();
+        assert!(empty_range.is_empty());
+    }
+
+    #[test]
+    fn test_time_range_overlaps_exact_boundaries() {
+        let r1 = TimeRange::new(
+            HybridTimestamp::new_unchecked(100, 0),
+            HybridTimestamp::new_unchecked(200, 0),
+        )
+        .unwrap();
+
+        // r2 is before r1
+        let r2 = TimeRange::new(
+            HybridTimestamp::new_unchecked(0, 0),
+            HybridTimestamp::new_unchecked(100, 0),
+        )
+        .unwrap();
+        assert!(!r1.overlaps(&r2));
+
+        // r3 overlaps r1 start
+        let r3 = TimeRange::new(
+            HybridTimestamp::new_unchecked(50, 0),
+            HybridTimestamp::new_unchecked(150, 0),
+        )
+        .unwrap();
+        assert!(r1.overlaps(&r3));
+
+        // r4 is inside r1
+        let r4 = TimeRange::new(
+            HybridTimestamp::new_unchecked(120, 0),
+            HybridTimestamp::new_unchecked(180, 0),
+        )
+        .unwrap();
+        assert!(r1.overlaps(&r4));
+
+        // r5 overlaps r1 end
+        let r5 = TimeRange::new(
+            HybridTimestamp::new_unchecked(150, 0),
+            HybridTimestamp::new_unchecked(250, 0),
+        )
+        .unwrap();
+        assert!(r1.overlaps(&r5));
+
+        // r6 is after r1
+        let r6 = TimeRange::new(
+            HybridTimestamp::new_unchecked(200, 0),
+            HybridTimestamp::new_unchecked(300, 0),
+        )
+        .unwrap();
+        assert!(!r1.overlaps(&r6));
+
+        // empty ranges
+        let empty_r1 = TimeRange::new(
+            HybridTimestamp::new_unchecked(150, 0),
+            HybridTimestamp::new_unchecked(150, 0),
+        )
+        .unwrap();
+        assert!(!r1.overlaps(&empty_r1));
+    }
+
+    #[test]
+    fn test_time_range_contains_range_exact_boundaries() {
+        let r1 = TimeRange::new(
+            HybridTimestamp::new_unchecked(100, 0),
+            HybridTimestamp::new_unchecked(200, 0),
+        )
+        .unwrap();
+
+        // exact match
+        let r2 = TimeRange::new(
+            HybridTimestamp::new_unchecked(100, 0),
+            HybridTimestamp::new_unchecked(200, 0),
+        )
+        .unwrap();
+        assert!(r1.contains_range(&r2));
+
+        // inside
+        let r3 = TimeRange::new(
+            HybridTimestamp::new_unchecked(100, 0),
+            HybridTimestamp::new_unchecked(199, 0),
+        )
+        .unwrap();
+        assert!(r1.contains_range(&r3));
+
+        let r4 = TimeRange::new(
+            HybridTimestamp::new_unchecked(101, 0),
+            HybridTimestamp::new_unchecked(200, 0),
+        )
+        .unwrap();
+        assert!(r1.contains_range(&r4));
+
+        // outside
+        let r5 = TimeRange::new(
+            HybridTimestamp::new_unchecked(99, 0),
+            HybridTimestamp::new_unchecked(200, 0),
+        )
+        .unwrap();
+        assert!(!r1.contains_range(&r5));
+
+        let r6 = TimeRange::new(
+            HybridTimestamp::new_unchecked(100, 0),
+            HybridTimestamp::new_unchecked(201, 0),
+        )
+        .unwrap();
+        assert!(!r1.contains_range(&r6));
+    }
+
+    #[test]
+    fn test_time_range_close_at_exact_boundaries() {
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let range = TimeRange::from(start);
+
+        let end = HybridTimestamp::new_unchecked(200, 0);
+        let closed = range.close_at(end).unwrap();
+        assert_eq!(closed.start(), start);
+        assert_eq!(closed.end(), end);
+
+        let same_as_start = HybridTimestamp::new_unchecked(100, 0);
+        let closed2 = range.close_at(same_as_start).unwrap();
+        assert_eq!(closed2.start(), start);
+        assert_eq!(closed2.end(), same_as_start);
+        assert!(closed2.is_empty());
+
+        let before_start = HybridTimestamp::new_unchecked(99, 0);
+        let result = range.close_at(before_start);
+        assert!(matches!(
+            result,
+            Err(TemporalError::InvalidTimeRange { .. })
+        ));
     }
 }
