@@ -77,6 +77,7 @@ impl Default for ActivityDensityResonator {
 }
 
 impl ActivityDensityResonator {
+    #[allow(dead_code)]
     /// Generate a fingerprint from the given history.
     fn resonate(&self, history: &EntityHistory) -> TemporalFingerprint {
         let mut bins = vec![0.0; self.num_bins];
