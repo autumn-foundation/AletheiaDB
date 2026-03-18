@@ -388,6 +388,83 @@ impl Default for WriteBuffer {
     }
 }
 
+impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
+    fn from(write: &BufferedWrite) -> Self {
+        match write {
+            BufferedWrite::CreateNode {
+                node_id,
+                label,
+                properties,
+                valid_from,
+                ..
+            } => crate::storage::wal::WalOperation::CreateNode {
+                node_id: *node_id,
+                label: *label,
+                properties: properties.clone(),
+                valid_from: *valid_from,
+            },
+            BufferedWrite::CreateEdge {
+                edge_id,
+                source,
+                target,
+                label,
+                properties,
+                valid_from,
+                ..
+            } => crate::storage::wal::WalOperation::CreateEdge {
+                edge_id: *edge_id,
+                source: *source,
+                target: *target,
+                label: *label,
+                properties: properties.clone(),
+                valid_from: *valid_from,
+            },
+            BufferedWrite::UpdateNode {
+                node_id,
+                version_id,
+                label,
+                properties,
+                valid_from,
+                ..
+            } => crate::storage::wal::WalOperation::UpdateNode {
+                node_id: *node_id,
+                version_id: *version_id,
+                label: *label,
+                properties: properties.clone(),
+                valid_from: *valid_from,
+            },
+            BufferedWrite::UpdateEdge {
+                edge_id,
+                version_id,
+                label,
+                properties,
+                valid_from,
+                ..
+            } => crate::storage::wal::WalOperation::UpdateEdge {
+                edge_id: *edge_id,
+                version_id: *version_id,
+                label: *label,
+                properties: properties.clone(),
+                valid_from: *valid_from,
+            },
+            BufferedWrite::DeleteNode {
+                node_id,
+                valid_from,
+            } => crate::storage::wal::WalOperation::DeleteNode {
+                node_id: *node_id,
+                valid_from: *valid_from,
+            },
+            BufferedWrite::DeleteEdge {
+                edge_id,
+                valid_from,
+            } => crate::storage::wal::WalOperation::DeleteEdge {
+                edge_id: *edge_id,
+                valid_from: *valid_from,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
