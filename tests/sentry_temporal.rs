@@ -1294,3 +1294,109 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_timerange_is_current_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::from(HybridTimestamp::new(100, 0).unwrap());
+    assert!(range.is_current());
+
+    // Test == mutated to !=
+    let closed = range
+        .close_at(HybridTimestamp::new(200, 0).unwrap())
+        .unwrap();
+    assert!(!closed.is_current());
+}
+
+#[test]
+fn test_timerange_is_closed_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let open = TimeRange::from(HybridTimestamp::new(100, 0).unwrap());
+    assert!(!open.is_closed());
+
+    let closed = open
+        .close_at(HybridTimestamp::new(200, 0).unwrap())
+        .unwrap();
+    assert!(closed.is_closed());
+}
+
+#[test]
+fn test_timerange_start_end_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{TIMESTAMP_MAX, TimeRange};
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let range = TimeRange::from(start);
+
+    // Ensure default isn't returned
+    assert_ne!(range.start(), HybridTimestamp::new(0, 0).unwrap());
+    assert_eq!(range.start(), start);
+
+    assert_ne!(range.end(), HybridTimestamp::new(0, 0).unwrap());
+    assert_eq!(range.end(), TIMESTAMP_MAX);
+}
+
+#[test]
+fn test_timerange_between_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+
+    let result = TimeRange::between(start, end);
+    assert!(result.is_ok());
+
+    let range = result.unwrap();
+    // Test that default isn't returned for TimeRange
+    assert_eq!(range.start(), start);
+    assert_eq!(range.end(), end);
+}
+
+#[test]
+fn test_time_to_iso8601_strict_division() {
+    use aletheiadb::core::temporal::time;
+    use aletheiadb::core::hlc::HybridTimestamp;
+
+    // Mutants target `/ 1_000_000` to `*` or `%`
+    let ts1 = HybridTimestamp::new(2_000_000, 0).unwrap();
+
+    let result = time::to_iso8601(ts1);
+
+    // If division was mutated to % 1_000_000, 2_000_000 % 1_000_000 = 0.
+    // If division was mutated to *, it would be 2_000_000_000_000.
+    // Since 2 seconds from epoch is 1970-01-01 00:00:02
+
+    if cfg!(windows) {
+        // Based on existing Windows debug format assertions in sentry_temporal.rs
+        assert!(result.contains("132539328020000000") || result.contains("116444736020000000"), "Expected exactly 2 seconds tick count on Windows, got: {}", result);
+    } else {
+        // Unix format for time::to_iso8601 debug printing: "tv_sec: 2"
+        assert!(result.contains("tv_sec: 2") || result.contains("2.000000000s"), "Expected 2 seconds representation on Unix, got: {}", result);
+    }
+}
+
+#[test]
+fn test_timerange_duration_micros_strict_operator() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    // Mutants target end - start to + or /
+    // If we pick specific numbers that fail clearly:
+    // start = 50, end = 100
+    // - yields 50
+    // + yields 150
+    // / yields 2
+    let start = HybridTimestamp::new(50, 0).unwrap();
+    let end = HybridTimestamp::new(100, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    let dur = range.duration_micros().unwrap();
+    assert_ne!(dur, 150, "Mutant replaced - with +");
+    assert_ne!(dur, 2, "Mutant replaced - with /");
+    assert_eq!(dur, 50);
+}
