@@ -30,7 +30,29 @@ pub struct NodeId(u64);
 impl NodeId {
     /// Create a new NodeId from a u64 value with validation.
     ///
-    /// Returns an error if the ID exceeds MAX_VALID_ID.
+    /// # The Spark
+    /// Graph databases run on connections, and every connection needs an anchor.
+    /// `NodeId` acts as this unique anchor. We strongly type this instead of using a
+    /// raw `u64` so that you cannot accidentally pass an edge ID to a function
+    /// expecting a node ID.
+    ///
+    /// # The Details
+    /// Creating a valid `NodeId` requires validation. The inner `u64` must not exceed
+    /// [`MAX_VALID_ID`]. This reserved space prevents potential DoS attacks during
+    /// vector resizing or memory allocation.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::InvalidId`] if the provided `id` exceeds [`MAX_VALID_ID`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::id::NodeId;
+    ///
+    /// // Valid ID
+    /// let id = NodeId::new(42).unwrap();
+    /// assert_eq!(id.as_u64(), 42);
+    /// ```
     #[inline]
     pub fn new(id: u64) -> Result<Self, StorageError> {
         if id > MAX_VALID_ID {
@@ -74,7 +96,29 @@ pub struct EdgeId(u64);
 impl EdgeId {
     /// Create a new EdgeId from a u64 value with validation.
     ///
-    /// Returns an error if the ID exceeds MAX_VALID_ID.
+    /// # The Spark
+    /// Edges are the relationships that give a graph its meaning.
+    /// `EdgeId` provides a unique identifier for these relationships. We strongly type
+    /// this instead of using a raw `u64` to prevent accidentally mixing up node and
+    /// edge identifiers, which would cause silent corruption or mapping failures.
+    ///
+    /// # The Details
+    /// Creating a valid `EdgeId` requires validation. The inner `u64` must not exceed
+    /// [`MAX_VALID_ID`]. This reserved space prevents potential DoS attacks during
+    /// vector resizing or memory allocation.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::InvalidId`] if the provided `id` exceeds [`MAX_VALID_ID`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::id::EdgeId;
+    ///
+    /// // Valid ID
+    /// let id = EdgeId::new(42).unwrap();
+    /// assert_eq!(id.as_u64(), 42);
+    /// ```
     #[inline]
     pub fn new(id: u64) -> Result<Self, StorageError> {
         if id > MAX_VALID_ID {
@@ -118,7 +162,29 @@ pub struct VersionId(u64);
 impl VersionId {
     /// Create a new VersionId from a u64 value with validation.
     ///
-    /// Returns an error if the ID exceeds MAX_VALID_ID.
+    /// # The Spark
+    /// AletheiaDB allows traversing time, not just data.
+    /// `VersionId` provides an anchor in this temporal dimension. It's a strongly
+    /// typed identifier so that historical snapshots cannot be confused with spatial
+    /// entities like nodes or edges.
+    ///
+    /// # The Details
+    /// Creating a valid `VersionId` requires validation. The inner `u64` must not exceed
+    /// [`MAX_VALID_ID`]. This reserved space prevents potential DoS attacks during
+    /// vector resizing or memory allocation.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::InvalidId`] if the provided `id` exceeds [`MAX_VALID_ID`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::id::VersionId;
+    ///
+    /// // Valid ID
+    /// let id = VersionId::new(42).unwrap();
+    /// assert_eq!(id.as_u64(), 42);
+    /// ```
     #[inline]
     pub fn new(id: u64) -> Result<Self, StorageError> {
         if id > MAX_VALID_ID {

@@ -85,3 +85,7 @@
 ## 2025-03-05 - Opaque Persistence Architecture
 **Confusion:** The `src/index/vector/hnsw/persistence.rs` module lacked documentation explaining the two-file architecture (the usearch `.bin` file vs the AletheiaDB `.idx` file), making it difficult to understand how and why index mapping was persisted. Furthermore, the DoS protections (like `MAX_MAPPINGS_COUNT`) were not clearly highlighted at the module level.
 **Clarification:** Added a module-level `//!` documentation block detailing the architecture and security protections. Additionally, documented the `IndexMetadata` struct to explain why exact configuration matching is required.
+
+## 2025-03-05 - The Spark and Details Format
+**Confusion:** Basic documentation comments like "Creates a new ID" don't help tired developers understand *why* strong types exist or *when* checkpoints trigger.
+**Clarification:** Added `# The Spark` and `# The Details` narrative structures to `NodeId`, `EdgeId`, `VersionId`, and `CheckpointManager` methods to explain the context of use, plus concrete `# Examples`.
