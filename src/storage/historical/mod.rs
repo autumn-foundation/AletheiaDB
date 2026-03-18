@@ -2972,18 +2972,12 @@ impl HistoricalStorage {
         use std::sync::Arc;
 
         // Collect Arc references to all node versions
-        let node_versions: Vec<Arc<NodeVersion>> = self
-            .node_versions
-            .values()
-            .map(|version| Arc::new(version.clone()))
-            .collect();
+        let node_versions: Arc<Vec<NodeVersion>> =
+            Arc::new(self.node_versions.values().cloned().collect());
 
         // Collect Arc references to all edge versions
-        let edge_versions: Vec<Arc<EdgeVersion>> = self
-            .edge_versions
-            .values()
-            .map(|version| Arc::new(version.clone()))
-            .collect();
+        let edge_versions: Arc<Vec<EdgeVersion>> =
+            Arc::new(self.edge_versions.values().cloned().collect());
 
         HistoricalStorageSnapshot::new(lsn, node_versions, edge_versions)
     }

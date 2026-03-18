@@ -234,17 +234,17 @@ pub struct HistoricalStorageSnapshot {
     /// LSN at which snapshot was taken
     lsn: LSN,
     /// Arc references to node versions
-    node_versions: Vec<Arc<NodeVersion>>,
+    node_versions: Arc<Vec<NodeVersion>>,
     /// Arc references to edge versions
-    edge_versions: Vec<Arc<EdgeVersion>>,
+    edge_versions: Arc<Vec<EdgeVersion>>,
 }
 
 impl HistoricalStorageSnapshot {
     /// Create a new historical snapshot.
     pub fn new(
         lsn: LSN,
-        node_versions: Vec<Arc<NodeVersion>>,
-        edge_versions: Vec<Arc<EdgeVersion>>,
+        node_versions: Arc<Vec<NodeVersion>>,
+        edge_versions: Arc<Vec<EdgeVersion>>,
     ) -> Self {
         Self {
             lsn,
@@ -269,83 +269,19 @@ impl HistoricalStorageSnapshot {
     }
 
     /// Iterate over node versions in snapshot (streaming)
-    pub fn iter_node_versions(&self) -> HistoricalNodeVersionIterator {
-        HistoricalNodeVersionIterator {
-            versions: self.node_versions.clone(),
-            index: 0,
-        }
+    pub fn iter_node_versions(&self) -> impl ExactSizeIterator<Item = &NodeVersion> {
+        self.node_versions.iter()
     }
 
     /// Iterate over edge versions in snapshot (streaming)
-    pub fn iter_edge_versions(&self) -> HistoricalEdgeVersionIterator {
-        HistoricalEdgeVersionIterator {
-            versions: self.edge_versions.clone(),
-            index: 0,
-        }
+    pub fn iter_edge_versions(&self) -> impl ExactSizeIterator<Item = &EdgeVersion> {
+        self.edge_versions.iter()
     }
 }
 
-/// Iterator over node versions in HistoricalStorageSnapshot.
-pub struct HistoricalNodeVersionIterator {
-    versions: Vec<Arc<NodeVersion>>,
-    index: usize,
-}
 
-impl Iterator for HistoricalNodeVersionIterator {
-    type Item = Arc<NodeVersion>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.versions.len() {
-            let version = self.versions[self.index].clone();
-            self.index += 1;
-            Some(version)
-        } else {
-            None
-        }
-    }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.versions.len() - self.index;
-        (remaining, Some(remaining))
-    }
-}
-
-impl ExactSizeIterator for HistoricalNodeVersionIterator {
-    fn len(&self) -> usize {
-        self.versions.len() - self.index
-    }
-}
-
-/// Iterator over edge versions in HistoricalStorageSnapshot.
-pub struct HistoricalEdgeVersionIterator {
-    versions: Vec<Arc<EdgeVersion>>,
-    index: usize,
-}
-
-impl Iterator for HistoricalEdgeVersionIterator {
-    type Item = Arc<EdgeVersion>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.versions.len() {
-            let version = self.versions[self.index].clone();
-            self.index += 1;
-            Some(version)
-        } else {
-            None
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.versions.len() - self.index;
-        (remaining, Some(remaining))
-    }
-}
-
-impl ExactSizeIterator for HistoricalEdgeVersionIterator {
-    fn len(&self) -> usize {
-        self.versions.len() - self.index
-    }
-}
 
 #[cfg(test)]
 mod tests {

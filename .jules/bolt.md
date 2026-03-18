@@ -24,3 +24,6 @@
 **Optimize query target_shards Pre-allocation with Cow**
 **Learning:** In hot paths like distributed query execution (`execute` in `src/storage/sharding/executor.rs`), cloning `Vec` inputs (`shards.clone()`) creates unnecessary heap allocations and memory copies.
 **Action:** Use `std::borrow::Cow` to wrap inputs that may either be borrowed directly or constructed on the fly. `Cow<'_, [T]>` enables passing slice references without cloning when available (`Cow::Borrowed(slice)`), while retaining the ability to fall back to an owned collection (`Cow::Owned(vec)`) seamlessly. This removes a heap allocation for every query execution specifying `target_shards`.
+## 2026-03-18 - [Optimize Historical Snapshot Vec Allocations]
+**Learning:** Returning `Vec<Arc<T>>` in `HistoricalStorageSnapshot::new` results in excessive allocations when iterating versions and creating snapshots, as it requires allocating an individual `Arc` for each node and edge version.
+**Action:** Change `Vec<Arc<T>>` to `Arc<Vec<T>>` to reduce heap allocations during the snapshot phase and iterator copies.
