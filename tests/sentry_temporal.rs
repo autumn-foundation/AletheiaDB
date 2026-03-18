@@ -1359,8 +1359,8 @@ fn test_timerange_between_mutants() {
 
 #[test]
 fn test_time_to_iso8601_strict_division() {
-    use aletheiadb::core::temporal::time;
     use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::time;
 
     // Mutants target `/ 1_000_000` to `*` or `%`
     let ts1 = HybridTimestamp::new(2_000_000, 0).unwrap();
@@ -1373,10 +1373,18 @@ fn test_time_to_iso8601_strict_division() {
 
     if cfg!(windows) {
         // Based on existing Windows debug format assertions in sentry_temporal.rs
-        assert!(result.contains("132539328020000000") || result.contains("116444736020000000"), "Expected exactly 2 seconds tick count on Windows, got: {}", result);
+        assert!(
+            result.contains("132539328020000000") || result.contains("116444736020000000"),
+            "Expected exactly 2 seconds tick count on Windows, got: {}",
+            result
+        );
     } else {
         // Unix format for time::to_iso8601 debug printing: "tv_sec: 2"
-        assert!(result.contains("tv_sec: 2") || result.contains("2.000000000s"), "Expected 2 seconds representation on Unix, got: {}", result);
+        assert!(
+            result.contains("tv_sec: 2") || result.contains("2.000000000s"),
+            "Expected 2 seconds representation on Unix, got: {}",
+            result
+        );
     }
 }
 
