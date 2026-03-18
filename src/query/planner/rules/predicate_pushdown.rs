@@ -552,6 +552,96 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
+
+    #[test]
+    fn test_apply_unchanged() {
+        let rule = PredicatePushdown;
+        let stats = Statistics::default();
+        let plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::NodeLookup(vec![
+            NodeId::new(1).unwrap(),
+        ])));
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_apply_changed() {
+        let rule = PredicatePushdown;
+        let stats = Statistics::default();
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("a", 1)),
+            LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: SortKey::Property("a".to_string()),
+                    descending: true,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_pushdown_traverse() {
+        let rule = PredicatePushdown;
+        let stats = Statistics::default();
+
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("a", 1)),
+            LogicalOp::unary(
+                UnaryOp::Traverse {
+                    label: None,
+                    direction: crate::query::ir::Direction::Outgoing,
+                    depth: crate::query::ir::TraversalDepth::Exact(1),
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            )
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        // Filter cannot push past Traverse
+        assert!(result.is_none());
+    }
+    #[test]
+    fn test_pushdown_unsupported_unary_op() {
+        let rule = PredicatePushdown;
+        let stats = Statistics::default();
+
+        // Filter inside an unsupported UnaryOp (like Limit) should be passed through
+        // but limit itself cannot be pushed down into.
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("a", 1)),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        // Since Filter is directly above Scan, it doesn't change.
+        // Limit -> Filter -> Scan
+        // push_down(Limit(Filter(Scan))) -> Limit(push_down(Filter(Scan))) -> Limit(Filter(Scan))
+        assert!(result.is_none());
+
+        let plan2 = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("a", 1)),
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+
+        let result2 = rule.apply(&plan2, &stats).unwrap();
+        // Filter cannot push past Limit
+        assert!(result2.is_none());
+    }
+    #[test]
+    fn test_pushdown_name() {
+        let rule = PredicatePushdown;
+        assert_eq!(rule.name(), "predicate-pushdown");
+    }
+
     use crate::core::NodeId;
     use crate::query::ir::Predicate;
     use crate::query::plan::{BinaryOp, ScanOp, SortKey};
