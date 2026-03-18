@@ -860,7 +860,12 @@ mod tests {
             QueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client0 = Arc::new(MockShardClient::new(make_shard_id(0)));
+        // Simulate client0 returning some data
+        client0.set_query_response(vec![1, 2, 3]);
+
         let client1 = Arc::new(MockShardClient::new(make_shard_id(1)));
+        // Simulate client1 returning a larger vector, so the merge node logic actually matches it
+        client1.set_query_response(vec![1, 2, 3, 4, 5]);
 
         executor.register_client(make_shard_id(0), client0);
         executor.register_client(make_shard_id(1), client1);
@@ -871,6 +876,8 @@ mod tests {
 
         let result = executor.execute(query).unwrap();
         assert!(result.is_complete());
+        // Aggregation should select the largest result
+        assert_eq!(result.data, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
