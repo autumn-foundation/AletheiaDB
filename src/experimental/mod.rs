@@ -49,6 +49,7 @@
 //! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
 //! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! | `pulsar` | **Pulsar** | Semantic Periodic Oscillation. "Does this node flip-flop between two states over time?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -244,3 +245,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Pulsar: Semantic Periodic Oscillation Engine.
+pub mod pulsar;
