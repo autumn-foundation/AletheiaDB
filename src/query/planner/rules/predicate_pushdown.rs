@@ -596,7 +596,7 @@ mod sentry_tests {
                     depth: crate::query::ir::TraversalDepth::Exact(1),
                 },
                 LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
-            )
+            ),
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
