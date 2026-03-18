@@ -238,6 +238,21 @@ mod tests {
     use crate::core::temporal::{Timestamp, time};
 
     #[test]
+    fn test_resonate_coverage() {
+        // Direct test to hit the ActivityDensityResonator::resonate method directly
+        // to ensure it is recorded by coverage.
+        let resonator = ActivityDensityResonator {
+            window_size_us: 100_000,
+            num_bins: 10,
+        };
+
+        let _now_wallclock = time::now().wallclock();
+        let history = crate::core::history::EntityHistory { versions: vec![] };
+
+        let fp = resonator.resonate(&history);
+        assert_eq!(fp.bins.len(), 10);
+    }
+    #[test]
     fn test_temporal_fingerprint_similarity() {
         let fp1 = TemporalFingerprint {
             bins: vec![1.0, 0.0], // Unit vector
