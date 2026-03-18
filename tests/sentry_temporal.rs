@@ -1092,3 +1092,205 @@ fn test_timerange_from_at_mutants_strict() {
     });
     assert!(res.is_ok(), "Mutant test: != -> == in at");
 }
+
+#[test]
+fn test_time_to_iso8601_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::time;
+
+    let default_ts = HybridTimestamp::new(0, 0).unwrap();
+    let default_str = time::to_iso8601(default_ts);
+    if cfg!(windows) {
+        assert!(
+            default_str.contains("116444736000000000"),
+            "to_iso8601 should output exact Windows epoch start"
+        );
+    } else {
+        assert!(
+            default_str.contains("1970-01-01T00:00:00Z") || default_str.contains("tv_sec: 0"),
+            "to_iso8601 should output exact Unix epoch start. Got: {}",
+            default_str
+        );
+    }
+}
+
+#[test]
+fn test_timerange_overlaps_mutants_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range1 = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    let range2 = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+
+    // mutant: replace || with && in TimeRange::overlaps (self.is_empty() || other.is_empty())
+    // For &&, both must be empty to return false. So if one is empty, it continues.
+    let empty_range = TimeRange::at(HybridTimestamp::new(150, 0).unwrap());
+    assert!(
+        !range1.overlaps(&empty_range),
+        "Should not overlap with empty"
+    );
+    assert!(
+        !empty_range.overlaps(&range2),
+        "Should not overlap with empty"
+    );
+
+    // mutant: replace < with == in TimeRange::overlaps (self.start < other.end)
+    let left_almost_touch = TimeRange::new(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(99, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !range1.overlaps(&left_almost_touch),
+        "Should not overlap disjoint"
+    );
+
+    // mutant: replace < with == in TimeRange::overlaps (other.start < self.end)
+    let right_almost_touch = TimeRange::new(
+        HybridTimestamp::new(201, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !range1.overlaps(&right_almost_touch),
+        "Should not overlap disjoint"
+    );
+}
+
+#[test]
+fn test_timerange_close_at_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let range = TimeRange::from(start);
+
+    // mutant: replace < with == in TimeRange::close_at (end < self.start)
+    let end_eq = HybridTimestamp::new(100, 0).unwrap();
+    assert!(
+        range.close_at(end_eq).is_ok(),
+        "Should close at exact start time"
+    );
+
+    let end_lt = HybridTimestamp::new(99, 0).unwrap();
+    assert!(
+        range.close_at(end_lt).is_err(),
+        "Should error if end < start"
+    );
+
+    // mutant: replace < with > in TimeRange::close_at
+    let end_gt = HybridTimestamp::new(101, 0).unwrap();
+    assert!(range.close_at(end_gt).is_ok(), "Should close at later time");
+
+    // mutant: replace && with ||
+    // mutant: replace > with == (end.wallclock() > MAX_VALID_TIMESTAMP)
+    use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
+
+    let max_ts = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    assert!(
+        range.close_at(max_ts).is_ok(),
+        "Should close at exact MAX_VALID_TIMESTAMP"
+    );
+
+    use aletheiadb::core::temporal::TIMESTAMP_MAX;
+    assert!(
+        range.close_at(TIMESTAMP_MAX).is_ok(),
+        "Should allow TIMESTAMP_MAX"
+    );
+}
+
+#[test]
+fn test_timerange_duration_micros_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let ts_start = HybridTimestamp::new(100, 0).unwrap();
+    let ts_end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(ts_start, ts_end).unwrap();
+
+    let duration = range.duration_micros();
+    // mutants: None, Some(0), Some(1), Some(-1)
+    assert!(duration.is_some(), "Duration should not be None");
+    assert_eq!(duration.unwrap(), 100, "Duration should be exactly 100");
+
+    let start_neg = HybridTimestamp::new(-2000, 0).unwrap();
+    let end_max = HybridTimestamp::new(i64::MAX - 1000, 0).unwrap();
+    let overflow_range = TimeRange::new(start_neg, end_max).unwrap();
+    let overflow_duration = overflow_range.duration_micros();
+    assert_eq!(
+        overflow_duration.unwrap(),
+        i64::MAX,
+        "Should saturate to i64::MAX on overflow"
+    );
+}
+
+#[test]
+fn test_timerange_deserialize_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    let bytes = range.serialize();
+
+    // mutant: replace < with == in bytes.len() < 24
+    assert!(
+        TimeRange::deserialize(&bytes[0..23]).is_err(),
+        "Should error on < 24"
+    );
+    assert!(
+        TimeRange::deserialize(&bytes[0..24]).is_ok(),
+        "Should succeed on == 24"
+    );
+
+    // mutant: replace > with == in start > end
+    let eq_range = TimeRange::new(start, start).unwrap();
+    let eq_bytes = eq_range.serialize();
+    assert!(
+        TimeRange::deserialize(&eq_bytes).is_ok(),
+        "Should succeed if start == end"
+    );
+
+    let mut inv_bytes = end.serialize();
+    inv_bytes.extend(start.serialize());
+    assert!(
+        TimeRange::deserialize(&inv_bytes).is_err(),
+        "Should error if start > end"
+    );
+}
+
+#[test]
+fn test_bitemporal_deserialize_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let interval = BiTemporalInterval::new(
+        TimeRange::new(start, end).unwrap(),
+        TimeRange::new(start, end).unwrap(),
+    );
+
+    let bytes = interval.serialize();
+
+    // mutant: replace < with == in bytes.len() < 48
+    assert!(
+        BiTemporalInterval::deserialize(&bytes[0..47]).is_err(),
+        "Should error on < 48"
+    );
+    assert!(
+        BiTemporalInterval::deserialize(&bytes[0..48]).is_ok(),
+        "Should succeed on == 48"
+    );
+}
