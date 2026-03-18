@@ -684,13 +684,31 @@ Available MCP tools for LLMs:
 
 ### Query Language (AQL)
 
-AletheiaDB supports a Cypher-like query language with temporal and vector extensions:
+AletheiaDB supports a Cypher-like query language with temporal and vector extensions.
+You can execute these directly using the `execute_aql` method:
 
+```rust
+use aletheiadb::prelude::*;
+
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
+
+    // Basic graph query
+    let results = db.execute_aql(
+        "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend:Person) RETURN friend"
+    )?;
+
+    // Bi-temporal query (point-in-time)
+    let results = db.execute_aql(
+        "AS OF '2024-01-15T10:00:00Z' MATCH (n:Person {name: 'Alice'}) RETURN n"
+    )?;
+
+    Ok(())
+}
+```
+
+Other supported syntax includes:
 ```cypher
--- Basic graph query
-MATCH (n:Person {name: "Alice"})-[:KNOWS]->(friend:Person)
-RETURN friend
-
 -- Vector similarity search
 SIMILAR TO $embedding LIMIT 10
 
@@ -698,11 +716,6 @@ SIMILAR TO $embedding LIMIT 10
 MATCH (a:Person {name: "Alice"})-[:KNOWS]->(friend)
 RANK BY SIMILARITY TO $bob_embedding TOP 10
 RETURN friend
-
--- Bi-temporal query (point-in-time)
-AS OF '2024-01-15T10:00:00Z'
-MATCH (n:Person {name: "Alice"})
-RETURN n
 
 -- Full hybrid: temporal + graph + vector
 AS OF '2024-06-01T00:00:00Z'

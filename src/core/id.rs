@@ -1666,3 +1666,142 @@ mod sentinel_id_generator_tests {
         assert_ne!(unchecked.as_u64(), 0);
     }
 }
+
+use std::str::FromStr;
+
+impl TryFrom<u64> for NodeId {
+    type Error = StorageError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        NodeId::new(value)
+    }
+}
+
+impl FromStr for NodeId {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<u64>().map_err(|_| StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "NodeId",
+        })?;
+        NodeId::new(value)
+    }
+}
+
+impl TryFrom<u64> for EdgeId {
+    type Error = StorageError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        EdgeId::new(value)
+    }
+}
+
+impl FromStr for EdgeId {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<u64>().map_err(|_| StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "EdgeId",
+        })?;
+        EdgeId::new(value)
+    }
+}
+
+impl TryFrom<u64> for VersionId {
+    type Error = StorageError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        VersionId::new(value)
+    }
+}
+
+impl FromStr for VersionId {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<u64>().map_err(|_| StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "VersionId",
+        })?;
+        VersionId::new(value)
+    }
+}
+
+impl TryFrom<u64> for TxId {
+    type Error = StorageError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Ok(TxId::new(value))
+    }
+}
+
+impl FromStr for TxId {
+    type Err = StorageError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<u64>().map_err(|_| StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "TxId",
+        })?;
+        Ok(TxId::new(value))
+    }
+}
+
+#[cfg(test)]
+mod tests_conversions {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_node_id_conversions() {
+        let n = NodeId::try_from(42).unwrap();
+        assert_eq!(n, NodeId::new(42).unwrap());
+
+        let n2 = NodeId::from_str("42").unwrap();
+        assert_eq!(n2, n);
+
+        let err = NodeId::from_str("invalid").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+
+        let err2 = NodeId::from_str("-1").unwrap_err();
+        assert!(matches!(err2, StorageError::InvalidId { .. }));
+    }
+
+    #[test]
+    fn test_edge_id_conversions() {
+        let e = EdgeId::try_from(42).unwrap();
+        assert_eq!(e, EdgeId::new(42).unwrap());
+
+        let e2 = EdgeId::from_str("42").unwrap();
+        assert_eq!(e2, e);
+
+        let err = EdgeId::from_str("invalid").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+    }
+
+    #[test]
+    fn test_version_id_conversions() {
+        let v = VersionId::try_from(42).unwrap();
+        assert_eq!(v, VersionId::new(42).unwrap());
+
+        let v2 = VersionId::from_str("42").unwrap();
+        assert_eq!(v2, v);
+
+        let err = VersionId::from_str("invalid").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+    }
+
+    #[test]
+    fn test_tx_id_conversions() {
+        let t = TxId::try_from(42).unwrap();
+        assert_eq!(t, TxId::new(42));
+
+        let t2 = TxId::from_str("42").unwrap();
+        assert_eq!(t2, t);
+
+        let err = TxId::from_str("invalid").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { .. }));
+    }
+}
