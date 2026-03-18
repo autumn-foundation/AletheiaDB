@@ -189,15 +189,14 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         return Ok(Vec::new());
     }
 
-    // Memory-map the file for efficient reading without loading entire file into memory.
-    // SAFETY: We only read from the memory map, never write. The file is opened read-only.
-    // The mapping is valid for the lifetime of this function and is automatically unmapped
-    // when dropped. We have verified the file size above to prevent out-of-bounds reads.
-    let mmap = unsafe {
-        memmap2::Mmap::map(&file).map_err(|e| {
-            StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
-        })?
-    };
+    // Read the file into memory instead of memory-mapping.
+    // Warden: Replaced unsafe memmap2 with safe file.read_to_end to prevent SIGBUS DoS
+    // if the underlying file is truncated externally or concurrently.
+    use std::io::Read;
+    let mut file = file;
+    let mut mmap = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut mmap)
+        .map_err(|e| StorageError::IoError(format!("Failed to read WAL segment: {}", e)))?;
 
     // Use the memory-mapped region as a byte slice
     let buffer = &mmap[..];

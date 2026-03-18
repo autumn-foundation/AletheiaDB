@@ -343,11 +343,11 @@ pub fn save_graph_index_compressed(
 /// let data = load_graph_index_mmap(&path)?;
 /// ```
 pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
-    use memmap2::Mmap;
     use std::fs::File;
+    use std::io::Read;
 
-    // Open file and create memory map
-    let file = File::open(path)?;
+    // Open file to check size
+    let mut file = File::open(path)?;
 
     // Sanity check for extremely large files
     let metadata = file.metadata()?;
@@ -361,10 +361,13 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
         });
     }
 
-    let mmap = unsafe { Mmap::map(&file)? };
+    // Warden: Replace unsafe memmap2::Mmap::map with safe std::fs::read
+    // to prevent SIGBUS DoS from concurrent truncation.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)
-    if mmap.len() < 4 {
+    if bytes.len() < 4 {
         return Err(IndexPersistenceError::Corrupted {
             path: path.to_path_buf(),
             source: "File too small to contain CRC32 checksum".into(),
@@ -372,7 +375,7 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
     }
 
     // Split data and checksum
-    let (data_slice, checksum_bytes) = mmap.split_at(mmap.len() - 4);
+    let (data_slice, checksum_bytes) = bytes.split_at(bytes.len() - 4);
     let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
         IndexPersistenceError::Corrupted {
             path: path.to_path_buf(),

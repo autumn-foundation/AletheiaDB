@@ -36,3 +36,6 @@
 2025-02-15 - [Warden: Replace unsafe transmute_vec with bytemuck::cast_vec]
 **Threat:** `Vec::from_raw_parts` was used in `AdjacencyIndex::import_csr` to transmute types without proper capacity checks, which can lead to Undefined Behavior.
 **Defense:** Replaced the `unsafe` block and `transmute_vec` with `bytemuck::cast_vec` for safe zero-copy transmutation. Added `bytemuck::Pod` and `bytemuck::Zeroable` derivations to `NodeId`.
+**2026-02-15 - Memory-Mapped File SIGBUS Denial of Service Prevention**
+**Threat:** `memmap2::Mmap::map` was used to map WAL segments (`src/storage/wal/segment_reader.rs`) and Graph Index Persistence files (`src/storage/index_persistence/graph.rs`) directly into memory using `unsafe`. If these memory-mapped files are concurrently truncated or manipulated by an external process, reading the memory slice triggers a `SIGBUS` signal, bypassing Rust's memory safety guarantees and instantly crashing the entire database process (Denial of Service).
+**Defense:** Replaced the `unsafe { memmap2::Mmap::map }` calls with safe memory allocations using `std::fs::read`. This ensures that even if the file is modified concurrently, the database will safely return standard I/O errors or parse errors instead of suffering a catastrophic crash.
