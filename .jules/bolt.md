@@ -20,3 +20,7 @@
 **[Optimize Filtering with `Vec::retain`]**
 **Learning:** When retrieving a `Vec` from a lower-level API and immediately filtering it, chaining `.into_iter().filter(...).collect()` forces the allocation of a completely new `Vec` on the heap, which is an unnecessary allocation.
 **Action:** Use `.retain(...)` on the existing `Vec` to filter the elements in-place. This preserves the original allocation and prevents unnecessary memory allocations in hot paths like querying the graph structure.
+
+**Optimize query target_shards Pre-allocation with Cow**
+**Learning:** In hot paths like distributed query execution (`execute` in `src/storage/sharding/executor.rs`), cloning `Vec` inputs (`shards.clone()`) creates unnecessary heap allocations and memory copies.
+**Action:** Use `std::borrow::Cow` to wrap inputs that may either be borrowed directly or constructed on the fly. `Cow<'_, [T]>` enables passing slice references without cloning when available (`Cow::Borrowed(slice)`), while retaining the ability to fall back to an owned collection (`Cow::Owned(vec)`) seamlessly. This removes a heap allocation for every query execution specifying `target_shards`.
