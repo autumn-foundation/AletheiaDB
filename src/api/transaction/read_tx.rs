@@ -179,20 +179,21 @@ impl ReadTransaction {
     ///
     /// This prevents phantom reads by checking each edge's visibility.
     /// Edges that don't exist or aren't visible are filtered out.
-    fn filter_visible_edges(&self, edge_ids: Vec<EdgeId>) -> Vec<EdgeId> {
+    ///
+    /// ⚡ Bolt Optimization: Uses `.retain()` instead of `.into_iter().filter(...).collect()`
+    /// to filter in-place and avoid allocating a new `Vec`.
+    fn filter_visible_edges(&self, mut edge_ids: Vec<EdgeId>) -> Vec<EdgeId> {
+        edge_ids.retain(|&edge_id| {
+            // Check if edge is visible in our snapshot
+            if let Ok(edge) = self.current.get_edge(edge_id) {
+                self.visibility_manager
+                    .is_visible(&self.snapshot, edge.metadata.created_by_tx)
+            } else {
+                // Edge doesn't exist or was deleted - not visible
+                false
+            }
+        });
         edge_ids
-            .into_iter()
-            .filter(|&edge_id| {
-                // Check if edge is visible in our snapshot
-                if let Ok(edge) = self.current.get_edge(edge_id) {
-                    self.visibility_manager
-                        .is_visible(&self.snapshot, edge.metadata.created_by_tx)
-                } else {
-                    // Edge doesn't exist or was deleted - not visible
-                    false
-                }
-            })
-            .collect()
     }
 
     /// Query historical storage for an edge version visible at snapshot time.
@@ -324,19 +325,22 @@ impl ReadOps for ReadTransaction {
         property_key: &str,
         property_value: &PropertyValue,
     ) -> Vec<NodeId> {
-        self.current
-            .find_nodes_by_property(label, property_key, property_value)
-            .into_iter()
-            .filter(|node_id| {
-                self.current
-                    .get_node(*node_id)
-                    .map(|node| {
-                        self.visibility_manager
-                            .is_visible(&self.snapshot, node.metadata.created_by_tx)
-                    })
-                    .unwrap_or(false)
-            })
-            .collect()
+        // ⚡ Bolt Optimization: Uses `.retain()` to filter in-place and avoid allocating a new `Vec`.
+        let mut node_ids = self
+            .current
+            .find_nodes_by_property(label, property_key, property_value);
+
+        node_ids.retain(|node_id| {
+            self.current
+                .get_node(*node_id)
+                .map(|node| {
+                    self.visibility_manager
+                        .is_visible(&self.snapshot, node.metadata.created_by_tx)
+                })
+                .unwrap_or(false)
+        });
+
+        node_ids
     }
 }
 
