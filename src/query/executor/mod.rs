@@ -26,6 +26,19 @@ pub use iterators::{
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::executor::ExecutionConfig;
+///
+/// let config = ExecutionConfig {
+///     max_buffer_size: 5000,
+///     parallel: true,
+///     timeout_ms: 1000,
+/// };
+/// assert_eq!(config.max_buffer_size, 5000);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
     /// Maximum number of results to buffer before backpressure is applied.

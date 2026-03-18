@@ -61,6 +61,18 @@ const MAX_RECURSION_DEPTH: usize = 100;
 ///
 /// This error provides detailed information about what went wrong during parsing,
 /// including the position in the token stream and what was expected vs found.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::query::parser::Parser;
+///
+/// // Invalid syntax triggers a ParseError
+/// let result = Parser::parse("MATCH n RETURN n");
+/// assert!(result.is_err());
+/// let error = result.unwrap_err();
+/// assert!(error.message.contains("Expected ("));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
     /// A descriptive error message explaining the failure.
