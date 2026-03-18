@@ -39,6 +39,7 @@ use super::network::{NetworkError, NetworkResult, ShardClient};
 use super::router::{ShardRouter, TraversalPlan};
 use super::types::ShardId;
 use crate::core::id::NodeId;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -333,9 +334,11 @@ impl<C: ShardClient> QueryExecutor<C> {
         let timeout = query.timeout.unwrap_or(self.config.default_timeout);
 
         // Determine target shards
-        let target_shards = match &query.target_shards {
-            Some(shards) => shards.clone(),
-            None => self.clients.keys().copied().collect(),
+        // ⚡ Bolt Optimization: Avoid cloning target shards when provided in the query
+        // by using Cow to borrow the slice instead of allocating a new Vec.
+        let target_shards: Cow<'_, [ShardId]> = match &query.target_shards {
+            Some(shards) => Cow::Borrowed(shards),
+            None => Cow::Owned(self.clients.keys().copied().collect()),
         };
 
         if target_shards.is_empty() {
@@ -346,7 +349,7 @@ impl<C: ShardClient> QueryExecutor<C> {
         let mut results: Vec<ShardResult> = Vec::with_capacity(target_shards.len());
         let mut failures: Vec<(ShardId, NetworkError)> = Vec::new();
 
-        for shard_id in &target_shards {
+        for shard_id in target_shards.as_ref() {
             if start.elapsed() >= timeout {
                 // Timed out before sending to all shards
                 let pending: Vec<_> = target_shards
