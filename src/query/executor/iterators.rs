@@ -653,9 +653,7 @@ pub struct TraversalIterator {
     temporal_context: Option<(Timestamp, Timestamp)>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
-
     visited: FastHashSet<NodeId>,
-
     input_exhausted: bool,
 }
 
@@ -678,9 +676,7 @@ impl TraversalIterator {
             historical,
             temporal_context,
             frontier: VecDeque::new(),
-
             visited: FastHashSet::with_hasher(BuildHasherDefault::default()),
-
             input_exhausted: false,
         }
     }
