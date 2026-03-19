@@ -17,6 +17,7 @@ use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
 use crate::core::vector::cosine_similarity;
+use crate::core::version::FastHashSet;
 use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{Direction, Predicate, PredicateValue};
 use crate::storage::current::CurrentStorage;
@@ -652,14 +653,11 @@ pub struct TraversalIterator {
     temporal_context: Option<(Timestamp, Timestamp)>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    visited: crate::core::version::FastHashSet<NodeId>,
+    visited: FastHashSet<NodeId>,
     input_exhausted: bool,
 }
 
 impl TraversalIterator {
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    #[allow(unexpected_cfgs)]
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
@@ -678,7 +676,7 @@ impl TraversalIterator {
             historical,
             temporal_context,
             frontier: VecDeque::new(),
-            visited: crate::core::version::FastHashSet::with_hasher(BuildHasherDefault::default()),
+            visited: FastHashSet::with_hasher(BuildHasherDefault::default()),
             input_exhausted: false,
         }
     }
