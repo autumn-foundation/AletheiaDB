@@ -1893,3 +1893,102 @@ mod tests_conversions {
         assert!(matches!(err2, StorageError::InvalidId { .. }));
     }
 }
+
+#[cfg(test)]
+mod sentinel_id_extra_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_node_id_conversions_strict() {
+        // Kill TryFrom returning Default::default() [Ok(NodeId(0))]
+        let n = NodeId::try_from(42).unwrap();
+        assert_eq!(n.as_u64(), 42);
+
+        // Kill FromStr returning Default::default()
+        let n2 = NodeId::from_str("42").unwrap();
+        assert_eq!(n2.as_u64(), 42);
+    }
+
+    #[test]
+    fn test_edge_id_conversions_strict() {
+        let e = EdgeId::try_from(42).unwrap();
+        assert_eq!(e.as_u64(), 42);
+
+        let e2 = EdgeId::from_str("42").unwrap();
+        assert_eq!(e2.as_u64(), 42);
+    }
+
+    #[test]
+    fn test_version_id_conversions_strict() {
+        let v = VersionId::try_from(42).unwrap();
+        assert_eq!(v.as_u64(), 42);
+
+        let v2 = VersionId::from_str("42").unwrap();
+        assert_eq!(v2.as_u64(), 42);
+    }
+
+    #[test]
+    fn test_tx_id_conversions_strict() {
+        let t = TxId::try_from(42).unwrap();
+        assert_eq!(t.as_u64(), 42);
+
+        let t2 = TxId::from_str("42").unwrap();
+        assert_eq!(t2.as_u64(), 42);
+    }
+
+    #[test]
+    fn test_entity_id_logic_strict() {
+        let node = NodeId::new_unchecked(42);
+        let edge = EdgeId::new_unchecked(43);
+
+        let ent_node = EntityId::Node(node);
+        let ent_edge = EntityId::Edge(edge);
+
+        // Kill EntityId::is_node -> true/false
+        assert!(ent_node.is_node());
+        assert!(!ent_edge.is_node());
+
+        // Kill EntityId::is_edge -> true/false
+        assert!(!ent_node.is_edge());
+        assert!(ent_edge.is_edge());
+
+        // Kill EntityId::as_node -> None / Some(Default)
+        assert_eq!(ent_node.as_node().unwrap().as_u64(), 42);
+        assert!(ent_edge.as_node().is_none());
+
+        // Kill EntityId::as_edge -> None / Some(Default)
+        assert_eq!(ent_edge.as_edge().unwrap().as_u64(), 43);
+        assert!(ent_node.as_edge().is_none());
+
+        // Kill From<NodeId> returning Default
+        let from_node = EntityId::from(node);
+        assert_eq!(from_node.as_node().unwrap().as_u64(), 42);
+
+        // Kill From<EdgeId> returning Default
+        let from_edge = EntityId::from(edge);
+        assert_eq!(from_edge.as_edge().unwrap().as_u64(), 43);
+
+        // Kill Display returning Ok(Default::default())
+        assert_eq!(format!("{}", ent_node), "Node(42)");
+        assert_eq!(format!("{}", ent_edge), "Edge(43)");
+    }
+
+    #[test]
+    fn test_node_id_display_strict() {
+        let node = NodeId::new_unchecked(42);
+        assert_eq!(format!("{}", node), "Node(42)");
+    }
+
+    #[test]
+    fn test_edge_id_display_strict() {
+        let edge = EdgeId::new_unchecked(42);
+        assert_eq!(format!("{}", edge), "Edge(42)");
+    }
+
+    #[test]
+    fn test_version_id_display_strict() {
+        let version = VersionId::new_unchecked(42);
+        assert_eq!(format!("{}", version), "Version(42)");
+    }
+}
