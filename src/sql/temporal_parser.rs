@@ -580,7 +580,7 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
     }
 
     // Sort removals by start position (descending) to remove from end to start
-    removals.sort_by(|a, b| b.0.cmp(&a.0));
+    removals.sort_by_key(|b| std::cmp::Reverse(b.0));
 
     // Remove temporal clauses from SQL
     for (start, end) in removals {

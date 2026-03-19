@@ -209,8 +209,7 @@ impl KMeans {
 
         // Initialize centroids deterministically to avoid adding `rand` dependency
         // We pick points spaced out in the input list.
-        if effective_k > 0 {
-            let step = data.len() / effective_k;
+        if let Some(step) = data.len().checked_div(effective_k) {
             for i in 0..effective_k {
                 let idx = (i * step).min(data.len() - 1);
                 centroids.push(data[idx].1.clone());

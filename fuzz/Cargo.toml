@@ -1,0 +1,46 @@
+[package]
+name = "aletheiadb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.aletheiadb]
+path = ".."
+features = ["sql"]
+
+[[bin]]
+name = "fuzz_target_1"
+path = "fuzz_targets/fuzz_target_1.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "fuzz_target_2"
+path = "fuzz_targets/fuzz_target_2.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "fuzz_target_3"
+path = "fuzz_targets/fuzz_target_3.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "fuzz_target_4"
+path = "fuzz_targets/fuzz_target_4.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "fuzz_target_5"
+path = "fuzz_targets/fuzz_target_5.rs"
+test = false
+doc = false
+bench = false

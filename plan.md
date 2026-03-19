@@ -1,6 +1,5 @@
-1. Refactor `VersionMetadata` in `src/index/temporal.rs` to `TimelineVersionMetadata` to prevent confusion with `src/core/version.rs::VersionMetadata`.
-2. Format the code with `cargo fmt --all`.
-3. Run `cargo clippy --all-targets --all-features -- -D warnings`.
-4. Run `cargo test`.
-5. Journal the finding in `.jules/atlas.md`.
-6. Complete pre-commit steps to ensure proper testing, verification, review, and reflection are done.
+1. **Fuzzing `aletheiadb::sql::parse_sql`**: Implement fuzz targets to parse a variety of SQL strings, as we found issues in our initial fuzzing pass. I've created the files in `fuzz/fuzz_targets`.
+2. **Concurrency Torture with `loom`**: Implemented concurrency testing in `tests/loom_db.rs` to find deadlocks when creating nodes via `AletheiaDB`. It seems USEARCH doesn't support Loom correctly, so tests run quickly but we could try running loom to verify synchronization.
+3. **Analyze Edge Cases**: Since no immediate crash occurred within 10-15s, I'll need to run further tests, such as proptest, or enhance our fuzzers. The prompt asked us to identify weak points like `unsafe` blocks and `RwLock`. There are numerous `unsafe` SIMD operations in `src/core/vector/simd.rs`, and a custom Loom test in `tests/loom_sentry.rs` (needs to be adapted as the struct is private).
+4. **Complete Pre-Commit**: Complete pre-commit steps to ensure proper testing, verification, review, and reflection are done.
+5. **Submit**: I will present the wreckage using the exact format requested.
