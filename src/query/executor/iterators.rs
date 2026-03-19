@@ -653,7 +653,7 @@ pub struct TraversalIterator {
     temporal_context: Option<(Timestamp, Timestamp)>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
-    /// ⚡ Bolt: Uses FastHashSet to avoid SipHash overhead for integer NodeIds
+    // ⚡ Bolt: Uses FastHashSet to avoid SipHash overhead for integer NodeIds
     visited: FastHashSet<NodeId>,
     input_exhausted: bool,
 }
