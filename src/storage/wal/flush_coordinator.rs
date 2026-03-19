@@ -310,10 +310,12 @@ impl FlushCoordinator {
     }
 
     /// Read segment metadata from a companion file.
+    ///
+    /// ⚡ Bolt Optimization: Replace Vec::new() heap allocation with a fixed 24-byte stack array when reading metadata.
     pub fn read_segment_metadata(&self, segment_id: u64) -> Option<SegmentMetadata> {
         let meta_path = self.segment_meta_path(segment_id);
-        let mut bytes = Vec::new();
-        File::open(&meta_path).ok()?.read_to_end(&mut bytes).ok()?;
+        let mut bytes = [0u8; 24];
+        File::open(&meta_path).ok()?.read_exact(&mut bytes).ok()?;
         SegmentMetadata::from_bytes(&bytes)
     }
 
