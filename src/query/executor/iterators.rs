@@ -652,7 +652,10 @@ pub struct TraversalIterator {
     temporal_context: Option<(Timestamp, Timestamp)>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
+
+    // Bolt ⚡ Optimization: IdentityHasher bypasses SipHash overhead for integer keys.
     visited: crate::core::version::FastHashSet<NodeId>,
+
     input_exhausted: bool,
 }
 
