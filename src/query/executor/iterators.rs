@@ -5,7 +5,8 @@
 
 use parking_lot::RwLock;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, VecDeque};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]
@@ -16,6 +17,7 @@ use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
 use crate::core::vector::cosine_similarity;
+use crate::core::version::FastHashSet;
 use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{Direction, Predicate, PredicateValue};
 use crate::storage::current::CurrentStorage;
@@ -651,7 +653,8 @@ pub struct TraversalIterator {
     temporal_context: Option<(Timestamp, Timestamp)>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
-    visited: HashSet<NodeId>,
+    /// ⚡ Bolt: Uses FastHashSet to avoid SipHash overhead for integer NodeIds
+    visited: FastHashSet<NodeId>,
     input_exhausted: bool,
 }
 
@@ -674,7 +677,7 @@ impl TraversalIterator {
             historical,
             temporal_context,
             frontier: VecDeque::new(),
-            visited: HashSet::new(),
+            visited: FastHashSet::with_hasher(BuildHasherDefault::default()),
             input_exhausted: false,
         }
     }

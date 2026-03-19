@@ -24,3 +24,7 @@
 **Optimize query target_shards Pre-allocation with Cow**
 **Learning:** In hot paths like distributed query execution (`execute` in `src/storage/sharding/executor.rs`), cloning `Vec` inputs (`shards.clone()`) creates unnecessary heap allocations and memory copies.
 **Action:** Use `std::borrow::Cow` to wrap inputs that may either be borrowed directly or constructed on the fly. `Cow<'_, [T]>` enables passing slice references without cloning when available (`Cow::Borrowed(slice)`), while retaining the ability to fall back to an owned collection (`Cow::Owned(vec)`) seamlessly. This removes a heap allocation for every query execution specifying `target_shards`.
+
+**Use FastHashSet with IdentityHasher for integer NodeId keys**
+**Learning:** `HashSet<NodeId>` uses the default cryptographically secure SipHash, which adds unnecessary overhead when the key is already a high-quality unique integer like `NodeId`.
+**Action:** Replace `HashSet<NodeId>` with `FastHashSet<NodeId>` (imported from `crate::core::version::FastHashSet`) and initialize it with `FastHashSet::with_hasher(std::hash::BuildHasherDefault::default())` to leverage `IdentityHasher` for O(1) performance.
