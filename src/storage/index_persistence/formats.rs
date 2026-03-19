@@ -682,10 +682,24 @@ mod tests {
     #[test]
     fn should_serialize_and_deserialize_persistence_policies() {
         let policy = PersistencePolicies {
-            vector: VectorPersistencePolicy { mutation_threshold: 42, time_interval_secs: 43 },
-            graph: GraphPersistencePolicy { on_adjacency_rebuild: false, mutation_threshold: 44, time_interval_secs: 45 },
-            temporal: TemporalPersistencePolicy { version_threshold: 46, anchor_threshold: 47, time_interval_secs: 48 },
-            strings: StringPersistencePolicy { new_strings_threshold: 49, time_interval_secs: 50 },
+            vector: VectorPersistencePolicy {
+                mutation_threshold: 42,
+                time_interval_secs: 43,
+            },
+            graph: GraphPersistencePolicy {
+                on_adjacency_rebuild: false,
+                mutation_threshold: 44,
+                time_interval_secs: 45,
+            },
+            temporal: TemporalPersistencePolicy {
+                version_threshold: 46,
+                anchor_threshold: 47,
+                time_interval_secs: 48,
+            },
+            strings: StringPersistencePolicy {
+                new_strings_threshold: 49,
+                time_interval_secs: 50,
+            },
         };
 
         let encoded = bitcode::encode(&policy);
