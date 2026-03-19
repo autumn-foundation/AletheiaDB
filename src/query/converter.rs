@@ -785,40 +785,40 @@ impl AstConverter {
         op: ComparisonOp,
         right: &Expression,
     ) -> Result<Predicate> {
-        // Try left side as property
-        if let Expression::Property(prop) = left {
-            let key = prop.property.clone();
-            let value = self.expression_to_predicate_value(right)?;
+        let (key, value, flipped_op) = if let Expression::Property(prop) = left {
+            (
+                prop.property.clone(),
+                self.expression_to_predicate_value(right)?,
+                op,
+            )
+        } else if let Expression::Property(prop) = right {
+            let flipped = match op {
+                ComparisonOp::Eq => ComparisonOp::Eq,
+                ComparisonOp::Ne => ComparisonOp::Ne,
+                ComparisonOp::Lt => ComparisonOp::Gt,
+                ComparisonOp::Le => ComparisonOp::Ge,
+                ComparisonOp::Gt => ComparisonOp::Lt,
+                ComparisonOp::Ge => ComparisonOp::Le,
+            };
+            (
+                prop.property.clone(),
+                self.expression_to_predicate_value(left)?,
+                flipped,
+            )
+        } else {
+            return Err(Error::Query(QueryError::SyntaxError {
+                message: "Comparison must involve a property access (e.g., n.age)".to_string(),
+            }));
+        };
 
-            return Ok(match op {
-                ComparisonOp::Eq => Predicate::Eq { key, value },
-                ComparisonOp::Ne => Predicate::Ne { key, value },
-                ComparisonOp::Lt => Predicate::Lt { key, value },
-                ComparisonOp::Le => Predicate::Lte { key, value },
-                ComparisonOp::Gt => Predicate::Gt { key, value },
-                ComparisonOp::Ge => Predicate::Gte { key, value },
-            });
-        }
-
-        // Try right side as property (swap operands)
-        if let Expression::Property(prop) = right {
-            let key = prop.property.clone();
-            let value = self.expression_to_predicate_value(left)?;
-
-            // When swapping, we must flip inequalities
-            return Ok(match op {
-                ComparisonOp::Eq => Predicate::Eq { key, value }, // Symmetric
-                ComparisonOp::Ne => Predicate::Ne { key, value }, // Symmetric
-                ComparisonOp::Lt => Predicate::Gt { key, value }, // < becomes >
-                ComparisonOp::Le => Predicate::Gte { key, value }, // <= becomes >=
-                ComparisonOp::Gt => Predicate::Lt { key, value }, // > becomes <
-                ComparisonOp::Ge => Predicate::Lte { key, value }, // >= becomes <=
-            });
-        }
-
-        Err(Error::Query(QueryError::SyntaxError {
-            message: "Comparison must involve a property access (e.g., n.age)".to_string(),
-        }))
+        Ok(match flipped_op {
+            ComparisonOp::Eq => Predicate::Eq { key, value },
+            ComparisonOp::Ne => Predicate::Ne { key, value },
+            ComparisonOp::Lt => Predicate::Lt { key, value },
+            ComparisonOp::Le => Predicate::Lte { key, value },
+            ComparisonOp::Gt => Predicate::Gt { key, value },
+            ComparisonOp::Ge => Predicate::Gte { key, value },
+        })
     }
 
     /// Convert an expression to a predicate value.

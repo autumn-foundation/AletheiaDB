@@ -700,6 +700,36 @@ impl TraversalIterator {
         }
     }
 
+    #[inline]
+    fn process_outgoing(
+        &self,
+        edge_id: crate::core::EdgeId,
+        historical_guard: &Option<parking_lot::RwLockReadGuard<'_, HistoricalStorage>>,
+    ) -> Option<(NodeId, crate::core::EdgeId)> {
+        if !self.edge_visible_at_time(edge_id, historical_guard) {
+            return None;
+        }
+        self.current
+            .get_edge_target(edge_id)
+            .ok()
+            .map(|target| (target, edge_id))
+    }
+
+    #[inline]
+    fn process_incoming(
+        &self,
+        edge_id: crate::core::EdgeId,
+        historical_guard: &Option<parking_lot::RwLockReadGuard<'_, HistoricalStorage>>,
+    ) -> Option<(NodeId, crate::core::EdgeId)> {
+        if !self.edge_visible_at_time(edge_id, historical_guard) {
+            return None;
+        }
+        self.current
+            .get_edge_source(edge_id)
+            .ok()
+            .map(|source| (source, edge_id))
+    }
+
     fn get_neighbors(&self, node_id: NodeId) -> Vec<(NodeId, crate::core::EdgeId)> {
         // Acquire historical lock ONCE for all edge checks in this call.
         // This avoids the performance regression of acquiring per-edge locks.
@@ -707,94 +737,32 @@ impl TraversalIterator {
 
         match self.direction {
             Direction::Outgoing => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 if let Some(ref label) = self.label {
                     self.current
                         .get_outgoing_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
+                        .filter_map(|e| self.process_outgoing(e, &historical_guard))
                         .collect()
                 } else {
                     self.current
                         .get_outgoing_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
+                        .filter_map(|e| self.process_outgoing(e, &historical_guard))
                         .collect()
                 }
             }
             Direction::Incoming => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 if let Some(ref label) = self.label {
                     self.current
                         .get_incoming_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
+                        .filter_map(|e| self.process_incoming(e, &historical_guard))
                         .collect()
                 } else {
                     self.current
                         .get_incoming_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
+                        .filter_map(|e| self.process_incoming(e, &historical_guard))
                         .collect()
                 }
             }
             Direction::Both => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
-                // Helper closure to process edges and add to neighbors
-                // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                let process_outgoing =
-                    |edge_id, neighbors: &mut Vec<(NodeId, crate::core::EdgeId)>| {
-                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                            return;
-                        }
-                        if let Ok(target) = self.current.get_edge_target(edge_id) {
-                            neighbors.push((target, edge_id));
-                        }
-                    };
-
-                // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                let process_incoming =
-                    |edge_id, neighbors: &mut Vec<(NodeId, crate::core::EdgeId)>| {
-                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                            return;
-                        }
-                        if let Ok(source) = self.current.get_edge_source(edge_id) {
-                            neighbors.push((source, edge_id));
-                        }
-                    };
-
                 if let Some(ref label) = self.label {
                     // ⚡ Bolt Optimization: Instantiate iterators once to avoid duplicate lookups,
                     // calculate required capacity, and pre-allocate to prevent heap reallocations.
@@ -807,12 +775,12 @@ impl TraversalIterator {
                     let capacity = out_iter.size_hint().0 + in_iter.size_hint().0;
 
                     let mut neighbors = Vec::with_capacity(capacity);
-                    for edge_id in out_iter {
-                        process_outgoing(edge_id, &mut neighbors);
-                    }
-                    for edge_id in in_iter {
-                        process_incoming(edge_id, &mut neighbors);
-                    }
+                    neighbors.extend(
+                        out_iter.filter_map(|e| self.process_outgoing(e, &historical_guard)),
+                    );
+                    neighbors.extend(
+                        in_iter.filter_map(|e| self.process_incoming(e, &historical_guard)),
+                    );
                     neighbors
                 } else {
                     // ⚡ Bolt Optimization: Instantiate iterators once to avoid duplicate lookups,
@@ -822,12 +790,12 @@ impl TraversalIterator {
                     let capacity = out_iter.size_hint().0 + in_iter.size_hint().0;
 
                     let mut neighbors = Vec::with_capacity(capacity);
-                    for edge_id in out_iter {
-                        process_outgoing(edge_id, &mut neighbors);
-                    }
-                    for edge_id in in_iter {
-                        process_incoming(edge_id, &mut neighbors);
-                    }
+                    neighbors.extend(
+                        out_iter.filter_map(|e| self.process_outgoing(e, &historical_guard)),
+                    );
+                    neighbors.extend(
+                        in_iter.filter_map(|e| self.process_incoming(e, &historical_guard)),
+                    );
                     neighbors
                 }
             }
