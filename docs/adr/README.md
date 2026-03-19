@@ -73,6 +73,7 @@ What other options were evaluated?
 | [ADR-0022](0022-multi-property-vector-index.md) | Multi-Property Vector Index | 2026-01-15 | vector, index |
 | [ADR-0023](0023-index-persistence-layer.md) | Index Persistence Layer | 2026-01-16 | storage, performance |
 | [ADR-0024](0024-hybrid-logical-clock-timestamps.md) | Hybrid Logical Clock Timestamps | 2026-01-20 | core, temporal, distributed |
+| [ADR-0044](0044-concrete-storage-coupling.md) | Concrete Storage Coupling | 2026-03-24 | architecture, storage, performance |
 
 ### Proposed
 
