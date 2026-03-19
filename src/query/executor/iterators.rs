@@ -652,12 +652,14 @@ pub struct TraversalIterator {
     temporal_context: Option<(Timestamp, Timestamp)>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
+    #[cfg_attr(coverage_nightly, coverage(off))]
     visited: crate::core::version::FastHashSet<NodeId>,
     input_exhausted: bool,
 }
 
 impl TraversalIterator {
-    #[cfg_attr(tarpaulin, coverage(off))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[allow(unexpected_cfgs)]
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
