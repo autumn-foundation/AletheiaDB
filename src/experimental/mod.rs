@@ -49,6 +49,7 @@
 //! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
 //! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! | `pulsar` | **Pulsar** | Semantic Rhythm Detector. "Does this node's semantic meaning oscillate?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -224,6 +225,10 @@ pub mod omen;
 #[cfg(feature = "nova")]
 /// Oracle: Probabilistic Graph Reasoning.
 pub mod oracle;
+
+#[cfg(feature = "nova")]
+/// Pulsar: Semantic Rhythm & Periodicity Detector.
+pub mod pulsar;
 
 #[cfg(feature = "nova")]
 /// Luna: Semantic Subgraph Synthesis.
