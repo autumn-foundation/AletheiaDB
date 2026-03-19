@@ -1632,32 +1632,34 @@ mod sentry_tests {
             "is_current() should be false if one dimension is closed"
         );
     }
-
     #[test]
+    #[cfg(windows)]
     fn test_sentry_iso8601_format_content() {
         // 🛡️ Sentry Test: Verify time::to_iso8601 produces expected content.
-        // This targets arithmetic mutants (e.g., replacing / with %) that would produce
-        // wildly incorrect second values in the output string.
-
         let secs = 1609459200; // 2021-01-01 00:00:00 UTC
         let ts = time::from_secs(secs);
         let output = time::to_iso8601(ts);
 
-        // Verify exact structural equality using independently derived, hardcoded string values
-        // to avoid tautological mirroring of SystemTime debug formatting.
-        if cfg!(windows) {
-            // Windows SystemTime debug format: "SystemTime { intervals: 132539328000000000 }"
-            assert_eq!(
-                output, "SystemTime { intervals: 132539328000000000 }",
-                "to_iso8601 output should match exact expected SystemTime debug string on Windows."
-            );
-        } else {
-            // Unix SystemTime debug format: "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }"
-            assert_eq!(
-                output, "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }",
-                "to_iso8601 output should match exact expected SystemTime debug string on Unix."
-            );
-        }
+        // Windows SystemTime debug format: "SystemTime { intervals: 132539328000000000 }"
+        assert_eq!(
+            output, "SystemTime { intervals: 132539328000000000 }",
+            "to_iso8601 output should match exact expected SystemTime debug string on Windows."
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_sentry_iso8601_format_content() {
+        // 🛡️ Sentry Test: Verify time::to_iso8601 produces expected content.
+        let secs = 1609459200; // 2021-01-01 00:00:00 UTC
+        let ts = time::from_secs(secs);
+        let output = time::to_iso8601(ts);
+
+        // Unix SystemTime debug format: "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }"
+        assert_eq!(
+            output, "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }",
+            "to_iso8601 output should match exact expected SystemTime debug string on Unix."
+        );
     }
 
     #[test]
@@ -1715,32 +1717,36 @@ mod sentry_tests {
             "Should contain range ending at exact same time"
         );
     }
-
     #[test]
+    #[cfg(windows)]
     fn test_sentry_iso8601_precision() {
         // 🛡️ Sentry Test: Verify sub-second precision in ISO 8601 output.
-        // This targets mutants that break nanosecond calculation.
-
         let secs = 1609459200;
         let micros = 123456;
         let ts = HybridTimestamp::new_unchecked(secs * 1_000_000 + micros, 0);
         let output = time::to_iso8601(ts);
 
-        // Verify exact structural equality using independently derived, hardcoded string values
-        // to avoid tautological mirroring of SystemTime debug formatting.
-        if cfg!(windows) {
-            // Windows SystemTime debug format
-            assert_eq!(
-                output, "SystemTime { intervals: 132539328001234560 }",
-                "to_iso8601 output should match exact expected SystemTime debug string with nanoseconds on Windows."
-            );
-        } else {
-            // Unix SystemTime debug format
-            assert_eq!(
-                output, "SystemTime { tv_sec: 1609459200, tv_nsec: 123456000 }",
-                "to_iso8601 output should match exact expected SystemTime debug string with nanoseconds on Unix."
-            );
-        }
+        // Windows SystemTime debug format
+        assert_eq!(
+            output, "SystemTime { intervals: 132539328001234560 }",
+            "to_iso8601 output should match exact expected SystemTime debug string with nanoseconds on Windows."
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_sentry_iso8601_precision() {
+        // 🛡️ Sentry Test: Verify sub-second precision in ISO 8601 output.
+        let secs = 1609459200;
+        let micros = 123456;
+        let ts = HybridTimestamp::new_unchecked(secs * 1_000_000 + micros, 0);
+        let output = time::to_iso8601(ts);
+
+        // Unix SystemTime debug format
+        assert_eq!(
+            output, "SystemTime { tv_sec: 1609459200, tv_nsec: 123456000 }",
+            "to_iso8601 output should match exact expected SystemTime debug string with nanoseconds on Unix."
+        );
     }
 
     #[test]
