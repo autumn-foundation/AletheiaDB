@@ -658,7 +658,6 @@ pub struct TraversalIterator {
 }
 
 impl TraversalIterator {
-    /// ⚡ Bolt: Uses FastHashSet to avoid SipHash overhead for integer NodeIds
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
