@@ -1648,15 +1648,13 @@ mod sentry_tests {
         if cfg!(windows) {
             // Windows SystemTime debug format: "SystemTime { intervals: 132539328000000000 }"
             assert_eq!(
-                output,
-                "SystemTime { intervals: 132539328000000000 }",
+                output, "SystemTime { intervals: 132539328000000000 }",
                 "to_iso8601 output should match exact expected SystemTime debug string on Windows."
             );
         } else {
             // Unix SystemTime debug format: "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }"
             assert_eq!(
-                output,
-                "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }",
+                output, "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }",
                 "to_iso8601 output should match exact expected SystemTime debug string on Unix."
             );
         }
@@ -1733,15 +1731,13 @@ mod sentry_tests {
         if cfg!(windows) {
             // Windows SystemTime debug format
             assert_eq!(
-                output,
-                "SystemTime { intervals: 132539328001234560 }",
+                output, "SystemTime { intervals: 132539328001234560 }",
                 "to_iso8601 output should match exact expected SystemTime debug string with nanoseconds on Windows."
             );
         } else {
             // Unix SystemTime debug format
             assert_eq!(
-                output,
-                "SystemTime { tv_sec: 1609459200, tv_nsec: 123456000 }",
+                output, "SystemTime { tv_sec: 1609459200, tv_nsec: 123456000 }",
                 "to_iso8601 output should match exact expected SystemTime debug string with nanoseconds on Unix."
             );
         }
