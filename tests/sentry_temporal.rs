@@ -1294,3 +1294,166 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_timerange_serialize_into_empty_mutant() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    let mut buffer = Vec::new();
+    range.serialize_into(&mut buffer);
+
+    // If the mutant `replace TimeRange::serialize_into with ()` survives,
+    // buffer.len() will be 0, not 24.
+    assert_eq!(
+        buffer.len(),
+        24,
+        "serialize_into must write exactly 24 bytes to the buffer"
+    );
+}
+
+#[test]
+fn test_bitemporal_serialize_into_empty_mutant() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let interval = BiTemporalInterval::now(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    );
+
+    let mut buffer = Vec::new();
+    interval.serialize_into(&mut buffer);
+
+    // If the mutant `replace BiTemporalInterval::serialize_into with ()` survives,
+    // buffer.len() will be 0, not 48.
+    assert_eq!(
+        buffer.len(),
+        48,
+        "serialize_into must write exactly 48 bytes to the buffer"
+    );
+}
+
+#[test]
+fn test_timerange_is_closed_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{TIMESTAMP_MAX, TimeRange};
+
+    // mutant: replace < with <= in is_closed
+    // If it's <=, a range ending at TIMESTAMP_MAX would be considered closed.
+    let open_range = TimeRange::from(HybridTimestamp::new(100, 0).unwrap());
+    assert_eq!(open_range.end(), TIMESTAMP_MAX); // Use TIMESTAMP_MAX to fix unused import
+    assert!(
+        !open_range.is_closed(),
+        "is_closed() must be false when end == TIMESTAMP_MAX"
+    );
+
+    // mutant: replace < with == in is_closed
+    // If it's ==, only ranges ending exactly at TIMESTAMP_MAX - 1 (or whatever logic) might match.
+    // It would be false for normal closed ranges.
+    let normal_closed = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        normal_closed.is_closed(),
+        "is_closed() must be true when end < TIMESTAMP_MAX"
+    );
+}
+
+#[test]
+fn test_timerange_overlaps_boundary_touch() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let mid = HybridTimestamp::new(200, 0).unwrap();
+    let end = HybridTimestamp::new(300, 0).unwrap();
+
+    let r1 = TimeRange::new(start, mid).unwrap();
+    let r2 = TimeRange::new(mid, end).unwrap();
+
+    // mutant: replace < with <=
+    // If self.start < other.end && other.start < self.end becomes
+    // self.start <= other.end && other.start <= self.end,
+    // then r1 and r2 would overlap (since r1.end == r2.start == 200).
+    assert!(
+        !r1.overlaps(&r2),
+        "Ranges sharing only an exclusive boundary must not overlap"
+    );
+    assert!(
+        !r2.overlaps(&r1),
+        "Ranges sharing only an exclusive boundary must not overlap"
+    );
+
+    // mutant: replace || with && (self.is_empty() || other.is_empty())
+    // Handled by test_timerange_overlaps_mutants_extra where one is empty and the other is not.
+}
+
+#[test]
+fn test_bitemporal_is_current_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+    let tx_ts = HybridTimestamp::new(200, 0).unwrap();
+
+    let interval = BiTemporalInterval::new(
+        TimeRange::from(valid_ts),
+        TimeRange::new(tx_ts, HybridTimestamp::new(300, 0).unwrap()).unwrap(),
+    );
+
+    // mutant: replace && with || in is_current
+    // is_currently_valid() && is_currently_recorded()
+    // Here, valid is open (true) but tx is closed (false)
+    assert!(
+        !interval.is_current(),
+        "is_current must be false if only one dimension is current"
+    );
+}
+
+#[test]
+fn test_bitemporal_is_visible_at_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let valid_range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    let tx_range = TimeRange::new(
+        HybridTimestamp::new(300, 0).unwrap(),
+        HybridTimestamp::new(400, 0).unwrap(),
+    )
+    .unwrap();
+
+    let interval = BiTemporalInterval::new(valid_range, tx_range);
+
+    // mutant: replace && with ||
+    // valid = true, tx = false
+    assert!(
+        !interval.is_visible_at(
+            HybridTimestamp::new(150, 0).unwrap(),
+            HybridTimestamp::new(500, 0).unwrap()
+        ),
+        "is_visible_at must be false if tx dimension does not contain the timestamp"
+    );
+
+    // valid = false, tx = true
+    assert!(
+        !interval.is_visible_at(
+            HybridTimestamp::new(50, 0).unwrap(),
+            HybridTimestamp::new(350, 0).unwrap()
+        ),
+        "is_visible_at must be false if valid dimension does not contain the timestamp"
+    );
+}
