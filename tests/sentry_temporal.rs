@@ -1294,3 +1294,93 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_timerange_serialize_into_empty() {
+    let start = aletheiadb::core::hlc::HybridTimestamp::new(100, 0).unwrap();
+    let end = aletheiadb::core::hlc::HybridTimestamp::new(200, 0).unwrap();
+    let range = aletheiadb::core::temporal::TimeRange::new(start, end).unwrap();
+
+    // Kill: replace serialize_into with ()
+    // If it's replaced with (), the buffer will remain empty
+    let mut buffer = Vec::new();
+    range.serialize_into(&mut buffer);
+    assert_eq!(
+        buffer.len(),
+        24,
+        "serialize_into must write 24 bytes to the buffer"
+    );
+}
+
+#[test]
+fn test_bitemporal_serialize_into_empty() {
+    let start = aletheiadb::core::hlc::HybridTimestamp::new(100, 0).unwrap();
+    let end = aletheiadb::core::hlc::HybridTimestamp::new(200, 0).unwrap();
+    let interval = aletheiadb::core::temporal::BiTemporalInterval::new(
+        aletheiadb::core::temporal::TimeRange::new(start, end).unwrap(),
+        aletheiadb::core::temporal::TimeRange::new(start, end).unwrap(),
+    );
+
+    // Kill: replace serialize_into with ()
+    let mut buffer = Vec::new();
+    interval.serialize_into(&mut buffer);
+    assert_eq!(
+        buffer.len(),
+        48,
+        "serialize_into must write 48 bytes to the buffer"
+    );
+}
+
+#[test]
+fn test_timerange_deserialize_default_returns() {
+    // Kill: replace deserialize with Ok((Default::default(), 0))
+    // Kill: replace deserialize with Ok((Default::default(), 1))
+    let mut buffer = Vec::new();
+
+    // Create a range that is decidedly NOT default
+    let start = aletheiadb::core::hlc::HybridTimestamp::new(12345, 67).unwrap();
+    let end = aletheiadb::core::hlc::HybridTimestamp::new(54321, 76).unwrap();
+    let range = aletheiadb::core::temporal::TimeRange::new(start, end).unwrap();
+
+    range.serialize_into(&mut buffer);
+
+    let (deserialized, bytes_read) =
+        aletheiadb::core::temporal::TimeRange::deserialize(&buffer).unwrap();
+    assert_eq!(bytes_read, 24, "deserialize must consume exactly 24 bytes");
+    assert_eq!(
+        deserialized.start(),
+        start,
+        "Deserialized start must match original exactly"
+    );
+    assert_eq!(
+        deserialized.end(),
+        end,
+        "Deserialized end must match original exactly"
+    );
+}
+
+#[test]
+fn test_bitemporal_deserialize_default_returns() {
+    // Kill: replace deserialize with Ok((Default::default(), 0))
+    // Kill: replace deserialize with Ok((Default::default(), 1))
+    let mut buffer = Vec::new();
+
+    // Create a bitemporal that is decidedly NOT default
+    let start = aletheiadb::core::hlc::HybridTimestamp::new(12345, 67).unwrap();
+    let end = aletheiadb::core::hlc::HybridTimestamp::new(54321, 76).unwrap();
+    let interval = aletheiadb::core::temporal::BiTemporalInterval::new(
+        aletheiadb::core::temporal::TimeRange::new(start, end).unwrap(),
+        aletheiadb::core::temporal::TimeRange::new(start, end).unwrap(),
+    );
+
+    interval.serialize_into(&mut buffer);
+
+    let (deserialized, bytes_read) =
+        aletheiadb::core::temporal::BiTemporalInterval::deserialize(&buffer).unwrap();
+    assert_eq!(bytes_read, 48, "deserialize must consume exactly 48 bytes");
+    assert_eq!(
+        deserialized.valid_time().start(),
+        start,
+        "Deserialized valid start must match original exactly"
+    );
+}
