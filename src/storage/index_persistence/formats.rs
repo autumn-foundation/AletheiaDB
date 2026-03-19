@@ -636,3 +636,61 @@ impl Default for StringPersistencePolicy {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_have_default_vector_policy() {
+        let policy = VectorPersistencePolicy::default();
+        assert_eq!(policy.mutation_threshold, 1000);
+        assert_eq!(policy.time_interval_secs, 300);
+    }
+
+    #[test]
+    fn should_have_default_graph_policy() {
+        let policy = GraphPersistencePolicy::default();
+        assert!(policy.on_adjacency_rebuild);
+        assert_eq!(policy.mutation_threshold, 5000);
+        assert_eq!(policy.time_interval_secs, 600);
+    }
+
+    #[test]
+    fn should_have_default_temporal_policy() {
+        let policy = TemporalPersistencePolicy::default();
+        assert_eq!(policy.version_threshold, 1000);
+        assert_eq!(policy.anchor_threshold, 100);
+        assert_eq!(policy.time_interval_secs, 300);
+    }
+
+    #[test]
+    fn should_have_default_string_policy() {
+        let policy = StringPersistencePolicy::default();
+        assert_eq!(policy.new_strings_threshold, 500);
+        assert_eq!(policy.time_interval_secs, 600);
+    }
+
+    #[test]
+    fn should_have_default_persistence_policies() {
+        let policy = PersistencePolicies::default();
+        assert_eq!(policy.vector, VectorPersistencePolicy::default());
+        assert_eq!(policy.graph, GraphPersistencePolicy::default());
+        assert_eq!(policy.temporal, TemporalPersistencePolicy::default());
+        assert_eq!(policy.strings, StringPersistencePolicy::default());
+    }
+
+    #[test]
+    fn should_serialize_and_deserialize_persistence_policies() {
+        let policy = PersistencePolicies {
+            vector: VectorPersistencePolicy { mutation_threshold: 42, time_interval_secs: 43 },
+            graph: GraphPersistencePolicy { on_adjacency_rebuild: false, mutation_threshold: 44, time_interval_secs: 45 },
+            temporal: TemporalPersistencePolicy { version_threshold: 46, anchor_threshold: 47, time_interval_secs: 48 },
+            strings: StringPersistencePolicy { new_strings_threshold: 49, time_interval_secs: 50 },
+        };
+
+        let encoded = bitcode::encode(&policy);
+        let decoded: PersistencePolicies = bitcode::decode(&encoded).unwrap();
+
+        assert_eq!(policy, decoded);
+    }
+}

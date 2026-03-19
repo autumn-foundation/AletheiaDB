@@ -86,3 +86,48 @@ impl IndexPersistenceError {
 
 /// Result type for index persistence operations.
 pub type Result<T> = std::result::Result<T, IndexPersistenceError>;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn should_return_true_when_error_is_not_found() {
+        // Test with NotFound error
+        let err =
+            IndexPersistenceError::Io(io::Error::new(io::ErrorKind::NotFound, "file missing"));
+        assert!(
+            err.is_not_found(),
+            "is_not_found() should return true for ErrorKind::NotFound"
+        );
+
+        // Test with other IO error
+        let err2 =
+            IndexPersistenceError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
+        assert!(
+            !err2.is_not_found(),
+            "is_not_found() should return false for other IO errors"
+        );
+
+        // Test with non-IO error
+        let err3 = IndexPersistenceError::MissingIndex {
+            name: "test".to_string(),
+        };
+        assert!(
+            !err3.is_not_found(),
+            "is_not_found() should return false for non-IO errors"
+        );
+    }
+
+    #[test]
+    fn should_convert_from_bitcode_error() {
+        let bad_data = vec![0xFF, 0xFF, 0xFF];
+        let bitcode_err = bitcode::decode::<u32>(&bad_data).unwrap_err();
+
+        let err: IndexPersistenceError = bitcode_err.into();
+        assert!(
+            matches!(err, IndexPersistenceError::Serialization(_)),
+            "Should wrap bitcode::Error in Serialization variant"
+        );
+    }
+}

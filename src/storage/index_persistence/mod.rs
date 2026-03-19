@@ -355,3 +355,51 @@ pub fn load_indexes_parallel(
 
     Ok((graph_data, temporal_data, vector_data))
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn should_atomically_write_file() {
+        let dir = tempdir().unwrap();
+        let target_path = dir.path().join("test.txt");
+
+        // Write initial data
+        let data1 = b"hello world";
+        atomic_write(&target_path, data1).unwrap();
+
+        // Verify it was written
+        assert_eq!(fs::read(&target_path).unwrap(), data1);
+
+        // Overwrite
+        let data2 = b"new data";
+        atomic_write(&target_path, data2).unwrap();
+
+        // Verify it was overwritten correctly
+        assert_eq!(fs::read(&target_path).unwrap(), data2);
+
+        // Check no temp files left behind
+        let mut count = 0;
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            assert_eq!(
+                entry.file_name(),
+                "test.txt",
+                "Should not have temporary files left"
+            );
+            count += 1;
+        }
+        assert_eq!(count, 1, "Should exactly have 1 file");
+    }
+
+    #[test]
+    fn should_fail_atomic_write_on_invalid_path() {
+        // Use a path that definitely doesn't exist to cause IO error
+        let path = std::path::PathBuf::from("/does/not/exist/anywhere/test.txt");
+        let result = atomic_write(&path, b"test");
+        assert!(result.is_err(), "Should return error for invalid directory");
+        assert!(matches!(result.unwrap_err(), IndexPersistenceError::Io(_)));
+    }
+}
