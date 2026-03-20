@@ -22,6 +22,18 @@ use crate::core::temporal::Timestamp;
 use std::time::Duration;
 
 /// A Clue represents a specific event or state change to look for.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::sherlock::Clue;
+/// use aletheiadb::core::property::PropertyValue;
+///
+/// let clue = Clue::PropertyState {
+///     key: "status".to_string(),
+///     value: Some(PropertyValue::from("Pending")),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub enum Clue {
     /// A property has a specific value at this version.
@@ -37,6 +49,25 @@ pub enum Clue {
 
 #[cfg(feature = "nova")]
 /// A Mystery defines the pattern to search for.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::experimental::sherlock::{Mystery, Clue};
+/// use aletheiadb::core::property::PropertyValue;
+/// use std::time::Duration;
+///
+/// let mystery = Mystery::new(Duration::from_secs(60))
+///     .add_clue(Clue::PropertyState {
+///         key: "status".to_string(),
+///         value: Some(PropertyValue::from("Pending")),
+///     });
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct Mystery {
     /// The sequence of clues to find.
@@ -102,6 +133,19 @@ impl Mystery {
 }
 
 /// A Deduction represents a successful match.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::sherlock::Deduction;
+/// use aletheiadb::core::id::NodeId;
+/// use aletheiadb::core::temporal::time;
+///
+/// let deduction = Deduction {
+///     node_id: NodeId::new(1).unwrap(),
+///     event_times: vec![time::now()],
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct Deduction {
     /// The node where the pattern was found.
@@ -112,6 +156,48 @@ pub struct Deduction {
 
 #[cfg(feature = "nova")]
 /// The Sherlock Engine.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
+/// use aletheiadb::core::property::{PropertyValue, PropertyMapBuilder};
+/// use aletheiadb::api::transaction::WriteOps;
+/// use std::time::Duration;
+///
+/// let db = AletheiaDB::new()?;
+///
+/// // Create a node
+/// let props = PropertyMapBuilder::new().insert("status", "Pending").build();
+/// let node_id = db.write(|tx| tx.create_node("Task", props))?;
+///
+/// // Update the node
+/// db.write(|tx| tx.update_node(
+///     node_id,
+///     PropertyMapBuilder::new().insert("status", "Completed").build()
+/// ))?;
+///
+/// let sherlock = Sherlock::new(&db);
+/// let mystery = Mystery::new(Duration::from_secs(60))
+///     .add_clue(Clue::PropertyState {
+///         key: "status".to_string(),
+///         value: Some(PropertyValue::from("Pending")),
+///     })
+///     .add_clue(Clue::PropertyState {
+///         key: "status".to_string(),
+///         value: Some(PropertyValue::from("Completed")),
+///     });
+///
+/// let deductions = sherlock.investigate(node_id, &mystery)?;
+/// assert_eq!(deductions.len(), 1);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct Sherlock<'a> {
     #[allow(dead_code)]
     db: &'a AletheiaDB,
