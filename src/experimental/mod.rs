@@ -170,6 +170,9 @@ pub mod prophet;
 /// Ripple: Semantic Causality Detector.
 pub mod ripple;
 #[cfg(feature = "nova")]
+/// Rubicon: Semantic Boundary Crossing Detector.
+pub mod rubicon;
+#[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
 #[cfg(feature = "nova")]
