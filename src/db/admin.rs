@@ -216,7 +216,7 @@ impl AletheiaDB {
     ///
     /// ```ignore
     /// let db = AletheiaDB::new()?;
-    /// db.enable_vector_index("embedding", config)?;
+    /// db.vector_index("embedding").hnsw(config).enable()?;
     /// // ... create nodes and perform searches ...
     /// let (count, candidates, results) = db.__test_get_filter_stats("Person").unwrap();
     /// assert_eq!(count, 10); // 10 searches performed

@@ -166,7 +166,7 @@ mod tests {
 
         // 1. Setup Vector Index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // 2. Create Nodes
         // A: [1.0, 0.0]
@@ -232,7 +232,7 @@ mod tests {
     fn test_wormhole_disconnected() {
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // A and D are disconnected but similar
         let props_a = PropertyMapBuilder::new()

@@ -162,7 +162,7 @@ mod tests {
 
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Euclidean); // 2D for simplicity
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         let t_start = time::now();
 
@@ -262,7 +262,9 @@ mod tests {
     #[test]
     fn test_dreamer_static_trajectory() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Euclidean))
+            .enable()
             .unwrap();
 
         let t0 = time::now();

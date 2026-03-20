@@ -332,7 +332,9 @@ mod tests {
     #[test]
     fn test_chimera_vector_blend() {
         let (db, _dir) = create_test_db();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Node A: [0.0, 0.0]

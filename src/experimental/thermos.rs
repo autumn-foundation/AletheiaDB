@@ -154,7 +154,7 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
         // Enable vector index for the property (optional for Thermos but good practice)
         let config = HnswConfig::new(2, DistanceMetric::Euclidean);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         let t0 = time::now();
         let props = PropertyMapBuilder::new()

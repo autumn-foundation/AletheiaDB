@@ -296,7 +296,7 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // Source: A [1, 0]
         // Target: X [1, 0], Y [0, 1]
@@ -332,7 +332,7 @@ mod tests {
         // causing valid mappings with score -1.0 to be ignored.
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // Source: A [1, 0]
         // Target: X [-1, 0] (Opposite, score -1.0)
@@ -361,7 +361,7 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // Scenario: Two nodes in Source (A, B) and two in Target (X, Y).
         // A and B have identical vectors. X and Y have identical vectors.

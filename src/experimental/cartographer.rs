@@ -23,7 +23,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Setup database and vectors
 //! let db = AletheiaDB::new()?;
-//! db.enable_vector_index("embedding", HnswConfig::new(2, DistanceMetric::Euclidean))?;
+//! db.vector_index("embedding").hnsw(HnswConfig::new(2, DistanceMetric::Euclidean)).enable()?;
 //!
 //! // Create nodes (Cluster 1: near origin)
 //! db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 0.0]).build())?;
@@ -332,7 +332,7 @@ mod tests {
 
         // Setup vector index
         let config = HnswConfig::new(2, DistanceMetric::Euclidean);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         // Create nodes with vectors
         // Cluster 1

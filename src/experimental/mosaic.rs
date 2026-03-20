@@ -151,7 +151,8 @@ mod tests {
     fn test_mosaic_composition() {
         let db = AletheiaDB::new().unwrap();
         // Enable index so search works
-        db.enable_vector_index("vec", HnswConfig::new(3, DistanceMetric::Cosine))
+        db.vector_index("vec").hnsw(HnswConfig::new(3, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Let's create orthogonal basis vectors as our "concepts"

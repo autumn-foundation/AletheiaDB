@@ -260,7 +260,9 @@ mod tests {
     fn test_kairos_noise_filtering() {
         let db = AletheiaDB::new().unwrap();
         // Enable index
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // 1. Create Node [1.0, 0.0]

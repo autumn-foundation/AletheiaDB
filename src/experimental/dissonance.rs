@@ -191,7 +191,9 @@ mod tests {
     fn test_dissonance_high() {
         let db = AletheiaDB::new().unwrap();
         // Enable vector index
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Node A: [1.0, 0.0] (Type X)
@@ -247,7 +249,9 @@ mod tests {
     #[test]
     fn test_dissonance_low() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Node A: [1.0, 0.0]

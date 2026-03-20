@@ -235,7 +235,7 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
         db
     }
 

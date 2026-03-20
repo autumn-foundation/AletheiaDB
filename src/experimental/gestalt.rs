@@ -494,7 +494,9 @@ mod tests {
     fn test_gestalt_simple_match() {
         let db = AletheiaDB::new().unwrap();
         // Enable vector index
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Graph:

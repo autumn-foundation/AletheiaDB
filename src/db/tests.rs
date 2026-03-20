@@ -544,7 +544,7 @@ fn test_aletheiadb_is_vector_index_enabled_for() {
 
     // Enable index for "embedding"
     let config = HnswConfig::new(128, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Now should be enabled
     assert!(db.is_vector_index_enabled());
@@ -553,7 +553,7 @@ fn test_aletheiadb_is_vector_index_enabled_for() {
 
     // Enable another index
     let config2 = HnswConfig::new(256, DistanceMetric::Euclidean);
-    db.enable_vector_index("vector", config2).unwrap();
+    db.vector_index("vector").hnsw(config2).enable().unwrap();
 
     assert!(db.is_vector_index_enabled_for("vector"));
 }
@@ -1940,7 +1940,9 @@ fn test_list_vector_indexes() {
 
     assert!(db.list_vector_indexes().is_empty());
 
-    db.enable_vector_index("embedding", HnswConfig::new(128, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(128, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     let indexes = db.list_vector_indexes();
@@ -1953,11 +1955,15 @@ fn test_enable_vector_index_duplicate() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(128, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(128, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     // Enabling the same index again should error
-    let result = db.enable_vector_index("embedding", HnswConfig::new(128, DistanceMetric::Cosine));
+    let result = db
+        .vector_index("embedding")
+        .hnsw(HnswConfig::new(128, DistanceMetric::Cosine)).enable();
     assert!(result.is_err());
 }
 
@@ -1966,7 +1972,9 @@ fn test_find_similar_with_label_without_matches() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     let node_id = db
@@ -1990,7 +1998,9 @@ fn test_find_similar_by_embedding_with_label() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     db.create_node(
@@ -2289,7 +2299,9 @@ fn test_vector_builder_duplicate_enable_counts_error_once() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     crate::observability::METRICS.reset();
