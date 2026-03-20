@@ -1294,3 +1294,139 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_timerange_math_mutants_strict() {
+    use aletheiadb::core::temporal::time;
+    let ts = time::from_secs(5);
+    assert_eq!(ts.wallclock(), 5_000_000);
+
+    let ts_m = time::from_millis(5);
+    assert_eq!(ts_m.wallclock(), 5_000);
+
+    let secs = time::to_secs(ts);
+    assert_eq!(secs, 5);
+    assert_ne!(
+        time::to_secs(aletheiadb::core::hlc::HybridTimestamp::new(5_000_001, 0).unwrap()),
+        5_000_001
+    );
+
+    let millis = time::to_millis(ts_m);
+    assert_eq!(millis, 5);
+    assert_ne!(
+        time::to_millis(aletheiadb::core::hlc::HybridTimestamp::new(5_001, 0).unwrap()),
+        5_001
+    );
+}
+
+#[test]
+fn test_time_to_iso8601_math_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::time;
+
+    let ts2 = HybridTimestamp::new(2_000_005, 0).unwrap();
+    let iso2 = time::to_iso8601(ts2);
+    if cfg!(windows) {
+        assert!(iso2.contains("116444736020000050"));
+    } else {
+        assert!(iso2.contains("5000"));
+        assert!(!iso2.contains("2000"));
+        assert!(!iso2.contains("1005"));
+        assert!(!iso2.contains("tv_nsec: 0"));
+    }
+
+    let epoch_iso = time::to_iso8601(HybridTimestamp::new(0, 0).unwrap());
+    assert_ne!(iso2, epoch_iso);
+    assert!(!iso2.contains("1969"));
+}
+
+#[test]
+fn test_timerange_constructors_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
+
+    let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+
+    let res_from = std::panic::catch_unwind(|| {
+        TimeRange::from(max_valid);
+    });
+    assert!(res_from.is_ok(), "&& -> || mutant in TimeRange::from");
+
+    let res_at = std::panic::catch_unwind(|| {
+        TimeRange::at(max_valid);
+    });
+    assert!(res_at.is_ok(), "&& -> || mutant in TimeRange::at");
+
+    let res_new = TimeRange::new(
+        HybridTimestamp::new(200, 0).unwrap(),
+        HybridTimestamp::new(100, 0).unwrap(),
+    );
+    assert!(res_new.is_err());
+    let res_eq = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(100, 0).unwrap(),
+    );
+    assert!(res_eq.is_ok(), "> -> >= mutant in TimeRange::new");
+
+    let res_new_max = TimeRange::new(max_valid, max_valid);
+    assert!(
+        res_new_max.is_ok(),
+        "&& -> || mutant in TimeRange::new (start check)"
+    );
+
+    let res_from_max = std::panic::catch_unwind(|| {
+        TimeRange::from(TIMESTAMP_MAX);
+    });
+    assert!(res_from_max.is_ok(), "!= -> == mutant in TimeRange::from");
+
+    let res_at_max = std::panic::catch_unwind(|| {
+        TimeRange::at(TIMESTAMP_MAX);
+    });
+    assert!(res_at_max.is_ok(), "!= -> == mutant in TimeRange::at");
+}
+#[test]
+fn test_timerange_duration_micros_math_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(150, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    let dur = range.duration_micros();
+    assert_eq!(dur, Some(50));
+    assert_ne!(dur, Some(250), "- -> + mutant");
+    assert_ne!(dur, Some(1), "- -> / mutant");
+}
+
+#[test]
+fn test_timerange_serialize_vec_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    let bytes = range.serialize();
+    assert_ne!(bytes, Vec::<u8>::new());
+    assert_ne!(bytes, vec![0u8]);
+    assert_ne!(bytes, vec![1u8]);
+    assert_eq!(bytes.len(), 24);
+}
+
+#[test]
+fn test_bitemporal_serialize_vec_mutants() {
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let interval = BiTemporalInterval::now(
+        aletheiadb::core::hlc::HybridTimestamp::new(100, 0).unwrap(),
+        aletheiadb::core::hlc::HybridTimestamp::new(200, 0).unwrap(),
+    );
+    let bytes = interval.serialize();
+    assert_ne!(bytes, Vec::<u8>::new());
+    assert_ne!(bytes, vec![0u8]);
+    assert_ne!(bytes, vec![1u8]);
+    assert_eq!(bytes.len(), 48);
+}
