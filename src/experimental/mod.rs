@@ -198,6 +198,10 @@ pub mod temporal_narrative;
 pub mod thermos;
 
 #[cfg(feature = "nova")]
+/// Pulsar: Semantic Rhythm & Periodicity Detector.
+pub mod pulsar;
+
+#[cfg(feature = "nova")]
 /// Sentinel: Semantic Firewall for validating data insertion.
 pub mod sentinel;
 
