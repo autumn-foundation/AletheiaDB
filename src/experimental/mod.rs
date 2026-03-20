@@ -250,3 +250,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// DejaVu: Semantic Recurrence Detector.
+pub mod dejavu;
