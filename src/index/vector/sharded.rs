@@ -105,6 +105,27 @@ pub enum ShardingStrategy {
 }
 
 /// Statistics for the sharded index.
+///
+/// `ShardStats` details the distribution of vectors across all shards within a
+/// [`ShardedVectorIndex`]. It computes the `imbalance_ratio` which is critical
+/// for determining if a rebalance operation is necessary.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::sharded::ShardStats;
+///
+/// let stats = ShardStats {
+///     shard_sizes: vec![100, 150, 120, 90],
+///     total_vectors: 460,
+///     imbalance_ratio: 1.66,
+/// };
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Default, Clone)]
 pub struct ShardStats {
     /// Number of vectors in each shard.
@@ -116,6 +137,25 @@ pub struct ShardStats {
 }
 
 /// Configuration for rebalancing shards.
+///
+/// The `RebalanceConfig` sets thresholds and limits for the rebalancing process
+/// inside a [`ShardedVectorIndex`]. It determines when the index is considered
+/// unbalanced and how aggressively it should attempt to fix the distribution.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::sharded::RebalanceConfig;
+///
+/// let config = RebalanceConfig::new()
+///     .with_imbalance_threshold(1.5)
+///     .with_batch_size(2000);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct RebalanceConfig {
     /// Trigger rebalancing when imbalance ratio exceeds this threshold.
@@ -153,6 +193,27 @@ impl RebalanceConfig {
 }
 
 /// Configuration for the sharded vector index.
+///
+/// `ShardedVectorConfig` dictates the architecture of a [`ShardedVectorIndex`],
+/// configuring the number of shards, the underlying `HnswConfig` for each shard,
+/// and the [`ShardingStrategy`] used to route vectors.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::sharded::{ShardedVectorConfig, ShardingStrategy};
+/// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+///
+/// let hnsw_cfg = HnswConfig::new(384, DistanceMetric::Cosine);
+/// let config = ShardedVectorConfig::new(4)
+///     .with_strategy(ShardingStrategy::HashBased)
+///     .with_hnsw_config(hnsw_cfg);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct ShardedVectorConfig {
     /// Number of shards.
@@ -206,11 +267,39 @@ impl Default for ShardedVectorConfig {
 /// This structure provides horizontal scalability by partitioning vectors
 /// across multiple shards and coordinating search operations.
 ///
+/// See [`ShardedVectorConfig`] for initialization options and [`ShardingStrategy`]
+/// for details on vector distribution.
+///
 /// # Fixed Shard Count
 ///
 /// The number of shards is fixed at construction time. This is because the
 /// routing algorithm (hash % num_shards) depends on a consistent shard count.
 /// Changing it would cause existing vectors to be routed to wrong shards.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> aletheiadb::core::error::Result<()> {
+/// use aletheiadb::index::vector::sharded::{ShardedVectorIndex, ShardedVectorConfig, ShardingStrategy};
+/// use aletheiadb::index::vector::{HnswConfig, DistanceMetric, VectorIndex};
+/// use aletheiadb::core::id::NodeId;
+///
+/// let config = ShardedVectorConfig::new(4)
+///     .with_hnsw_config(HnswConfig::new(384, DistanceMetric::Cosine));
+///
+/// let index = ShardedVectorIndex::new(config)?;
+///
+/// let node = NodeId::new(1).unwrap();
+/// let embedding = vec![0.1f32; 384];
+/// index.add(node, &embedding)?;
+///
+/// assert_eq!(index.len(), 1);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct ShardedVectorIndex {
     /// Configuration for this index.
     config: ShardedVectorConfig,
