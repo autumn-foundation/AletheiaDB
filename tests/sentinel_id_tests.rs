@@ -231,3 +231,89 @@ fn test_entity_id_as_edge_exhaustive() {
     // Check node case returns None
     assert_eq!(entity_node.as_edge(), None);
 }
+
+#[test]
+fn test_node_id_try_from_exhaustive() {
+    let raw = 42u64;
+    let node_id = NodeId::try_from(raw).unwrap();
+    assert_eq!(node_id.as_u64(), 42);
+    assert_ne!(node_id.as_u64(), 0);
+}
+
+#[test]
+fn test_node_id_from_str_exhaustive() {
+    use std::str::FromStr;
+    let raw = "42";
+    let node_id = NodeId::from_str(raw).unwrap();
+    assert_eq!(node_id.as_u64(), 42);
+    assert_ne!(node_id.as_u64(), 0);
+}
+
+#[test]
+fn test_edge_id_try_from_exhaustive() {
+    let raw = 42u64;
+    let edge_id = EdgeId::try_from(raw).unwrap();
+    assert_eq!(edge_id.as_u64(), 42);
+    assert_ne!(edge_id.as_u64(), 0);
+}
+
+#[test]
+fn test_edge_id_from_str_exhaustive() {
+    use std::str::FromStr;
+    let raw = "42";
+    let edge_id = EdgeId::from_str(raw).unwrap();
+    assert_eq!(edge_id.as_u64(), 42);
+    assert_ne!(edge_id.as_u64(), 0);
+}
+
+#[test]
+fn test_version_id_try_from_exhaustive() {
+    let raw = 42u64;
+    let version_id = VersionId::try_from(raw).unwrap();
+    assert_eq!(version_id.as_u64(), 42);
+    assert_ne!(version_id.as_u64(), 0);
+}
+
+#[test]
+fn test_version_id_from_str_exhaustive() {
+    use std::str::FromStr;
+    let raw = "42";
+    let version_id = VersionId::from_str(raw).unwrap();
+    assert_eq!(version_id.as_u64(), 42);
+    assert_ne!(version_id.as_u64(), 0);
+}
+
+#[test]
+fn test_tx_id_try_from_exhaustive() {
+    let raw = 42u64;
+    let tx_id = TxId::try_from(raw).unwrap();
+    assert_eq!(tx_id.as_u64(), 42);
+    assert_ne!(tx_id.as_u64(), 0);
+}
+
+#[test]
+fn test_tx_id_from_str_exhaustive() {
+    use std::str::FromStr;
+    let raw = "42";
+    let tx_id = TxId::from_str(raw).unwrap();
+    assert_eq!(tx_id.as_u64(), 42);
+    assert_ne!(tx_id.as_u64(), 0);
+}
+
+#[test]
+fn test_node_id_try_from_err_exhaustive() {
+    let node_id = NodeId::try_from(u64::MAX); // should be out of bounds, but NodeId::new checks MAX_VALID_ID
+    assert!(node_id.is_err());
+}
+
+#[test]
+fn test_edge_id_try_from_err_exhaustive() {
+    let edge_id = EdgeId::try_from(u64::MAX);
+    assert!(edge_id.is_err());
+}
+
+#[test]
+fn test_version_id_try_from_err_exhaustive() {
+    let version_id = VersionId::try_from(u64::MAX);
+    assert!(version_id.is_err());
+}
