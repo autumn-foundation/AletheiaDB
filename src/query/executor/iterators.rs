@@ -2,12 +2,7 @@
 //!
 //! Pull-based iterators for query execution. Each physical operator
 //! has a corresponding iterator that lazily produces results.
-use parking_lot::RwLock;
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet, VecDeque};
-use std::sync::Arc;
-#[cfg(feature = "observability")]
-use tracing;
+use super::results::{EntityId, EntityResult, QueryRow};
 use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
@@ -17,7 +12,12 @@ use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{Direction, Predicate, PredicateValue};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use super::results::{EntityId, EntityResult, QueryRow};
+use parking_lot::RwLock;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet, VecDeque};
+use std::sync::Arc;
+#[cfg(feature = "observability")]
+use tracing;
 /// Trait for result iteration (pull-based).
 ///
 /// Query execution uses a pull-based iterator model, where each physical
