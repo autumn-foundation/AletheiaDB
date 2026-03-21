@@ -88,7 +88,8 @@ impl NodeLookupIterator {
     /// use aletheiadb::core::id::NodeId;
     /// use std::sync::Arc;
     ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn main() { run().unwrap(); }
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let current = Arc::new(CurrentStorage::new());
     /// let node_ids = vec![NodeId::new(1)?];
     /// let iter = NodeLookupIterator::new(node_ids, current);
@@ -246,7 +247,8 @@ impl VectorResultIterator {
     /// use aletheiadb::core::id::NodeId;
     /// use std::sync::Arc;
     ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn main() { run().unwrap(); }
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let current = Arc::new(CurrentStorage::new());
     /// let results = vec![(NodeId::new(1)?, 0.95)];
     /// let iter = VectorResultIterator::new(results, current);
@@ -309,7 +311,8 @@ impl TemporalNodeIterator {
     /// use parking_lot::RwLock;
     /// use std::sync::Arc;
     ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn main() { run().unwrap(); }
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
     /// let node_ids = vec![NodeId::new(1)?];
     /// let now = time::now();
@@ -739,7 +742,8 @@ impl TraversalIterator {
     /// use parking_lot::RwLock;
     /// use std::sync::Arc;
     ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn main() { run().unwrap(); }
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let current = Arc::new(CurrentStorage::new());
     /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
     /// let input = Box::new(NodeLookupIterator::new(vec![NodeId::new(1)?], Arc::clone(&current)));
@@ -1550,7 +1554,8 @@ impl PropertyScanIterator {
     /// use aletheiadb::query::ir::PredicateValue;
     /// use std::sync::Arc;
     ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn main() { run().unwrap(); }
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let current = Arc::new(CurrentStorage::new());
     /// let iter = PropertyScanIterator::new(
     ///     "Person".to_string(),
