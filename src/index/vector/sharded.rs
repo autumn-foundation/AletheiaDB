@@ -357,17 +357,34 @@ impl ShardedVectorIndex {
         Self::new(config)
     }
 
-    /// Returns the number of shards.
+    /// The current number of active shards in the cluster.
+    ///
+    /// # The Spark
+    /// Knowing the total number of shards is critical for query planning. When executing
+    /// a distributed vector search, the coordinator uses this count to pre-allocate
+    /// result aggregation buffers and calculate the expected network fan-out latency.
     pub fn num_shards(&self) -> usize {
         self.shards.len()
     }
 
-    /// Returns the sharding strategy.
+    /// The algorithmic strategy used to route data to specific shards.
+    ///
+    /// # The Spark
+    /// Data placement dictates performance. A `Hash` strategy ensures uniform storage
+    /// distribution but requires broadcasting queries to all shards. Conversely, a
+    /// semantic or geographical strategy might allow targeted routing. Query planners
+    /// check this to determine if a full scatter-gather is required.
     pub fn strategy(&self) -> ShardingStrategy {
         self.config.strategy
     }
 
-    /// Returns the configuration.
+    /// The immutable configuration defining this sharded deployment.
+    ///
+    /// # The Spark
+    /// Distributed systems require absolute agreement on configuration to prevent
+    /// split-brain scenarios or data corruption. This provides access to the cluster's
+    /// baseline truths, such as rebalance thresholds and strategy choices, which are
+    /// necessary for health-checking background tasks.
     pub fn config(&self) -> &ShardedVectorConfig {
         &self.config
     }

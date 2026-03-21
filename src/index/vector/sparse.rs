@@ -567,19 +567,36 @@ impl SparseVectorIndex {
         self.len() == 0
     }
 
-    /// Returns the configured dimensions.
+    /// The maximum vocabulary size or feature space of this index.
+    ///
+    /// # The Spark
+    /// When querying a sparse index, the query vector's dimensions cannot exceed
+    /// the index's configured dimensions. This acts as a safety boundary to prevent
+    /// out-of-bounds memory access during dot-product calculations.
     #[must_use]
     pub fn dimensions(&self) -> usize {
         self.config.dimensions
     }
 
-    /// Returns the scoring method.
+    /// The similarity metric used to rank search results.
+    ///
+    /// # The Spark
+    /// Different applications require different scoring mechanisms. For example,
+    /// `BM25` is ideal for term-frequency based text search, while raw `DotProduct`
+    /// might be used for neural sparse embeddings (like SPLADE). This method lets
+    /// you dynamically check the index's behavior before executing complex queries.
     #[must_use]
     pub fn scoring(&self) -> ScoringMethod {
         self.config.scoring
     }
 
-    /// Returns the configuration.
+    /// The immutable configuration used to instantiate this index.
+    ///
+    /// # The Spark
+    /// Sparse indexes rely on a strict set of configuration parameters (like capacity
+    /// and dimensions) that cannot change after creation. This method provides read-only
+    /// access to those parameters, typically used by cluster managers to verify shard
+    /// compatibility before routing queries.
     #[must_use]
     pub fn config(&self) -> &SparseIndexConfig {
         &self.config

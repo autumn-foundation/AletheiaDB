@@ -123,7 +123,13 @@ impl Options {
         Ok(())
     }
 
-    /// Returns the batch endpoint URL.
+    /// The fully qualified URL for bulk event ingestion.
+    ///
+    /// # The Spark
+    /// The Honeycomb API requires events to be routed to specific datasets. This method
+    /// automatically constructs the correct `/1/batch/{dataset}` path by sanitizing the
+    /// base API host (removing trailing slashes) and appending the configured dataset,
+    /// ensuring the HTTP client always targets the correct ingestion route.
     pub fn batch_endpoint(&self) -> String {
         format!(
             "{}/1/batch/{}",

@@ -92,3 +92,7 @@
 ## 2025-03-05 - Experimental Feature Leaks II & Doctest Conditionals
 **Confusion:** Several experimental modules (`chronos`, `echo`, `sherlock`, and `temporal_narrative`) in `src/experimental/mod.rs` were missing their `#[cfg(feature = "nova")]` gating attributes. This allowed them to leak into the public API without the required feature flag enabled. Furthermore, the doctests for `sherlock` (in `mod.rs`) and `kairos` used an anonymous block (`# { ... }`) for feature gating, which generated `main function not found` or `expressions at the top level` warnings in `cargo test --doc`.
 **Clarification:** Added the missing `#[cfg(feature = "nova")]` attributes to the exposed experimental modules. Fixed the doctests to use conditional compilation on the `main` function and imports themselves (`# #[cfg(feature = "nova")] \n fn main() { ... }`), and added an empty fallback `main` function for when the feature is disabled.
+
+## 2025-03-05 - Useless Getter Noise
+**Confusion:** Trivial getter methods were documented with auto-generated noise like `/// Returns the configuration.`. This added zero value to the developer experience, cluttering `cargo doc` output without explaining *why* the method exists or *how* it should be used in the architecture.
+**Clarification:** Eliminated these "Getters docs" violations by replacing them with `# The Spark` sections. We now document *why* someone would need to retrieve the dimensionality, scoring method, or shard count (e.g., for query planning, safety boundaries, or cluster configuration checks).

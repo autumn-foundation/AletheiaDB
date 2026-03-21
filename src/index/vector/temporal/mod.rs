@@ -1377,12 +1377,23 @@ impl TemporalVectorIndex {
         &self.current
     }
 
-    /// Returns the vector dimensionality.
+    /// The vector dimensionality inherited from the current state index.
+    ///
+    /// # The Spark
+    /// Temporal indexes manage multiple historical snapshots, but all snapshots must
+    /// share the exact same vector space dimensionality. We proxy this call to the
+    /// `current` index because it acts as the authoritative source of truth for the
+    /// entire temporal chain.
     pub fn dimensions(&self) -> usize {
         self.current.dimensions()
     }
 
-    /// Returns the distance metric used.
+    /// The distance metric inherited from the current state index.
+    ///
+    /// # The Spark
+    /// To ensure queries spanning across time return comparable similarity scores,
+    /// the distance metric (e.g., Cosine vs Euclidean) must remain constant across
+    /// all historical snapshots. We proxy this directly to the `current` index.
     pub fn distance_metric(&self) -> DistanceMetric {
         self.current.distance_metric()
     }
