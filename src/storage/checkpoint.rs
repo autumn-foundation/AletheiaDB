@@ -676,8 +676,10 @@ impl CheckpointManager {
         &self,
         snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
     ) -> Result<GraphIndexData> {
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
+        // ⚡ Bolt Optimization: Uses `Vec::with_capacity` pre-allocated to the snapshot's node and edge count
+        // to avoid multiple heap reallocations when persisting thousands or millions of entities.
+        let mut nodes = Vec::with_capacity(snapshot.node_count());
+        let mut edges = Vec::with_capacity(snapshot.edge_count());
 
         // Extract all nodes from snapshot (isolated from concurrent writes)
         for node in snapshot.iter_nodes() {
@@ -743,10 +745,13 @@ impl CheckpointManager {
             PersistedVersionType,
         };
 
-        let mut node_versions = Vec::new();
-        let mut node_anchors = Vec::new();
-        let mut edge_versions = Vec::new();
-        let mut edge_anchors = Vec::new();
+        // ⚡ Bolt Optimization: Uses `Vec::with_capacity` based on the snapshot's version counts.
+        // While not all versions are anchors (so anchor vecs might be slightly over-allocated),
+        // this completely eliminates reallocation overhead during the critical persistence path.
+        let mut node_versions = Vec::with_capacity(snapshot.node_version_count());
+        let mut node_anchors = Vec::with_capacity(snapshot.node_version_count());
+        let mut edge_versions = Vec::with_capacity(snapshot.edge_version_count());
+        let mut edge_anchors = Vec::with_capacity(snapshot.edge_version_count());
 
         // Extract node versions from snapshot (isolated from concurrent writes)
         for version_arc in snapshot.iter_node_versions() {
