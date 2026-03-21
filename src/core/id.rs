@@ -1892,4 +1892,31 @@ mod tests_conversions {
         let err2 = TxId::from_str("-1").unwrap_err();
         assert!(matches!(err2, StorageError::InvalidId { .. }));
     }
+
+    #[test]
+    fn test_id_conversions_exhaustive() {
+        let n_try = NodeId::try_from(42).unwrap();
+        assert_eq!(n_try.as_u64(), 42);
+
+        let n_str = NodeId::from_str("42").unwrap();
+        assert_eq!(n_str.as_u64(), 42);
+
+        let e_try = EdgeId::try_from(42).unwrap();
+        assert_eq!(e_try.as_u64(), 42);
+
+        let e_str = EdgeId::from_str("42").unwrap();
+        assert_eq!(e_str.as_u64(), 42);
+
+        let v_try = VersionId::try_from(42).unwrap();
+        assert_eq!(v_try.as_u64(), 42);
+
+        let v_str = VersionId::from_str("42").unwrap();
+        assert_eq!(v_str.as_u64(), 42);
+
+        let t_try = TxId::try_from(42).unwrap();
+        assert_eq!(t_try.as_u64(), 42);
+
+        let t_str = TxId::from_str("42").unwrap();
+        assert_eq!(t_str.as_u64(), 42);
+    }
 }
