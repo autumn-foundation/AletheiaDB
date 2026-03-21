@@ -628,42 +628,17 @@ impl FlushCoordinator {
             // Capture start size for rollback on sync failure (Phantom Commit Prevention)
             let start_size = self.current_segment_size.load(Ordering::Relaxed);
 
-            let mut bytes_written = 0usize;
-
             // Track LSN range for this batch (ADR-0025)
             let mut batch_min_lsn = u64::MAX;
             let mut batch_max_lsn = 0u64;
 
             // Write all entries
-            {
-                let writer = writer_guard.as_mut().ok_or_else(|| {
-                    Error::Storage(StorageError::WalError {
-                        reason: "WAL writer not initialized".to_string(),
-                    })
-                })?;
-
-                for entry in &entries {
-                    // Track LSN range
-                    batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
-                    batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
-
-                    writer.write_all(&entry.data).map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!(
-                            "Failed to write WAL entry: {}",
-                            e
-                        )))
-                    })?;
-                    bytes_written += entry.data.len();
-                }
-
-                // Flush buffer to OS
-                writer.flush().map_err(|e| {
-                    Error::Storage(StorageError::IoError(format!(
-                        "Failed to flush WAL buffer: {}",
-                        e
-                    )))
-                })?;
-            }
+            let bytes_written = Self::write_entries_to_buffer(
+                &mut writer_guard,
+                &entries,
+                &mut batch_min_lsn,
+                &mut batch_max_lsn,
+            )?;
 
             // Update segment LSN tracking (ADR-0025)
             // Use fetch_min/fetch_max for atomic updates
@@ -676,56 +651,7 @@ impl FlushCoordinator {
 
             // Sync to disk if requested
             if sync && self.config.sync_on_flush {
-                let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref sync_file) = *sync_guard
-                    && let Err(e) = sync_file.sync_data()
-                {
-                    // 🛡️ CRITICAL: If sync fails, we MUST truncate the file back to start_size.
-                    // Otherwise, the data we just wrote to the OS cache remains in the file
-                    // but we return an error to the client. If the system restarts, this "failed"
-                    // transaction would be replayed (Phantom Commit).
-                    //
-                    // We use the writer_guard to access the underlying file since it is still locked.
-                    if let Some(writer) = writer_guard.as_mut() {
-                        // writer.flush() was already called above, so data is in the file (OS cache).
-                        // We get the mutable reference to the inner File to truncate it.
-                        let file = writer.get_mut();
-
-                        // Attempt truncation. If this fails, we are in a very bad state (likely disk failure),
-                        // but we must try to rollback the phantom data.
-                        if let Err(trunc_err) = file.set_len(start_size) {
-                            // We can't do much if truncation fails, but we log it critically.
-                            eprintln!(
-                                "CRITICAL: Failed to truncate WAL segment after sync failure. \
-                                 Data consistency may be compromised. Error: {}",
-                                trunc_err
-                            );
-                        } else {
-                            // Truncation succeeded. We successfully prevented a phantom commit.
-                            // The file size is now restored to start_size.
-
-                            // 🛡️ CRITICAL: We must also reset the file cursor (seek) back to start_size.
-                            // set_len() truncates the file but leaves the cursor at the end of the failed write.
-                            // If we don't seek, the next write will start after the hole, creating a sparse file.
-                            if let Err(seek_err) = file.seek(SeekFrom::Start(start_size)) {
-                                eprintln!(
-                                    "CRITICAL: Failed to seek WAL segment after sync failure. \
-                                     Data consistency may be compromised. Error: {}",
-                                    seek_err
-                                );
-                            }
-
-                            // Reset in-memory size to match file state (defensive, though flush updates it later)
-                            self.current_segment_size
-                                .store(start_size, Ordering::Relaxed);
-                        }
-                    }
-
-                    return Err(Error::Storage(StorageError::IoError(format!(
-                        "Failed to sync WAL: {}",
-                        e
-                    ))));
-                }
+                self.sync_to_disk_with_rollback(&mut writer_guard, start_size)?;
             }
 
             // Update size
@@ -769,6 +695,102 @@ impl FlushCoordinator {
                 Err(e)
             }
         }
+    }
+
+    fn write_entries_to_buffer(
+        writer_guard: &mut std::sync::MutexGuard<'_, Option<std::io::BufWriter<File>>>,
+        entries: &[PendingEntry],
+        batch_min_lsn: &mut u64,
+        batch_max_lsn: &mut u64,
+    ) -> Result<usize> {
+        let writer = writer_guard.as_mut().ok_or_else(|| {
+            Error::Storage(StorageError::WalError {
+                reason: "WAL writer not initialized".to_string(),
+            })
+        })?;
+
+        let mut bytes_written = 0usize;
+
+        for entry in entries {
+            *batch_min_lsn = (*batch_min_lsn).min(entry.lsn.0);
+            *batch_max_lsn = (*batch_max_lsn).max(entry.lsn.0);
+
+            writer.write_all(&entry.data).map_err(|e| {
+                Error::Storage(StorageError::IoError(format!(
+                    "Failed to write WAL entry: {}",
+                    e
+                )))
+            })?;
+            bytes_written += entry.data.len();
+        }
+
+        writer.flush().map_err(|e| {
+            Error::Storage(StorageError::IoError(format!(
+                "Failed to flush WAL buffer: {}",
+                e
+            )))
+        })?;
+
+        Ok(bytes_written)
+    }
+
+    fn sync_to_disk_with_rollback(
+        &self,
+        writer_guard: &mut std::sync::MutexGuard<'_, Option<std::io::BufWriter<File>>>,
+        start_size: u64,
+    ) -> Result<()> {
+        let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref sync_file) = *sync_guard
+            && let Err(e) = sync_file.sync_data()
+        {
+            // 🛡️ CRITICAL: If sync fails, we MUST truncate the file back to start_size.
+            // Otherwise, the data we just wrote to the OS cache remains in the file
+            // but we return an error to the client. If the system restarts, this "failed"
+            // transaction would be replayed (Phantom Commit).
+            //
+            // We use the writer_guard to access the underlying file since it is still locked.
+            if let Some(writer) = writer_guard.as_mut() {
+                // writer.flush() was already called above, so data is in the file (OS cache).
+                // We get the mutable reference to the inner File to truncate it.
+                let file = writer.get_mut();
+
+                // Attempt truncation. If this fails, we are in a very bad state (likely disk failure),
+                // but we must try to rollback the phantom data.
+                if let Err(trunc_err) = file.set_len(start_size) {
+                    // We can't do much if truncation fails, but we log it critically.
+                    eprintln!(
+                        "CRITICAL: Failed to truncate WAL segment after sync failure. \
+                         Data consistency may be compromised. Error: {}",
+                        trunc_err
+                    );
+                } else {
+                    // Truncation succeeded. We successfully prevented a phantom commit.
+                    // The file size is now restored to start_size.
+
+                    // 🛡️ CRITICAL: We must also reset the file cursor (seek) back to start_size.
+                    // set_len() truncates the file but leaves the cursor at the end of the failed write.
+                    // If we don't seek, the next write will start after the hole, creating a sparse file.
+                    if let Err(seek_err) = file.seek(SeekFrom::Start(start_size)) {
+                        eprintln!(
+                            "CRITICAL: Failed to seek WAL segment after sync failure. \
+                             Data consistency may be compromised. Error: {}",
+                            seek_err
+                        );
+                    }
+
+                    // Reset in-memory size to match file state (defensive, though flush updates it later)
+                    self.current_segment_size
+                        .store(start_size, Ordering::Relaxed);
+                }
+            }
+
+            return Err(Error::Storage(StorageError::IoError(format!(
+                "Failed to sync WAL: {}",
+                e
+            ))));
+        }
+
+        Ok(())
     }
 
     /// Get total entries flushed.

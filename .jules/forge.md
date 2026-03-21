@@ -9,3 +9,7 @@
 ## src/query/executor/mod.rs God Function
 **Learning:** `execute_op` in `src/query/executor/mod.rs` was a 249-line "God Function" containing a massive match block for `PhysicalOp`. Large implementations for `HnswSearch` and `SimilarToNode` arms made it very hard to read.
 **Action:** Extracted the complex match arms into descriptive private helper methods (`execute_hnsw_search`, `execute_similar_to_node`). This dramatically flattened the match block, improved readability, and enforced strict type-checking on the separated domains.
+
+## src/storage/wal/flush_coordinator.rs God Function
+**Learning:** `flush` in `src/storage/wal/flush_coordinator.rs` was a 160-line God Function with deep nesting for error handling and phantom commit rollback logic.
+**Action:** Extracted core write logic into `write_entries_to_buffer` and critical sync/rollback logic into `sync_to_disk_with_rollback`. This drastically simplified the main logic flow.
