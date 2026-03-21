@@ -93,6 +93,6 @@
 **Confusion:** Several experimental modules (`chronos`, `echo`, `sherlock`, and `temporal_narrative`) in `src/experimental/mod.rs` were missing their `#[cfg(feature = "nova")]` gating attributes. This allowed them to leak into the public API without the required feature flag enabled. Furthermore, the doctests for `sherlock` (in `mod.rs`) and `kairos` used an anonymous block (`# { ... }`) for feature gating, which generated `main function not found` or `expressions at the top level` warnings in `cargo test --doc`.
 **Clarification:** Added the missing `#[cfg(feature = "nova")]` attributes to the exposed experimental modules. Fixed the doctests to use conditional compilation on the `main` function and imports themselves (`# #[cfg(feature = "nova")] \n fn main() { ... }`), and added an empty fallback `main` function for when the feature is disabled.
 
-## 2024-05-31 - The Case of the Undocumented Iterators
+## 2025-03-05 - The Case of the Undocumented Iterators
 **Confusion:** The query executor exposed numerous internal iterator structures like `NodeLookupIterator` and `PropertyScanIterator`, but their constructors (`new`) lacked documentation or usage examples. Users trying to understand or extend the executor's internal physical plan operators were left guessing how to initialize them.
 **Clarification:** Added comprehensive `# Examples` sections with fully compilable doctests to all the key `ResultIterator` constructors in `src/query/executor/iterators.rs`, illustrating their integration with `CurrentStorage` and `HistoricalStorage`.
