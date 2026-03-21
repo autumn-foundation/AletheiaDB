@@ -829,6 +829,10 @@ impl FlushSignal {
 
     /// Request an immediate flush.
     pub fn request_flush(&self) {
+        // 👺 HAVOC FIX: Must acquire the mutex before notifying condvar
+        // to prevent a "lost wakeup" race condition where a waiter checks
+        // the flag just before we set it, and we notify before they sleep.
+        let _guard = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
         self.requested.store(true, Ordering::Release);
         self.condvar.notify_all();
     }
