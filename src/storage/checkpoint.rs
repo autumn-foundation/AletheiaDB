@@ -678,8 +678,8 @@ impl CheckpointManager {
     ) -> Result<GraphIndexData> {
         use crate::storage::snapshot::StorageSnapshot;
 
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
+        let mut nodes = Vec::with_capacity(snapshot.node_count());
+        let mut edges = Vec::with_capacity(snapshot.edge_count());
 
         // Extract all nodes from snapshot (isolated from concurrent writes)
         for node in snapshot.iter_nodes() {
@@ -745,9 +745,9 @@ impl CheckpointManager {
             PersistedVersionType,
         };
 
-        let mut node_versions = Vec::new();
+        let mut node_versions = Vec::with_capacity(snapshot.node_version_count());
         let mut node_anchors = Vec::new();
-        let mut edge_versions = Vec::new();
+        let mut edge_versions = Vec::with_capacity(snapshot.edge_version_count());
         let mut edge_anchors = Vec::new();
 
         // Extract node versions from snapshot (isolated from concurrent writes)

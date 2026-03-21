@@ -701,7 +701,7 @@ mod tests {
         }
 
         fn with_error(mut rows: Vec<QueryRow>, error_at: usize) -> Self {
-            let mut results: Vec<Result<QueryRow>> = Vec::new();
+            let mut results: Vec<Result<QueryRow>> = Vec::with_capacity(rows.len() + 1);
             for (i, row) in rows.drain(..).enumerate() {
                 if i == error_at {
                     results.push(Err(crate::core::error::Error::Other(

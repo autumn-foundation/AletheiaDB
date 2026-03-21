@@ -28,3 +28,7 @@
 **Optimize Vec allocations with Vec::with_capacity in loops over collections**
 **Learning:** Initializing a vector with `Vec::new()` and then populating it in a loop whose length is known (e.g. iterating over a `DashMap`) causes unnecessary intermediate heap reallocations.
 **Action:** Use `Vec::with_capacity(collection.len())` when the target collection size is known in advance to avoid these reallocations.
+
+**Optimize Checkpoint Heap Allocations with Vec::with_capacity**
+**Learning:** Initializing `Vec::new()` and then populating it with thousands of items (like graph nodes, edges, or temporal versions) during checkpoining creates multiple unnecessary O(N) reallocation cycles.
+**Action:** Always utilize exact item counts when known (e.g. from a snapshot via `snapshot.node_count()`) to preallocate required vectors using `Vec::with_capacity(count)` before looping over iterators.
