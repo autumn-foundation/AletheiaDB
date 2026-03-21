@@ -222,7 +222,11 @@ mod tests {
         let score = detector.analyze_node(hermit, "vec", 5, Some(10.0)).unwrap();
 
         assert_eq!(score.structural_degree, 0);
-        assert_eq!(score.semantic_neighbors, 0, "Found {} semantic neighbors", score.semantic_neighbors);
+        assert_eq!(
+            score.semantic_neighbors, 0,
+            "Found {} semantic neighbors",
+            score.semantic_neighbors
+        );
         assert_eq!(score.score, 0.0);
         assert!(!score.is_lighthouse());
     }
