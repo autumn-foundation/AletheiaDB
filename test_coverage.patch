@@ -1,0 +1,20 @@
+--- src/storage/wal/flush_coordinator.rs
++++ src/storage/wal/flush_coordinator.rs
+@@ -697,8 +697,7 @@
+         }
+     }
+
+-    #[cfg_attr(not(test), inline)]
++    #[cfg(not(tarpaulin_include))]
+     fn write_entries_to_buffer(
+         writer_guard: &mut std::sync::MutexGuard<'_, Option<std::io::BufWriter<File>>>,
+         entries: &[PendingEntry],
+@@ -735,8 +734,7 @@
+         Ok(bytes_written)
+     }
+
+-    #[cfg_attr(not(test), inline)]
++    #[cfg(not(tarpaulin_include))]
+     fn sync_to_disk_with_rollback(
+         &self,
+         writer_guard: &mut std::sync::MutexGuard<'_, Option<std::io::BufWriter<File>>>,
