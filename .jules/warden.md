@@ -36,3 +36,6 @@
 2025-02-15 - [Warden: Replace unsafe transmute_vec with bytemuck::cast_vec]
 **Threat:** `Vec::from_raw_parts` was used in `AdjacencyIndex::import_csr` to transmute types without proper capacity checks, which can lead to Undefined Behavior.
 **Defense:** Replaced the `unsafe` block and `transmute_vec` with `bytemuck::cast_vec` for safe zero-copy transmutation. Added `bytemuck::Pod` and `bytemuck::Zeroable` derivations to `NodeId`.
+**2026-03-24 - Fix AWS-LC vulnerabilities**
+**Threat:** `aws-lc-sys` and `rustls-webpki` had vulnerabilities resulting in possible logic bypass and certificate chain bypass.
+**Defense:** Updated vulnerable dependencies `aws-lc-sys` and `rustls-webpki` to secure versions using `cargo update` and verified via `cargo audit`.

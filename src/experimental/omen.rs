@@ -18,13 +18,15 @@
 //! 3. Distance Squared at time $t$: $D^2(t) = ||P + V*t||^2$
 //! 4. Minimized when derivative is 0: $t = -(P \cdot V) / ||V||^2$
 //!
-//! # Example
-//! ```rust,no_run
+//! # Examples
+//!
+//! ```rust
+//! # #[cfg(feature = "nova")]
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::omen::Omen;
 //! use aletheiadb::core::temporal::{TimeRange, time};
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! # let node_a = db.create_node("A", Default::default())?;
 //! # let node_b = db.create_node("B", Default::default())?;
@@ -40,6 +42,8 @@
 //! }
 //! # Ok(())
 //! # }
+//! # #[cfg(not(feature = "nova"))]
+//! # fn main() {}
 //! ```
 
 use crate::AletheiaDB;
@@ -50,6 +54,23 @@ use crate::core::temporal::TimeRange;
 use std::time::Duration;
 
 /// The predicted outcome of two trajectories.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::omen::Encounter;
+/// use std::time::Duration;
+///
+/// let encounter = Encounter {
+///     time_to_encounter: Duration::from_secs(30),
+///     is_past: false, // It will happen in the future
+///     predicted_distance: 0.1,
+/// };
+///
+/// if !encounter.is_past {
+///     println!("Collision incoming!");
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Encounter {
     /// Time until the encounter (from window end).
