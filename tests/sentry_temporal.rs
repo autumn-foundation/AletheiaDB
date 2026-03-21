@@ -1294,3 +1294,89 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_time_to_secs_millis_exact_math_operators() {
+    use aletheiadb::core::temporal::time;
+
+    let ts_10sec = time::from_secs(10);
+    assert_eq!(
+        time::to_secs(ts_10sec),
+        10,
+        "from_secs and to_secs should roundtrip 10 seconds perfectly"
+    );
+    assert_eq!(
+        time::to_millis(ts_10sec),
+        10_000,
+        "10 seconds should equal 10_000 milliseconds perfectly"
+    );
+
+    // Explicit wallclock verification for constructors
+    assert_eq!(
+        ts_10sec.wallclock(),
+        10_000_000,
+        "10 seconds should be EXACTLY 10_000_000 micros"
+    );
+
+    let ts_10ms = time::from_millis(10);
+    assert_eq!(
+        ts_10ms.wallclock(),
+        10_000,
+        "10 milliseconds should be EXACTLY 10_000 micros"
+    );
+    assert_eq!(
+        time::to_millis(ts_10ms),
+        10,
+        "from_millis and to_millis should roundtrip 10 ms perfectly"
+    );
+    assert_eq!(
+        time::to_secs(ts_10ms),
+        0,
+        "10 ms should truncate to 0 full seconds"
+    );
+}
+
+#[test]
+fn test_time_to_iso8601_exact_math_operators() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::time;
+
+    // Use 1_000_005 micros.
+    // 1_000_005 micros = 1 second + 5 micros.
+    // 5 micros = 5000 nanos.
+    let ts = HybridTimestamp::new(1_000_005, 0).unwrap();
+    let output = time::to_iso8601(ts);
+
+    // We do not dynamically reconstruct the string (e.g., format!("{:?}", SystemTime::UNIX_EPOCH ...)) to avoid tautological mirroring.
+    // We assert against independently derived, hardcoded string expected values for the math.
+    if cfg!(windows) {
+        // Windows intervals (100-ns ticks since 1601-01-01).
+        // 1_000_005 micros = 1 sec + 5 micros.
+        // Ticks for 1 sec = 10_000_000
+        // Ticks for 5 micros = 50
+        // Ticks between 1601-01-01 and 1970-01-01 is 116444736000000000.
+        // Total ticks: 116444736000000000 + 10_000_000 + 50 = 116444736010000050
+        assert!(
+            output.contains("116444736010000050"),
+            "Windows output must contain exact computed ticks for 1_000_005 micros: {}",
+            output
+        );
+    } else {
+        // General Unix format
+        assert!(
+            output.contains("1") && output.contains("5000"),
+            "Unix output must contain exact extracted seconds (1) and nanos (5000): {}",
+            output
+        );
+        // Ensure no mutated math results are present
+        assert!(
+            !output.contains("1000005000000"),
+            "Mutant * detected in seconds calc"
+        );
+        assert!(
+            !output.contains("2000005000"),
+            "Mutant + detected in nanos calc"
+        );
+        assert!(!output.contains("1000"), "Mutant / detected in nanos calc");
+    }
+}
