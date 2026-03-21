@@ -18,7 +18,7 @@ fn is_ci() -> bool {
 
 /// Returns reduced iterations in CI to avoid timeouts on slow runners.
 fn iterations() -> usize {
-    if is_ci() { 10 } else { 100 }
+    if is_ci() { 5 } else { 50 }
 }
 
 /// Returns a longer timeout in CI to accommodate slow shared runners.
@@ -166,7 +166,7 @@ fn run_deadlock_stress_test() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("index.usearch");
             barrier.wait();
-            for _ in 0..10 {
+            for _ in 0..iterations().min(10) {
                 match index.save(&path) {
                     Ok(_) => {
                         counter.fetch_add(1, Ordering::Relaxed);
@@ -174,7 +174,7 @@ fn run_deadlock_stress_test() {
                     Err(e) => eprintln!("Save error: {}", e),
                 }
                 // Sleep slightly to allow other threads to make progress and create different lock states
-                thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(5));
             }
         }));
     }

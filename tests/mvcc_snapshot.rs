@@ -13,7 +13,7 @@ use aletheiadb::core::version::VersionData;
 use aletheiadb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
 use aletheiadb::storage::current::CurrentStorage;
 use aletheiadb::storage::historical::HistoricalStorage;
-use aletheiadb::storage::snapshot::StorageSnapshot;
+
 use aletheiadb::storage::wal::LSN;
 use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 use std::collections::HashMap;
