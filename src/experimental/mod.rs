@@ -250,3 +250,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Zeitgeist: Global Semantic Drift Analysis.
+pub mod zeitgeist;
