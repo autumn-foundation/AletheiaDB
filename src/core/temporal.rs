@@ -51,10 +51,10 @@
 //! let range = TimeRange::new(start, end)?;
 //!
 //! // ❌ Pitfall: Expecting the end timestamp to be included
-//! assert_eq!(range.contains(end), false);
+//! assert!( !(range.contains(end)) );
 //!
 //! // ✅ Correct: Use end-1 or check < end
-//! assert_eq!(range.contains(time::from_secs(199)), true);
+//! assert!(range.contains(time::from_secs(199)));
 //! # Ok(())
 //! # }
 //! ```
@@ -1943,5 +1943,203 @@ mod sentry_tests {
         // Check error message
         let err = result.unwrap_err();
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
+    }
+
+    #[test]
+    fn test_sentry_timerange_is_current_mutants() {
+        let range_current = TimeRange::from(100.into());
+        let range_closed = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        assert!(range_current.is_current());
+        assert!(!(range_closed.is_current()));
+    }
+
+    #[test]
+    fn test_sentry_timerange_is_closed_mutants() {
+        let range_current = TimeRange::from(100.into());
+        let range_closed = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        assert!(!(range_current.is_closed()));
+        assert!(range_closed.is_closed());
+    }
+
+    #[test]
+    fn test_sentry_timerange_contains_mutants() {
+        let start = 100.into();
+        let end = 200.into();
+        let range = TimeRange::new(start, end).unwrap();
+
+        // Testing the >= and < boundary exact behaviors
+        assert!(!(range.contains(99.into())));
+        assert!(range.contains(100.into()));
+        assert!(range.contains(150.into()));
+        assert!(range.contains(199.into()));
+        assert!(!(range.contains(200.into())));
+        assert!(!(range.contains(201.into())));
+    }
+
+    #[test]
+    fn test_sentry_timerange_contains_or_after_mutants() {
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        assert!(!(range.contains_or_after(99.into())));
+        assert!(range.contains_or_after(100.into()));
+        assert!(range.contains_or_after(150.into()));
+        assert!(range.contains_or_after(200.into()));
+        assert!(range.contains_or_after(201.into()));
+    }
+
+    #[test]
+    fn test_sentry_timerange_is_empty_mutants() {
+        let empty_range = TimeRange::at(100.into());
+        let non_empty_range = TimeRange::new(100.into(), 101.into()).unwrap();
+
+        assert!(empty_range.is_empty());
+        assert!(!(non_empty_range.is_empty()));
+    }
+
+    #[test]
+    fn test_sentry_timerange_overlaps_mutants() {
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        let before = TimeRange::new(50.into(), 100.into()).unwrap();
+        assert!(!(range.overlaps(&before)));
+
+        let overlap_start = TimeRange::new(50.into(), 150.into()).unwrap();
+        assert!(range.overlaps(&overlap_start));
+
+        let overlap_end = TimeRange::new(150.into(), 250.into()).unwrap();
+        assert!(range.overlaps(&overlap_end));
+
+        let after = TimeRange::new(200.into(), 250.into()).unwrap();
+        assert!(!(range.overlaps(&after)));
+
+        let inside = TimeRange::new(120.into(), 180.into()).unwrap();
+        assert!(range.overlaps(&inside));
+
+        let outside = TimeRange::new(50.into(), 250.into()).unwrap();
+        assert!(range.overlaps(&outside));
+
+        let empty_inside = TimeRange::at(150.into());
+        assert!(!(range.overlaps(&empty_inside)));
+    }
+
+    #[test]
+    fn test_sentry_timerange_contains_range_mutants() {
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        let completely_inside = TimeRange::new(120.into(), 180.into()).unwrap();
+        assert!(range.contains_range(&completely_inside));
+
+        let same = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(range.contains_range(&same));
+
+        let sticks_out_start = TimeRange::new(90.into(), 150.into()).unwrap();
+        assert!(!(range.contains_range(&sticks_out_start)));
+
+        let sticks_out_end = TimeRange::new(150.into(), 210.into()).unwrap();
+        assert!(!(range.contains_range(&sticks_out_end)));
+
+        let completely_outside = TimeRange::new(210.into(), 300.into()).unwrap();
+        assert!(!(range.contains_range(&completely_outside)));
+    }
+
+    #[test]
+    fn test_sentry_timerange_close_at_mutants() {
+        let range = TimeRange::from(100.into());
+
+        let closed = range.close_at(200.into()).unwrap();
+        assert_eq!(closed.start(), 100.into());
+        assert_eq!(closed.end(), 200.into());
+
+        let invalid = range.close_at(50.into());
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_currently_valid_mutants() {
+        let closed = BiTemporalInterval::new(
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+            TimeRange::from(100.into()),
+        );
+        let open = BiTemporalInterval::new(
+            TimeRange::from(100.into()),
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+        );
+
+        assert!(!(closed.is_currently_valid()));
+        assert!(open.is_currently_valid());
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_currently_recorded_mutants() {
+        let open = BiTemporalInterval::new(
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+            TimeRange::from(100.into()),
+        );
+        let closed = BiTemporalInterval::new(
+            TimeRange::from(100.into()),
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+        );
+
+        assert!(open.is_currently_recorded());
+        assert!(!(closed.is_currently_recorded()));
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_current_mutants() {
+        let both_closed = BiTemporalInterval::new(
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+        );
+        let both_open =
+            BiTemporalInterval::new(TimeRange::from(100.into()), TimeRange::from(100.into()));
+
+        // test_sentry_bitemporal_is_current_mixed_state already tests the mixed states
+        assert!(!(both_closed.is_current()));
+        assert!(both_open.is_current());
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_valid_at_mutants() {
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+            TimeRange::from(100.into()),
+        );
+
+        assert!(!(interval.is_valid_at(99.into())));
+        assert!(interval.is_valid_at(100.into()));
+        assert!(interval.is_valid_at(150.into()));
+        assert!(!(interval.is_valid_at(200.into())));
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_recorded_at_mutants() {
+        let interval = BiTemporalInterval::new(
+            TimeRange::from(100.into()),
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+        );
+
+        assert!(!(interval.is_recorded_at(99.into())));
+        assert!(interval.is_recorded_at(100.into()));
+        assert!(interval.is_recorded_at(150.into()));
+        assert!(!(interval.is_recorded_at(200.into())));
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_visible_at_mutants() {
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+        );
+
+        // Both valid
+        assert!(interval.is_visible_at(150.into(), 150.into()));
+        // Valid time invalid
+        assert!(!(interval.is_visible_at(200.into(), 150.into())));
+        // Transaction time invalid
+        assert!(!(interval.is_visible_at(150.into(), 200.into())));
+        // Both invalid
+        assert!(!(interval.is_visible_at(200.into(), 200.into())));
     }
 }
