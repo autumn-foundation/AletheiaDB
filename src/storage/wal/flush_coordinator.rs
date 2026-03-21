@@ -697,6 +697,7 @@ impl FlushCoordinator {
         }
     }
 
+    #[cfg_attr(not(test), inline)]
     fn write_entries_to_buffer(
         writer_guard: &mut std::sync::MutexGuard<'_, Option<std::io::BufWriter<File>>>,
         entries: &[PendingEntry],
@@ -734,6 +735,7 @@ impl FlushCoordinator {
         Ok(bytes_written)
     }
 
+    #[cfg_attr(not(test), inline)]
     fn sync_to_disk_with_rollback(
         &self,
         writer_guard: &mut std::sync::MutexGuard<'_, Option<std::io::BufWriter<File>>>,
