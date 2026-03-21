@@ -853,4 +853,195 @@ mod tests {
             assert_eq!(guard.fast_len(), None); // Not fast path anymore because tombstones exist
         }
     }
+
+    #[test]
+    fn test_import_and_export_frozen_csr() {
+        let index = IncrementalAdjacencyIndex::new();
+        let (_v1, _v2, _v3) = index.export_frozen_csr();
+        // We just ensure the export doesn't panic on an empty index
+
+        let mut edges = Vec::new();
+        use crate::core::interning::InternedString;
+        edges.push((
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            EdgeId::new(1).unwrap(),
+            InternedString::from_raw(1),
+        ));
+        let frozen = Arc::new(AdjacencyIndex::build(edges));
+
+        index.import_frozen_csr(frozen);
+        assert_eq!(index.frozen_edge_count(), 1);
+    }
+
+    #[test]
+    fn test_try_import_frozen_csr() {
+        use crate::core::interning::InternedString;
+        let index = IncrementalAdjacencyIndex::new();
+        let frozen = Arc::new(AdjacencyIndex::new());
+        assert!(index.try_import_frozen_csr(frozen.clone()).is_ok());
+
+        // Add delta to cause error
+        index.insert(
+            NodeId::new(1).unwrap(),
+            AdjacencyEntry::new(
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                InternedString::from_raw(1),
+            ),
+        );
+        assert!(index.try_import_frozen_csr(frozen).is_err());
+    }
+
+    #[test]
+    fn test_should_compact() {
+        let config = IncrementalConfig {
+            max_delta_edges: 10,
+            max_tombstones: 5,
+            ..Default::default()
+        };
+        let index = IncrementalAdjacencyIndex::with_config(Arc::new(AdjacencyIndex::new()), config);
+
+        assert!(!index.should_compact());
+
+        // Exceed delta threshold
+        use crate::core::interning::InternedString;
+        for i in 1..=10 {
+            index.insert(
+                NodeId::new(1).unwrap(),
+                AdjacencyEntry::new(
+                    NodeId::new(2).unwrap(),
+                    EdgeId::new(i).unwrap(),
+                    InternedString::from_raw(1),
+                ),
+            );
+        }
+        assert!(index.should_compact());
+    }
+
+    #[test]
+    fn test_compact() {
+        use crate::core::interning::InternedString;
+        let index = IncrementalAdjacencyIndex::new();
+        let node = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        index.insert(
+            node,
+            AdjacencyEntry::new(
+                NodeId::new(2).unwrap(),
+                edge_id,
+                InternedString::from_raw(1),
+            ),
+        );
+        assert_eq!(index.delta_edge_count(), 1);
+
+        index.compact();
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 1);
+
+        index.delete(edge_id);
+        assert_eq!(index.tombstone_count(), 1);
+        index.compact();
+        assert_eq!(index.tombstone_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 0);
+    }
+
+    #[test]
+    fn test_frozen_view() {
+        use crate::core::interning::InternedString;
+        let index = IncrementalAdjacencyIndex::new();
+        let view = index.frozen_view();
+        assert!(view.is_some());
+
+        let node = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        index.insert(
+            node,
+            AdjacencyEntry::new(
+                NodeId::new(2).unwrap(),
+                edge_id,
+                InternedString::from_raw(1),
+            ),
+        );
+
+        assert!(index.frozen_view().is_none());
+        index.compact();
+
+        let view2 = index.frozen_view().unwrap();
+        assert_eq!(view2.get_adjacency(node).len(), 1);
+    }
+
+    #[test]
+    fn test_merged_adjacency_guard_methods() {
+        use crate::core::interning::InternedString;
+        let index = IncrementalAdjacencyIndex::new();
+        let node = NodeId::new(1).unwrap();
+        let guard = index.get_adjacency(node);
+
+        assert!(guard.is_empty());
+        assert_eq!(guard.len(), 0);
+        assert!(guard.get(0).is_none());
+        assert_eq!(guard.capacity_hint(), 0);
+        assert_eq!(guard.fast_len(), Some(0));
+        assert!(guard.as_slice().is_some());
+
+        let edge_id = EdgeId::new(1).unwrap();
+        index.insert(
+            node,
+            AdjacencyEntry::new(
+                NodeId::new(2).unwrap(),
+                edge_id,
+                InternedString::from_raw(1),
+            ),
+        );
+
+        let guard2 = index.get_adjacency(node);
+        assert!(!guard2.is_empty());
+        assert_eq!(guard2.len(), 1);
+        assert!(guard2.get(0).is_some());
+        assert_eq!(guard2.capacity_hint(), 1);
+        assert_eq!(guard2.fast_len(), None);
+        assert!(guard2.as_slice().is_none());
+
+        // test partial eq
+        let guard3 = index.get_adjacency(node);
+        assert_eq!(guard2, guard3);
+    }
+
+    #[test]
+    fn test_compaction_scheduler() {
+        let index = Arc::new(IncrementalAdjacencyIndex::new());
+        let scheduler = CompactionScheduler::new(index.clone());
+
+        assert_eq!(scheduler.panic_count(), 0);
+        scheduler.start();
+        scheduler.pause();
+        scheduler.resume();
+        scheduler.shutdown();
+    }
+
+    #[test]
+    fn test_compaction_scheduler_panic_recovery() {
+        let index = Arc::new(IncrementalAdjacencyIndex::new());
+        let _scheduler = CompactionScheduler::new(index.clone());
+
+        // Force should_compact to true and inject panic
+        use crate::core::interning::InternedString;
+        index.insert(
+            NodeId::new(1).unwrap(),
+            AdjacencyEntry::new(
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                InternedString::from_raw(1),
+            ),
+        );
+        index.test_inject_panic_on_compact();
+
+        // Test manual panic logic in compaction since scheduler runs in background thread
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            index.compact();
+        }));
+
+        assert!(result.is_err());
+    }
 }
