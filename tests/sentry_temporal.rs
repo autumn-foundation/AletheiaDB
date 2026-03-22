@@ -1294,3 +1294,382 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_timerange_is_closed_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let closed_range = TimeRange::new(start, HybridTimestamp::new(200, 0).unwrap()).unwrap();
+    let open_range = TimeRange::from(start);
+
+    assert!(closed_range.is_closed(), "Closed range must return true");
+    assert!(!open_range.is_closed(), "Open range must return false");
+}
+
+#[test]
+fn test_timerange_is_empty_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+
+    let empty = TimeRange::at(start);
+    let not_empty = TimeRange::new(start, end).unwrap();
+
+    assert!(empty.is_empty(), "Empty range must return true");
+    assert!(!not_empty.is_empty(), "Non-empty range must return false");
+}
+
+#[test]
+fn test_timerange_contains_mutants_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    assert!(range.contains(HybridTimestamp::new(150, 0).unwrap()));
+    assert!(!range.contains(HybridTimestamp::new(250, 0).unwrap()));
+}
+
+#[test]
+fn test_timerange_overlaps_mutants_extra_bounds() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let r1 = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    let r2 = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(r1.overlaps(&r2));
+
+    let r3 = TimeRange::new(
+        HybridTimestamp::new(250, 0).unwrap(),
+        HybridTimestamp::new(350, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(!r1.overlaps(&r3));
+}
+
+#[test]
+fn test_timerange_contains_range_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let r1 = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    let inner = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(180, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(r1.contains_range(&inner));
+
+    let outer = TimeRange::new(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(!r1.contains_range(&outer));
+}
+
+#[test]
+fn test_timerange_duration_micros_replace_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    let duration = range.duration_micros();
+    assert!(duration.is_some());
+    assert_eq!(duration.unwrap(), 100);
+}
+
+#[test]
+fn test_timerange_serialize_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    let bytes = range.serialize();
+    assert_eq!(bytes.len(), 24);
+    assert_ne!(bytes, Vec::<u8>::new());
+    assert_ne!(bytes, vec![0u8]);
+    assert_ne!(bytes, vec![1u8]);
+}
+
+#[test]
+fn test_timerange_serialize_into_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    let mut buffer = Vec::new();
+    range.serialize_into(&mut buffer);
+    assert_eq!(buffer.len(), 24);
+}
+
+#[test]
+fn test_timerange_deserialize_replace_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+    let bytes = range.serialize();
+
+    let (deserialized, size) = TimeRange::deserialize(&bytes).unwrap();
+    assert_eq!(size, 24);
+    assert_eq!(deserialized, range);
+
+    let default_ts = HybridTimestamp::new(0, 0).unwrap();
+    let default_range = TimeRange::new(default_ts, default_ts).unwrap();
+    assert_ne!(deserialized, default_range);
+}
+
+#[test]
+fn test_timerange_fmt_display_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+
+    let output = format!("{}", range);
+    assert!(!output.is_empty());
+}
+
+#[test]
+fn test_bitemporal_methods_replace_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+    let tx_ts = HybridTimestamp::new(200, 0).unwrap();
+
+    let current = BiTemporalInterval::current(valid_ts);
+    assert_ne!(
+        current.valid_time().start(),
+        HybridTimestamp::new(0, 0).unwrap()
+    );
+
+    let now = BiTemporalInterval::now(valid_ts, tx_ts);
+    assert_ne!(
+        now.valid_time().start(),
+        HybridTimestamp::new(0, 0).unwrap()
+    );
+
+    let with_valid = BiTemporalInterval::with_valid_time(valid_ts, tx_ts);
+    assert_ne!(
+        with_valid.valid_time().start(),
+        HybridTimestamp::new(0, 0).unwrap()
+    );
+
+    assert_ne!(
+        current.valid_time().start(),
+        HybridTimestamp::new(0, 0).unwrap()
+    );
+    assert_ne!(
+        current.transaction_time().start(),
+        HybridTimestamp::new(0, 0).unwrap()
+    );
+
+    assert!(current.is_currently_valid());
+
+    let closed_valid = current
+        .close_valid_time(HybridTimestamp::new(150, 0).unwrap())
+        .unwrap();
+    assert!(!closed_valid.is_currently_valid());
+
+    assert!(now.is_currently_recorded());
+    let closed_tx = now
+        .close_transaction_time(HybridTimestamp::new(250, 0).unwrap())
+        .unwrap();
+    assert!(!closed_tx.is_currently_recorded());
+
+    let cur = BiTemporalInterval::current(valid_ts);
+    assert!(cur.is_current());
+
+    assert!(!closed_valid.is_current());
+    assert!(!closed_tx.is_current());
+
+    assert!(now.is_valid_at(HybridTimestamp::new(150, 0).unwrap()));
+    assert!(!now.is_valid_at(HybridTimestamp::new(50, 0).unwrap()));
+
+    assert!(now.is_recorded_at(HybridTimestamp::new(250, 0).unwrap()));
+    assert!(!now.is_recorded_at(HybridTimestamp::new(150, 0).unwrap()));
+
+    assert!(now.is_visible_at(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap()
+    ));
+    assert!(!now.is_visible_at(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap()
+    ));
+    assert!(!now.is_visible_at(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(150, 0).unwrap()
+    ));
+}
+
+#[test]
+fn test_bitemporal_close_closures_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+    let tx_ts = HybridTimestamp::new(200, 0).unwrap();
+    let interval = BiTemporalInterval::now(valid_ts, tx_ts);
+
+    let closed_valid = interval
+        .close_valid_time(HybridTimestamp::new(150, 0).unwrap())
+        .unwrap();
+    assert_ne!(
+        closed_valid.valid_time().start(),
+        HybridTimestamp::new(0, 0).unwrap()
+    );
+
+    let closed_tx = interval
+        .close_transaction_time(HybridTimestamp::new(250, 0).unwrap())
+        .unwrap();
+    assert_ne!(
+        closed_tx.valid_time().start(),
+        HybridTimestamp::new(0, 0).unwrap()
+    );
+
+    let closed_both = interval
+        .close_both(
+            HybridTimestamp::new(150, 0).unwrap(),
+            HybridTimestamp::new(250, 0).unwrap(),
+        )
+        .unwrap();
+    assert_ne!(
+        closed_both.valid_time().start(),
+        HybridTimestamp::new(0, 0).unwrap()
+    );
+}
+
+#[test]
+fn test_bitemporal_serialize_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+    let interval = BiTemporalInterval::current(valid_ts);
+
+    let bytes = interval.serialize();
+    assert_eq!(bytes.len(), 48);
+    assert_ne!(bytes, Vec::<u8>::new());
+    assert_ne!(bytes, vec![0u8]);
+    assert_ne!(bytes, vec![1u8]);
+
+    let mut buffer = Vec::new();
+    interval.serialize_into(&mut buffer);
+    assert_eq!(buffer.len(), 48);
+}
+
+#[test]
+fn test_bitemporal_deserialize_replace_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+    let tx_ts = HybridTimestamp::new(200, 0).unwrap();
+    let interval = BiTemporalInterval::now(valid_ts, tx_ts);
+    let bytes = interval.serialize();
+
+    let (deserialized, size) = BiTemporalInterval::deserialize(&bytes).unwrap();
+    assert_eq!(size, 48);
+    assert_eq!(deserialized, interval);
+
+    assert!(BiTemporalInterval::deserialize(&bytes[0..47]).is_err());
+}
+
+#[test]
+fn test_bitemporal_fmt_display_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_ts = HybridTimestamp::new(100, 0).unwrap();
+    let interval = BiTemporalInterval::current(valid_ts);
+
+    let output = format!("{}", interval);
+    assert!(!output.is_empty());
+}
+
+#[test]
+fn test_time_math_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::time;
+
+    let ts = HybridTimestamp::new(5_000_000, 0).unwrap();
+    assert_eq!(time::to_secs(ts), 5);
+
+    assert_eq!(time::to_millis(ts), 5_000);
+
+    let ts2 = time::from_secs(5);
+    assert_eq!(ts2, ts);
+
+    let ts3 = time::from_millis(5_000);
+    assert_eq!(ts3, ts);
+}
+
+#[test]
+fn test_time_to_iso8601_math_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::time;
+
+    let ts = HybridTimestamp::new(1_609_459_200_123_456, 0).unwrap();
+    let iso = time::to_iso8601(ts);
+
+    assert!(!iso.is_empty());
+    assert_ne!(iso, "xyzzy");
+
+    if cfg!(windows) {
+        assert!(
+            iso.contains("132539328001234560") || iso.contains("1234560"),
+            "Windows output did not match exact format: {}",
+            iso
+        );
+    } else {
+        assert!(
+            iso.contains("1609459200"),
+            "Output missing seconds. Math mutant / to % or *. Output: {}",
+            iso
+        );
+        assert!(
+            iso.contains("123456000"),
+            "Output missing nanoseconds. Math mutant * to + or /, % to /. Output: {}",
+            iso
+        );
+    }
+
+    use aletheiadb::core::temporal::TIMESTAMP_MAX;
+    let iso_max = time::to_iso8601(TIMESTAMP_MAX);
+    assert_eq!(iso_max, "current", "Mutant: == replaced with !=");
+}
