@@ -1294,3 +1294,316 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_bitemporal_interval_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let start1 = HybridTimestamp::new(100, 0).unwrap();
+    let start2 = HybridTimestamp::new(200, 0).unwrap();
+
+    // test BiTemporalInterval::current default value mutant
+    let int_current = BiTemporalInterval::current(start1);
+    // test explicitly that it returns a correct instance that is not e.g. wrapping 0
+    let empty_ts = HybridTimestamp::new(0, 0).unwrap();
+    let empty_range = TimeRange::from(empty_ts);
+    let empty_int = BiTemporalInterval::new(empty_range, empty_range);
+
+    assert_ne!(int_current, empty_int, "Should not be default");
+    assert_eq!(int_current.valid_time().start(), start1);
+
+    // test BiTemporalInterval::now default value mutant
+    let int_now = BiTemporalInterval::now(start1, start2);
+    assert_ne!(int_now, empty_int, "Should not be default");
+    assert_eq!(int_now.valid_time().start(), start1);
+    assert_eq!(int_now.transaction_time().start(), start2);
+
+    // test BiTemporalInterval::with_valid_time default value mutant
+    let int_with_valid = BiTemporalInterval::with_valid_time(start1, start2);
+    assert_ne!(int_with_valid, empty_int, "Should not be default");
+
+    // test valid_time / transaction_time default return mutants
+    assert_ne!(
+        int_now.valid_time(),
+        empty_range,
+        "valid_time should not be default"
+    );
+    assert_ne!(
+        int_now.transaction_time(),
+        empty_range,
+        "transaction_time should not be default"
+    );
+}
+
+#[test]
+fn test_bitemporal_is_methods_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+
+    let ts_100 = HybridTimestamp::new(100, 0).unwrap();
+    let ts_200 = HybridTimestamp::new(200, 0).unwrap();
+    let ts_300 = HybridTimestamp::new(300, 0).unwrap();
+
+    let int_open = BiTemporalInterval::current(ts_100);
+
+    // mutants returning true/false for is_currently_valid
+    assert!(int_open.is_currently_valid(), "Should be currently valid");
+    let int_closed_valid = int_open.close_valid_time(ts_200).unwrap();
+    assert!(
+        !int_closed_valid.is_currently_valid(),
+        "Should not be currently valid after close"
+    );
+
+    // mutants returning true/false for is_currently_recorded
+    let int_open2 = BiTemporalInterval::current(ts_100);
+    assert!(
+        int_open2.is_currently_recorded(),
+        "Should be currently recorded"
+    );
+    let int_closed_tx = int_open2.close_transaction_time(ts_200).unwrap();
+    assert!(
+        !int_closed_tx.is_currently_recorded(),
+        "Should not be currently recorded after close"
+    );
+
+    // mutants for is_current
+    assert!(int_open.is_current(), "Should be current in both");
+    assert!(
+        !int_closed_valid.is_current(),
+        "Should not be current if valid closed"
+    );
+    assert!(
+        !int_closed_tx.is_current(),
+        "Should not be current if tx closed"
+    );
+
+    // replace && with || in is_current
+    let mixed1 = BiTemporalInterval::new(
+        TimeRange::from(ts_100),
+        TimeRange::new(ts_100, ts_200).unwrap(),
+    );
+    assert!(
+        !mixed1.is_current(),
+        "Should not be current if one is closed"
+    );
+
+    let mixed2 = BiTemporalInterval::new(
+        TimeRange::new(ts_100, ts_200).unwrap(),
+        TimeRange::from(ts_100),
+    );
+    assert!(
+        !mixed2.is_current(),
+        "Should not be current if one is closed"
+    );
+
+    // mutants for is_valid_at, is_recorded_at, is_visible_at
+    let int = BiTemporalInterval::new(
+        TimeRange::new(ts_100, ts_300).unwrap(),
+        TimeRange::new(ts_100, ts_200).unwrap(),
+    );
+
+    assert!(int.is_valid_at(ts_200), "Should be valid at 200");
+    assert!(!int.is_valid_at(ts_300), "Should not be valid at 300");
+
+    assert!(int.is_recorded_at(ts_100), "Should be recorded at 100");
+    assert!(!int.is_recorded_at(ts_200), "Should not be recorded at 200");
+
+    // replace && with || in is_visible_at
+    assert!(
+        !int.is_visible_at(ts_200, ts_200),
+        "Should not be visible if tx not valid"
+    );
+    assert!(
+        !int.is_visible_at(ts_300, ts_100),
+        "Should not be visible if valid not valid"
+    );
+    assert!(
+        int.is_visible_at(ts_200, ts_100),
+        "Should be visible if both valid"
+    );
+}
+
+#[test]
+fn test_bitemporal_close_methods_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+
+    let int = BiTemporalInterval::current(start);
+
+    let empty_ts = HybridTimestamp::new(0, 0).unwrap();
+    let empty_range = aletheiadb::core::temporal::TimeRange::from(empty_ts);
+    let empty_int = BiTemporalInterval::new(empty_range, empty_range);
+
+    let closed_valid = int.close_valid_time(end).unwrap();
+    assert_ne!(
+        closed_valid, empty_int,
+        "close_valid_time should not return default"
+    );
+    assert_eq!(closed_valid.valid_time().end(), end);
+
+    let closed_tx = int.close_transaction_time(end).unwrap();
+    assert_ne!(
+        closed_tx, empty_int,
+        "close_transaction_time should not return default"
+    );
+    assert_eq!(closed_tx.transaction_time().end(), end);
+
+    let closed_both = int.close_both(end, end).unwrap();
+    assert_ne!(
+        closed_both, empty_int,
+        "close_both should not return default"
+    );
+    assert_eq!(closed_both.valid_time().end(), end);
+    assert_eq!(closed_both.transaction_time().end(), end);
+}
+
+#[test]
+fn test_bitemporal_serialize_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let int = BiTemporalInterval::current(start);
+
+    let bytes = int.serialize();
+
+    // Precalculate the exact 48 byte expected representation.
+    // Both Valid and TX are [100, 0] to [TIMESTAMP_MAX]
+    // HybridTimestamp(100, 0) -> wallclock 100_i64.to_le_bytes(), logical 0_u32.to_le_bytes()
+    // HybridTimestamp(TIMESTAMP_MAX) -> i64::MAX.to_le_bytes(), 0_u32.to_le_bytes()
+    let mut expected_bytes = Vec::new();
+    // Valid start
+    expected_bytes.extend(100_i64.to_le_bytes());
+    expected_bytes.extend(0_u32.to_le_bytes());
+    // Valid end
+    expected_bytes.extend(i64::MAX.to_le_bytes());
+    expected_bytes.extend(0_u32.to_le_bytes());
+
+    // TX start
+    expected_bytes.extend(100_i64.to_le_bytes());
+    expected_bytes.extend(0_u32.to_le_bytes());
+    // TX end
+    expected_bytes.extend(i64::MAX.to_le_bytes());
+    expected_bytes.extend(0_u32.to_le_bytes());
+
+    assert_eq!(
+        bytes, expected_bytes,
+        "serialize output must exactly match expected 48 bytes"
+    );
+    assert_eq!(bytes.len(), 48, "serialize length should be 48");
+
+    let mut buf = Vec::new();
+    int.serialize_into(&mut buf);
+    assert_eq!(buf.len(), 48, "serialize_into should write 48 bytes");
+    assert_eq!(
+        buf, bytes,
+        "serialize_into output should match serialize output exactly"
+    );
+}
+
+#[test]
+fn test_time_conversions_mutants() {
+    use aletheiadb::core::temporal::time;
+
+    // test time::from_secs default return and exact math
+    let empty_ts = aletheiadb::core::hlc::HybridTimestamp::new(0, 0).unwrap();
+    let ts_secs = time::from_secs(10);
+    assert_ne!(ts_secs, empty_ts, "from_secs should not return default");
+    assert_eq!(
+        ts_secs.wallclock(),
+        10 * 1_000_000,
+        "from_secs math is wrong"
+    );
+
+    // test time::from_millis default return and exact math
+    let ts_millis = time::from_millis(10);
+    assert_ne!(ts_millis, empty_ts, "from_millis should not return default");
+    assert_eq!(
+        ts_millis.wallclock(),
+        10 * 1_000,
+        "from_millis math is wrong"
+    );
+
+    // test time::to_secs default returns and exact math
+    let secs = time::to_secs(ts_secs);
+    assert_ne!(secs, 0, "to_secs should not return 0");
+    assert_ne!(secs, 1, "to_secs should not return 1");
+    assert_ne!(secs, -1, "to_secs should not return -1");
+    assert_eq!(secs, 10, "to_secs math is wrong");
+
+    // test time::to_millis default returns and exact math
+    let millis = time::to_millis(ts_millis);
+    assert_ne!(millis, 0, "to_millis should not return 0");
+    assert_ne!(millis, 1, "to_millis should not return 1");
+    assert_ne!(millis, -1, "to_millis should not return -1");
+    assert_eq!(millis, 10, "to_millis math is wrong");
+}
+
+#[test]
+fn test_to_iso8601_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{TIMESTAMP_MAX, time};
+
+    // mutant: replace == with != in time::to_iso8601
+    assert_eq!(
+        time::to_iso8601(TIMESTAMP_MAX),
+        "current",
+        "TIMESTAMP_MAX should return 'current'"
+    );
+
+    // test empty / xyzzy returns exact output matching logic
+    // we use a timestamp that has an exact expected formatting (e.g. 100 seconds after epoch)
+    let ts = HybridTimestamp::new(100_000_000, 0).unwrap();
+    let iso = time::to_iso8601(ts);
+
+    if cfg!(windows) {
+        assert!(
+            iso.contains("116444737000000000"),
+            "Should contain exact tick count: {}",
+            iso
+        );
+    } else {
+        // Since we simplify and use Debug representation of SystemTime,
+        // it may look like `SystemTime { tv_sec: 100, tv_nsec: 0 }`
+        assert!(
+            iso.contains("100"),
+            "Should contain exact formatted seconds: {}",
+            iso
+        );
+    }
+
+    // Test math mutations in to_iso8601 by ensuring exact nanoseconds and seconds calculation
+    // 1500_500_000 microseconds = 1500 seconds + 500_000 microseconds
+    // = 1500 seconds + 500_000_000 nanoseconds
+    let ts_math = HybridTimestamp::new(1_500_500_000, 0).unwrap();
+    let iso_math = time::to_iso8601(ts_math);
+
+    // Using string matching to avoid depending on exact chrono logic formatting,
+    // but ensuring the calculated time duration components are right.
+    // If * was replaced with +, or / with %, the underlying Duration::new would fail
+    // or format entirely wrong numbers
+    if cfg!(windows) {
+        // Windows might format SystemTime Debug differently, but it will have the value
+        // tick math: 116444736000000000 + 15000000000 + 5000000 = 116444751005000000
+        assert!(
+            iso_math.contains("116444751005000000"),
+            "Should contain exact tick count or related math: {}",
+            iso_math
+        );
+    } else {
+        assert!(
+            iso_math.contains("500000000"),
+            "Should contain exact nanos: {}",
+            iso_math
+        );
+        assert!(
+            iso_math.contains("1500"),
+            "Should contain exact seconds: {}",
+            iso_math
+        );
+    }
+}
