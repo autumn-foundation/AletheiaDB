@@ -637,6 +637,22 @@ mod sentry_tests {
             !node.has_label_str("Admin"),
             "matches_label should return false when checking against a different label"
         );
+
+        // Positive case: exact match
+        assert!(
+            node.has_label_str("User"),
+            "matches_label should return true for exact match"
+        );
+
+        // Exact mismatch case (kills replacing == with != in matches_label)
+        assert!(
+            !super::matches_label(label, "Admin"),
+            "matches_label should return false for exact mismatch"
+        );
+        assert!(
+            super::matches_label(label, "User"),
+            "matches_label should return true for exact match"
+        );
     }
 
     #[test]
@@ -655,6 +671,15 @@ mod sentry_tests {
             props,
             VersionId::new(10).unwrap(),
             metadata,
+        );
+
+        // Kills mutant replacing Node::with_metadata with Default::default()
+        assert_eq!(node.id, NodeId::new(1).unwrap(), "Node id must match");
+        assert_eq!(node.label, label, "Node label must match");
+        assert_eq!(
+            node.current_version,
+            VersionId::new(10).unwrap(),
+            "Node current_version must match"
         );
 
         assert_eq!(
@@ -685,12 +710,74 @@ mod sentry_tests {
             metadata,
         );
 
+        // Kills mutant replacing Edge::with_metadata with Default::default()
+        assert_eq!(edge.id, EdgeId::new(1).unwrap(), "Edge id must match");
+        assert_eq!(edge.label, label, "Edge label must match");
+        assert_eq!(
+            edge.source,
+            NodeId::new(1).unwrap(),
+            "Edge source must match"
+        );
+        assert_eq!(
+            edge.target,
+            NodeId::new(2).unwrap(),
+            "Edge target must match"
+        );
+        assert_eq!(
+            edge.current_version,
+            VersionId::new(1).unwrap(),
+            "Edge current_version must match"
+        );
+
         assert_eq!(
             edge.metadata, metadata,
             "Edge::with_metadata should store the provided metadata"
         );
         assert_eq!(edge.metadata.created_by_tx, tx_id);
         assert_eq!(edge.metadata.commit_timestamp, Some(timestamp));
+    }
+
+    #[test]
+    fn test_edge_connects_mutants() {
+        // 🛡️ Sentry Test: Kill mutants replacing `&&` with `||` and returning default booleans in `connects`
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(10).unwrap(),
+            NodeId::new(20).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Positive case: valid source and valid target
+        let valid_connection = edge.connects(NodeId::new(10).unwrap(), NodeId::new(20).unwrap());
+        assert!(valid_connection, "Edge connects valid endpoints");
+        assert!(valid_connection, "connects exactly returns true for valid");
+
+        // Negative case: valid source but invalid target (kills && -> || mutation)
+        let invalid_target = edge.connects(NodeId::new(10).unwrap(), NodeId::new(99).unwrap());
+        assert!(!invalid_target, "Edge does not connect to invalid target");
+        assert!(
+            !invalid_target,
+            "connects exactly returns false for invalid target"
+        );
+
+        // Negative case: invalid source but valid target (kills && -> || mutation)
+        let invalid_source = edge.connects(NodeId::new(99).unwrap(), NodeId::new(20).unwrap());
+        assert!(!invalid_source, "Edge does not connect from invalid source");
+        assert!(
+            !invalid_source,
+            "connects exactly returns false for invalid source"
+        );
+
+        // Negative case: both invalid
+        let both_invalid = edge.connects(NodeId::new(99).unwrap(), NodeId::new(100).unwrap());
+        assert!(!both_invalid, "Edge does not connect invalid endpoints");
+        assert!(
+            !both_invalid,
+            "connects exactly returns false for both invalid"
+        );
     }
 
     #[test]
@@ -714,6 +801,12 @@ mod sentry_tests {
             age_prop.as_int(),
             Some(42),
             "get_property must return the exact stored value"
+        );
+        // Explicit check against Some(Default::default())
+        assert_ne!(
+            age_prop,
+            &crate::core::property::PropertyValue::Null,
+            "get_property must not return a default PropertyValue"
         );
 
         // Negative check: Must return None for missing properties.
@@ -741,6 +834,11 @@ mod sentry_tests {
             Some(42.5),
             "Edge::get_property must return the exact stored value"
         );
+        assert_ne!(
+            weight_prop,
+            &crate::core::property::PropertyValue::Null,
+            "Edge::get_property must not return a default PropertyValue"
+        );
         assert!(
             edge.get_property("missing").is_none(),
             "Edge::get_property must return None for missing key"
@@ -760,10 +858,12 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
+        // Test explicit true and explicit false cases
         assert!(
             node.has_label(label_a),
             "has_label must return true for exact match"
         );
+
         assert!(
             !node.has_label(label_b),
             "has_label must return false for mismatch"
@@ -782,6 +882,7 @@ mod sentry_tests {
             edge.has_label(label_a),
             "Edge::has_label must return true for exact match"
         );
+
         assert!(
             !edge.has_label(label_b),
             "Edge::has_label must return false for mismatch"
@@ -804,6 +905,7 @@ mod sentry_tests {
             node.has_label_str("TargetLabel"),
             "has_label_str must return true for exact match"
         );
+
         assert!(
             !node.has_label_str("OtherLabel"),
             "has_label_str must return false for mismatch"
@@ -818,13 +920,24 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
+        let edge_has_str_target = edge.has_label_str("TargetLabel");
         assert!(
-            edge.has_label_str("TargetLabel"),
+            edge_has_str_target,
             "Edge::has_label_str must return true for exact match"
         );
         assert!(
-            !edge.has_label_str("OtherLabel"),
+            edge_has_str_target,
+            "Edge::has_label_str exactly matches true"
+        );
+
+        let edge_has_str_other = edge.has_label_str("OtherLabel");
+        assert!(
+            !edge_has_str_other,
             "Edge::has_label_str must return false for mismatch"
+        );
+        assert!(
+            !edge_has_str_other,
+            "Edge::has_label_str exactly matches false"
         );
     }
 
