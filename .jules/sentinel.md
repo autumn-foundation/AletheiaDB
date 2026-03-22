@@ -165,4 +165,5 @@
 **Module:** `src/core/id.rs`
 **Summary:** Mutants returning `Ok(Default::default())` survived in `TryFrom<u64>` and `FromStr` implementations for `NodeId`, `EdgeId`, `VersionId`, and `TxId`.
 **Diagnosis:** WEAK_TEST - Tests converted `42` and then asserted `assert_eq!(converted, IdType::new(42).unwrap())`. Since `IdType::new(42)` itself wasn't directly tested in the conversion assertions to not equal `Default::default()` (which wraps `0`), it allowed the conversion functions to return `0` unchecked against the explicit expectation of `42`.
+
 **Kill Shot:** Appended explicit exact value assertions `assert_eq!(converted.as_u64(), 42)` within `tests_conversions` inside `src/core/id.rs`.

@@ -1824,12 +1824,14 @@ mod tests_conversions {
     #[test]
     fn test_node_id_conversions() {
         let n = NodeId::try_from(42).unwrap();
+        assert_eq!(n.as_u64(), 42);
         assert_eq!(n, NodeId::new(42).unwrap());
 
         let err = NodeId::try_from(u64::MAX).unwrap_err();
         assert!(matches!(err, StorageError::InvalidId { .. }));
 
         let n2 = NodeId::from_str("42").unwrap();
+        assert_eq!(n2.as_u64(), 42);
         assert_eq!(n2, n);
 
         let err = NodeId::from_str("invalid").unwrap_err();
@@ -1845,12 +1847,14 @@ mod tests_conversions {
     #[test]
     fn test_edge_id_conversions() {
         let e = EdgeId::try_from(42).unwrap();
+        assert_eq!(e.as_u64(), 42);
         assert_eq!(e, EdgeId::new(42).unwrap());
 
         let err = EdgeId::try_from(u64::MAX).unwrap_err();
         assert!(matches!(err, StorageError::InvalidId { .. }));
 
         let e2 = EdgeId::from_str("42").unwrap();
+        assert_eq!(e2.as_u64(), 42);
         assert_eq!(e2, e);
 
         let err = EdgeId::from_str("invalid").unwrap_err();
@@ -1863,12 +1867,14 @@ mod tests_conversions {
     #[test]
     fn test_version_id_conversions() {
         let v = VersionId::try_from(42).unwrap();
+        assert_eq!(v.as_u64(), 42);
         assert_eq!(v, VersionId::new(42).unwrap());
 
         let err = VersionId::try_from(u64::MAX).unwrap_err();
         assert!(matches!(err, StorageError::InvalidId { .. }));
 
         let v2 = VersionId::from_str("42").unwrap();
+        assert_eq!(v2.as_u64(), 42);
         assert_eq!(v2, v);
 
         let err = VersionId::from_str("invalid").unwrap_err();
@@ -1881,9 +1887,11 @@ mod tests_conversions {
     #[test]
     fn test_tx_id_conversions() {
         let t = TxId::try_from(42).unwrap();
+        assert_eq!(t.as_u64(), 42);
         assert_eq!(t, TxId::new(42));
 
         let t2 = TxId::from_str("42").unwrap();
+        assert_eq!(t2.as_u64(), 42);
         assert_eq!(t2, t);
 
         let err = TxId::from_str("invalid").unwrap_err();
