@@ -123,11 +123,27 @@ mod node_tests {
     #[test]
     fn test_invalid_node_edge_id_parsing() {
         let server = create_test_server();
-        let invalid_node = json!({ "node_id": "not-a-number", "label": "L", "properties": {}, "valid_time": "2023-01-01T00:00:00Z", "transaction_time": "2023-01-01T00:00:00Z" });
-        let invalid_edge = json!({ "edge_id": "not-a-number", "label": "L", "from_node": 1, "to_node": 2, "properties": {}, "valid_time": "2023-01-01T00:00:00Z", "transaction_time": "2023-01-01T00:00:00Z" });
-        let invalid_start_node =
-            json!({ "start_node_id": "not-a-number", "direction": "out", "max_depth": 1 });
+        // Provide valid format for serde (u64 for IDs, strings for time)
+        // But invalid semantically (0 is invalid NodeId usually, "invalid" is invalid timestamp)
+        let invalid_node = json!({
+            "node_id": 0,
+            "start_node_id": 0,
+            "label": "L",
+            "properties": {},
+            "valid_time": "not-a-timestamp",
+            "transaction_time": "not-a-timestamp"
+        });
+        let invalid_edge = json!({
+            "edge_id": 0,
+            "label": "L",
+            "from_node": 1,
+            "to_node": 2,
+            "properties": {},
+            "valid_time": "not-a-timestamp",
+            "transaction_time": "not-a-timestamp"
+        });
 
+        // These will pass `parse_args` but fail at `parse_node_id`, `parse_edge_id`, `parse_timestamp_arg`
         assert!(
             server
                 .handle_get_node(invalid_node.clone())
@@ -186,33 +202,29 @@ mod node_tests {
         );
         assert!(
             server
-                .handle_traverse(invalid_start_node)
+                .handle_traverse(invalid_node.clone())
                 .is_error
                 .unwrap_or(false)
         );
 
+        // Node At Time
+        let time_node =
+            json!({ "node_id": 1, "valid_time": "invalid", "transaction_time": "invalid" });
         assert!(
             server
-                .handle_get_node_at_time(invalid_node.clone())
+                .handle_get_node_at_time(time_node.clone())
                 .is_error
                 .unwrap_or(false)
         );
         assert!(
             server
-                .handle_get_edge_at_time(invalid_edge.clone())
-                .is_error
-                .unwrap_or(false)
-        );
-
-        assert!(
-            server
-                .handle_get_node_at_valid_time(invalid_node.clone())
+                .handle_get_node_at_valid_time(time_node.clone())
                 .is_error
                 .unwrap_or(false)
         );
         assert!(
             server
-                .handle_get_node_at_transaction_time(invalid_node.clone())
+                .handle_get_node_at_transaction_time(time_node.clone())
                 .is_error
                 .unwrap_or(false)
         );
@@ -229,15 +241,24 @@ mod node_tests {
                 .unwrap_or(false)
         );
 
+        // Edge At Time
+        let time_edge =
+            json!({ "edge_id": 1, "valid_time": "invalid", "transaction_time": "invalid" });
         assert!(
             server
-                .handle_get_edge_at_valid_time(invalid_edge.clone())
+                .handle_get_edge_at_time(time_edge.clone())
                 .is_error
                 .unwrap_or(false)
         );
         assert!(
             server
-                .handle_get_edge_at_transaction_time(invalid_edge.clone())
+                .handle_get_edge_at_valid_time(time_edge.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_get_edge_at_transaction_time(time_edge.clone())
                 .is_error
                 .unwrap_or(false)
         );
@@ -260,41 +281,186 @@ mod node_tests {
         let server = create_test_server();
         let bad_args = json!({ "limit": "not-a-number", "node_id": "not-a-number", "edge_id": "not-a-number", "label": 123, "start_node_id": "not-a-number", "query": 123, "property_key": 123, "property_value": 123, "properties": 123, "from_node": "not-a-number", "to_node": "not-a-number" });
 
-        assert!(server.handle_get_node(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_create_node(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_update_node(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_delete_node(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_delete_node_cascade(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_list_nodes(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_count_nodes(bad_args.clone()).is_error.unwrap_or(false));
+        assert!(
+            server
+                .handle_get_node(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_create_node(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_update_node(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_delete_node(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_delete_node_cascade(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_list_nodes(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_count_nodes(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
 
-        assert!(server.handle_get_edge(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_create_edge(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_update_edge(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_delete_edge(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_list_edges(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_count_edges(bad_args.clone()).is_error.unwrap_or(false));
+        assert!(
+            server
+                .handle_get_edge(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_create_edge(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_update_edge(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_delete_edge(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_list_edges(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_count_edges(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
 
-        assert!(server.handle_get_outgoing_edges(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_get_incoming_edges(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_traverse(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_find_similar(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_enable_vector_index(bad_args.clone()).is_error.unwrap_or(false));
+        assert!(
+            server
+                .handle_get_outgoing_edges(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_get_incoming_edges(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_traverse(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_find_similar(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_enable_vector_index(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
 
-        assert!(server.handle_get_node_at_time(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_get_edge_at_time(bad_args.clone()).is_error.unwrap_or(false));
+        assert!(
+            server
+                .handle_get_node_at_time(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_get_edge_at_time(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
 
-        assert!(server.handle_get_node_at_valid_time(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_get_node_at_transaction_time(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_get_node_history(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_diff_node_versions(bad_args.clone()).is_error.unwrap_or(false));
+        assert!(
+            server
+                .handle_get_node_at_valid_time(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_get_node_at_transaction_time(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_get_node_history(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_diff_node_versions(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
 
-        assert!(server.handle_get_edge_at_valid_time(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_get_edge_at_transaction_time(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_get_edge_history(bad_args.clone()).is_error.unwrap_or(false));
-        assert!(server.handle_diff_edge_versions(bad_args.clone()).is_error.unwrap_or(false));
+        assert!(
+            server
+                .handle_get_edge_at_valid_time(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_get_edge_at_transaction_time(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_get_edge_history(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
+        assert!(
+            server
+                .handle_diff_edge_versions(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
 
-        assert!(server.handle_hybrid_query(bad_args.clone()).is_error.unwrap_or(false));
+        assert!(
+            server
+                .handle_hybrid_query(bad_args.clone())
+                .is_error
+                .unwrap_or(false)
+        );
     }
 
     #[test]
