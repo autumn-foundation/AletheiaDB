@@ -218,6 +218,10 @@ pub mod gravity;
 pub mod metaphor;
 
 #[cfg(feature = "nova")]
+/// Mirror: Semantic Reflection Engine.
+pub mod mirror;
+
+#[cfg(feature = "nova")]
 /// Mnemosyne: Semantic Memory Consolidation.
 pub mod mnemosyne;
 
