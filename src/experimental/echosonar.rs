@@ -99,8 +99,8 @@ impl<'a> EchoSonar<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
-    use crate::core::property::PropertyMapBuilder;
     use crate::core::error::Error;
+    use crate::core::property::PropertyMapBuilder;
 
     #[test]
     fn test_echosonar_high_echo() {
