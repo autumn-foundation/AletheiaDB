@@ -339,3 +339,24 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[Predicate Pushdown Binary Operation Blind Spot]**
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** The `LogicalOp::Binary` processing in `push_down` correctly updates if either `left` or `right` branches trigger an optimization (`left_changed || right_changed`). This partial optimization capability is critical, and the rule was properly tested, with tests correctly asserting failure when `||` was maliciously mutated to `&&`.
+**Evidence:** A targeted mutant replacing `left_changed || right_changed` with `left_changed && right_changed` was caught by both `test_binary_op_recursion_logic` and `test_binary_op_partial_optimization`.
+**Recommendation:** None, testing around binary operations is robust.
+
+**[Operation Reordering Predicate Equality]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `test_predicates_equal_exhaustive_mismatches` was missing explicit tests asserting that functionally identical predicates (e.g. `Predicate::ne("a", 1)` vs `Predicate::ne("a", 1)`) actually evaluated to `true`. Without explicit match tests, mutations altering equality checks (e.g. `k1 == k2 && v1 == v2` -> `false`) could survive if only mismatches were tested.
+**Evidence:** A manual mutation forcing the `Ne` mismatch check to always return `false` passed the test suite, as only mismatches (which legitimately return false) were being asserted.
+**Recommendation:** Refactored `test_predicates_equal_exhaustive_mismatches` to explicitly include `assert!(rule.predicates_equal(...))` matches for `Ne`, `Gt`, `Gte`, `Lt`, and `Lte` to ensure true equality paths are explicitly covered and tested against malicious mutations.
+
+**[Hybrid Logical Clock Causal Bounds]**
+**Module:** `src/core/hlc.rs`
+**Severity:** ⭐ Commended
+**Finding:** The complex causal `receive` logic, particularly the `if new_wallclock == self.wallclock && new_wallclock == msg.wallclock` condition, is exceptionally robust against mutations.
+**Evidence:** Manual testing of critical mutants (swapping `&&` for `||`, `>` for `>=`, and swapping operands) consistently failed existing regression tests, notably `test_hybrid_timestamp_receive_exact_wallclock_logic`, `test_receive_ignores_msg_logical_when_wallclock_behind`, and `test_receive_collision_oracle`.
+**Recommendation:** None. The test suite for `hlc.rs` is exemplary.

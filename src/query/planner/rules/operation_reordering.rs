@@ -1122,13 +1122,67 @@ mod tests {
         assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("b", 1)));
         assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("a", 2)));
 
+        // Ne matches
+        assert!(rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("a", 1)));
+
+        // Ne matches
+        assert!(rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("a", 1)));
+
+        // Ne matches
+        assert!(rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("a", 1)));
+
         // Ne mismatches
         assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("b", 1)));
         assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("a", 2)));
 
+        // Gt matches
+        assert!(rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("a", 1)));
+
+        // Gt matches
+        assert!(rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("a", 1)));
+
+        // Gt matches
+        assert!(rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("a", 1)));
+
         // Gt mismatches
         assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("b", 1)));
         assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("a", 2)));
+
+        // Gte matches
+        assert!(rule.predicates_equal(
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            }
+        ));
+
+        // Gte matches
+        assert!(rule.predicates_equal(
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            }
+        ));
+
+        // Gte matches
+        assert!(rule.predicates_equal(
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Gte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            }
+        ));
 
         // Gte mismatches
         assert!(!rule.predicates_equal(
@@ -1152,9 +1206,54 @@ mod tests {
             }
         ));
 
+        // Lt matches
+        assert!(rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("a", 1)));
+
+        // Lt matches
+        assert!(rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("a", 1)));
+
+        // Lt matches
+        assert!(rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("a", 1)));
+
         // Lt mismatches
         assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("b", 1)));
         assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("a", 2)));
+
+        // Lte matches
+        assert!(rule.predicates_equal(
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            }
+        ));
+
+        // Lte matches
+        assert!(rule.predicates_equal(
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            }
+        ));
+
+        // Lte matches
+        assert!(rule.predicates_equal(
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            },
+            &Predicate::Lte {
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1)
+            }
+        ));
 
         // Lte mismatches
         assert!(!rule.predicates_equal(
