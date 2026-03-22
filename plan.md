@@ -1,12 +1,11 @@
-1. **Understand the problem**:
-   - The code coverage check (Codecov) is failing because the newly added refactored lines (mostly the `Err(err) => return err` and `return self.parse_node_id(...).unwrap_err()` lines) are not covered by existing tests.
-   - We need to hit at least 85% coverage on the new diff.
-2. **Add unit tests**:
-   - Since we added `parse_args` and `parse_node_id` usage, these error paths (the `Err` branches in matching and the `unwrap_err` in guard clauses) need tests.
-   - We can either write specific unit tests in `src/mcp/tests.rs` for invalid inputs, or just test the helper methods themselves if the methods are covered. Wait, we modified the handlers, so we need to test the handlers directly.
-   - Let's look at `src/mcp/tests.rs` to see what tests exist and add more invalid input tests to hit the `Err` and `unwrap_err` branches for `parse_args`, `parse_node_id`, `parse_edge_id`, `parse_timestamp_arg`, `parse_optional_tx_time_arg`.
-3. **Execute testing**:
-   - Write tests for some methods like `handle_create_node`, `handle_get_node` with invalid inputs (`node_id: null`, invalid string, etc.) to trigger the error branches.
-   - Run `cargo clippy` and `cargo test --lib mcp::tests` to verify.
-4. **Run pre-commit steps**.
+1. **Understand the problem:** Codecov check is failing because our added tests did not cover enough lines of the modified diff. We have ~56% coverage on the new lines and need 85%.
+   - Most of the lines not covered are the `return err` or `return self.parse_...(req.x).unwrap_err()` lines that are error guard branches.
+2. **Examine the untested lines:**
+   - e.g. Line 840, 858, 887: these are `return err` blocks when `self.parse_args` fails, or `unwrap_err` on `self.parse_node_id` in other `handle_*` functions.
+3. **Write tests:**
+   - Instead of writing individual tests for every single handler `handle_update_node`, `handle_delete_node`, `handle_list_nodes`, we can write a simple iteration test in `src/mcp/tests.rs`.
+   - The test will just call `server.handle_XXX(json!({ "node_id": "not-a-number", "edge_id": "not-a-number", "start_node_id": "not-a-number" }))` or `server.handle_XXX(json!({}))` (empty JSON to fail `parse_args`) for every single handler, which will hit all the `parse_args` error branches.
+   - We will also call it with valid JSON args but invalid ID formats `{"node_id": "invalid"}` to trigger the `parse_node_id` and `parse_edge_id` errors.
+   - This should easily boost coverage.
+4. **Compile and test locally**.
 5. **Submit**.

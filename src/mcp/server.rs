@@ -740,7 +740,10 @@ impl AletheiaMcpServer {
     }
 
     /// Parse an optional transaction time, returning the current time if not specified.
-    pub(crate) fn parse_optional_tx_time(&self, tx_time: Option<&str>) -> Result<Timestamp, String> {
+    pub(crate) fn parse_optional_tx_time(
+        &self,
+        tx_time: Option<&str>,
+    ) -> Result<Timestamp, String> {
         match tx_time {
             Some(tx) => self.parse_timestamp(tx),
             None => Ok(time::now()),
@@ -813,7 +816,10 @@ impl AletheiaMcpServer {
         EdgeId::new(id).map_err(|e| self.error_json(&e.to_string()))
     }
 
-    pub(crate) fn parse_timestamp_arg(&self, timestamp_str: &str) -> Result<HybridTimestamp, CallToolResult> {
+    pub(crate) fn parse_timestamp_arg(
+        &self,
+        timestamp_str: &str,
+    ) -> Result<HybridTimestamp, CallToolResult> {
         self.parse_timestamp(timestamp_str)
             .map_err(|e| self.error_json(&e))
     }
@@ -1586,7 +1592,10 @@ impl AletheiaMcpServer {
         }
     }
 
-    pub(crate) fn handle_get_node_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_node_at_transaction_time(
+        &self,
+        args: serde_json::Value,
+    ) -> CallToolResult {
         let req = match self.parse_args::<GetNodeAtTransactionTimeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1698,7 +1707,10 @@ impl AletheiaMcpServer {
         }
     }
 
-    pub(crate) fn handle_get_edge_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_edge_at_transaction_time(
+        &self,
+        args: serde_json::Value,
+    ) -> CallToolResult {
         let req = match self.parse_args::<GetEdgeAtTransactionTimeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
