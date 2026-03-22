@@ -2776,6 +2776,20 @@ fn test_sparse_dot_product_different_dimensions() {
 }
 
 #[test]
+fn test_sparse_cosine_similarity_dimension_mismatch() {
+    // Vectors with different dimensions should fail
+    let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+    let b = SparseVec::new(vec![2, 4], vec![3.0, 4.0], 10).unwrap();
+
+    let result = sparse_cosine_similarity(&a, &b);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        Error::Vector(VectorError::DimensionMismatch { .. })
+    ));
+}
+
+#[test]
 fn test_sparse_cosine_similarity_identical() {
     let a = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
     let b = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
@@ -2841,6 +2855,19 @@ fn test_sparse_squared_euclidean_distance_dimension_mismatch() {
     let b = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
 
     let result = sparse_squared_euclidean_distance(&a, &b);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        Error::Vector(VectorError::DimensionMismatch { .. })
+    ));
+}
+
+#[test]
+fn test_sparse_euclidean_distance_dimension_mismatch() {
+    let a = SparseVec::new(vec![0], vec![1.0], 5).unwrap();
+    let b = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+
+    let result = sparse_euclidean_distance(&a, &b);
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
