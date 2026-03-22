@@ -1,11 +1,12 @@
-1. **Understand the problem:** Codecov check is failing because our added tests did not cover enough lines of the modified diff. We have ~56% coverage on the new lines and need 85%.
-   - Most of the lines not covered are the `return err` or `return self.parse_...(req.x).unwrap_err()` lines that are error guard branches.
-2. **Examine the untested lines:**
-   - e.g. Line 840, 858, 887: these are `return err` blocks when `self.parse_args` fails, or `unwrap_err` on `self.parse_node_id` in other `handle_*` functions.
-3. **Write tests:**
-   - Instead of writing individual tests for every single handler `handle_update_node`, `handle_delete_node`, `handle_list_nodes`, we can write a simple iteration test in `src/mcp/tests.rs`.
-   - The test will just call `server.handle_XXX(json!({ "node_id": "not-a-number", "edge_id": "not-a-number", "start_node_id": "not-a-number" }))` or `server.handle_XXX(json!({}))` (empty JSON to fail `parse_args`) for every single handler, which will hit all the `parse_args` error branches.
-   - We will also call it with valid JSON args but invalid ID formats `{"node_id": "invalid"}` to trigger the `parse_node_id` and `parse_edge_id` errors.
-   - This should easily boost coverage.
-4. **Compile and test locally**.
+1. **Understand the problem:**
+   - A single test is failing: `mcp::tests::node_tests::test_invalid_argument_parsing_exhaustive`.
+   - The panic message: `assertion failed: server.handle_list_nodes(json!({})).is_error.unwrap_or(false)`.
+   - Wait, `handle_list_nodes` doesn't necessarily take an `id` - looking at `ListNodesRequest` definition, what fields are there? Wait, `ListNodesRequest` might not have required fields and `json!({})` might be successfully parsed!
+2. **Examine `ListNodesRequest`**:
+   - If `ListNodesRequest` has all optional fields (e.g. `label: Option<String>`, `limit: Option<usize>`), then parsing `json!({})` would SUCCEED, returning `Ok(...)`.
+   - Let's check `ListNodesRequest` and the other failing endpoints to see if `json!({})` is valid for them.
+   - If so, we need to pass invalid data types like `json!({ "limit": "not-a-number" })` instead of `json!({})` to trigger a parse error for these endpoints, or just accept that they succeed with empty json.
+3. **Fix the test**:
+   - Update `test_invalid_argument_parsing_exhaustive` to use actually invalid arguments for `ListNodesRequest`, `ListEdgesRequest`, `CountNodesRequest`, `CountEdgesRequest` etc.
+4. **Test locally** with `cargo test --lib mcp::tests::node_tests::test_invalid_argument_parsing_exhaustive`.
 5. **Submit**.
