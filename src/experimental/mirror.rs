@@ -80,63 +80,74 @@ impl<'a> Mirror<'a> {
     ) -> Result<Vec<Reflection>> {
         let mut reflections = Vec::new();
 
-        if candidates.len() < 2 {
+        // Deduplicate candidates deterministically to avoid self-reflections or duplicate pairs
+        let mut unique_candidates = candidates.to_vec();
+        unique_candidates.sort();
+        unique_candidates.dedup();
+
+        if unique_candidates.len() < 2 {
             return Ok(reflections);
         }
 
         self.db.read(|tx| {
-            // Extract vectors for all candidates
-            let mut node_vectors = Vec::new();
-            for &node_id in candidates {
-                if let Ok(node) = tx.get_node(node_id) {
-                    if let Some(prop) = node.get_property(property_name).and_then(|p| p.as_vector())
-                    {
-                        node_vectors.push((node_id, prop.to_vec()));
-                    }
-                }
-            }
+            // Compare all pairs, fetching vectors on demand to save memory
+            for i in 0..unique_candidates.len() {
+                let node_a = unique_candidates[i];
 
-            // Compare all pairs
-            for i in 0..node_vectors.len() {
-                for j in (i + 1)..node_vectors.len() {
-                    let (node_a, vec_a) = &node_vectors[i];
-                    let (node_b, vec_b) = &node_vectors[j];
+                // Fetch the outer loop vector lazily once
+                let vec_a_opt = tx.get_node(node_a).ok().and_then(|n| {
+                    n.get_property(property_name)
+                        .and_then(|p| p.as_vector().map(|v| v.to_vec()))
+                });
 
-                    // Check similarity first (often cheaper than graph traversal if we have optimized SIMD)
-                    let similarity = cosine_similarity(vec_a, vec_b)?;
+                let a = match vec_a_opt {
+                    Some(v) => v,
+                    None => continue,
+                };
 
-                    if similarity >= similarity_threshold {
-                        // They are semantic twins. Now check for a structural void.
-                        let mut connected = false;
+                for j in (i + 1)..unique_candidates.len() {
+                    let node_b = unique_candidates[j];
 
-                        // Check A -> B
-                        for edge_id in tx.get_outgoing_edges(*node_a) {
-                            if let Ok(edge) = tx.get_edge(edge_id) {
-                                if edge.target == *node_b {
+                    let vec_b_opt = tx.get_node(node_b).ok().and_then(|n| {
+                        n.get_property(property_name)
+                            .and_then(|p| p.as_vector().map(|v| v.to_vec()))
+                    });
+
+                    if let Some(b) = vec_b_opt {
+                        // Check similarity first
+                        let similarity = cosine_similarity(&a, &b)?;
+
+                        if similarity >= similarity_threshold {
+                            // They are semantic twins. Now check for a structural void.
+                            let mut connected = false;
+
+                            // Check A -> B
+                            for edge_id in tx.get_outgoing_edges(node_a) {
+                                let edge = tx.get_edge(edge_id)?;
+                                if edge.target == node_b {
                                     connected = true;
                                     break;
                                 }
                             }
-                        }
 
-                        // Check B -> A
-                        if !connected {
-                            for edge_id in tx.get_outgoing_edges(*node_b) {
-                                if let Ok(edge) = tx.get_edge(edge_id) {
-                                    if edge.target == *node_a {
+                            // Check B -> A
+                            if !connected {
+                                for edge_id in tx.get_outgoing_edges(node_b) {
+                                    let edge = tx.get_edge(edge_id)?;
+                                    if edge.target == node_a {
                                         connected = true;
                                         break;
                                     }
                                 }
                             }
-                        }
 
-                        if !connected {
-                            reflections.push(Reflection {
-                                node_a: *node_a,
-                                node_b: *node_b,
-                                similarity_score: similarity,
-                            });
+                            if !connected {
+                                reflections.push(Reflection {
+                                    node_a,
+                                    node_b,
+                                    similarity_score: similarity,
+                                });
+                            }
                         }
                     }
                 }
