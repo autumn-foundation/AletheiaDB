@@ -1,5 +1,3 @@
-
-
 //! AletheiaDB MCP Server implementation.
 //!
 //! This module implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server
@@ -717,7 +715,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn parse_timestamp(&self, s: &str) -> Result<Timestamp, String> {
+    pub(crate) fn parse_timestamp(&self, s: &str) -> Result<Timestamp, String> {
         // Try parsing as ISO 8601 timestamp first
         if let Ok(dt) = s.parse::<DateTime<Utc>>() {
             let micros = dt.timestamp_micros();
@@ -742,7 +740,7 @@ impl AletheiaMcpServer {
     }
 
     /// Parse an optional transaction time, returning the current time if not specified.
-    fn parse_optional_tx_time(&self, tx_time: Option<&str>) -> Result<Timestamp, String> {
+    pub(crate) fn parse_optional_tx_time(&self, tx_time: Option<&str>) -> Result<Timestamp, String> {
         match tx_time {
             Some(tx) => self.parse_timestamp(tx),
             None => Ok(time::now()),
@@ -799,7 +797,7 @@ impl AletheiaMcpServer {
         CallToolResult::error(vec![Content::text(json!({"error": msg}).to_string())])
     }
 
-    fn parse_args<T: serde::de::DeserializeOwned>(
+    pub(crate) fn parse_args<T: serde::de::DeserializeOwned>(
         &self,
         args: &serde_json::Value,
     ) -> Result<T, CallToolResult> {
@@ -807,20 +805,20 @@ impl AletheiaMcpServer {
             .map_err(|e| self.error_json(&format!("Invalid arguments: {e}")))
     }
 
-    fn parse_node_id(&self, id: u64) -> Result<NodeId, CallToolResult> {
+    pub(crate) fn parse_node_id(&self, id: u64) -> Result<NodeId, CallToolResult> {
         NodeId::new(id).map_err(|e| self.error_json(&e.to_string()))
     }
 
-    fn parse_edge_id(&self, id: u64) -> Result<EdgeId, CallToolResult> {
+    pub(crate) fn parse_edge_id(&self, id: u64) -> Result<EdgeId, CallToolResult> {
         EdgeId::new(id).map_err(|e| self.error_json(&e.to_string()))
     }
 
-    fn parse_timestamp_arg(&self, timestamp_str: &str) -> Result<HybridTimestamp, CallToolResult> {
+    pub(crate) fn parse_timestamp_arg(&self, timestamp_str: &str) -> Result<HybridTimestamp, CallToolResult> {
         self.parse_timestamp(timestamp_str)
             .map_err(|e| self.error_json(&e))
     }
 
-    fn parse_optional_tx_time_arg(
+    pub(crate) fn parse_optional_tx_time_arg(
         &self,
         tx_time: Option<&str>,
     ) -> Result<HybridTimestamp, CallToolResult> {
@@ -832,7 +830,7 @@ impl AletheiaMcpServer {
     // Tool Implementations
     // ========================================================================
 
-    fn handle_get_node(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_node(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetNodeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -854,7 +852,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_create_node(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_create_node(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<CreateNodeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -883,7 +881,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_update_node(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_update_node(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<UpdateNodeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -913,7 +911,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_delete_node(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_delete_node(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<DeleteNodeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -932,7 +930,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_delete_node_cascade(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_delete_node_cascade(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<DeleteNodeCascadeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -952,7 +950,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_list_nodes(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_list_nodes(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<ListNodesRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1058,7 +1056,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_count_nodes(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_count_nodes(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<CountNodesRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1088,7 +1086,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_get_edge(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetEdgeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1110,7 +1108,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_create_edge(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_create_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<CreateEdgeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1152,7 +1150,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_update_edge(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_update_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<UpdateEdgeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1182,7 +1180,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_delete_edge(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_delete_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<DeleteEdgeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1201,7 +1199,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_list_edges(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_list_edges(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<ListEdgesRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1227,7 +1225,7 @@ impl AletheiaMcpServer {
         }))
     }
 
-    fn handle_count_edges(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_count_edges(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<CountEdgesRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1246,7 +1244,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_get_outgoing_edges(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_outgoing_edges(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetOutgoingEdgesRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1274,7 +1272,7 @@ impl AletheiaMcpServer {
         }))
     }
 
-    fn handle_get_incoming_edges(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_incoming_edges(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetIncomingEdgesRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1305,7 +1303,7 @@ impl AletheiaMcpServer {
         }))
     }
 
-    fn handle_traverse(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_traverse(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<TraverseRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1407,7 +1405,7 @@ impl AletheiaMcpServer {
         }))
     }
 
-    fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<FindSimilarRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1449,7 +1447,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_enable_vector_index(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_enable_vector_index(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<EnableVectorIndexRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1474,7 +1472,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_list_vector_indexes(&self, _args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_list_vector_indexes(&self, _args: serde_json::Value) -> CallToolResult {
         let indexes = self.db.list_vector_indexes();
         let index_list: Vec<serde_json::Value> = indexes
             .into_iter()
@@ -1492,7 +1490,7 @@ impl AletheiaMcpServer {
         }))
     }
 
-    fn handle_get_node_at_time(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_node_at_time(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetNodeAtTimeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1525,7 +1523,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_get_edge_at_time(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_edge_at_time(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetEdgeAtTimeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1562,7 +1560,7 @@ impl AletheiaMcpServer {
     // Phase 11: Independent Dimension Temporal Queries & Version History
     // ============================================================================
 
-    fn handle_get_node_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_node_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetNodeAtValidTimeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1588,7 +1586,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_get_node_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_node_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetNodeAtTransactionTimeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1614,7 +1612,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_get_node_history(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_node_history(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetNodeHistoryRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1642,7 +1640,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_diff_node_versions(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_diff_node_versions(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<DiffNodeVersionsRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1674,7 +1672,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_get_edge_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_edge_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetEdgeAtValidTimeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1700,7 +1698,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_get_edge_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_edge_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetEdgeAtTransactionTimeRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1726,7 +1724,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_get_edge_history(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_get_edge_history(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<GetEdgeHistoryRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1754,7 +1752,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn handle_diff_edge_versions(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_diff_edge_versions(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<DiffEdgeVersionsRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,
@@ -1854,7 +1852,7 @@ impl AletheiaMcpServer {
         })
     }
 
-    fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
+    pub(crate) fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req = match self.parse_args::<HybridQueryRequest>(&args) {
             Ok(req) => req,
             Err(err) => return err,

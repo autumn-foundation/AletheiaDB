@@ -1,13 +1,12 @@
-1. **Explore the codebase for refactoring opportunities.**
-   - We already found a repetitive block in `src/mcp/server.rs` involving `serde_json::from_value(args)` where it had a lot of nested blocks.
-   - We created `parse_args` helper function to reuse code and reduced repetitions in `handle_*` functions.
-2. **Continue refactoring `src/mcp/server.rs` to flatten structure.**
-   - In functions like `handle_get_node`, we can avoid nesting `match` statements by using early returns.
-   - e.g. for `let node_id = match NodeId::new(req.node_id) { ... }` use `let Ok(node_id) = NodeId::new(req.node_id) else { ... }`.
-   - Wait, `parse_args` now uses a match, we can potentially use guard clauses `let Ok(req) = ... else { return ... }` if we fix the double execution error we ran into. However, since the `Err` is already the `CallToolResult` we can't easily extract it from `else` branch without doing `.unwrap_err()`. We can use `let req = match ...` as it is simple enough.
-3. **Check other repetitive blocks like `NodeId::new(...)` and `EdgeId::new(...)`.**
-   - Extract error handling into a helper method or use `Result` combinators.
-4. **Run pre-commit instructions.**
-   - Complete pre-commit steps to ensure proper testing, verification, review, and reflection are done.
-5. **Create the PR/Submit the change.**
-   - Use the `submit` tool to finalize the refactoring.
+1. **Understand the problem**:
+   - The code coverage check (Codecov) is failing because the newly added refactored lines (mostly the `Err(err) => return err` and `return self.parse_node_id(...).unwrap_err()` lines) are not covered by existing tests.
+   - We need to hit at least 85% coverage on the new diff.
+2. **Add unit tests**:
+   - Since we added `parse_args` and `parse_node_id` usage, these error paths (the `Err` branches in matching and the `unwrap_err` in guard clauses) need tests.
+   - We can either write specific unit tests in `src/mcp/tests.rs` for invalid inputs, or just test the helper methods themselves if the methods are covered. Wait, we modified the handlers, so we need to test the handlers directly.
+   - Let's look at `src/mcp/tests.rs` to see what tests exist and add more invalid input tests to hit the `Err` and `unwrap_err` branches for `parse_args`, `parse_node_id`, `parse_edge_id`, `parse_timestamp_arg`, `parse_optional_tx_time_arg`.
+3. **Execute testing**:
+   - Write tests for some methods like `handle_create_node`, `handle_get_node` with invalid inputs (`node_id: null`, invalid string, etc.) to trigger the error branches.
+   - Run `cargo clippy` and `cargo test --lib mcp::tests` to verify.
+4. **Run pre-commit steps**.
+5. **Submit**.

@@ -118,6 +118,33 @@ mod node_tests {
         assert_eq!(node.properties.get("age"), Some(&serde_json::json!(30)));
     }
 
+    use serde_json::json;
+
+
+
+    #[test]
+    fn test_invalid_argument_parsing() {
+        let server = create_test_server();
+
+        // Test parsing invalid types directly with CallTool args
+        // Missing required field `node_id` in GetNodeRequest
+        let get_node_err = server.handle_get_node(json!({}));
+        assert!(get_node_err.is_error.unwrap_or(false));
+
+        // Invalid edge_id in GetEdgeRequest
+        let get_edge_err = server.handle_get_edge(json!({ "edge_id": "not-a-number" }));
+        assert!(get_edge_err.is_error.unwrap_or(false));
+
+        // Invalid transaction time format
+        let tx_time_err = server.handle_get_node_at_time(json!({ "node_id": 1, "valid_time": "2023-01-01T00:00:00Z", "transaction_time": "invalid-time" }));
+        assert!(tx_time_err.is_error.unwrap_or(false));
+
+        // Invalid valid_time format in GetNodeAtValidTimeRequest
+        let valid_time_err = server
+            .handle_get_node_at_valid_time(json!({ "node_id": 1, "valid_time": "invalid-time" }));
+        assert!(valid_time_err.is_error.unwrap_or(false));
+    }
+
     #[test]
     fn test_get_node() {
         let server = create_test_server();
