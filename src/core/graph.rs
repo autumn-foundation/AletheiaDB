@@ -592,6 +592,18 @@ mod tests {
             !edge.connects(NodeId::new(3).unwrap(), NodeId::new(2).unwrap()),
             "Should return false when source mismatches even if target matches"
         );
+
+        // Match source, mismatch target
+        assert!(
+            !edge.connects(NodeId::new(1).unwrap(), NodeId::new(3).unwrap()),
+            "Should return false when target mismatches even if source matches"
+        );
+
+        // Mismatch both source and target
+        assert!(
+            !edge.connects(NodeId::new(4).unwrap(), NodeId::new(5).unwrap()),
+            "Should return false when both mismatch"
+        );
     }
 }
 
