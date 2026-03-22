@@ -42,8 +42,8 @@
 //! # }
 //! ```
 
-use crate::api::transaction::ReadOps;
 use crate::AletheiaDB;
+use crate::api::transaction::ReadOps;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::vector::ops;
