@@ -166,3 +166,9 @@
 **Summary:** Mutants returning `Ok(Default::default())` survived in `TryFrom<u64>` and `FromStr` implementations for `NodeId`, `EdgeId`, `VersionId`, and `TxId`.
 **Diagnosis:** WEAK_TEST - Tests converted `42` and then asserted `assert_eq!(converted, IdType::new(42).unwrap())`. Since `IdType::new(42)` itself wasn't directly tested in the conversion assertions to not equal `Default::default()` (which wraps `0`), it allowed the conversion functions to return `0` unchecked against the explicit expectation of `42`.
 **Kill Shot:** Appended explicit exact value assertions `assert_eq!(converted.as_u64(), 42)` within `tests_conversions` inside `src/core/id.rs`.
+
+**[Weak Test Coverage in Node & Edge Behaviors]**
+**Module:** `aletheiadb::core::graph`
+**Summary:** Mutation testing revealed numerous surviving mutants related to `get_property` returning `None` or `Some(Default::default())`, `has_label` returning arbitrary `true`/`false` defaults or replacing `==` with `!=`, `has_label_str` replacing returns with default booleans, `matches_label` swapping `==` to `!=`, and `fmt::Debug` implementations simply outputting `Ok(Default::default())`.
+**Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted overall flow or simple positive logic paths without testing explicit exact equality returns for properties or structural content guarantees for strings. Some negative tests were missing entirely.
+**Kill Shot:** Appended targeted boundary and logic tests `test_get_property_behavior`, `test_has_label_behavior`, `test_has_label_str_behavior`, `test_matches_label_behavior`, and `test_debug_format_not_empty` into the `sentry_tests` module of `src/core/graph.rs`.
