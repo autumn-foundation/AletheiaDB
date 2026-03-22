@@ -490,10 +490,8 @@ let results = db.query()
 for row in results {
     // Access score from metadata
     let row = row?;
-    if let Some(score) = row.score {
-        if score > 0.8 {
-            println!("High similarity match: {:?}", row.entity);
-        }
+    if row.score.unwrap_or(0.0) > 0.8 {
+        println!("High similarity match: {:?}", row.entity);
     }
 }
 
@@ -694,12 +692,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new().unwrap();
 
     // Basic graph query
-    let results = db.execute_aql(
+    let _results = db.execute_aql(
         "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend:Person) RETURN friend"
     )?;
 
     // Bi-temporal query (point-in-time)
-    let results = db.execute_aql(
+    let _results = db.execute_aql(
         "AS OF '2024-01-15T10:00:00Z' MATCH (n:Person {name: 'Alice'}) RETURN n"
     )?;
 
@@ -794,13 +792,16 @@ For complex operations involving multiple updates, use explicit transactions.
 ```rust
 use aletheiadb::prelude::*;
 
+let db = AletheiaDB::new().unwrap();
+let alice_id = db.create_node("Person", PropertyMap::new()).unwrap();
+
 // Explicit read transaction
-let result = db.read(|tx| {
+let result: std::result::Result<InternedString, aletheiadb::Error> = db.read(|tx| {
     tx.get_node(alice_id).map(|node| node.label.clone())
-})?;
+});
 
 // Explicit write transaction with multiple operations
-db.write(|tx| {
+db.write(|tx: &mut aletheiadb::api::transaction::WriteTransaction| {
     let node1 = tx.create_node("Event", PropertyMap::new())?;
     let node2 = tx.create_node("Event", PropertyMap::new())?;
     tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
@@ -813,7 +814,8 @@ AletheiaDB includes an optional embedding generation system for semantic search:
 
 ```rust
 use aletheiadb::{AletheiaDB, properties};
-use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
+use aletheiadb::embeddings::EmbeddingService;
+use aletheiadb::embeddings::providers::openai::{OpenAIConfig, OpenAIModel, OpenAIProvider};
 use std::sync::Arc;
 
 // Note: Requires `tokio` dependency in Cargo.toml
@@ -831,7 +833,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "AletheiaDB is a bi-temporal graph database",
         "It tracks both valid time and transaction time",
     ];
-    let embeddings = service.embed_batch(&documents).await?;
+    let embeddings: Vec<Vec<f32>> = service.embed_batch(&documents).await?;
 
     // 3. Store with vectors
     let db = AletheiaDB::new()?;
@@ -885,7 +887,7 @@ fn main() {
     let config = observability::Config::from_env();
     observability::init(config);
 
-    let db = aletheiadb::AletheiaDB::new().unwrap();
+    let _db = aletheiadb::AletheiaDB::new().unwrap();
 
     // Metrics automatically collected
     // Check for critical errors
