@@ -1819,7 +1819,6 @@ impl FromStr for TxId {
 #[cfg(test)]
 mod tests_conversions {
     use super::*;
-    use std::str::FromStr;
 
     #[test]
     fn test_node_id_conversions() {
@@ -1918,5 +1917,120 @@ mod tests_conversions {
 
         let t_str = TxId::from_str("42").unwrap();
         assert_eq!(t_str.as_u64(), 42);
+    }
+}
+
+#[cfg(test)]
+mod sentinel_entity_id_exhaustive_tests {
+    use super::*;
+
+    #[test]
+    fn test_entity_id_is_node_exhaustive() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_node: EntityId = node_id.into();
+        assert!(entity_node.is_node());
+
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+        assert!(!entity_edge.is_node());
+    }
+
+    #[test]
+    fn test_entity_id_is_edge_exhaustive() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_node: EntityId = node_id.into();
+        assert!(!entity_node.is_edge());
+
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+        assert!(entity_edge.is_edge());
+    }
+
+    #[test]
+    fn test_entity_id_as_node_exhaustive() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_node: EntityId = node_id.into();
+        assert_eq!(entity_node.as_node(), Some(node_id));
+
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+        assert_eq!(entity_edge.as_node(), None);
+    }
+
+    #[test]
+    fn test_entity_id_as_edge_exhaustive() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_node: EntityId = node_id.into();
+        assert_eq!(entity_node.as_edge(), None);
+
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+        assert_eq!(entity_edge.as_edge(), Some(edge_id));
+    }
+
+    #[test]
+    fn test_entity_id_from_exhaustive() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_node: EntityId = node_id.into();
+        assert_eq!(entity_node, EntityId::Node(node_id));
+
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+        assert_eq!(entity_edge, EntityId::Edge(edge_id));
+    }
+
+    #[test]
+    fn test_id_generator_with_start_exhaustive() {
+        let generator = IdGenerator::with_start(42);
+        assert_eq!(generator.current(), 42);
+
+        let generator_default: IdGenerator = Default::default();
+        assert_eq!(generator_default.current(), 0);
+    }
+}
+
+#[cfg(test)]
+mod sentinel_tests_id_fmt {
+    use super::*;
+
+    #[test]
+    fn test_node_id_fmt_display() {
+        let node_id = NodeId::new(42).unwrap();
+        assert_eq!(format!("{}", node_id), "Node(42)");
+        assert_ne!(format!("{}", node_id), "");
+    }
+
+    #[test]
+    fn test_edge_id_fmt_display() {
+        let edge_id = EdgeId::new(42).unwrap();
+        assert_eq!(format!("{}", edge_id), "Edge(42)");
+        assert_ne!(format!("{}", edge_id), "");
+    }
+
+    #[test]
+    fn test_version_id_fmt_display() {
+        let version_id = VersionId::new(42).unwrap();
+        assert_eq!(format!("{}", version_id), "Version(42)");
+        assert_ne!(format!("{}", version_id), "");
+    }
+
+    #[test]
+    fn test_tx_id_fmt_display() {
+        let tx_id = TxId::new(42);
+        assert_eq!(format!("{}", tx_id), "TxId(42)");
+        assert_ne!(format!("{}", tx_id), "");
+    }
+
+    #[test]
+    fn test_entity_id_fmt_display() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_node: EntityId = node_id.into();
+        assert_eq!(format!("{}", entity_node), "Node(42)");
+        assert_ne!(format!("{}", entity_node), "");
+
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+        assert_eq!(format!("{}", entity_edge), "Edge(42)");
+        assert_ne!(format!("{}", entity_edge), "");
     }
 }

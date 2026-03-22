@@ -172,3 +172,9 @@
 **Summary:** Mutation testing revealed numerous surviving mutants related to `get_property` returning `None` or `Some(Default::default())`, `has_label` returning arbitrary `true`/`false` defaults or replacing `==` with `!=`, `has_label_str` replacing returns with default booleans, `matches_label` swapping `==` to `!=`, and `fmt::Debug` implementations simply outputting `Ok(Default::default())`.
 **Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted overall flow or simple positive logic paths without testing explicit exact equality returns for properties or structural content guarantees for strings. Some negative tests were missing entirely.
 **Kill Shot:** Appended targeted boundary and logic tests `test_get_property_behavior`, `test_has_label_behavior`, `test_has_label_str_behavior`, `test_matches_label_behavior`, and `test_debug_format_not_empty` into the `sentry_tests` module of `src/core/graph.rs`.
+
+**[Weak Test Coverage in EntityId Traits & Displays]**
+**Module:** `aletheiadb::core::id`
+**Summary:** Mutation testing indicated several surviving mutants around exact evaluation of defaults returned by `.as_node()`, `.as_edge()`, `is_node()`, `is_edge()` when replacing booleans with defaults. Additionally, missing display bounds for all string variations (replacing string formats with empty/defaults) and default overrides in ID conversions/generator settings were present.
+**Diagnosis:** WEAK_TEST / MISSING_TEST - Existing tests asserted conversions implicitly, avoiding the `.as_node()` options, default logic bounds on display parameters, and boolean strict logic implementations.
+**Kill Shot:** Appended explicit exact bound assertions via exhaustive methods like `test_entity_id_as_node_exhaustive` and `test_node_id_fmt_display` directly inside `src/core/id.rs` within `sentinel_tests_id_fmt` and `sentinel_entity_id_exhaustive_tests` to prevent defaults substituting standard types.
