@@ -36,6 +36,7 @@
 //! | `chronos` | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
 //! | `ariadne` | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
 //! | `echo` | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
+//! | `echosonar` | **EchoSonar** | Cyclic Semantic Behavior Detector. "Does this concept keep returning to its origins?" |
 //! | `kaleidoscope` | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
 //! | `sentinel` | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
 //! | `sybil` | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
@@ -134,6 +135,9 @@ pub mod dreamer;
 #[cfg(feature = "nova")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
+#[cfg(feature = "nova")]
+/// EchoSonar: Cyclic Semantic Behavior Detector.
+pub mod echosonar;
 #[cfg(feature = "nova")]
 /// Entanglement: Detecting Quantum Entanglement in the Graph.
 pub mod entanglement;
