@@ -385,354 +385,14 @@ pub(crate) fn parse_entry_at(
     add_offset!(1);
 
     // Parse operation data based on type and version
-    let operation = match op_type {
-        1 => {
-            // CreateNode
-            if current_offset.checked_add(12).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for CreateNode".to_string(),
-                )
-                .into());
-            }
-            let node_id = deserialize_node_id(buffer, current_offset, "CreateNode")?;
-            add_offset!(8);
-
-            // Read 4-byte InternedString ID
-            if current_offset.checked_add(4).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for CreateNode label".to_string(),
-                )
-                .into());
-            }
-            let label_id = u32::from_le_bytes(
-                buffer[current_offset..current_offset + 4]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            );
-            add_offset!(4);
-
-            // Reconstruct InternedString from ID
-            // During recovery, the string should already be in the interner
-            // (either from checkpoint or previous WAL entries)
-            let label = crate::core::interning::InternedString::from_raw(label_id);
-
-            // V1+: deserialize properties and temporal
-            let (properties, valid_from) = if version >= WAL_VERSION {
-                let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
-                add_offset!(props_len);
-                let (valid_from_ts, ts_len) =
-                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
-                add_offset!(ts_len);
-                (props, valid_from_ts)
-            } else {
-                (PropertyMap::new(), timestamp)
-            };
-
-            WalOperation::CreateNode {
-                node_id,
-                label,
-                properties,
-                valid_from,
-            }
-        }
-        2 => {
-            // CreateEdge
-            if current_offset.checked_add(28).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for CreateEdge".to_string(),
-                )
-                .into());
-            }
-            let edge_id = deserialize_edge_id(buffer, current_offset, "CreateEdge")?;
-            add_offset!(8);
-
-            let source = deserialize_node_id(buffer, current_offset, "CreateEdge source")?;
-            add_offset!(8);
-
-            let target = deserialize_node_id(buffer, current_offset, "CreateEdge target")?;
-            add_offset!(8);
-
-            // Read 4-byte InternedString ID
-            if current_offset.checked_add(4).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for CreateEdge label".to_string(),
-                )
-                .into());
-            }
-            let label_id = u32::from_le_bytes(
-                buffer[current_offset..current_offset + 4]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            );
-            add_offset!(4);
-
-            // Reconstruct InternedString from ID
-            let label = crate::core::interning::InternedString::from_raw(label_id);
-
-            let (properties, valid_from) = if version >= WAL_VERSION {
-                let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
-                add_offset!(props_len);
-                let (valid_from_ts, ts_len) =
-                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
-                add_offset!(ts_len);
-                (props, valid_from_ts)
-            } else {
-                (PropertyMap::new(), timestamp)
-            };
-
-            WalOperation::CreateEdge {
-                edge_id,
-                source,
-                target,
-                label,
-                properties,
-                valid_from,
-            }
-        }
-        3 => {
-            // UpdateNode
-            if current_offset.checked_add(16).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for UpdateNode".to_string(),
-                )
-                .into());
-            }
-            let node_id = deserialize_node_id(buffer, current_offset, "UpdateNode")?;
-            add_offset!(8);
-
-            let version_id = deserialize_version_id(buffer, current_offset, "UpdateNode")?;
-            add_offset!(8);
-
-            let (label, properties, valid_from) = if version >= WAL_VERSION {
-                // Read 4-byte InternedString ID
-                if current_offset.checked_add(4).ok_or_else(|| {
-                    Error::Storage(StorageError::CorruptedData(
-                        "WAL offset overflow".to_string(),
-                    ))
-                })? > buffer.len()
-                {
-                    return Err(StorageError::CorruptedData(
-                        "Insufficient buffer size for UpdateNode label".to_string(),
-                    )
-                    .into());
-                }
-                let label_id = u32::from_le_bytes([
-                    buffer[current_offset],
-                    buffer[current_offset + 1],
-                    buffer[current_offset + 2],
-                    buffer[current_offset + 3],
-                ]);
-                add_offset!(4);
-
-                // Reconstruct InternedString from ID
-                let lbl = crate::core::interning::InternedString::from_raw(label_id);
-
-                let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
-                add_offset!(props_len);
-                let (valid_from_ts, ts_len) =
-                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
-                add_offset!(ts_len);
-                (lbl, props, valid_from_ts)
-            } else {
-                (
-                    // For old WAL format, create a dummy InternedString (this shouldn't happen in practice)
-                    crate::core::interning::InternedString::from_raw(0),
-                    PropertyMap::new(),
-                    timestamp,
-                )
-            };
-
-            WalOperation::UpdateNode {
-                node_id,
-                version_id,
-                label,
-                properties,
-                valid_from,
-            }
-        }
-        4 => {
-            // UpdateEdge
-            // V0: 16 bytes (EdgeId + VersionId)
-            // V1+: 20 bytes (EdgeId + VersionId + LabelId)
-            let required = if version >= WAL_VERSION { 20 } else { 16 };
-            if current_offset.checked_add(required).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for UpdateEdge".to_string(),
-                )
-                .into());
-            }
-            let edge_id = deserialize_edge_id(buffer, current_offset, "UpdateEdge")?;
-            add_offset!(8);
-
-            let version_id = deserialize_version_id(buffer, current_offset, "UpdateEdge")?;
-            add_offset!(8);
-
-            let (label, properties, valid_from) = if version >= WAL_VERSION {
-                // Read 4-byte InternedString ID
-                if current_offset.checked_add(4).ok_or_else(|| {
-                    Error::Storage(StorageError::CorruptedData(
-                        "WAL offset overflow".to_string(),
-                    ))
-                })? > buffer.len()
-                {
-                    return Err(StorageError::CorruptedData(
-                        "Insufficient buffer size for UpdateEdge label".to_string(),
-                    )
-                    .into());
-                }
-                let label_id = u32::from_le_bytes([
-                    buffer[current_offset],
-                    buffer[current_offset + 1],
-                    buffer[current_offset + 2],
-                    buffer[current_offset + 3],
-                ]);
-                add_offset!(4);
-
-                // Reconstruct InternedString from ID
-                let lbl = crate::core::interning::InternedString::from_raw(label_id);
-
-                let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
-                add_offset!(props_len);
-                let (valid_from_ts, ts_len) =
-                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
-                add_offset!(ts_len);
-                (lbl, props, valid_from_ts)
-            } else {
-                (
-                    // For old WAL format, create a dummy InternedString (this shouldn't happen in practice)
-                    crate::core::interning::InternedString::from_raw(0),
-                    PropertyMap::new(),
-                    timestamp,
-                )
-            };
-
-            WalOperation::UpdateEdge {
-                edge_id,
-                version_id,
-                label,
-                properties,
-                valid_from,
-            }
-        }
-        5 => {
-            // Checkpoint: Phase 2: LSN (8 bytes) + HybridTimestamp (12 bytes) = 20 bytes
-            if current_offset.checked_add(20).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for Checkpoint".to_string(),
-                )
-                .into());
-            }
-            let cp_lsn = LSN(u64::from_le_bytes(
-                buffer[current_offset..current_offset + 8]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            ));
-            add_offset!(8);
-
-            // Phase 2: Deserialize HybridTimestamp (12 bytes: 8 wallclock + 4 logical)
-            let (cp_timestamp, consumed) = HybridTimestamp::deserialize(&buffer[current_offset..])?;
-            add_offset!(consumed);
-
-            WalOperation::Checkpoint {
-                lsn: cp_lsn,
-                timestamp: cp_timestamp,
-            }
-        }
-        6 => {
-            // DeleteNode
-            if current_offset.checked_add(8).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for DeleteNode".to_string(),
-                )
-                .into());
-            }
-            let node_id = deserialize_node_id(buffer, current_offset, "DeleteNode")?;
-            add_offset!(8);
-
-            let valid_from = if version >= WAL_VERSION {
-                let (valid_from_ts, ts_len) =
-                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
-                add_offset!(ts_len);
-                valid_from_ts
-            } else {
-                timestamp
-            };
-
-            WalOperation::DeleteNode {
-                node_id,
-                valid_from,
-            }
-        }
-        7 => {
-            // DeleteEdge
-            if current_offset.checked_add(8).ok_or_else(|| {
-                Error::Storage(StorageError::CorruptedData(
-                    "WAL offset overflow".to_string(),
-                ))
-            })? > buffer.len()
-            {
-                return Err(StorageError::CorruptedData(
-                    "Insufficient buffer size for DeleteEdge".to_string(),
-                )
-                .into());
-            }
-            let edge_id = deserialize_edge_id(buffer, current_offset, "DeleteEdge")?;
-            add_offset!(8);
-
-            let valid_from = if version >= WAL_VERSION {
-                let (valid_from_ts, ts_len) =
-                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
-                add_offset!(ts_len);
-                valid_from_ts
-            } else {
-                timestamp
-            };
-
-            WalOperation::DeleteEdge {
-                edge_id,
-                valid_from,
-            }
-        }
+    let (operation, current_offset) = match op_type {
+        1 => parse_create_node(buffer, current_offset, version, timestamp)?,
+        2 => parse_create_edge(buffer, current_offset, version, timestamp)?,
+        3 => parse_update_node(buffer, current_offset, version, timestamp)?,
+        4 => parse_update_edge(buffer, current_offset, version, timestamp)?,
+        5 => parse_checkpoint(buffer, current_offset)?,
+        6 => parse_delete_node(buffer, current_offset, version, timestamp)?,
+        7 => parse_delete_edge(buffer, current_offset, version, timestamp)?,
         _ => {
             // Unknown operation type
             return Err(StorageError::CorruptedData(format!(
@@ -742,7 +402,6 @@ pub(crate) fn parse_entry_at(
             .into());
         }
     };
-
     // Verify checksum to ensure data integrity (critical for WAL correctness)
     let mut hasher = crc32fast::Hasher::new();
     // Hash LSN (8 bytes) + timestamp (12 bytes) = bytes 0..20
@@ -2022,4 +1681,464 @@ mod sentry_tests {
             msg
         );
     }
+}
+
+fn parse_create_node(
+    buffer: &[u8],
+    mut current_offset: usize,
+    version: u8,
+    timestamp: HybridTimestamp,
+) -> Result<(WalOperation, usize)> {
+    macro_rules! add_offset {
+        ($n:expr) => {
+            current_offset = current_offset.checked_add($n).ok_or_else(|| {
+                Error::Storage(StorageError::CorruptedData(
+                    "WAL offset overflow".to_string(),
+                ))
+            })?;
+        };
+    }
+
+    if current_offset.checked_add(12).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for CreateNode".to_string(),
+        )
+        .into());
+    }
+    let node_id = deserialize_node_id(buffer, current_offset, "CreateNode")?;
+    add_offset!(8);
+
+    // Read 4-byte InternedString ID
+    if current_offset.checked_add(4).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for CreateNode label".to_string(),
+        )
+        .into());
+    }
+    let label_id = u32::from_le_bytes(
+        buffer[current_offset..current_offset + 4]
+            .try_into()
+            .unwrap(), // Safe due to buffer length check above
+    );
+    add_offset!(4);
+
+    // Reconstruct InternedString from ID
+    // During recovery, the string should already be in the interner
+    // (either from checkpoint or previous WAL entries)
+    let label = crate::core::interning::InternedString::from_raw(label_id);
+
+    // V1+: deserialize properties and temporal
+    let (properties, valid_from) = if version >= WAL_VERSION {
+        let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
+        add_offset!(props_len);
+        let (valid_from_ts, ts_len) = HybridTimestamp::deserialize(&buffer[current_offset..])?;
+        add_offset!(ts_len);
+        (props, valid_from_ts)
+    } else {
+        (PropertyMap::new(), timestamp)
+    };
+
+    Ok((
+        WalOperation::CreateNode {
+            node_id,
+            label,
+            properties,
+            valid_from,
+        },
+        current_offset,
+    ))
+}
+
+fn parse_create_edge(
+    buffer: &[u8],
+    mut current_offset: usize,
+    version: u8,
+    timestamp: HybridTimestamp,
+) -> Result<(WalOperation, usize)> {
+    macro_rules! add_offset {
+        ($n:expr) => {
+            current_offset = current_offset.checked_add($n).ok_or_else(|| {
+                Error::Storage(StorageError::CorruptedData(
+                    "WAL offset overflow".to_string(),
+                ))
+            })?;
+        };
+    }
+
+    if current_offset.checked_add(28).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for CreateEdge".to_string(),
+        )
+        .into());
+    }
+    let edge_id = deserialize_edge_id(buffer, current_offset, "CreateEdge")?;
+    add_offset!(8);
+
+    let source = deserialize_node_id(buffer, current_offset, "CreateEdge source")?;
+    add_offset!(8);
+
+    let target = deserialize_node_id(buffer, current_offset, "CreateEdge target")?;
+    add_offset!(8);
+
+    // Read 4-byte InternedString ID
+    if current_offset.checked_add(4).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for CreateEdge label".to_string(),
+        )
+        .into());
+    }
+    let label_id = u32::from_le_bytes(
+        buffer[current_offset..current_offset + 4]
+            .try_into()
+            .unwrap(), // Safe due to buffer length check above
+    );
+    add_offset!(4);
+
+    // Reconstruct InternedString from ID
+    let label = crate::core::interning::InternedString::from_raw(label_id);
+
+    let (properties, valid_from) = if version >= WAL_VERSION {
+        let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
+        add_offset!(props_len);
+        let (valid_from_ts, ts_len) = HybridTimestamp::deserialize(&buffer[current_offset..])?;
+        add_offset!(ts_len);
+        (props, valid_from_ts)
+    } else {
+        (PropertyMap::new(), timestamp)
+    };
+
+    Ok((
+        WalOperation::CreateEdge {
+            edge_id,
+            source,
+            target,
+            label,
+            properties,
+            valid_from,
+        },
+        current_offset,
+    ))
+}
+
+fn parse_update_node(
+    buffer: &[u8],
+    mut current_offset: usize,
+    version: u8,
+    timestamp: HybridTimestamp,
+) -> Result<(WalOperation, usize)> {
+    macro_rules! add_offset {
+        ($n:expr) => {
+            current_offset = current_offset.checked_add($n).ok_or_else(|| {
+                Error::Storage(StorageError::CorruptedData(
+                    "WAL offset overflow".to_string(),
+                ))
+            })?;
+        };
+    }
+
+    if current_offset.checked_add(16).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for UpdateNode".to_string(),
+        )
+        .into());
+    }
+    let node_id = deserialize_node_id(buffer, current_offset, "UpdateNode")?;
+    add_offset!(8);
+
+    let version_id = deserialize_version_id(buffer, current_offset, "UpdateNode")?;
+    add_offset!(8);
+
+    let (label, properties, valid_from) = if version >= WAL_VERSION {
+        // Read 4-byte InternedString ID
+        if current_offset.checked_add(4).ok_or_else(|| {
+            Error::Storage(StorageError::CorruptedData(
+                "WAL offset overflow".to_string(),
+            ))
+        })? > buffer.len()
+        {
+            return Err(StorageError::CorruptedData(
+                "Insufficient buffer size for UpdateNode label".to_string(),
+            )
+            .into());
+        }
+        let label_id = u32::from_le_bytes([
+            buffer[current_offset],
+            buffer[current_offset + 1],
+            buffer[current_offset + 2],
+            buffer[current_offset + 3],
+        ]);
+        add_offset!(4);
+
+        // Reconstruct InternedString from ID
+        let lbl = crate::core::interning::InternedString::from_raw(label_id);
+
+        let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
+        add_offset!(props_len);
+        let (valid_from_ts, ts_len) = HybridTimestamp::deserialize(&buffer[current_offset..])?;
+        add_offset!(ts_len);
+        (lbl, props, valid_from_ts)
+    } else {
+        (
+            // For old WAL format, create a dummy InternedString (this shouldn't happen in practice)
+            crate::core::interning::InternedString::from_raw(0),
+            PropertyMap::new(),
+            timestamp,
+        )
+    };
+
+    Ok((
+        WalOperation::UpdateNode {
+            node_id,
+            version_id,
+            label,
+            properties,
+            valid_from,
+        },
+        current_offset,
+    ))
+}
+
+fn parse_update_edge(
+    buffer: &[u8],
+    mut current_offset: usize,
+    version: u8,
+    timestamp: HybridTimestamp,
+) -> Result<(WalOperation, usize)> {
+    macro_rules! add_offset {
+        ($n:expr) => {
+            current_offset = current_offset.checked_add($n).ok_or_else(|| {
+                Error::Storage(StorageError::CorruptedData(
+                    "WAL offset overflow".to_string(),
+                ))
+            })?;
+        };
+    }
+
+    let required = if version >= WAL_VERSION { 20 } else { 16 };
+    if current_offset.checked_add(required).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for UpdateEdge".to_string(),
+        )
+        .into());
+    }
+    let edge_id = deserialize_edge_id(buffer, current_offset, "UpdateEdge")?;
+    add_offset!(8);
+
+    let version_id = deserialize_version_id(buffer, current_offset, "UpdateEdge")?;
+    add_offset!(8);
+
+    let (label, properties, valid_from) = if version >= WAL_VERSION {
+        // Read 4-byte InternedString ID
+        if current_offset.checked_add(4).ok_or_else(|| {
+            Error::Storage(StorageError::CorruptedData(
+                "WAL offset overflow".to_string(),
+            ))
+        })? > buffer.len()
+        {
+            return Err(StorageError::CorruptedData(
+                "Insufficient buffer size for UpdateEdge label".to_string(),
+            )
+            .into());
+        }
+        let label_id = u32::from_le_bytes([
+            buffer[current_offset],
+            buffer[current_offset + 1],
+            buffer[current_offset + 2],
+            buffer[current_offset + 3],
+        ]);
+        add_offset!(4);
+
+        // Reconstruct InternedString from ID
+        let lbl = crate::core::interning::InternedString::from_raw(label_id);
+
+        let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
+        add_offset!(props_len);
+        let (valid_from_ts, ts_len) = HybridTimestamp::deserialize(&buffer[current_offset..])?;
+        add_offset!(ts_len);
+        (lbl, props, valid_from_ts)
+    } else {
+        (
+            // For old WAL format, create a dummy InternedString (this shouldn't happen in practice)
+            crate::core::interning::InternedString::from_raw(0),
+            PropertyMap::new(),
+            timestamp,
+        )
+    };
+
+    Ok((
+        WalOperation::UpdateEdge {
+            edge_id,
+            version_id,
+            label,
+            properties,
+            valid_from,
+        },
+        current_offset,
+    ))
+}
+
+fn parse_checkpoint(buffer: &[u8], mut current_offset: usize) -> Result<(WalOperation, usize)> {
+    macro_rules! add_offset {
+        ($n:expr) => {
+            current_offset = current_offset.checked_add($n).ok_or_else(|| {
+                Error::Storage(StorageError::CorruptedData(
+                    "WAL offset overflow".to_string(),
+                ))
+            })?;
+        };
+    }
+
+    if current_offset.checked_add(20).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for Checkpoint".to_string(),
+        )
+        .into());
+    }
+    let cp_lsn = LSN(u64::from_le_bytes(
+        buffer[current_offset..current_offset + 8]
+            .try_into()
+            .unwrap(), // Safe due to buffer length check above
+    ));
+    add_offset!(8);
+
+    // Phase 2: Deserialize HybridTimestamp (12 bytes: 8 wallclock + 4 logical)
+    let (cp_timestamp, consumed) = HybridTimestamp::deserialize(&buffer[current_offset..])?;
+    add_offset!(consumed);
+
+    Ok((
+        WalOperation::Checkpoint {
+            lsn: cp_lsn,
+            timestamp: cp_timestamp,
+        },
+        current_offset,
+    ))
+}
+
+fn parse_delete_node(
+    buffer: &[u8],
+    mut current_offset: usize,
+    version: u8,
+    timestamp: HybridTimestamp,
+) -> Result<(WalOperation, usize)> {
+    macro_rules! add_offset {
+        ($n:expr) => {
+            current_offset = current_offset.checked_add($n).ok_or_else(|| {
+                Error::Storage(StorageError::CorruptedData(
+                    "WAL offset overflow".to_string(),
+                ))
+            })?;
+        };
+    }
+
+    if current_offset.checked_add(8).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for DeleteNode".to_string(),
+        )
+        .into());
+    }
+    let node_id = deserialize_node_id(buffer, current_offset, "DeleteNode")?;
+    add_offset!(8);
+
+    let valid_from = if version >= WAL_VERSION {
+        let (valid_from_ts, ts_len) = HybridTimestamp::deserialize(&buffer[current_offset..])?;
+        add_offset!(ts_len);
+        valid_from_ts
+    } else {
+        timestamp
+    };
+
+    Ok((
+        WalOperation::DeleteNode {
+            node_id,
+            valid_from,
+        },
+        current_offset,
+    ))
+}
+
+fn parse_delete_edge(
+    buffer: &[u8],
+    mut current_offset: usize,
+    version: u8,
+    timestamp: HybridTimestamp,
+) -> Result<(WalOperation, usize)> {
+    macro_rules! add_offset {
+        ($n:expr) => {
+            current_offset = current_offset.checked_add($n).ok_or_else(|| {
+                Error::Storage(StorageError::CorruptedData(
+                    "WAL offset overflow".to_string(),
+                ))
+            })?;
+        };
+    }
+
+    if current_offset.checked_add(8).ok_or_else(|| {
+        Error::Storage(StorageError::CorruptedData(
+            "WAL offset overflow".to_string(),
+        ))
+    })? > buffer.len()
+    {
+        return Err(StorageError::CorruptedData(
+            "Insufficient buffer size for DeleteEdge".to_string(),
+        )
+        .into());
+    }
+    let edge_id = deserialize_edge_id(buffer, current_offset, "DeleteEdge")?;
+    add_offset!(8);
+
+    let valid_from = if version >= WAL_VERSION {
+        let (valid_from_ts, ts_len) = HybridTimestamp::deserialize(&buffer[current_offset..])?;
+        add_offset!(ts_len);
+        valid_from_ts
+    } else {
+        timestamp
+    };
+
+    Ok((
+        WalOperation::DeleteEdge {
+            edge_id,
+            valid_from,
+        },
+        current_offset,
+    ))
 }
