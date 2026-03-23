@@ -12,3 +12,8 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `Resonator` trait in `src/experimental/echo.rs` (Single-implementation trait for DI).
+**Cut:** Deleted the `Resonator` trait and replaced `Box<dyn Resonator>` usages directly with the concrete struct `ActivityDensityResonator`. Removed generic parameters `<R: Resonator>`.
+**Saved:** ~10 lines of trait definition boilerplate, removed heap allocation for dynamic dispatch, and lowered cognitive overhead of following abstract layer mappings.
