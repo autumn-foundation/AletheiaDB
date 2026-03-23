@@ -88,6 +88,10 @@ classDiagram
         class QueryEngine
         class TemporalPlanner
         class TraversalEngine
+        class QueryExecutable
+    }
+    namespace Utils {
+        class Error
     }
     namespace Storage {
         class CurrentStorage
@@ -102,12 +106,14 @@ classDiagram
     }
 
     MCPServer --> QueryEngine : Uses
-    QueryEngine --> AletheiaDB : Uses
+    QueryEngine --> QueryExecutable : Executes via
+    AletheiaDB ..|> QueryExecutable : Implements
     AletheiaDB --> CurrentStorage : "Owns (Arc)"
     AletheiaDB --> HistoricalStorage : "Owns (Arc<RwLock>)"
     %% Removed the circular dependency arrow
     HistoricalStorage --> TieredStorage : Uses
     TieredStorage --> RedbColdStorage : Uses
+    Utils ..> Core : Depends on CoreError
 ```
 
 **When to Use Each:**

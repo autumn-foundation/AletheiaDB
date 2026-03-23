@@ -1,6 +1,6 @@
 # ADR-0052: Chimera Hybrid Entity Synthesis Engine
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-01
 **Deciders:** Atlas, Codex
 **Categories:** Experimental, Cognitive Architecture, Data Synthesis

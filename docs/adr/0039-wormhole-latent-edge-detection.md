@@ -1,6 +1,6 @@
 # ADR-0039: Wormhole (Latent Edge Detection)
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-25
 **Deciders:** AletheiaDB Core Team
 **Categories:** experimental, hybrid-search, reasoning

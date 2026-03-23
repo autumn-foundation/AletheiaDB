@@ -82,6 +82,7 @@ What other options were evaluated?
 | [ADR-0013](0013-tiered-storage-architecture.md) | Tiered Storage Architecture | 2026-01-01 | storage, scalability, performance |
 | [ADR-0014](0014-graph-sharding-strategy.md) | Graph Sharding Strategy | 2026-01-01 | storage, scalability, distributed |
 | [ADR-0026](0026-encryption-at-rest.md) | Encryption-at-Rest Architecture | 2026-01-27 | security, storage, durability, encryption |
+| [ADR-0055](0055-breaking-dependency-cycles.md) | Breaking Core and Query Dependency Cycles | 2026-03-23 | architecture, core, query, modularity |
 
 ## Creating a New ADR
 
