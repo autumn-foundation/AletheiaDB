@@ -561,22 +561,27 @@ impl<C: ShardClient> QueryExecutor<C> {
     }
 
     fn serialize_traversal_plan(&self, plan: &TraversalPlan) -> Vec<u8> {
-        // Simplified serialization
-        // ⚡ Bolt Optimization: Pre-calculate vector capacity based on the steps and edge labels
-        // to avoid multiple heap reallocations.
-        let capacity = 4 + plan
-            .steps
-            .iter()
-            .map(|step| {
-                2 + 4
-                    + step
-                        .edge_labels
-                        .iter()
-                        .map(|label| 4 + label.len())
-                        .sum::<usize>()
-                    + 1
-            })
-            .sum::<usize>();
+        const STEP_COUNT_SIZE: usize = size_of::<u32>();
+        const SHARD_ID_SIZE: usize = size_of::<u16>();
+        const LABEL_COUNT_SIZE: usize = size_of::<u32>();
+        const LABEL_LEN_SIZE: usize = size_of::<u32>();
+        const CROSS_SHARD_FLAG_SIZE: usize = size_of::<u8>();
+
+        let capacity = STEP_COUNT_SIZE
+            + plan
+                .steps
+                .iter()
+                .map(|step| {
+                    SHARD_ID_SIZE
+                        + LABEL_COUNT_SIZE
+                        + step
+                            .edge_labels
+                            .iter()
+                            .map(|label| LABEL_LEN_SIZE + label.len())
+                            .sum::<usize>()
+                        + CROSS_SHARD_FLAG_SIZE
+                })
+                .sum::<usize>();
 
         let mut data = Vec::with_capacity(capacity);
         data.extend_from_slice(&(plan.steps.len() as u32).to_le_bytes());
