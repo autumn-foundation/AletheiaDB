@@ -36,3 +36,6 @@
 **Optimize Traversal Plan Serialization Vec Pre-allocation**
 **Learning:** Initializing the serialized traversal plan with `Vec::new()` and repeatedly pushing/extending primitive byte arrays (`u32`, `u16`, `[u8]`) into it inside nested loops creates an arbitrary number of heap reallocations because the byte capacity size isn't known ahead of time.
 **Action:** When serializing structs into byte arrays, always calculate the exact required capacity first using iterator combinators (e.g., `.sum::<usize>()`) over the inputs (e.g., node paths, string lengths) and initialize the buffer with `Vec::with_capacity(capacity)`.
+**[DashMap Guard iterators and .cloned()]**
+**Learning:** In AletheiaDB, `CurrentIndexes` iterators (`iter_nodes`, `iter_edges`) yield `impl Deref<Target = Node>` representing DashMap guards, not simple references (`&T`). Thus, attempting to apply `.cloned()` fails to compile since it strictly requires `&T`.
+**Action:** Always use `.map(|n| n.clone())` instead of `.cloned()` when iterating over DashMap guards or opaque `impl Deref` types.
