@@ -593,6 +593,43 @@ mod tests {
             "Should return false when source mismatches even if target matches"
         );
     }
+
+    #[test]
+    fn test_edge_connects_exhaustive() {
+        // 🛡️ Sentry Test: Kill mutants replacing `==` with `!=` or returning `true`/`false` or mutating `&&` to `||` in `connects`.
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(10).unwrap(),
+            NodeId::new(20).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Match both
+        assert!(
+            edge.connects(NodeId::new(10).unwrap(), NodeId::new(20).unwrap()),
+            "Should return true for exact match"
+        );
+
+        // Mismatch both
+        assert!(
+            !edge.connects(NodeId::new(11).unwrap(), NodeId::new(21).unwrap()),
+            "Should return false for complete mismatch"
+        );
+
+        // Match source, mismatch target
+        assert!(
+            !edge.connects(NodeId::new(10).unwrap(), NodeId::new(21).unwrap()),
+            "Should return false when target mismatches"
+        );
+
+        // Mismatch source, match target
+        assert!(
+            !edge.connects(NodeId::new(11).unwrap(), NodeId::new(20).unwrap()),
+            "Should return false when source mismatches"
+        );
+    }
 }
 
 #[cfg(test)]
