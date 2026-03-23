@@ -643,7 +643,9 @@ impl<S: QueryState> QueryBuilder<S> {
     #[must_use]
     pub fn valid_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
         let mut ctx = self.temporal_context.take().unwrap_or_default();
-        ctx.valid_time_between = Some(TimeRange::between(start, end).unwrap());
+        ctx.valid_time_between = Some(TimeRange::between(start, end).expect(
+            "valid_time_between: start timestamp must be less than or equal to end timestamp",
+        ));
         self.temporal_context = Some(ctx);
         self
     }
@@ -670,7 +672,9 @@ impl<S: QueryState> QueryBuilder<S> {
     #[must_use]
     pub fn transaction_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
         let mut ctx = self.temporal_context.take().unwrap_or_default();
-        ctx.transaction_time_between = Some(TimeRange::between(start, end).unwrap());
+        ctx.transaction_time_between = Some(TimeRange::between(start, end).expect(
+            "transaction_time_between: start timestamp must be less than or equal to end timestamp",
+        ));
         self.temporal_context = Some(ctx);
         self
     }
@@ -687,7 +691,10 @@ impl<S: QueryState> QueryBuilder<S> {
     #[must_use]
     pub fn between(mut self, start: Timestamp, end: Timestamp) -> Self {
         let mut ctx = self.temporal_context.take().unwrap_or_default();
-        ctx.valid_time_between = Some(TimeRange::between(start, end).unwrap());
+        ctx.valid_time_between = Some(
+            TimeRange::between(start, end)
+                .expect("between: start timestamp must be less than or equal to end timestamp"),
+        );
         self.temporal_context = Some(ctx);
         self
     }
@@ -1190,6 +1197,22 @@ mod tests {
                 .valid_time_between
                 .is_some()
         );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "valid_time_between: start timestamp must be less than or equal to end timestamp"
+    )]
+    fn test_valid_time_between_panics_on_invalid_range() {
+        let _ = QueryBuilder::new().valid_time_between(2000.into(), 1000.into());
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "transaction_time_between: start timestamp must be less than or equal to end timestamp"
+    )]
+    fn test_transaction_time_between_panics_on_invalid_range() {
+        let _ = QueryBuilder::new().transaction_time_between(2000.into(), 1000.into());
     }
 
     #[test]

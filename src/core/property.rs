@@ -685,7 +685,10 @@ impl PropertyValue {
             );
         }
         // SAFETY: Length check above guarantees slice has 8 bytes
-        let value = i64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        let bytes_array = bytes[1..9]
+            .try_into()
+            .map_err(|_| StorageError::CorruptedData("Failed to read Int bytes".to_string()))?;
+        let value = i64::from_le_bytes(bytes_array);
         Ok((PropertyValue::Int(value), 9))
     }
 
@@ -697,7 +700,10 @@ impl PropertyValue {
             .into());
         }
         // SAFETY: Length check above guarantees slice has 8 bytes
-        let value = f64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        let bytes_array = bytes[1..9]
+            .try_into()
+            .map_err(|_| StorageError::CorruptedData("Failed to read Float bytes".to_string()))?;
+        let value = f64::from_le_bytes(bytes_array);
         Ok((PropertyValue::Float(value), 9))
     }
 
@@ -709,7 +715,10 @@ impl PropertyValue {
             )
             .into());
         }
-        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let len_bytes = bytes[1..5].try_into().map_err(|_| {
+            StorageError::CorruptedData("Failed to read String length bytes".to_string())
+        })?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -739,7 +748,10 @@ impl PropertyValue {
             )
             .into());
         }
-        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let len_bytes = bytes[1..5]
+            .try_into()
+            .map_err(|_| StorageError::CorruptedData("Failed to read Bytes length".to_string()))?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -766,7 +778,10 @@ impl PropertyValue {
             )
             .into());
         }
-        let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let count_bytes = bytes[1..5].try_into().map_err(|_| {
+            StorageError::CorruptedData("Failed to read Array count bytes".to_string())
+        })?;
+        let count = u32::from_le_bytes(count_bytes) as usize;
         let mut offset: usize = 5;
 
         // Prevent DoS via memory exhaustion from malicious input
@@ -1354,7 +1369,10 @@ impl PropertyMap {
             .into());
         }
 
-        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let count_bytes = bytes[0..4].try_into().map_err(|_| {
+            StorageError::CorruptedData("Failed to read PropertyMap count bytes".to_string())
+        })?;
+        let count = u32::from_le_bytes(count_bytes) as usize;
 
         // Prevent DoS via memory exhaustion from malicious input
         if count > MAX_PROPERTY_MAP_CAPACITY {
@@ -1394,8 +1412,12 @@ impl PropertyMap {
                 .into());
             }
             // SAFETY: Length check above guarantees 4 bytes available
-            let key_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let key_len_bytes = bytes[offset..offset + 4].try_into().map_err(|_| {
+                StorageError::CorruptedData(
+                    "Failed to read PropertyMap key length bytes".to_string(),
+                )
+            })?;
+            let key_len = u32::from_le_bytes(key_len_bytes) as usize;
             offset += 4;
 
             // Read key
@@ -3649,6 +3671,46 @@ mod sentry_tests {
     /// 💣 Risk: Calculation failure should default to a "penalty" size to prevent cache monopolization by malicious inputs.
     /// 🧪 Strategy: Call estimated_heap_size on a deeply nested structure.
     /// 🔬 Verification: Verify result is 10MB (10 * 1024 * 1024).
+    #[test]
+    fn test_deserialize_corrupted_data_length() {
+        // Test short byte slices to ensure map_err catches truncated bytes cleanly
+        // Int
+        let bytes = vec![TAG_INT, 0, 0, 0];
+        let res = PropertyValue::deserialize(&bytes);
+        assert!(res.is_err());
+        assert!(format!("{:?}", res.unwrap_err()).contains("too short"));
+
+        // Float
+        let bytes = vec![TAG_FLOAT, 0, 0, 0];
+        let res = PropertyValue::deserialize(&bytes);
+        assert!(res.is_err());
+        assert!(format!("{:?}", res.unwrap_err()).contains("too short"));
+
+        // String
+        let bytes = vec![TAG_STRING, 0, 0, 0];
+        let res = PropertyValue::deserialize(&bytes);
+        assert!(res.is_err());
+        assert!(format!("{:?}", res.unwrap_err()).contains("too short"));
+
+        // Bytes
+        let bytes = vec![TAG_BYTES, 0, 0, 0];
+        let res = PropertyValue::deserialize(&bytes);
+        assert!(res.is_err());
+        assert!(format!("{:?}", res.unwrap_err()).contains("too short"));
+
+        // Array
+        let bytes = vec![TAG_ARRAY, 0, 0, 0];
+        let res = PropertyValue::deserialize(&bytes);
+        assert!(res.is_err());
+        assert!(format!("{:?}", res.unwrap_err()).contains("too short"));
+
+        // PropertyMap
+        let bytes = vec![0, 0, 0];
+        let res = PropertyMap::deserialize(&bytes);
+        assert!(res.is_err());
+        assert!(format!("{:?}", res.unwrap_err()).contains("too short"));
+    }
+
     #[test]
     fn test_property_value_estimated_heap_size_penalty() {
         let mut value = PropertyValue::Int(42);
