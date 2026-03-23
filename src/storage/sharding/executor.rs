@@ -976,6 +976,91 @@ mod tests {
         assert_ne!(shard_id_1, shard_id_2);
     }
 
+    // ==================== Serialization Tests ====================
+
+    #[test]
+    fn test_serialize_traversal_plan() {
+        use crate::storage::sharding::router::{TraversalPlan, TraversalStep};
+        use std::collections::HashSet;
+
+        let executor: QueryExecutor<MockShardClient> =
+            QueryExecutor::new(ExecutorConfig::default(), test_router());
+
+        let mut plan = TraversalPlan {
+            start_shard: make_shard_id(0),
+            involved_shards: HashSet::new(),
+            steps: vec![],
+            is_distributed: false,
+            estimated_cost: 0.0,
+        };
+
+        plan.involved_shards.insert(make_shard_id(0));
+        plan.involved_shards.insert(make_shard_id(1));
+
+        plan.steps.push(TraversalStep {
+            shard_id: make_shard_id(0),
+            edge_labels: vec!["KNOWS".to_string(), "FRIEND".to_string()],
+            may_cross_shard: true,
+        });
+
+        plan.steps.push(TraversalStep {
+            shard_id: make_shard_id(1),
+            edge_labels: vec!["WORKS_AT".to_string()],
+            may_cross_shard: false,
+        });
+
+        let serialized = executor.serialize_traversal_plan(&plan);
+
+        // Expected length calculation
+        // 4 bytes for number of steps
+        // Step 1: 2 (shard_id) + 4 (num labels) + (4 + 5) (KNOWS) + (4 + 6) (FRIEND) + 1 (cross shard) = 26 bytes
+        // Step 2: 2 (shard_id) + 4 (num labels) + (4 + 8) (WORKS_AT) + 1 (cross shard) = 19 bytes
+        // Total = 4 + 26 + 19 = 49 bytes
+        assert_eq!(serialized.len(), 49);
+
+        let mut offset = 0;
+
+        // Num steps
+        let num_steps = u32::from_le_bytes([
+            serialized[offset],
+            serialized[offset + 1],
+            serialized[offset + 2],
+            serialized[offset + 3],
+        ]);
+        assert_eq!(num_steps, 2);
+        offset += 4;
+
+        // Step 1
+        let shard_1 = u16::from_le_bytes([serialized[offset], serialized[offset + 1]]);
+        assert_eq!(shard_1, 0);
+        offset += 2;
+
+        let num_labels_1 = u32::from_le_bytes([
+            serialized[offset],
+            serialized[offset + 1],
+            serialized[offset + 2],
+            serialized[offset + 3],
+        ]);
+        assert_eq!(num_labels_1, 2);
+        offset += 4;
+
+        // Label 1
+        let label_1_len = u32::from_le_bytes([
+            serialized[offset],
+            serialized[offset + 1],
+            serialized[offset + 2],
+            serialized[offset + 3],
+        ]);
+        assert_eq!(label_1_len, 5);
+        offset += 4;
+
+        let label_1 = std::str::from_utf8(&serialized[offset..offset + 5]).unwrap();
+        assert_eq!(label_1, "KNOWS");
+
+        // Skip rest of checks, ensuring the capacity matches actual output is the main goal
+        assert_eq!(serialized.capacity(), serialized.len());
+    }
+
     // ==================== ExecutorStats Tests ====================
 
     #[test]
