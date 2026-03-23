@@ -1841,14 +1841,18 @@ impl CurrentStorage {
     ///
     /// Used by recovery property tests to verify invariants.
     pub fn get_all_nodes(&self) -> Vec<crate::Node> {
-        self.indexes.iter_nodes().map(|n| n.clone()).collect()
+        let mut nodes = Vec::with_capacity(self.indexes.node_count());
+        nodes.extend(self.indexes.iter_nodes().map(|n| n.clone()));
+        nodes
     }
 
     /// Get all edges in the current storage.
     ///
     /// Used by recovery property tests to verify invariants.
     pub fn get_all_edges(&self) -> Vec<crate::Edge> {
-        self.indexes.iter_edges().map(|e| e.clone()).collect()
+        let mut edges = Vec::with_capacity(self.indexes.edge_count());
+        edges.extend(self.indexes.iter_edges().map(|e| e.clone()));
+        edges
     }
 
     /// Get nodes by label.
@@ -2133,13 +2137,17 @@ impl CurrentStorage {
 
         // Collect all nodes into a single contiguous block on the heap, and share it via Arc.
         // ⚡ Bolt Optimization: Avoids thousands of individual `Arc::new()` heap allocations.
-        let nodes: Arc<Vec<Node>> =
-            Arc::new(self.indexes.iter_nodes().map(|n| n.clone()).collect());
+        // ⚡ Bolt Optimization: Pre-allocate vector using known node_count to avoid reallocations during collect()
+        let mut n = Vec::with_capacity(self.indexes.node_count());
+        n.extend(self.indexes.iter_nodes().map(|n| n.clone()));
+        let nodes: Arc<Vec<Node>> = Arc::new(n);
 
         // Collect all edges into a single contiguous block on the heap, and share it via Arc.
         // ⚡ Bolt Optimization: Avoids thousands of individual `Arc::new()` heap allocations.
-        let edges: Arc<Vec<Edge>> =
-            Arc::new(self.indexes.iter_edges().map(|e| e.clone()).collect());
+        // ⚡ Bolt Optimization: Pre-allocate vector using known edge_count to avoid reallocations during collect()
+        let mut e = Vec::with_capacity(self.indexes.edge_count());
+        e.extend(self.indexes.iter_edges().map(|e| e.clone()));
+        let edges: Arc<Vec<Edge>> = Arc::new(e);
 
         CurrentStorageSnapshot::new(lsn, nodes, edges)
     }
