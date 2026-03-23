@@ -362,9 +362,15 @@ mod tests {
             VersionId::new(1).unwrap(),
         );
 
-        assert!(edge.connects(NodeId::new(1).unwrap(), NodeId::new(2).unwrap()));
-        assert!(!edge.connects(NodeId::new(2).unwrap(), NodeId::new(1).unwrap()));
-        assert!(!edge.connects(NodeId::new(1).unwrap(), NodeId::new(3).unwrap()));
+        let res1 = edge.connects(NodeId::new(1).unwrap(), NodeId::new(2).unwrap());
+        let res2 = edge.connects(NodeId::new(2).unwrap(), NodeId::new(1).unwrap());
+        let res3 = edge.connects(NodeId::new(1).unwrap(), NodeId::new(3).unwrap());
+        let res4 = edge.connects(NodeId::new(3).unwrap(), NodeId::new(2).unwrap());
+
+        assert!(res1, "Edge should connect 1 to 2");
+        assert!(!res2, "Edge should not connect 2 to 1");
+        assert!(!res3, "Edge should not connect 1 to 3");
+        assert!(!res4, "Edge should not connect 3 to 2");
     }
 
     #[test]
@@ -637,6 +643,11 @@ mod sentry_tests {
             !node.has_label_str("Admin"),
             "matches_label should return false when checking against a different label"
         );
+
+        assert!(
+            node.has_label_str("User"),
+            "matches_label should return true when checking against exact label"
+        );
     }
 
     #[test]
@@ -663,6 +674,10 @@ mod sentry_tests {
         );
         assert_eq!(node.metadata.created_by_tx, tx_id);
         assert_eq!(node.metadata.commit_timestamp, Some(timestamp));
+        // Note: Default is not implemented for Node. Mutants returning Default::default()
+        // inside Node::with_metadata result in compile-time unviable code for this crate type
+        // if type doesn't support Default. However, if they change the logic, we test fields explicitly.
+        assert_eq!(node.id, NodeId::new(1).unwrap());
     }
 
     #[test]
@@ -691,6 +706,7 @@ mod sentry_tests {
         );
         assert_eq!(edge.metadata.created_by_tx, tx_id);
         assert_eq!(edge.metadata.commit_timestamp, Some(timestamp));
+        assert_eq!(edge.id, EdgeId::new(1).unwrap());
     }
 
     #[test]
@@ -760,14 +776,8 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
-        assert!(
-            node.has_label(label_a),
-            "has_label must return true for exact match"
-        );
-        assert!(
-            !node.has_label(label_b),
-            "has_label must return false for mismatch"
-        );
+        assert!(node.has_label(label_a), "has_label must return true for exact match");
+        assert!(!node.has_label(label_b), "has_label must return false for mismatch");
 
         let edge = Edge::new(
             EdgeId::new(1).unwrap(),
@@ -778,14 +788,8 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
-        assert!(
-            edge.has_label(label_a),
-            "Edge::has_label must return true for exact match"
-        );
-        assert!(
-            !edge.has_label(label_b),
-            "Edge::has_label must return false for mismatch"
-        );
+        assert!(edge.has_label(label_a), "Edge::has_label must return true for exact match");
+        assert!(!edge.has_label(label_b), "Edge::has_label must return false for mismatch");
     }
 
     #[test]
@@ -800,14 +804,8 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
-        assert!(
-            node.has_label_str("TargetLabel"),
-            "has_label_str must return true for exact match"
-        );
-        assert!(
-            !node.has_label_str("OtherLabel"),
-            "has_label_str must return false for mismatch"
-        );
+        assert!(node.has_label_str("TargetLabel"), "has_label_str must return true for exact match");
+        assert!(!node.has_label_str("OtherLabel"), "has_label_str must return false for mismatch");
 
         let edge = Edge::new(
             EdgeId::new(1).unwrap(),
@@ -818,12 +816,15 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
+        let eres_match = edge.has_label_str("TargetLabel");
+        let eres_miss = edge.has_label_str("OtherLabel");
+
         assert!(
-            edge.has_label_str("TargetLabel"),
+            eres_match,
             "Edge::has_label_str must return true for exact match"
         );
         assert!(
-            !edge.has_label_str("OtherLabel"),
+            !eres_miss,
             "Edge::has_label_str must return false for mismatch"
         );
     }
@@ -834,14 +835,8 @@ mod sentry_tests {
         let label_id = GLOBAL_INTERNER.intern("MatchMe").unwrap();
 
         // Direct test of the matches_label function
-        assert!(
-            super::matches_label(label_id, "MatchMe"),
-            "matches_label must return true for match"
-        );
-        assert!(
-            !super::matches_label(label_id, "DoNotMatch"),
-            "matches_label must return false for mismatch"
-        );
+        assert!(super::matches_label(label_id, "MatchMe"), "matches_label must return true for match");
+        assert!(!super::matches_label(label_id, "DoNotMatch"), "matches_label must return false for mismatch");
     }
 
     #[test]
@@ -866,6 +861,15 @@ mod sentry_tests {
             node_debug.len() > 10,
             "Node debug format must contain structured data"
         );
+        let node_debug_str = node_debug.clone();
+        assert!(
+            node_debug_str.contains("Node { id: NodeId("),
+            "Node debug should contain id"
+        );
+        assert!(
+            node_debug_str.contains("label: \"DebugLabel\""),
+            "Node debug should contain label"
+        );
 
         let edge = Edge::new(
             EdgeId::new(1).unwrap(),
@@ -884,6 +888,19 @@ mod sentry_tests {
         assert!(
             edge_debug.len() > 10,
             "Edge debug format must contain structured data"
+        );
+        let edge_debug_str = edge_debug.clone();
+        assert!(
+            edge_debug_str.contains("Edge { id: EdgeId("),
+            "Edge debug should contain id"
+        );
+        assert!(
+            edge_debug_str.contains("source: NodeId("),
+            "Edge debug should contain source"
+        );
+        assert!(
+            edge_debug_str.contains("target: NodeId("),
+            "Edge debug should contain target"
         );
     }
 }
