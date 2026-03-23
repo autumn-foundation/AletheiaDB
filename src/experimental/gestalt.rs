@@ -54,6 +54,37 @@ pub struct PatternEdge {
 }
 
 /// A graph pattern to search for.
+///
+/// A pattern represents the structure (nodes, edges, labels) and the semantic
+/// constraints (vector embeddings) you want to discover in the database.
+///
+/// # Examples
+///
+/// Building a pattern to find a specific sub-graph structure:
+///
+/// ```
+/// use aletheiadb::experimental::gestalt::Pattern;
+///
+/// # fn main() {
+/// let mut pattern = Pattern::new();
+///
+/// // Create a starting node constraint.
+/// // We're looking for a Person matching this embedding concept:
+/// let p0 = pattern.add_semantic_node(
+///     Some("Person".to_string()),
+///     "embedding".to_string(),
+///     vec![0.8, 0.2, 0.1],
+///     0.85, // Similarity threshold
+/// );
+///
+/// // Create a target constraint.
+/// // We're looking for a related Company:
+/// let p1 = pattern.add_node(Some("Company".to_string()));
+///
+/// // Connect them. "Person" -> `WORKS_FOR` -> "Company"
+/// pattern.add_edge(p0, p1, Some("WORKS_FOR".to_string()));
+/// # }
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct Pattern {
     /// Nodes in the pattern.
@@ -63,12 +94,14 @@ pub struct Pattern {
 }
 
 impl Pattern {
-    /// Create a new empty pattern.
+    /// Create a new, empty pattern.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Add a node to the pattern.
+    /// Add a basic node to the pattern without semantic constraints.
+    ///
+    /// Returns the internal index of the new node, which can be used to connect edges.
     pub fn add_node(&mut self, label: Option<String>) -> usize {
         let id = self.nodes.len();
         self.nodes.push(PatternNode {
@@ -79,7 +112,13 @@ impl Pattern {
         id
     }
 
-    /// Add a node with a vector constraint.
+    /// Add a node with a semantic vector constraint.
+    ///
+    /// This defines an "anchor" node. When evaluating the pattern, the
+    /// [`GestaltMatcher`] will first find nodes meeting this semantic
+    /// threshold, then expand outward to check the rest of the pattern.
+    ///
+    /// Returns the internal index of the new node.
     pub fn add_semantic_node(
         &mut self,
         label: Option<String>,
@@ -100,7 +139,11 @@ impl Pattern {
         id
     }
 
-    /// Add a directed edge.
+    /// Add a directed edge between two previously added nodes.
+    ///
+    /// The `source` and `target` IDs must correspond to nodes already created
+    /// via [`add_node`](Pattern::add_node) or [`add_semantic_node`](Pattern::add_semantic_node).
+    /// If invalid IDs are used, an error will be returned when [`GestaltMatcher::find_matches`] evaluates the pattern.
     pub fn add_edge(&mut self, source: usize, target: usize, label: Option<String>) {
         self.edges.push(PatternEdge {
             source,
@@ -136,18 +179,31 @@ pub struct Match {
     pub score: f32,
 }
 
-/// The Gestalt Engine.
+/// The Gestalt Engine for semantic sub-graph matching.
+///
+/// This engine is responsible for executing a [`Pattern`] query against an [`AletheiaDB`] instance.
+/// It uses a "backtracking search" strategy, beginning at the "anchor" node (the node with
+/// the semantic constraint) and traversing outward to verify the structural constraints.
 pub struct GestaltMatcher<'a> {
     db: &'a AletheiaDB,
 }
 
 impl<'a> GestaltMatcher<'a> {
-    /// Create a new matcher.
+    /// Create a new `GestaltMatcher` bound to an active database.
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
-    /// Find occurrences of the pattern in the database.
+    /// Find occurrences of the pattern in the database up to a specified limit.
+    ///
+    /// The returned `Vec<Match>` will contain the concrete `NodeId` and `EdgeId` mappings
+    /// from the database that satisfy the [`Pattern`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The [`Pattern`] is invalid (e.g., edges point to non-existent nodes).
+    /// - The [`Pattern`] does not contain at least one node with a `vector_constraint` (anchor).
     pub fn find_matches(&self, pattern: &Pattern, limit: usize) -> Result<Vec<Match>> {
         pattern.validate()?;
 
