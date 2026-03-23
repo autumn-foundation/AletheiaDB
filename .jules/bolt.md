@@ -32,3 +32,7 @@
 **Optimize Checkpoint Serialization Vec Pre-allocation**
 **Learning:** Found multiple vectors (`nodes`, `edges`, `node_versions`, `edge_versions`, etc.) in `extract_graph_data_from_snapshot` and `extract_temporal_data_from_snapshot` within `src/storage/checkpoint.rs` being created without capacity, resulting in potentially multiple heap reallocations when persisting thousands or millions of entities. `clippy::unused_doc_comments` lint caught the invalid `///` doc comment usage inside function bodies.
 **Action:** Use `Vec::with_capacity(n)` instead of `Vec::new()` when initializing vectors and calculating their capacity using snapshot's `node_count`, `edge_count`, `node_version_count`, and `edge_version_count` methods. Use standard `//` for inline comments to avoid unused doc comment warnings.
+
+**Optimize Traversal Plan Serialization Vec Pre-allocation**
+**Learning:** Initializing the serialized traversal plan with `Vec::new()` and repeatedly pushing/extending primitive byte arrays (`u32`, `u16`, `[u8]`) into it inside nested loops creates an arbitrary number of heap reallocations because the byte capacity size isn't known ahead of time.
+**Action:** When serializing structs into byte arrays, always calculate the exact required capacity first using iterator combinators (e.g., `.sum::<usize>()`) over the inputs (e.g., node paths, string lengths) and initialize the buffer with `Vec::with_capacity(capacity)`.
