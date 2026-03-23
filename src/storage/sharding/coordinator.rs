@@ -883,9 +883,13 @@ impl ShardCoordinator {
     pub fn recover_pending_transactions(&self) -> RecoveryResult {
         let decisions = {
             let log = self.commit_log.read().expect("Commit log lock poisoned");
+            // ⚡ Bolt Optimization: `pending_commits()` returns a `Vec<CommitLogEntry>`.
+            // `into_iter()` takes ownership of the vector and yields owned `CommitLogEntry` structs.
+            // By removing the `.clone()` on `participants`, we consume the owned data directly,
+            // avoiding a costly and unnecessary heap allocation for each pending transaction.
             log.pending_commits()
                 .into_iter()
-                .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
+                .map(|d| (d.tx_id, d.participants, d.commit_timestamp))
                 .collect::<Vec<_>>()
         };
 
@@ -1012,10 +1016,12 @@ impl ShardCoordinator {
                 .map_err(|_| DistributedTxError::Aborted {
                     reason: "Lock poisoned".to_string(),
                 })?;
+            // ⚡ Bolt Optimization: Removed unnecessary `.clone()` on `participants` since
+            // `into_iter()` takes ownership and yields an owned `CommitLogEntry`.
             log.pending_commits()
                 .into_iter()
                 .filter(|d| d.tx_id == tx_id)
-                .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
+                .map(|d| (d.tx_id, d.participants, d.commit_timestamp))
                 .collect::<Vec<_>>()
         };
 
