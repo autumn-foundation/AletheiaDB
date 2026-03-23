@@ -120,6 +120,9 @@ pub mod chameleon;
 /// Chimera: Hybrid Entity Synthesis Engine.
 pub mod chimera;
 #[cfg(feature = "nova")]
+/// Chrononaut: Temporal Vector Relevance Tracker.
+pub mod chrononaut;
+#[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
 #[cfg(feature = "nova")]
