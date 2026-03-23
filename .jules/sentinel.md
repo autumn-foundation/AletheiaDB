@@ -172,3 +172,27 @@
 **Summary:** Mutation testing revealed numerous surviving mutants related to `get_property` returning `None` or `Some(Default::default())`, `has_label` returning arbitrary `true`/`false` defaults or replacing `==` with `!=`, `has_label_str` replacing returns with default booleans, `matches_label` swapping `==` to `!=`, and `fmt::Debug` implementations simply outputting `Ok(Default::default())`.
 **Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted overall flow or simple positive logic paths without testing explicit exact equality returns for properties or structural content guarantees for strings. Some negative tests were missing entirely.
 **Kill Shot:** Appended targeted boundary and logic tests `test_get_property_behavior`, `test_has_label_behavior`, `test_has_label_str_behavior`, `test_matches_label_behavior`, and `test_debug_format_not_empty` into the `sentry_tests` module of `src/core/graph.rs`.
+
+**[Weak Test Coverage in Node & Edge Structures]**
+**Module:** `src/core/graph.rs`
+**Summary:** Mutants regarding default returns in constructors (`with_metadata`), property retrieval (`get_property`), structural verification (`Debug` format), and mutated logical comparisons (`has_label`, `has_label_str`, `matches_label`, `connects`) survived.
+**Diagnosis:** MISSING_TEST / WEAK_TEST - Existing tests were verifying some "Happy Path" construction, but failed to assert exact property retrieval non-nullity, structural string outputs for `fmt::Debug`, and strict binary inversions like `==` replaced with `!=`.
+**Kill Shot:** Appended explicitly exhaustive tests into `sentinel_graph_coverage` isolating each specific mutant variation.
+
+**[Weak Test Coverage in IdentityHasher Logic]**
+**Module:** `src/core/hasher.rs`
+**Summary:** Mutants regarding zero-initialization conditional bounds (`self.0 == 0`), bitwise operations (`^=` replaced with `|=`), and empty function bodies in match arm configurations for primitive serialization lengths survived.
+**Diagnosis:** MISSING_TEST / WEAK_TEST - The test suite didn't comprehensively target the FNV fallback mechanisms, nor the exact bitwise XORing behaviors for `update_state` that prevent collisions on composited hash inputs.
+**Kill Shot:** Added exhaustive tests inside `sentinel_identity_hasher_more_coverage` validating FNV fallback loop values against manual XOR computations.
+
+**[Weak Test Coverage in ID Generation & Defaults]**
+**Module:** `src/core/id.rs`
+**Summary:** Mutants involving `EntityId` mapping to empty options (`as_node`), generators returning zeroes or initializing with zeroes (`with_start`), and type conversion defaults (from `TryFrom` and `FromStr`) survived.
+**Diagnosis:** MISSING_TEST / WEAK_TEST - Structural mapping tests relied on macro generation or generic comparisons without specifically ensuring that an invalid string or generic conversion didn't just quietly return an instantiated ID with inner value 0.
+**Kill Shot:** Augmented `sentinel_id_coverage` covering exactly these primitive bounds.
+
+**[Weak Test Coverage in Temporal Logic Boundaries and Math]**
+**Module:** `src/core/temporal.rs`
+**Summary:** Mutants replacing comparison inequalities (`>` with `==` or `>=`) on `MAX_VALID_TIMESTAMP` logic survived in `TimeRange::from` and `TimeRange::at`. Additionally, replacing `!=` with `==` for sentinel verification in these initializations survived.
+**Diagnosis:** WEAK_TEST - Missing negative path tests specifically targeting panic generation when timestamps exceed limits dynamically, or when passing sentinel values deliberately to static constructors.
+**Kill Shot:** Appended explicit panic-catching bounds tests checking exact responses from invalid values in `sentinel_temporal_coverage`.

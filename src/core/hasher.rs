@@ -886,3 +886,112 @@ mod sentinel_identity_hasher_tests {
         assert_ne!(h.finish(), 1);
     }
 }
+
+#[cfg(test)]
+mod sentinel_identity_hasher_more_coverage {
+    use super::*;
+    use std::hash::Hasher;
+
+    #[test]
+    fn test_identity_hasher_update_state_zero_equality() {
+        // Kill "replace == with != in IdentityHasher::update_state"
+        let mut hasher = IdentityHasher::default();
+        // Default state is 0. If `self.0 == 0` became `self.0 != 0`, it would try to multiply by FNV_PRIME
+        hasher.update_state(42);
+        assert_eq!(hasher.finish(), 42); // Fails if logic was inverted
+    }
+
+    #[test]
+    fn test_identity_hasher_update_state_empty_body() {
+        // Kill "replace IdentityHasher::update_state with ()"
+        let mut hasher = IdentityHasher::default();
+        hasher.update_state(42);
+        assert_eq!(hasher.finish(), 42);
+        assert_ne!(hasher.finish(), 0);
+    }
+
+    #[test]
+    fn test_identity_hasher_write_empty_body() {
+        // Kill "replace <impl Hasher for IdentityHasher>::write with ()"
+        let mut hasher = IdentityHasher::default();
+        hasher.write(&[42]);
+        assert_ne!(hasher.finish(), 0); // If empty body, would be 0
+    }
+
+    #[test]
+    fn test_identity_hasher_write_fallback_bitwise_or_and() {
+        // Kill "replace ^ with | in <impl Hasher for IdentityHasher>::write"
+        // Kill "replace ^ with & in <impl Hasher for IdentityHasher>::write"
+        // 16 byte fast path XORs low and high
+        // low: 0b1100 = 12
+        // high: 0b1010 = 10
+        // expected XOR: 0b0110 = 6
+        // expected OR: 0b1110 = 14
+        // expected AND: 0b1000 = 8
+
+        let mut hasher = IdentityHasher::default();
+        let low = 12u64;
+        let high = 10u64;
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&low.to_le_bytes());
+        bytes[8..16].copy_from_slice(&high.to_le_bytes());
+        hasher.write(&bytes);
+
+        assert_eq!(hasher.finish(), 6);
+        assert_ne!(hasher.finish(), 14);
+        assert_ne!(hasher.finish(), 8);
+    }
+
+    #[test]
+    fn test_identity_hasher_fnv_loop_bitwise() {
+        // Kill "replace ^= with |= in <impl Hasher for IdentityHasher>::write" (in FNV loop)
+        // Kill "replace ^= with &= in <impl Hasher for IdentityHasher>::write" (in FNV loop)
+        let mut hasher = IdentityHasher::default();
+        hasher.write(&[0x25, 0x25, 0x25]); // Length 3 takes FNV fallback
+
+        let mut expected = FNV_OFFSET_BASIS;
+        for &b in &[0x25, 0x25, 0x25] {
+            expected ^= b as u64;
+            expected = expected.wrapping_mul(FNV_PRIME);
+        }
+
+        let mut wrong_or = FNV_OFFSET_BASIS;
+        for &b in &[0x25, 0x25, 0x25] {
+            wrong_or |= b as u64;
+            wrong_or = wrong_or.wrapping_mul(FNV_PRIME);
+        }
+
+        let mut wrong_and = FNV_OFFSET_BASIS;
+        for &b in &[0x25, 0x25, 0x25] {
+            wrong_and &= b as u64;
+            wrong_and = wrong_and.wrapping_mul(FNV_PRIME);
+        }
+
+        assert_eq!(hasher.finish(), expected);
+        assert_ne!(hasher.finish(), wrong_or);
+        assert_ne!(hasher.finish(), wrong_and);
+    }
+
+    #[test]
+    fn test_identity_hasher_fnv_initial_state() {
+        // Kill "replace == with != in <impl Hasher for IdentityHasher>::write"
+        // (if self.0 == 0 { self.0 = FNV_OFFSET_BASIS })
+        let mut hasher = IdentityHasher::default();
+        hasher.write(&[1, 2, 3]);
+
+        let mut expected = FNV_OFFSET_BASIS;
+        for &b in &[1, 2, 3] {
+            expected ^= b as u64;
+            expected = expected.wrapping_mul(FNV_PRIME);
+        }
+
+        let mut wrong_inverted = 0u64; // If inverted, self.0 = 0 is kept
+        for &b in &[1, 2, 3] {
+            wrong_inverted ^= b as u64;
+            wrong_inverted = wrong_inverted.wrapping_mul(FNV_PRIME);
+        }
+
+        assert_eq!(hasher.finish(), expected);
+        assert_ne!(hasher.finish(), wrong_inverted);
+    }
+}

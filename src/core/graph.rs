@@ -598,7 +598,7 @@ mod tests {
 #[cfg(test)]
 mod sentry_tests {
     use super::*;
-    use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
 
     #[test]
@@ -884,6 +884,237 @@ mod sentry_tests {
         assert!(
             edge_debug.len() > 10,
             "Edge debug format must contain structured data"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sentinel_graph_coverage {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+
+    #[test]
+    fn test_node_with_metadata_mutants() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let props = PropertyMapBuilder::new().build();
+        let tx_id = crate::core::id::TxId::new(123);
+        let timestamp = crate::core::temporal::Timestamp::from(456);
+        let metadata = crate::core::version::VersionMetadata::new(tx_id, timestamp);
+
+        let node = Node::with_metadata(
+            NodeId::new(1).unwrap(),
+            label,
+            props.clone(),
+            VersionId::new(10).unwrap(),
+            metadata,
+        );
+
+        // Kills "replace Node::with_metadata -> Self with Default::default()"
+        // We do this by ensuring the returned node is structurally exactly what we provided.
+        // It cannot just be an empty/default node.
+        assert_eq!(node.id, NodeId::new(1).unwrap());
+        assert_eq!(node.label, label);
+        assert_eq!(node.current_version, VersionId::new(10).unwrap());
+        assert_eq!(node.metadata, metadata);
+
+        // Edge case: test Edge with_metadata just to be safe as well, in case it was hidden
+        let edge = Edge::with_metadata(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(10).unwrap(),
+            metadata,
+        );
+        assert_eq!(edge.id, EdgeId::new(1).unwrap());
+        assert_eq!(edge.source, NodeId::new(1).unwrap());
+        assert_eq!(edge.target, NodeId::new(2).unwrap());
+        assert_eq!(edge.metadata, metadata);
+    }
+
+    #[test]
+    fn test_get_property_mutants() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let mut props = PropertyMapBuilder::new();
+        props = props.insert("age", 42);
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props.build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Kills "replace Node::get_property -> Option<&PropertyValue> with None"
+        let age_prop = node.get_property("age");
+        assert!(age_prop.is_some(), "Property should not be None");
+
+        // Kills "replace Node::get_property -> Option<&PropertyValue> with Some(Default::default())"
+        // Default PropertyValue is Null. If we put 42 and get Null, it's a mutant.
+        let val = age_prop.unwrap();
+        assert_ne!(
+            *val,
+            crate::core::property::PropertyValue::Null,
+            "Property should not be Null/Default"
+        );
+        assert_eq!(val.as_int(), Some(42));
+
+        // Same for edge
+        let mut edge_props = PropertyMapBuilder::new();
+        edge_props = edge_props.insert("weight", 42.5);
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            edge_props.build(),
+            VersionId::new(1).unwrap(),
+        );
+        let weight_prop = edge.get_property("weight");
+        assert!(weight_prop.is_some(), "Edge Property should not be None");
+        assert_ne!(
+            *weight_prop.unwrap(),
+            crate::core::property::PropertyValue::Null,
+            "Edge Property should not be Null/Default"
+        );
+        assert_eq!(weight_prop.unwrap().as_float(), Some(42.5));
+    }
+
+    #[test]
+    fn test_has_label_mutants() {
+        let label_a = GLOBAL_INTERNER.intern("TypeA").unwrap();
+        let label_b = GLOBAL_INTERNER.intern("TypeB").unwrap();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label_a,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Kills "replace Node::has_label -> bool with true / false"
+        // Kills "replace == with != in Node::has_label"
+        assert!(node.has_label(label_a), "Must match exactly");
+        assert!(!node.has_label(label_b), "Must not match");
+
+        // Same for edge
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label_a,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+        assert!(edge.has_label(label_a), "Must match exactly");
+        assert!(!edge.has_label(label_b), "Must not match");
+    }
+
+    #[test]
+    fn test_has_label_str_mutants() {
+        let label = GLOBAL_INTERNER.intern("TargetLabel").unwrap();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Kills "replace Node::has_label_str -> bool with true / false"
+        assert!(node.has_label_str("TargetLabel"), "Must match exactly");
+        assert!(!node.has_label_str("OtherLabel"), "Must not match");
+
+        // Same for edge
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+        assert!(edge.has_label_str("TargetLabel"), "Must match exactly");
+        assert!(!edge.has_label_str("OtherLabel"), "Must not match");
+    }
+
+    #[test]
+    fn test_matches_label_mutants() {
+        let label_id = GLOBAL_INTERNER.intern("MatchMe").unwrap();
+
+        // Kills "replace matches_label -> bool with true / false"
+        // Kills "replace == with != in matches_label"
+        assert!(super::matches_label(label_id, "MatchMe"), "Must match");
+        assert!(
+            !super::matches_label(label_id, "DoNotMatch"),
+            "Must not match"
+        );
+    }
+
+    #[test]
+    fn test_debug_format_mutants() {
+        let label = GLOBAL_INTERNER.intern("DebugLabel").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Kills "replace <impl std::fmt::Debug for Node>::fmt with Ok(Default::default())"
+        // An empty format would return "", we expect structure like Node { ... }
+        let node_debug = format!("{:?}", node);
+        assert!(node_debug.len() > 10, "Node debug should have content");
+        assert!(
+            node_debug.contains("DebugLabel"),
+            "Node debug should contain label"
+        );
+
+        // Same for edge
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+        let edge_debug = format!("{:?}", edge);
+        assert!(edge_debug.len() > 10, "Edge debug should have content");
+        assert!(
+            edge_debug.contains("DebugLabel"),
+            "Edge debug should contain label"
+        );
+    }
+
+    #[test]
+    fn test_edge_connects_mutants() {
+        // Kills mutants in `connects`
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            source,
+            target,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Kills "replace Edge::connects -> bool with true / false"
+        // Kills "replace && with || in connects"
+        // Kills "replace == with != in connects"
+        assert!(edge.connects(source, target), "Valid connection");
+        assert!(!edge.connects(target, source), "Reversed connection");
+        assert!(
+            !edge.connects(source, NodeId::new(3).unwrap()),
+            "Wrong target"
+        );
+        assert!(
+            !edge.connects(NodeId::new(3).unwrap(), target),
+            "Wrong source"
         );
     }
 }

@@ -1945,3 +1945,83 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod sentinel_temporal_coverage {
+    use super::*;
+
+    #[test]
+    fn test_timerange_constructors_mutants() {
+        // Kill "replace TimeRange::from -> Self with Default::default()"
+        // Note: TimeRange doesn't explicitly derive Default, but if it returned zeroed out:
+        let start = HybridTimestamp::new_unchecked(100, 0);
+        let from_range = TimeRange::from(start);
+        assert_eq!(from_range.start(), start);
+        assert_eq!(from_range.end(), TIMESTAMP_MAX);
+        assert_ne!(from_range.start().wallclock(), 0);
+
+        // Kill "replace TimeRange::at -> Self with Default::default()"
+        let at_range = TimeRange::at(start);
+        assert_eq!(at_range.start(), start);
+        assert_eq!(at_range.end(), start);
+        assert_ne!(at_range.start().wallclock(), 0);
+
+        // Kill "replace TimeRange::between -> Result<Self, TemporalError> with Ok(Default::default())"
+        let end = HybridTimestamp::new_unchecked(200, 0);
+        let between_range = TimeRange::between(start, end).unwrap();
+        assert_eq!(between_range.start(), start);
+        assert_eq!(between_range.end(), end);
+        assert_ne!(between_range.start().wallclock(), 0);
+    }
+
+    #[test]
+    fn test_timerange_from_panic_mutants() {
+        // TimeRange::from checking `> MAX_VALID_TIMESTAMP` logic inversion
+        // Kill "replace > with == / < / >=" in TimeRange::from
+        let max_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+
+        // This should NOT panic (tests >)
+        let _ = TimeRange::from(max_ts);
+
+        // This SHOULD panic (tests >= / == would let it pass)
+        let over_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let result = std::panic::catch_unwind(|| TimeRange::from(over_ts));
+        assert!(
+            result.is_err(),
+            "Must panic when exceeding MAX_VALID_TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn test_timerange_at_panic_mutants() {
+        // TimeRange::at checking `> MAX_VALID_TIMESTAMP` logic inversion
+        let max_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let _ = TimeRange::at(max_ts); // OK
+
+        let over_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let result = std::panic::catch_unwind(|| TimeRange::at(over_ts));
+        assert!(
+            result.is_err(),
+            "Must panic when exceeding MAX_VALID_TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn test_timerange_from_sentinel_mutant() {
+        // Kill "replace != with == in TimeRange::from" logic `timestamp != TIMESTAMP_MAX`
+        // If mutated, passing TIMESTAMP_MAX (which is > MAX_VALID_TIMESTAMP) would panic
+        let sentinel = TIMESTAMP_MAX;
+        let range = TimeRange::from(sentinel);
+        assert_eq!(range.start(), sentinel);
+        assert_eq!(range.end(), sentinel);
+    }
+
+    #[test]
+    fn test_timerange_at_sentinel_mutant() {
+        // Kill "replace != with == in TimeRange::at"
+        let sentinel = TIMESTAMP_MAX;
+        let range = TimeRange::at(sentinel);
+        assert_eq!(range.start(), sentinel);
+        assert_eq!(range.end(), sentinel);
+    }
+}

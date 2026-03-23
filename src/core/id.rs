@@ -1920,3 +1920,136 @@ mod tests_conversions {
         assert_eq!(t_str.as_u64(), 42);
     }
 }
+
+#[cfg(test)]
+mod sentinel_id_coverage {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_try_from_str_conversions_mutants() {
+        // Kill "replace <impl TryFrom<u64> for NodeId>::try_from -> Result<Self, Self::Error> with Ok(Default::default())"
+        // Kill "replace <impl FromStr for NodeId>::from_str -> Result<Self, Self::Err> with Ok(Default::default())"
+
+        let n_try = NodeId::try_from(42).unwrap();
+        assert_eq!(n_try.as_u64(), 42, "NodeId try_from must match exact value");
+        assert_ne!(n_try.as_u64(), 0);
+
+        let n_str = NodeId::from_str("42").unwrap();
+        assert_eq!(n_str.as_u64(), 42, "NodeId from_str must match exact value");
+        assert_ne!(n_str.as_u64(), 0);
+
+        let e_try = EdgeId::try_from(42).unwrap();
+        assert_eq!(e_try.as_u64(), 42, "EdgeId try_from must match exact value");
+        assert_ne!(e_try.as_u64(), 0);
+
+        let e_str = EdgeId::from_str("42").unwrap();
+        assert_eq!(e_str.as_u64(), 42, "EdgeId from_str must match exact value");
+        assert_ne!(e_str.as_u64(), 0);
+
+        let v_try = VersionId::try_from(42).unwrap();
+        assert_eq!(
+            v_try.as_u64(),
+            42,
+            "VersionId try_from must match exact value"
+        );
+        assert_ne!(v_try.as_u64(), 0);
+
+        let v_str = VersionId::from_str("42").unwrap();
+        assert_eq!(
+            v_str.as_u64(),
+            42,
+            "VersionId from_str must match exact value"
+        );
+        assert_ne!(v_str.as_u64(), 0);
+
+        let t_try = TxId::try_from(42).unwrap();
+        assert_eq!(t_try.as_u64(), 42, "TxId try_from must match exact value");
+        assert_ne!(t_try.as_u64(), 0);
+
+        let t_str = TxId::from_str("42").unwrap();
+        assert_eq!(t_str.as_u64(), 42, "TxId from_str must match exact value");
+        assert_ne!(t_str.as_u64(), 0);
+    }
+
+    #[test]
+    fn test_entity_id_is_and_as_mutants() {
+        let node = EntityId::Node(NodeId::new_unchecked(42));
+        let edge = EntityId::Edge(EdgeId::new_unchecked(42));
+
+        // Kill "replace EntityId::is_node -> bool with true / false"
+        assert!(node.is_node());
+        assert!(!edge.is_node());
+
+        // Kill "replace EntityId::is_edge -> bool with true / false"
+        assert!(edge.is_edge());
+        assert!(!node.is_edge());
+
+        // Kill "replace EntityId::as_node -> Option<NodeId> with None / Some(Default::default())"
+        let as_node = node.as_node();
+        assert!(as_node.is_some());
+        assert_eq!(as_node.unwrap().as_u64(), 42);
+        assert_ne!(as_node.unwrap().as_u64(), 0);
+
+        // Kill "replace EntityId::as_edge -> Option<EdgeId> with None / Some(Default::default())"
+        let as_edge = edge.as_edge();
+        assert!(as_edge.is_some());
+        assert_eq!(as_edge.unwrap().as_u64(), 42);
+        assert_ne!(as_edge.unwrap().as_u64(), 0);
+    }
+
+    #[test]
+    fn test_fmt_display_mutants() {
+        let node = NodeId::new_unchecked(42);
+        let n_str = format!("{}", node);
+        assert_eq!(n_str, "Node(42)");
+        assert_ne!(n_str, "");
+
+        let edge = EdgeId::new_unchecked(42);
+        let e_str = format!("{}", edge);
+        assert_eq!(e_str, "Edge(42)");
+        assert_ne!(e_str, "");
+
+        let version = VersionId::new_unchecked(42);
+        let v_str = format!("{}", version);
+        assert_eq!(v_str, "Version(42)");
+        assert_ne!(v_str, "");
+
+        let entity_node = EntityId::Node(node);
+        let entity_node_str = format!("{}", entity_node);
+        assert_eq!(entity_node_str, "Node(42)");
+        assert_ne!(entity_node_str, "");
+
+        let entity_edge = EntityId::Edge(edge);
+        let entity_edge_str = format!("{}", entity_edge);
+        assert_eq!(entity_edge_str, "Edge(42)");
+        assert_ne!(entity_edge_str, "");
+
+        let tx = TxId::new(42);
+        let tx_str = format!("{}", tx);
+        assert_eq!(tx_str, "TxId(42)");
+        assert_ne!(tx_str, "");
+    }
+
+    #[test]
+    fn test_id_from_entityid() {
+        // Kill "replace <impl From<NodeId> for EntityId>::from -> Self with Default::default()"
+        // Note: Default for EntityId is not strictly defined, but if it mapped to 0...
+        let node_id = NodeId::new_unchecked(42);
+        let e_node = EntityId::from(node_id);
+        assert_eq!(e_node.as_node().unwrap().as_u64(), 42);
+
+        // Kill "replace <impl From<EdgeId> for EntityId>::from -> Self with Default::default()"
+        let edge_id = EdgeId::new_unchecked(42);
+        let e_edge = EntityId::from(edge_id);
+        assert_eq!(e_edge.as_edge().unwrap().as_u64(), 42);
+    }
+
+    #[test]
+    fn test_generator_with_start_mutant() {
+        // Kill "replace IdGenerator::with_start -> Self with Default::default()"
+        let generator = IdGenerator::with_start(42);
+        assert_eq!(generator.current(), 42);
+        assert_ne!(generator.current(), 0);
+    }
+}
