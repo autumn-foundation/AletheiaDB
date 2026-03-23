@@ -2184,7 +2184,7 @@ impl CurrentStorage {
         } else {
             self.get_default_vector_property_name().ok_or_else(|| {
                 crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                    "Vector index is not enabled. Call enable_vector_index() first.".to_string(),
+                    "Vector index is not enabled. Call db.vector_index(\"...\").hnsw(...).enable() first.".to_string(),
                 ))
             })?
         };

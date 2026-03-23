@@ -1396,8 +1396,8 @@ impl AletheiaMcpServer {
 
         if !self.db.is_vector_index_enabled_for(&req.property_name) {
             return self.error_json(&format!(
-                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
-                req.property_name
+                "Vector index not enabled for property '{}'. Use db.vector_index(\"{}\").hnsw(...).enable() first.",
+                req.property_name, req.property_name
             ));
         }
 
@@ -1986,8 +1986,8 @@ impl AletheiaMcpServer {
             // Check if vector index is enabled for the property
             if !self.db.is_vector_index_enabled_for(property_name) {
                 return self.error_json(&format!(
-                    "Vector index not enabled for property '{}'. Use enable_vector_index first.",
-                    property_name
+                    "Vector index not enabled for property '{}'. Use db.vector_index(\"{}\").hnsw(...).enable() first.",
+                    property_name, property_name
                 ));
             }
 
