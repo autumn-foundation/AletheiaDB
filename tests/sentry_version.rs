@@ -168,3 +168,146 @@ fn test_entity_version_methods_not_default() {
     assert_eq!(edge.version_id(), VersionId::new(20).unwrap());
     assert!(edge.is_anchor());
 }
+
+#[test]
+fn test_property_delta_from_diff_exact_mutants() {
+    use aletheiadb::core::property::PropertyMapBuilder;
+
+    let base = PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .insert("age", 30i64)
+        .build();
+
+    let new = PropertyMapBuilder::new()
+        .insert("name", "Bob")
+        .insert("age", 30i64)
+        .build();
+
+    let delta = PropertyDelta::from_diff(&base, &new);
+
+    assert!(
+        !delta.is_empty(),
+        "from_diff should not return default (empty)"
+    );
+
+    // == vs != on reference equality (old == new)
+    let delta_same = PropertyDelta::from_diff(&base, &base);
+    assert!(delta_same.is_empty(), "Same reference should return empty");
+}
+
+#[test]
+fn test_property_delta_apply_exact_mutants() {
+    use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+
+    let base = PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .insert("age", 30i64)
+        .build();
+
+    let mut delta = PropertyDelta::new();
+    let key_age = aletheiadb::core::interning::GLOBAL_INTERNER
+        .intern("age")
+        .unwrap();
+    delta.changed.insert(key_age, PropertyValue::Int(31));
+
+    // test `!self.removed.contains(key)`
+    // if removed ! -> deleted, it skips inserting non-removed.
+    let applied = delta.apply(&base);
+    assert_eq!(applied.get("name").unwrap().as_str(), Some("Alice"));
+    assert_eq!(applied.get("age").unwrap().as_int(), Some(31));
+    assert_eq!(applied.len(), 2);
+}
+
+use aletheiadb::core::version::VectorDelta;
+
+#[test]
+fn test_property_delta_is_empty_exact_mutants() {
+    use aletheiadb::core::property::PropertyValue;
+
+    let mut delta = PropertyDelta::new();
+    let key = aletheiadb::core::interning::GLOBAL_INTERNER
+        .intern("key")
+        .unwrap();
+
+    delta.changed.insert(key, PropertyValue::Int(1));
+    // if && was mutated to ||, checking changed.is_empty() (false) || ... would return false,
+    // but if it's evaluated differently, we want strict bounds.
+    assert!(!delta.is_empty());
+
+    let mut delta2 = PropertyDelta::new();
+    delta2.removed.insert(key);
+    assert!(!delta2.is_empty());
+
+    let mut delta3 = PropertyDelta::new();
+    delta3
+        .vector_deltas
+        .insert(key, VectorDelta::Full(std::sync::Arc::from(vec![1.0f32])));
+    assert!(!delta3.is_empty());
+}
+
+#[test]
+fn test_vector_delta_apply_exact_mutants() {
+    let delta = VectorDelta::Full(std::sync::Arc::from(vec![1.0f32]));
+    // test replace VectorDelta::apply with vec![]
+    let res = delta.apply(&[0.0]);
+    assert_eq!(res, vec![1.0f32]);
+}
+
+#[test]
+fn test_vector_delta_partial_eq_exact_mutants() {
+    let v1 = VectorDelta::Full(std::sync::Arc::from(vec![1.0f32, 2.0]));
+    let v2 = VectorDelta::Full(std::sync::Arc::from(vec![1.0f32, 3.0]));
+    assert_ne!(v1, v2);
+
+    let v3 = VectorDelta::Full(std::sync::Arc::from(vec![1.0f32]));
+    assert_ne!(v1, v3);
+
+    let sparse1 = VectorDelta::Sparse {
+        dimension: 2,
+        changes: std::sync::Arc::new(vec![(0, 1.0)]),
+    };
+    let sparse2 = VectorDelta::Sparse {
+        dimension: 3,
+        changes: std::sync::Arc::new(vec![(0, 1.0)]),
+    };
+    let sparse3 = VectorDelta::Sparse {
+        dimension: 2,
+        changes: std::sync::Arc::new(vec![(0, 1.0), (1, 2.0)]),
+    };
+    let sparse4 = VectorDelta::Sparse {
+        dimension: 2,
+        changes: std::sync::Arc::new(vec![(1, 1.0)]),
+    };
+    let sparse5 = VectorDelta::Sparse {
+        dimension: 2,
+        changes: std::sync::Arc::new(vec![(0, 2.0)]),
+    };
+
+    assert_ne!(sparse1, sparse2, "dimension mismatch");
+    assert_ne!(sparse1, sparse3, "length mismatch");
+    assert_ne!(sparse1, sparse4, "index mismatch");
+    assert_ne!(sparse1, sparse5, "value mismatch");
+}
+
+#[test]
+fn test_vector_delta_from_diff_exact_mutants() {
+    // Need at least 3 elements where 1 changes to use sparse
+    // (changes.len() * 2 < dimension -> 1 * 2 < 3 -> 2 < 3 is true)
+    let old = vec![1.0f32, 2.0, 3.0];
+    let new = vec![1.0f32, 2.0, 4.0];
+    let diff = VectorDelta::from_diff(&old, &new).unwrap();
+    // Test that the diff is NOT None (from replace with None)
+    assert!(matches!(diff, VectorDelta::Sparse { .. }));
+
+    // Test different lengths (from != to ==)
+    let old2 = vec![1.0f32];
+    assert!(VectorDelta::from_diff(&old2, &new).is_none());
+
+    // > with >=
+    // MAX_VECTOR_DIMENSIONS
+    use aletheiadb::core::property::MAX_VECTOR_DIMENSIONS;
+    let old_max = vec![0.0f32; MAX_VECTOR_DIMENSIONS];
+    let mut new_max = old_max.clone();
+    new_max[0] = 1.0;
+    assert!(VectorDelta::from_diff(&old_max, &new_max).is_some());
+}
