@@ -333,9 +333,6 @@ impl<C: ShardClient> QueryExecutor<C> {
         let start = Instant::now();
         let timeout = query.timeout.unwrap_or(self.config.default_timeout);
 
-        // Determine target shards
-        // ⚡ Bolt Optimization: Avoid cloning target shards when provided in the query
-        // by using Cow to borrow the slice instead of allocating a new Vec.
         let target_shards: Cow<'_, [ShardId]> = match &query.target_shards {
             Some(shards) => Cow::Borrowed(shards),
             None => Cow::Owned(self.clients.keys().copied().collect()),
