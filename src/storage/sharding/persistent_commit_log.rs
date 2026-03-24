@@ -11,7 +11,7 @@
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │ Header (16 bytes)                                           │
-//! │   Magic: "GDB2" (4 bytes)                                  │
+//! │   Magic: "ADB2" (4 bytes)                                  │
 //! │   Version: u8                                               │
 //! │   Reserved: 3 bytes                                         │
 //! │   Entry count: u64                                          │
@@ -41,8 +41,8 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Magic bytes for the commit log file.
-const COMMIT_LOG_MAGIC: [u8; 4] = *b"GDB2";
+/// Magic bytes for the commit log file (AletheiaDB 2PC).
+const COMMIT_LOG_MAGIC: [u8; 4] = *b"ADB2";
 
 /// Current commit log format version.
 const COMMIT_LOG_VERSION: u8 = 2;
