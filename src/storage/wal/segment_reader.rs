@@ -24,6 +24,10 @@ use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::property::PropertyMap;
 
+use super::serialization::{
+    OP_CHECKPOINT, OP_CREATE_EDGE, OP_CREATE_NODE, OP_DELETE_EDGE, OP_DELETE_NODE, OP_UPDATE_EDGE,
+    OP_UPDATE_NODE,
+};
 use super::{LSN, WalEntry, WalOperation};
 
 /// Magic bytes identifying a AletheiaDB WAL segment file.
@@ -386,8 +390,7 @@ pub(crate) fn parse_entry_at(
 
     // Parse operation data based on type and version
     let operation = match op_type {
-        1 => {
-            // CreateNode
+        OP_CREATE_NODE => {
             if current_offset.checked_add(12).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
@@ -445,8 +448,7 @@ pub(crate) fn parse_entry_at(
                 valid_from,
             }
         }
-        2 => {
-            // CreateEdge
+        OP_CREATE_EDGE => {
             if current_offset.checked_add(28).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
@@ -509,8 +511,7 @@ pub(crate) fn parse_entry_at(
                 valid_from,
             }
         }
-        3 => {
-            // UpdateNode
+        OP_UPDATE_NODE => {
             if current_offset.checked_add(16).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
@@ -575,8 +576,7 @@ pub(crate) fn parse_entry_at(
                 valid_from,
             }
         }
-        4 => {
-            // UpdateEdge
+        OP_UPDATE_EDGE => {
             // V0: 16 bytes (EdgeId + VersionId)
             // V1+: 20 bytes (EdgeId + VersionId + LabelId)
             let required = if version >= WAL_VERSION { 20 } else { 16 };
@@ -644,8 +644,8 @@ pub(crate) fn parse_entry_at(
                 valid_from,
             }
         }
-        5 => {
-            // Checkpoint: Phase 2: LSN (8 bytes) + HybridTimestamp (12 bytes) = 20 bytes
+        OP_CHECKPOINT => {
+            // LSN (8 bytes) + HybridTimestamp (12 bytes) = 20 bytes
             if current_offset.checked_add(20).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
@@ -673,8 +673,7 @@ pub(crate) fn parse_entry_at(
                 timestamp: cp_timestamp,
             }
         }
-        6 => {
-            // DeleteNode
+        OP_DELETE_NODE => {
             if current_offset.checked_add(8).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
@@ -703,8 +702,7 @@ pub(crate) fn parse_entry_at(
                 valid_from,
             }
         }
-        7 => {
-            // DeleteEdge
+        OP_DELETE_EDGE => {
             if current_offset.checked_add(8).ok_or_else(|| {
                 Error::Storage(StorageError::CorruptedData(
                     "WAL offset overflow".to_string(),
