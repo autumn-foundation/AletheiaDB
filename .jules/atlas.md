@@ -79,3 +79,7 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+**[Removed "api" Namespace Leak from Storage]
+**Tangle:** The `storage::index_persistence` module contained a file named `api.rs` and re-exported it as `pub use api::{...}`. This created an `api` module within the `storage` layer, causing naming overlap and semantic confusion ("The Leak" architectural smell) with the top-level `crate::api` layer. Also, a backwards dependency existed in `src/storage/current/mod.rs` linking to `crate::api` documentation.
+**Blueprint:** Renamed `src/storage/index_persistence/api.rs` to `types.rs`, changing the export to `pub use types::{...}`. Removed the doc link dependency in `src/storage/current/mod.rs`. This enforces clear architectural boundaries and ensures the `storage` module remains completely isolated from the `api` concept.

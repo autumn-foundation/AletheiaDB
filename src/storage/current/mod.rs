@@ -596,9 +596,8 @@ impl CurrentStorage {
     /// # Important
     ///
     /// This method does NOT delete edges connected to the node. This may leave
-    /// orphaned edges in the graph. For most use cases, prefer using
-    /// [`crate::api::transaction::WriteOps::delete_node_cascade`] which automatically removes
-    /// all connected edges to maintain referential integrity.
+    /// orphaned edges in the graph. For most use cases, prefer cascade deletion
+    /// which automatically removes all connected edges to maintain referential integrity.
     ///
     /// Only use this method if you explicitly need to preserve edges for some
     /// specialized use case (e.g., maintaining edge history for audit purposes).

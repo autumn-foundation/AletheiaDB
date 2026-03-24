@@ -78,7 +78,6 @@
 //! - **Magic Bytes**: All files start with 4 magic bytes to prevent parsing invalid file types.
 //! - **Versioning**: All files include a version byte to support future schema evolution.
 
-pub mod api;
 pub(crate) mod common;
 mod error;
 pub mod formats;
@@ -92,6 +91,7 @@ pub mod temporal;
 pub mod temporal_adjacency;
 /// Persistence mutation tracking.
 pub mod tracker;
+pub mod types;
 pub mod vector;
 /// Background persistence worker thread.
 pub mod worker;
@@ -101,13 +101,13 @@ mod dos_tests;
 #[cfg(test)]
 mod manifest_consistency_tests;
 
-pub use api::{
-    IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,
-};
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
 use rayon::prelude::*;
+pub use types::{
+    IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,
+};
 
 /// Current manifest format version.
 pub const MANIFEST_VERSION: u16 = 1;
