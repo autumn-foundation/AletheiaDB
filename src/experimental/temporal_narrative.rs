@@ -1,3 +1,70 @@
+//! Temporal Narrative Generator.
+//!
+//! "Tell me the story of this node."
+//!
+//! The `NarrativeGenerator` is an experimental tool designed to bridge the gap between
+//! structured temporal data and human understanding. Instead of presenting a user with a raw list
+//! of properties that changed across multiple versions, it synthesizes these changes into a coherent,
+//! chronologically ordered sequence of natural language events.
+//!
+//! # How it Works
+//!
+//! Under the hood, the generator reconstructs the complete lifespan of an entity by iterating over
+//! its historical versions (using `AletheiaDB::get_node_history`). For each consecutive pair of
+//! versions, it utilizes `VersionDiff::compute` to accurately identify which properties were added,
+//! modified, or removed. These granular differences are then mapped to string representations,
+//! creating a human-readable `NarrativeEvent` for each state change.
+//!
+//! # Use Cases
+//!
+//! - **Audit Trails**: Presenting complex data changes to non-technical stakeholders or compliance officers.
+//! - **Data Provenance**: Understanding not just *what* the current state of a node is, but the *journey* of how it got there.
+//! - **LLM Context**: Providing a summarized, natural language history to Large Language Models for better temporal reasoning.
+//!
+//! # Example
+//!
+//! ```rust
+//! # #[cfg(feature = "nova")]
+//! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+//! use aletheiadb::api::transaction::WriteOps;
+//! use aletheiadb::core::property::PropertyMapBuilder;
+//!
+//! let db = AletheiaDB::new()?;
+//!
+//! // 1. Create a node
+//! let props = PropertyMapBuilder::new()
+//!     .insert("name", "Alice")
+//!     .insert("status", "Active")
+//!     .build();
+//! let node_id = db.create_node("User", props)?;
+//!
+//! // 2. Update it later
+//! db.write(|tx| {
+//!     let updated_props = PropertyMapBuilder::new()
+//!         .insert("name", "Alice")
+//!         .insert("status", "Inactive")
+//!         .build();
+//!     tx.update_node(node_id, updated_props)
+//! })?;
+//!
+//! // 3. Generate the story
+//! let generator = NarrativeGenerator::new(&db);
+//! let story = generator.generate_node_narrative(node_id)?;
+//!
+//! for event in story {
+//!     println!("Version {}: {}", event.version_number, event.description);
+//!     for change in event.changes {
+//!         println!("  - {}", change);
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! # #[cfg(not(feature = "nova"))]
+//! # fn main() {}
+//! ```
+
 use crate::AletheiaDB;
 #[cfg(feature = "nova")]
 use crate::core::GLOBAL_INTERNER;

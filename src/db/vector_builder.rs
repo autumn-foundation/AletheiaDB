@@ -1,3 +1,12 @@
+//! Fluent API builder for configuring and enabling vector indexes.
+//!
+//! This module provides the [`VectorIndexBuilder`], which allows developers to configure
+//! vector index settings (like HNSW parameters and temporal snapshot strategies) in a safe,
+//! step-by-step manner before enabling the index on a specific property.
+//!
+//! The builder ensures that all necessary configurations, such as the required `HnswConfig`,
+//! are provided before the index is created, preventing invalid state.
+
 use crate::core::error::{Error, Result};
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;
