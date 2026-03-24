@@ -1556,7 +1556,13 @@ mod tests {
         // fsync on /dev/null returns EINVAL on Linux, which causes sync_data to fail.
         // This avoids unsafe libc::close and double-close issues.
         {
-            let dev_null = File::open("/dev/null").expect("Failed to open /dev/null");
+            #[cfg(not(target_os = "windows"))]
+            let dev_null_path = "/dev/null";
+            #[cfg(target_os = "windows")]
+            let dev_null_path = "NUL";
+
+            let dev_null = File::open(dev_null_path)
+                .unwrap_or_else(|_| panic!("Failed to open {}", dev_null_path));
             let mut guard = coordinator.sync_handle.lock().unwrap();
             *guard = Some(dev_null);
         }
@@ -1779,7 +1785,13 @@ mod havoc_tests {
 
         // 2. Force failure on next flush by poisoning the sync handle
         {
-            let dev_null = File::open("/dev/null").expect("Failed to open /dev/null");
+            #[cfg(not(target_os = "windows"))]
+            let dev_null_path = "/dev/null";
+            #[cfg(target_os = "windows")]
+            let dev_null_path = "NUL";
+
+            let dev_null = File::open(dev_null_path)
+                .unwrap_or_else(|_| panic!("Failed to open {}", dev_null_path));
             let mut guard = coordinator.sync_handle.lock().unwrap();
             *guard = Some(dev_null);
         }
