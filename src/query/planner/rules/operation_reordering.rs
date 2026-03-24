@@ -413,8 +413,8 @@ impl OperationReordering {
                 // Check if predicates are equal (simple comparison)
                 self.predicates_equal(pred_a, pred_b) && self.filters_equal(input_a, input_b)
             }
-            // If not both filters, just check if they're the same type
-            _ => std::mem::discriminant(a) == std::mem::discriminant(b),
+            // If not both filters, check if they're identical
+            _ => a == b,
         }
     }
 
@@ -1272,5 +1272,73 @@ mod tests {
             &Predicate::Or(vec![Predicate::eq("a", 1)]),
             &Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
         ));
+    }
+    #[test]
+    fn test_estimate_cardinality_exact() {
+        let rule = OperationReordering;
+
+        let scan = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Table".to_string()),
+            estimated_rows: Some(1000),
+        });
+
+        // Base scan cardinality
+        assert_eq!(rule.estimate_cardinality(&scan), 1000);
+
+        // Filter cardinality: 1000 * 0.1 = 100
+        let filter = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("a", 1)), scan.clone());
+        assert_eq!(rule.estimate_cardinality(&filter), 100);
+
+        // Limit cardinality
+        let limit = LogicalOp::unary(UnaryOp::Limit(50), scan.clone());
+        assert_eq!(rule.estimate_cardinality(&limit), 50);
+
+        // Join cardinality: 1000 * 1000 * 0.1 = 100000
+        let join = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "a".to_string(),
+                right_key: "b".to_string(),
+            },
+            scan.clone(),
+            scan.clone(),
+        );
+        assert_eq!(rule.estimate_cardinality(&join), 100000);
+    }
+
+    #[test]
+    fn test_filters_equal_match_arms() {
+        let rule = OperationReordering;
+
+        let scan1 = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("A".to_string()),
+            estimated_rows: Some(10),
+        });
+        let scan2 = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("B".to_string()),
+            estimated_rows: Some(10),
+        });
+
+        let filter1 = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("a", 1)), scan1.clone());
+        let filter2 = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("a", 1)), scan1.clone());
+        let filter_diff_pred =
+            LogicalOp::unary(UnaryOp::Filter(Predicate::eq("b", 1)), scan1.clone());
+        let filter_diff_input =
+            LogicalOp::unary(UnaryOp::Filter(Predicate::eq("a", 1)), scan2.clone());
+
+        // Both filters equal
+        assert!(rule.filters_equal(&filter1, &filter2));
+
+        // Predicates differ
+        assert!(!rule.filters_equal(&filter1, &filter_diff_pred));
+
+        // Inputs differ
+        assert!(!rule.filters_equal(&filter1, &filter_diff_input));
+
+        // Non-filter vs filter
+        assert!(!rule.filters_equal(&filter1, &scan1));
+        assert!(!rule.filters_equal(&scan1, &filter1));
+
+        // Same non-filter types with different internal data
+        assert!(!rule.filters_equal(&scan1, &scan2));
     }
 }

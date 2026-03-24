@@ -178,3 +178,15 @@
 **Summary:** Mutants regarding `Edge::connects` replacing boolean logic `&&` with `||`, equalities `==` with `!=`, and returning default `true` or `false` booleans survived.
 **Diagnosis:** WEAK_TEST - Existing tests verified positive path matching combinations and single mismatch, but neglected explicit exhaustive mismatches enforcing exact combinatorics and short-circuit `&&` behaviors alongside preventing a simple blanket return.
 **Kill Shot:** Appended explicit exact boundary combinatorial tests `test_edge_connects_exhaustive` directly to `tests` module inside `src/core/graph.rs`.
+
+**[Weak Test Coverage in Query Operation Reordering Math and Logic]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Summary:** Mutants regarding math operators inside `estimate_cardinality` (`replace * with +` and `/`) survived testing, allowing logic errors in cardinality estimations to persist unnoticed. Additionally, a mutant deleting the `LogicalOp::Unary { op: UnaryOp::Filter(pred_a), input: input_a }` match arm from `filters_equal` survived, alongside a `replace && with ||` inside it.
+**Diagnosis:** MISSING_TEST - The test suite verified high-level join ordering logic relying on estimations but neglected explicitly testing the math of `estimate_cardinality` calculations itself. Also, the suite lacked a deep structural equivalence check testing the equality operator behavior for the `Filter` vs `Filter` match arm, allowing it to silently fallback to `std::mem::discriminant(a) == std::mem::discriminant(b)` which coincidentally allowed some tests to pass.
+**Kill Shot:** Added `test_estimate_cardinality_exact` to strictly enforce the scaling logic and `test_filters_equal_match_arms` to verify exact matching and mismatched combinations between `Filter` operators and `NodeScan` operators.
+
+**[Suspected Bug: operation_reordering filters_equal fallback]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Summary:** The fallback `_` arm of `OperationReordering::filters_equal` performed a shallow discriminant equality check (`std::mem::discriminant(a) == std::mem::discriminant(b)`), returning `true` for structurally different inputs (like two `NodeScan` operators with different labels). This issue was masked by tests which didn't assert mismatched base structures.
+**Diagnosis:** SUSPECTED_BUG - Found while writing test coverage. The shallow discriminant check incorrectly evaluated `filters_equal` as true when base input scanning operators had divergent internal data. This masked optimization regressions because `apply` would falsely return `None` (claiming unchanged plan) even if the base inputs changed structurally.
+**Kill Shot:** Replaced `std::mem::discriminant(a) == std::mem::discriminant(b)` with `a == b` in `filters_equal` and updated `test_filters_equal_match_arms` to explicitly assert the exact input mismatched failure behavior.
