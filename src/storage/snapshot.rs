@@ -53,13 +53,9 @@ use std::sync::Arc;
 pub struct CurrentStorageSnapshot {
     /// LSN at which snapshot was taken
     lsn: LSN,
-    /// Arc reference to a contiguous block of nodes.
-    /// ⚡ Bolt Optimization: Replaces `Vec<Arc<Node>>` to eliminate thousands of
-    /// individual heap allocations and improve cache locality during checkpointing.
+    /// Contiguous block of nodes shared via Arc for cache locality.
     nodes: Arc<Vec<Node>>,
-    /// Arc reference to a contiguous block of edges.
-    /// ⚡ Bolt Optimization: Replaces `Vec<Arc<Edge>>` to eliminate thousands of
-    /// individual heap allocations and improve cache locality during checkpointing.
+    /// Contiguous block of edges shared via Arc for cache locality.
     edges: Arc<Vec<Edge>>,
 }
 
