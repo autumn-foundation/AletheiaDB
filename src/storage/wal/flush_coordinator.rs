@@ -43,14 +43,7 @@ use super::ring_buffer::PendingEntry;
 
 use crate::core::error::{Error, Result, StorageError};
 
-/// Magic bytes identifying a AletheiaDB WAL segment file.
-const WAL_MAGIC: [u8; 4] = *b"GWAL";
-
-/// Current WAL format version.
-const WAL_VERSION: u8 = 1;
-
-/// Size of the WAL segment header (magic + version).
-const WAL_HEADER_SIZE: usize = 5;
+use super::segment_reader::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
 
 /// Metadata about a WAL segment's LSN range.
 ///

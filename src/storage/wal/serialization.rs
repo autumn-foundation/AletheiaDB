@@ -7,6 +7,16 @@ use crate::core::error::Result;
 use crate::core::interning::InternedString;
 use crate::core::temporal::Timestamp;
 
+// WAL operation type tags for the binary format.
+// These must match the deserialization in segment_reader.rs.
+pub(crate) const OP_CREATE_NODE: u8 = 1;
+pub(crate) const OP_CREATE_EDGE: u8 = 2;
+pub(crate) const OP_UPDATE_NODE: u8 = 3;
+pub(crate) const OP_UPDATE_EDGE: u8 = 4;
+pub(crate) const OP_CHECKPOINT: u8 = 5;
+pub(crate) const OP_DELETE_NODE: u8 = 6;
+pub(crate) const OP_DELETE_EDGE: u8 = 7;
+
 /// Helper to serialize an InternedString into the buffer (4-byte ID)
 #[inline(always)]
 fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
@@ -121,7 +131,7 @@ pub(crate) fn serialize_operation_into(
             properties,
             valid_from,
         } => {
-            buffer.push(1); // operation type
+            buffer.push(OP_CREATE_NODE);
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
@@ -135,7 +145,7 @@ pub(crate) fn serialize_operation_into(
             properties,
             valid_from,
         } => {
-            buffer.push(2); // operation type
+            buffer.push(OP_CREATE_EDGE);
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&source.as_u64().to_le_bytes());
             buffer.extend_from_slice(&target.as_u64().to_le_bytes());
@@ -150,7 +160,7 @@ pub(crate) fn serialize_operation_into(
             properties,
             valid_from,
         } => {
-            buffer.push(3); // operation type
+            buffer.push(OP_UPDATE_NODE);
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
@@ -164,7 +174,7 @@ pub(crate) fn serialize_operation_into(
             properties,
             valid_from,
         } => {
-            buffer.push(4); // operation type
+            buffer.push(OP_UPDATE_EDGE);
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
@@ -175,7 +185,7 @@ pub(crate) fn serialize_operation_into(
             node_id,
             valid_from,
         } => {
-            buffer.push(6); // operation type
+            buffer.push(OP_DELETE_NODE);
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             valid_from.serialize_into(buffer);
         }
@@ -183,12 +193,12 @@ pub(crate) fn serialize_operation_into(
             edge_id,
             valid_from,
         } => {
-            buffer.push(7); // operation type
+            buffer.push(OP_DELETE_EDGE);
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             valid_from.serialize_into(buffer);
         }
         WalOperation::Checkpoint { lsn, timestamp } => {
-            buffer.push(5); // operation type
+            buffer.push(OP_CHECKPOINT);
             buffer.extend_from_slice(&lsn.0.to_le_bytes());
             // Phase 2: Use HybridTimestamp serialization
             timestamp.serialize_into(buffer);
