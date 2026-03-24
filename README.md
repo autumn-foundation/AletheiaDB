@@ -700,7 +700,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Bi-temporal query (point-in-time)
     let results = db.execute_aql(
-        "AS OF '2024-01-15T10:00:00Z' MATCH (n:Person {name: 'Alice'}) RETURN n"
+        "AS OF 1705312800000000 MATCH (n:Person {name: 'Alice'}) RETURN n"
     )?;
 
     Ok(())
@@ -718,7 +718,7 @@ RANK BY SIMILARITY TO $bob_embedding TOP 10
 RETURN friend
 
 -- Full hybrid: temporal + graph + vector
-AS OF '2024-06-01T00:00:00Z'
+AS OF 1717200000000000
 MATCH (user:User {id: $user_id})-[:VIEWED]->(item:Product)
 RANK BY SIMILARITY TO $recommendation_embedding TOP 20
 WHERE item.price < 100
