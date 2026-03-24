@@ -15,7 +15,7 @@ fn test_property_map_silent_loss_when_interner_full() {
         .arg("--exact")
         .arg("--nocapture")
         .env("WARDEN_SUBPROCESS", "1")
-        .env("GALLIFREYDB_MAX_INTERNED_STRINGS", "5") // Limit < COMMON_STRINGS.len() (10)
+        .env("ALETHEIADB_MAX_INTERNED_STRINGS", "5") // Limit < COMMON_STRINGS.len() (10)
         .output()
         .expect("failed to spawn subprocess");
 
