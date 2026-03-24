@@ -665,15 +665,6 @@ impl FlushCoordinator {
                 })?;
             }
 
-            // Update segment LSN tracking (ADR-0025)
-            // Use fetch_min/fetch_max for atomic updates
-            self.current_segment_min_lsn
-                .fetch_min(batch_min_lsn, Ordering::Relaxed);
-            self.current_segment_max_lsn
-                .fetch_max(batch_max_lsn, Ordering::Relaxed);
-            self.current_segment_entry_count
-                .fetch_add(entries.len() as u64, Ordering::Relaxed);
-
             // Sync to disk if requested
             if sync && self.config.sync_on_flush {
                 let sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
@@ -727,6 +718,15 @@ impl FlushCoordinator {
                     ))));
                 }
             }
+
+            // Update segment LSN tracking (ADR-0025)
+            // Use fetch_min/fetch_max for atomic updates
+            self.current_segment_min_lsn
+                .fetch_min(batch_min_lsn, Ordering::Relaxed);
+            self.current_segment_max_lsn
+                .fetch_max(batch_max_lsn, Ordering::Relaxed);
+            self.current_segment_entry_count
+                .fetch_add(entries.len() as u64, Ordering::Relaxed);
 
             // Update size
             self.current_segment_size
@@ -1754,5 +1754,56 @@ mod tests {
         // max() would be 50.
         let min_lsn = coordinator.get_min_lsn();
         assert_eq!(min_lsn, Some(LSN(10)));
+    }
+}
+
+#[cfg(test)]
+mod havoc_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn create_test_entry(lsn: u64, data: &[u8]) -> PendingEntry {
+        PendingEntry::new_async(LSN(lsn), data.to_vec())
+    }
+
+    #[test]
+    fn test_sync_data_failure_reverts_lsn_tracking() {
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 1000;
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // 1. Initial success write to establish baseline
+        let entry1 = create_test_entry(10, &[1, 2, 3]);
+        assert!(coordinator.flush(vec![entry1], false).is_ok());
+
+        // 2. Force failure on next flush by poisoning the sync handle
+        {
+            let dev_null = File::open("/dev/null").expect("Failed to open /dev/null");
+            let mut guard = coordinator.sync_handle.lock().unwrap();
+            *guard = Some(dev_null);
+        }
+
+        // 3. Attempt to flush with sync=true -> will fail with EINVAL
+        let entry2 = create_test_entry(20, &[4, 5, 6]);
+        let result = coordinator.flush(vec![entry2], true);
+        assert!(result.is_err(), "Sync should have failed");
+
+        // 4. Verification: The LSN metadata should NOT reflect entry2's data
+        let max_lsn = coordinator.current_segment_max_lsn.load(Ordering::Relaxed);
+        assert_eq!(
+            max_lsn, 10,
+            "Max LSN was corrupted by the failed flush! Expected 10, got {}",
+            max_lsn
+        );
+
+        let count = coordinator
+            .current_segment_entry_count
+            .load(Ordering::Relaxed);
+        assert_eq!(
+            count, 1,
+            "Entry count was corrupted by failed flush! Expected 1, got {}",
+            count
+        );
     }
 }
