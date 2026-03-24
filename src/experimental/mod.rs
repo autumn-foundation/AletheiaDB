@@ -32,6 +32,7 @@
 //! | `thermos` | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
 //! | `hindsight` | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
 //! | `janus` | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
+//! | `eclipse` | **Eclipse** | Semantic Shadow Detection. "Who is being silenced in this conversation?" |
 //! | `prism` | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
 //! | `chronos` | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
 //! | `ariadne` | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
@@ -134,6 +135,9 @@ pub mod dreamer;
 #[cfg(feature = "nova")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
+#[cfg(feature = "nova")]
+/// Eclipse: Semantic Shadow Detection.
+pub mod eclipse;
 #[cfg(feature = "nova")]
 /// Entanglement: Detecting Quantum Entanglement in the Graph.
 pub mod entanglement;
