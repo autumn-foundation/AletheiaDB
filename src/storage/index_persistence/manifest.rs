@@ -104,19 +104,7 @@ impl IndexManifest {
 /// - The file cannot be written (e.g., permission denied, disk full).
 /// - The atomic rename operation fails.
 pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
-    let encoded = bitcode::encode(manifest);
-
-    // Calculate CRC32 of the encoded data
-    let mut hasher = Hasher::new();
-    hasher.update(&encoded);
-    let checksum = hasher.finalize();
-
-    // Write data + checksum
-    let mut data_with_checksum = encoded;
-    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
-
-    super::atomic_write(path, &data_with_checksum)?;
-    Ok(())
+    super::common::save_encoded_with_crc(manifest, path)
 }
 
 /// Load manifest from disk and validate CRC32 checksum.

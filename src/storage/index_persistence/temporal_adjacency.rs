@@ -107,9 +107,6 @@ pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdja
 ///
 /// Only outgoing edges are persisted to disk. The incoming index is automatically
 /// rebuilt during load by calling insert_edge(), which populates both directions.
-///
-/// ⚡ Bolt Optimization: Replacing Vec::new() with Vec::with_capacity() using the exact length of the DashMap (`index.outgoing.len()`).
-/// This removes unnecessary intermediate heap reallocations that occur as the vector expands to accommodate all items.
 fn extract_outgoing_data(index: &TemporalAdjacencyIndex) -> Vec<NodeAdjacencyEntry> {
     let mut outgoing_entries = Vec::with_capacity(index.outgoing.len());
 

@@ -291,7 +291,7 @@ pub(crate) fn load_vector_indexes(
         // Register index with CurrentStorage
         current.register_vector_index(property_name, index, config);
 
-        println!(
+        eprintln!(
             "✓ Loaded vector index '{}': {} dimensions, {} vectors",
             property_name, meta.dimensions, meta.vector_count
         );
