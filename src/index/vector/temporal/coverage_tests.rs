@@ -1,3 +1,21 @@
+//! 🛡️ Sentry Coverage Tests for Temporal Vector Indexing
+//!
+//! This module contains targeted tests designed to improve test coverage metrics
+//! for the temporal vector indexing components, specifically `SnapshotIndex`
+//! and `DeltaIndex`.
+//!
+//! # Purpose
+//!
+//! These tests exercise specific edge cases and error paths that are difficult
+//! to hit during standard integration testing, including:
+//!
+//! - **Configuration logic:** Ensuring thresholds apply correctly.
+//! - **Debug formatting:** Verifying `std::fmt::Debug` on complex index structures.
+//! - **Depth Limit Errors:** Explicitly forcing the `MAX_DELTA_CHAIN_DEPTH` limit to
+//!   be reached and ensuring it gracefully errors rather than crashing.
+//! - **Deletion semantics:** Confirming vectors removed in a delta layer are
+//!   correctly filtered out when queried.
+
 use super::*;
 use crate::core::error::Result;
 use crate::core::id::{NodeId, VersionId};
