@@ -248,10 +248,8 @@ impl CurrentStorage {
 
     /// Get the first/default property name that is currently indexed.
     ///
-    /// Returns `Some(property_name)` if a vector index is enabled,
-    /// or `None` if no index is configured.
-    ///
-    /// Note: For multi-property setups, use [`list_vector_indexes`](Self::list_vector_indexes) instead.
+    /// Equivalent to [`get_default_vector_property_name`](Self::get_default_vector_property_name).
+    /// For multi-property setups, use [`list_vector_indexes`](Self::list_vector_indexes) instead.
     pub fn get_indexed_property_name(&self) -> Option<String> {
         self.get_default_vector_property_name()
     }
@@ -273,15 +271,9 @@ impl CurrentStorage {
 
     /// Check if a vector index is enabled for a specific property.
     ///
-    /// # Arguments
-    ///
-    /// * `property_name` - The property name to check
-    ///
-    /// # Returns
-    ///
-    /// `true` if a vector index exists for this property, `false` otherwise.
+    /// Equivalent to [`is_vector_index_enabled_for`](Self::is_vector_index_enabled_for).
     pub fn has_vector_index(&self, property_name: &str) -> bool {
-        self.vector_indexes.contains_key(property_name)
+        self.is_vector_index_enabled_for(property_name)
     }
 
     /// Get the HNSW configuration for a specific property's vector index.
@@ -1178,16 +1170,7 @@ impl CurrentStorage {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         let (_, index, config) = self.get_vector_index_internal(None)?;
-
-        if embedding.len() != config.dimensions {
-            return Err(crate::core::error::Error::Vector(
-                crate::core::error::VectorError::DimensionMismatch {
-                    expected: config.dimensions,
-                    actual: embedding.len(),
-                },
-            ));
-        }
-
+        Self::validate_embedding_dimensions(embedding, &config)?;
         self.run_vector_search(&index, embedding, k, None, None)
     }
 
@@ -1219,16 +1202,7 @@ impl CurrentStorage {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         let (_, index, config) = self.get_vector_index_internal(None)?;
-
-        if embedding.len() != config.dimensions {
-            return Err(crate::core::error::Error::Vector(
-                crate::core::error::VectorError::DimensionMismatch {
-                    expected: config.dimensions,
-                    actual: embedding.len(),
-                },
-            ));
-        }
-
+        Self::validate_embedding_dimensions(embedding, &config)?;
         self.run_vector_search(&index, embedding, k, Some(label), None)
     }
 
@@ -1259,16 +1233,7 @@ impl CurrentStorage {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
-
-        if embedding.len() != config.dimensions {
-            return Err(crate::core::error::Error::Vector(
-                crate::core::error::VectorError::DimensionMismatch {
-                    expected: config.dimensions,
-                    actual: embedding.len(),
-                },
-            ));
-        }
-
+        Self::validate_embedding_dimensions(embedding, &config)?;
         self.run_vector_search(&index, embedding, k, None, None)
     }
 
@@ -1290,16 +1255,7 @@ impl CurrentStorage {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
-
-        if embedding.len() != config.dimensions {
-            return Err(crate::core::error::Error::Vector(
-                crate::core::error::VectorError::DimensionMismatch {
-                    expected: config.dimensions,
-                    actual: embedding.len(),
-                },
-            ));
-        }
-
+        Self::validate_embedding_dimensions(embedding, &config)?;
         self.run_vector_search(&index, embedding, k, Some(label), None)
     }
 
@@ -1325,16 +1281,7 @@ impl CurrentStorage {
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
         let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
-
-        if query.len() != config.dimensions {
-            return Err(crate::core::error::Error::Vector(
-                crate::core::error::VectorError::DimensionMismatch {
-                    expected: config.dimensions,
-                    actual: query.len(),
-                },
-            ));
-        }
-
+        Self::validate_embedding_dimensions(query, &config)?;
         index.search_with_filter(query, k, predicate)
     }
 
@@ -1387,33 +1334,9 @@ impl CurrentStorage {
     }
 
     /// Search a specific property's vector index with a raw embedding.
+    /// Search a specific property's vector index with a raw embedding.
     ///
-    /// Use this method when searching with embeddings that don't correspond to
-    /// any existing node in the graph (e.g., query embeddings from external sources).
-    ///
-    /// # Arguments
-    ///
-    /// * `property_name` - The indexed property to search
-    /// * `embedding` - The query embedding vector
-    /// * `k` - Maximum number of results to return
-    ///
-    /// # Returns
-    ///
-    /// A list of (NodeId, similarity_score) pairs sorted by similarity (highest first).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - No vector index is enabled for the specified property
-    /// - Embedding dimensions don't match the index configuration
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Search with external embedding
-    /// let query = embed_text("search query");
-    /// let results = storage.search_vectors_in("title_embedding", &query, 10)?;
-    /// ```
+    /// Equivalent to [`find_similar_by_embedding_in`](Self::find_similar_by_embedding_in).
     pub fn search_vectors_in(
         &self,
         property_name: &str,
@@ -1912,8 +1835,8 @@ impl CurrentStorage {
 
     /// Get the name of the property used for vector indexing.
     ///
-    /// Returns `None` if vector indexing is not enabled.
-    /// This is used by the query executor for vector reranking operations.
+    /// Equivalent to [`get_default_vector_property_name`](Self::get_default_vector_property_name).
+    /// Used by the query executor for vector reranking operations.
     pub fn get_vector_property_name(&self) -> Option<String> {
         self.get_default_vector_property_name()
     }
@@ -2135,16 +2058,10 @@ impl CurrentStorage {
         use crate::storage::snapshot::CurrentStorageSnapshot;
         use std::sync::Arc;
 
-        // Collect all nodes into a single contiguous block on the heap, and share it via Arc.
-        // ⚡ Bolt Optimization: Avoids thousands of individual `Arc::new()` heap allocations.
-        // ⚡ Bolt Optimization: Pre-allocate vector using known node_count to avoid reallocations during collect()
         let mut n = Vec::with_capacity(self.indexes.node_count());
         n.extend(self.indexes.iter_nodes().map(|n| n.clone()));
         let nodes: Arc<Vec<Node>> = Arc::new(n);
 
-        // Collect all edges into a single contiguous block on the heap, and share it via Arc.
-        // ⚡ Bolt Optimization: Avoids thousands of individual `Arc::new()` heap allocations.
-        // ⚡ Bolt Optimization: Pre-allocate vector using known edge_count to avoid reallocations during collect()
         let mut e = Vec::with_capacity(self.indexes.edge_count());
         e.extend(self.indexes.iter_edges().map(|e| e.clone()));
         let edges: Arc<Vec<Edge>> = Arc::new(e);
@@ -2181,6 +2098,19 @@ impl CurrentStorage {
             .ok_or(crate::core::error::Error::Storage(
                 StorageError::NodeNotFound(node_id),
             ))
+    }
+
+    /// Validate that an embedding's dimensions match the index configuration.
+    fn validate_embedding_dimensions(embedding: &[f32], config: &HnswConfig) -> Result<()> {
+        if embedding.len() != config.dimensions {
+            return Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::DimensionMismatch {
+                    expected: config.dimensions,
+                    actual: embedding.len(),
+                },
+            ));
+        }
+        Ok(())
     }
 
     fn get_vector_index_internal(
