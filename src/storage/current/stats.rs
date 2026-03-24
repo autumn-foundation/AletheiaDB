@@ -122,3 +122,66 @@ impl FilterStats {
         multiplier.clamp(MIN_MULTIPLIER, MAX_MULTIPLIER)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn test_filter_stats_record_search() {
+        let stats = FilterStats::new();
+        stats.record_search(100, 10);
+        assert_eq!(stats.search_count.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.total_candidates.load(Ordering::Relaxed), 100);
+        assert_eq!(stats.total_results.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn test_filter_stats_get_adaptive_multiplier_default() {
+        let stats = FilterStats::new();
+        // Not enough searches yet
+        stats.record_search(100, 50);
+        stats.record_search(100, 50);
+        assert_eq!(stats.get_adaptive_multiplier(), 10.0);
+    }
+
+    #[test]
+    fn test_filter_stats_get_adaptive_multiplier_zero_candidates() {
+        let stats = FilterStats::new();
+        stats.record_search(0, 0);
+        stats.record_search(0, 0);
+        stats.record_search(0, 0);
+        assert_eq!(stats.get_adaptive_multiplier(), 10.0);
+    }
+
+    #[test]
+    fn test_filter_stats_get_adaptive_multiplier_high_pass_rate() {
+        let stats = FilterStats::new();
+        stats.record_search(100, 100);
+        stats.record_search(100, 100);
+        stats.record_search(100, 100);
+        // pass_rate = 1.0 -> sqrt(1.0) = 1.0 -> MIN_MULTIPLIER / 1.0 = 5.0
+        assert_eq!(stats.get_adaptive_multiplier(), 5.0);
+    }
+
+    #[test]
+    fn test_filter_stats_get_adaptive_multiplier_low_pass_rate() {
+        let stats = FilterStats::new();
+        stats.record_search(100, 1);
+        stats.record_search(100, 1);
+        stats.record_search(100, 1);
+        // pass_rate = 0.01 -> sqrt(0.01) = 0.1 -> MIN_MULTIPLIER / 0.1 = 50.0
+        assert_eq!(stats.get_adaptive_multiplier(), 50.0);
+    }
+
+    #[test]
+    fn test_filter_stats_get_adaptive_multiplier_mid_pass_rate() {
+        let stats = FilterStats::new();
+        stats.record_search(100, 25);
+        stats.record_search(100, 25);
+        stats.record_search(100, 25);
+        // pass_rate = 0.25 -> sqrt(0.25) = 0.5 -> MIN_MULTIPLIER / 0.5 = 10.0
+        assert_eq!(stats.get_adaptive_multiplier(), 10.0);
+    }
+}
