@@ -1522,6 +1522,36 @@ mod tests {
     }
 
     #[test]
+    fn test_coordinator_retry_existing_dead_letter() {
+        let coordinator = ShardCoordinator::new(test_config());
+        let tx_id = TxId::new(42);
+
+        // Add to commit log
+        {
+            let log = coordinator.commit_log.read().unwrap();
+            let _ = log.log_commit(tx_id, vec![ShardId::new(1).unwrap()], None);
+        }
+
+        // Add to dead letter queue
+        {
+            let mut dlq = coordinator.dead_letter_queue.write().unwrap();
+            dlq.insert(
+                tx_id,
+                DeadLetteredTransaction {
+                    tx_id,
+                    reason: "Test".to_string(),
+                    last_attempt: std::time::Instant::now(),
+                    attempt_count: 1,
+                },
+            );
+        }
+
+        let result = coordinator.retry_dead_lettered_transaction(tx_id);
+        // It succeeds in preparing and marking as committing in this mocked case
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_coordinator_retry_nonexistent_dead_letter() {
         let coordinator = ShardCoordinator::new(test_config());
 
