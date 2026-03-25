@@ -659,21 +659,7 @@ mod sentry_tests {
 
         let double_not = !not_inner;
 
-        // Should be structurally equal to inner
-        // We can't use assert_eq! directly because Predicate doesn't derive PartialEq
-        // So we match the structure.
-        if let Predicate::And(preds) = double_not {
-            assert_eq!(preds.len(), 2);
-            match &preds[0] {
-                Predicate::Eq { key, .. } => assert_eq!(key, "a"),
-                _ => panic!("Expected Eq"),
-            }
-            match &preds[1] {
-                Predicate::Eq { key, .. } => assert_eq!(key, "b"),
-                _ => panic!("Expected Eq"),
-            }
-        } else {
-            panic!("Expected And predicate after double negation");
-        }
+        // Predicate derives PartialEq, so direct comparison works
+        assert_eq!(double_not, inner);
     }
 }

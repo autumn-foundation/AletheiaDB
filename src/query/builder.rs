@@ -685,11 +685,8 @@ impl<S: QueryState> QueryBuilder<S> {
     /// Prefer using [`valid_time_between()`](Self::valid_time_between) or
     /// [`transaction_time_between()`](Self::transaction_time_between) for clarity.
     #[must_use]
-    pub fn between(mut self, start: Timestamp, end: Timestamp) -> Self {
-        let mut ctx = self.temporal_context.take().unwrap_or_default();
-        ctx.valid_time_between = Some(TimeRange::between(start, end).unwrap());
-        self.temporal_context = Some(ctx);
-        self
+    pub fn between(self, start: Timestamp, end: Timestamp) -> Self {
+        self.valid_time_between(start, end)
     }
 
     /// Limit the number of results
