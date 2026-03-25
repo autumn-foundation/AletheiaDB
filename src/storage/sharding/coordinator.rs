@@ -1880,4 +1880,53 @@ mod tests {
         let second = run_distributed_tx(&coordinator, &shards).unwrap();
         assert!(second > first);
     }
+
+    #[test]
+    fn test_retry_dead_lettered_transaction() {
+        let coordinator = ShardCoordinator::new(test_config());
+        let tx_id = TxId::new(12345);
+        let participants = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
+        let ts = crate::core::hlc::HybridTimestamp::new(1000, 0).unwrap();
+
+        // 1. Initially it should fail because it's not in the dead letter queue
+        let res = coordinator.retry_dead_lettered_transaction(tx_id);
+        assert!(res.is_err());
+        if let Err(DistributedTxError::Aborted { reason }) = res {
+            assert!(reason.contains("not found in dead letter queue"));
+        } else {
+            panic!("Expected Aborted error");
+        }
+
+        // 2. Add an entry to the commit log
+        {
+            let log = coordinator.commit_log.read().unwrap();
+            log.log_commit(tx_id, participants.clone(), Some(ts))
+                .unwrap();
+        }
+
+        // 3. Add to dead letter queue
+        let dead_letter = DeadLetteredTransaction {
+            tx_id,
+            reason: "Simulated failure".to_string(),
+            last_attempt: std::time::Instant::now(),
+            attempt_count: 5,
+        };
+        {
+            let mut dlq = coordinator.dead_letter_queue.write().unwrap();
+            dlq.insert(tx_id, dead_letter);
+        }
+
+        // 4. Retry it
+        let res = coordinator.retry_dead_lettered_transaction(tx_id);
+        assert!(res.is_ok(), "Expected Ok, got {:?}", res);
+
+        // 5. Depending on the mock, it might have completed or be pending.
+        // It succeeds because the transaction commits successfully or handles error internally.
+
+        // 6. Verify it's no longer in the dead letter queue
+        {
+            let dlq = coordinator.dead_letter_queue.read().unwrap();
+            assert!(dlq.get(&tx_id).is_none());
+        }
+    }
 }
