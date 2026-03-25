@@ -518,10 +518,10 @@ fn test_mapping_file_has_magic_header() {
     index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
     index.save(&index_path).unwrap();
 
-    // Verify mappings file starts with magic bytes "GMAP"
+    // Verify mappings file starts with magic bytes "AMAP" (AletheiaDB MAPping)
     let data = std::fs::read(&mappings_path).unwrap();
     assert!(data.len() >= 4);
-    assert_eq!(&data[0..4], b"GMAP");
+    assert_eq!(&data[0..4], b"AMAP");
 }
 
 #[test]

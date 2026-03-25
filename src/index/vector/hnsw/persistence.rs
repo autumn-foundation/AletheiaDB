@@ -15,7 +15,7 @@
 //! # Security & Integrity
 //!
 //! Mapping files are explicitly designed to resist data corruption and DoS attacks:
-//! - **Magic Bytes & Versioning:** Ensures file type correctness (`GMAP`).
+//! - **Magic Bytes & Versioning:** Ensures file type correctness (`AMAP`).
 //! - **Streaming Reads:** Files are loaded via buffered streaming rather than `mmap` or
 //!   loading into memory all at once, preventing OOM crashes on massively oversized files.
 //! - **Checksums:** Every mapping file ends with a CRC32 checksum to verify structural integrity.
@@ -33,10 +33,12 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
-/// Magic bytes for mapping file identification
-pub(crate) const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
-/// Current mapping file format version
+/// Magic bytes for mapping file identification (AletheiaDB MAPping).
+pub(crate) const MAPPING_MAGIC: &[u8; 4] = b"AMAP";
+/// Current mapping file format version.
 pub(crate) const MAPPING_VERSION: u8 = 2;
+/// Minimum valid mapping file size: Magic(4) + Version(1) + Count(8) + CRC(4).
+const MIN_MAPPING_FILE_SIZE: usize = 17;
 
 /// Maximum number of entries allowed in a mappings file.
 ///
@@ -140,7 +142,7 @@ where
 ///
 /// # Integrity Checks
 ///
-/// - **Magic Bytes**: Verifies file type (`GMAP`).
+/// - **Magic Bytes**: Verifies file type (`AMAP`).
 /// - **File Size**: Checked against expected size based on header count (prevents partial reads).
 /// - **CRC32**: Verifies full file integrity.
 /// - **Limits**: Enforces `MAX_MAPPINGS_COUNT` to prevent OOM DoS.
@@ -180,9 +182,7 @@ pub(crate) fn load_mappings_with_integrity(
         })?
         .len();
 
-    // Minimum size check (V1 min size)
-    // Magic(4) + Version(1) + Count(8) + CRC(4) = 17 bytes
-    if file_len < 17 {
+    if file_len < MIN_MAPPING_FILE_SIZE as u64 {
         return Err(Error::Vector(VectorError::IndexError(
             "Mapping file too small or corrupted".to_string(),
         )));
@@ -224,8 +224,7 @@ pub(crate) fn load_mappings_with_integrity(
             })?;
             hasher.update(&buf);
             let count = u64::from_le_bytes(buf) as usize;
-            // Overhead: Magic(4) + Version(1) + Count(8) + CRC(4) = 17
-            (count, None, 17)
+            (count, None, MIN_MAPPING_FILE_SIZE)
         }
         2 => {
             // V2: Dims(8) + Quant(1) + Metric(1) + Count(8)
@@ -274,11 +273,13 @@ pub(crate) fn load_mappings_with_integrity(
             "Mapping count too large (overflow)".to_string(),
         ))
     })?;
-    let expected_size = data_size.checked_add(header_overhead).ok_or_else(|| {
-        Error::Vector(VectorError::IndexError(
-            "Mapping file size too large (overflow)".to_string(),
-        ))
-    })?;
+    let expected_size = data_size
+        .checked_add(header_overhead as u64)
+        .ok_or_else(|| {
+            Error::Vector(VectorError::IndexError(
+                "Mapping file size too large (overflow)".to_string(),
+            ))
+        })?;
 
     // Critical Security Check: Verify file size matches expected size BEFORE reading data.
     // This prevents reading until EOF if the file is truncated or huge.
