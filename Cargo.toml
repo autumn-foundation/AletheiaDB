@@ -83,7 +83,7 @@ rand = "0.8"
 
 [dev-dependencies]
 criterion = "0.8"
-proptest = "1.4"
+proptest = "1.11"
 tempfile = "3.27"
 serial_test = "3.4"
 # Tokio for async tests
