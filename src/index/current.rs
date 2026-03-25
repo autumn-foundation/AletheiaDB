@@ -144,13 +144,6 @@ impl CurrentIndexes {
 
     /// Insert an edge into the indexes.
     ///
-    /// Note: This only updates the edge map. Adjacency indexes are rebuilt
-    /// lazily on next access for efficiency (batch updates).
-    ///
-    /// Acquires `rebuild_lock` in read mode to coordinate with concurrent
-    /// adjacency rebuilds (which hold write lock).
-    /// Insert an edge into the indexes.
-    ///
     /// Updates both the edge map and adjacency indexes incrementally.
     /// - **O(1) amortized**: Edge goes to delta buffer, no rebuild
     /// - **Thread-safe**: Lock-free concurrent inserts
@@ -537,9 +530,6 @@ impl CurrentIndexes {
         self.edges.contains_key(&id)
     }
 
-    // NOTE: ensure_adjacency_current() removed with incremental adjacency integration.
-    // Adjacency is always current - inserts/deletes are O(1) and immediately visible.
-
     /// Get outgoing edges for a node.
     ///
     /// Returns a guard that provides zero-copy iterator access to adjacency.
@@ -658,15 +648,6 @@ impl CurrentIndexes {
         self.get_incoming(node).len()
     }
 
-    /// Rebuild adjacency indexes from current edges.
-    ///
-    /// This can be called explicitly after batch edge insertions/deletions
-    /// to force an immediate rebuild, though normally adjacency is rebuilt
-    /// lazily on first access after modifications.
-    ///
-    /// # Concurrency
-    ///
-    /// Acquires `rebuild_lock` in write mode, which blocks all concurrent
     /// Compact adjacency indexes to merge delta → frozen.
     ///
     /// With incremental adjacency, this is optional - indexes are always correct.
@@ -1065,8 +1046,7 @@ mod tests {
         indexes.insert_edge(create_test_edge(1, 0, 2, "KNOWS"));
         indexes.insert_edge(create_test_edge(2, 1, 2, "KNOWS"));
 
-        // Adjacency should be rebuilt lazily on first access
-        // This tests that ensure_adjacency_current() works correctly
+        // Adjacency is immediately visible via incremental index
         let outgoing = indexes.get_outgoing(NodeId::new(0).unwrap());
         assert_eq!(
             outgoing.len(),
