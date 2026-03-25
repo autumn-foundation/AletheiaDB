@@ -301,16 +301,8 @@ pub enum BinaryOp {
     },
 }
 
-/// Key for sorting results.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SortKey {
-    /// Sort by a property value
-    Property(String),
-    /// Sort by similarity score
-    Score,
-    /// Sort by timestamp
-    Timestamp,
-}
+/// Re-export `SortKey` from the IR to avoid maintaining two identical enums.
+pub use super::ir::SortKey;
 
 /// Temporal context for a query.
 ///
