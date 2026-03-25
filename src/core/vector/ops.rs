@@ -723,7 +723,5 @@ pub fn is_normalized(v: &[f32], tolerance: f32) -> bool {
 /// ```
 #[inline]
 pub fn is_normalized_default(v: &[f32]) -> bool {
-    // We can't import NORMALIZATION_TOLERANCE from constants because of visibility/import loops?
-    // Actually constants.rs is a sibling.
     is_normalized(v, super::constants::NORMALIZATION_TOLERANCE)
 }
