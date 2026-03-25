@@ -123,6 +123,9 @@ pub mod chimera;
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
 #[cfg(feature = "nova")]
+/// Compass: Semantic Direction Finder.
+pub mod compass;
+#[cfg(feature = "nova")]
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
 #[cfg(feature = "nova")]
