@@ -262,6 +262,17 @@ impl ConcurrentWal {
         self.stripes.get(id)
     }
 
+    /// Check if the WAL is shutting down and return an error if so.
+    #[inline]
+    fn check_not_shutting_down(&self) -> Result<()> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "WAL is shutting down".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
     /// Append an operation (async mode - returns immediately after buffering).
     ///
     /// The entry is buffered in a stripe's ring buffer and will be
@@ -275,11 +286,7 @@ impl ConcurrentWal {
     ///
     /// The allocated LSN for this entry.
     pub fn append_async(&self, operation: WalOperation) -> Result<LSN> {
-        if self.shutdown_requested.load(Ordering::SeqCst) {
-            return Err(Error::Storage(StorageError::WalError {
-                reason: "WAL is shutting down".to_string(),
-            }));
-        }
+        self.check_not_shutting_down()?;
         let _guard = ActiveBatchGuard::new(&self.active_batches);
 
         let lsn = self.lsn_allocator.allocate();
@@ -307,11 +314,7 @@ impl ConcurrentWal {
     /// - `Ok(lsn)` - The entry is now durable
     /// - `Err(...)` - Flush failed
     pub fn append_sync(&self, operation: WalOperation) -> Result<LSN> {
-        if self.shutdown_requested.load(Ordering::SeqCst) {
-            return Err(Error::Storage(StorageError::WalError {
-                reason: "WAL is shutting down".to_string(),
-            }));
-        }
+        self.check_not_shutting_down()?;
         let _guard = ActiveBatchGuard::new(&self.active_batches);
 
         let lsn = self.lsn_allocator.allocate();
@@ -341,11 +344,7 @@ impl ConcurrentWal {
     /// This method will block if the buffer is full until space becomes
     /// available (backpressure).
     pub fn append_with_handle(&self, operation: WalOperation) -> Result<(LSN, CompletionHandle)> {
-        if self.shutdown_requested.load(Ordering::SeqCst) {
-            return Err(Error::Storage(StorageError::WalError {
-                reason: "WAL is shutting down".to_string(),
-            }));
-        }
+        self.check_not_shutting_down()?;
         let _guard = ActiveBatchGuard::new(&self.active_batches);
 
         let lsn = self.lsn_allocator.allocate();
@@ -399,11 +398,7 @@ impl ConcurrentWal {
     /// assert_eq!(lsns.len(), 3);
     /// ```
     pub fn append_batch(&self, operations: Vec<WalOperation>) -> Result<Vec<LSN>> {
-        if self.shutdown_requested.load(Ordering::SeqCst) {
-            return Err(Error::Storage(StorageError::WalError {
-                reason: "WAL is shutting down".to_string(),
-            }));
-        }
+        self.check_not_shutting_down()?;
         let _guard = ActiveBatchGuard::new(&self.active_batches);
 
         // Handle empty batch early
@@ -460,11 +455,7 @@ impl ConcurrentWal {
         &self,
         operations: Vec<WalOperation>,
     ) -> Result<(Vec<LSN>, Vec<CompletionHandle>)> {
-        if self.shutdown_requested.load(Ordering::SeqCst) {
-            return Err(Error::Storage(StorageError::WalError {
-                reason: "WAL is shutting down".to_string(),
-            }));
-        }
+        self.check_not_shutting_down()?;
         let _guard = ActiveBatchGuard::new(&self.active_batches);
 
         // Handle empty batch early
@@ -546,7 +537,8 @@ impl ConcurrentWal {
     /// This is called by the flush coordinator. Entries are returned
     /// sorted by LSN to ensure correct write order.
     pub fn drain_all(&self) -> Vec<PendingEntry> {
-        let mut all_entries = Vec::new();
+        let total_pending: usize = self.stripes.iter().map(|s| s.pending_count()).sum();
+        let mut all_entries = Vec::with_capacity(total_pending);
 
         for stripe in &self.stripes {
             all_entries.extend(stripe.drain());

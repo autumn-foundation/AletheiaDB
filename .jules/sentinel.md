@@ -172,3 +172,9 @@
 **Summary:** Mutation testing revealed numerous surviving mutants related to `get_property` returning `None` or `Some(Default::default())`, `has_label` returning arbitrary `true`/`false` defaults or replacing `==` with `!=`, `has_label_str` replacing returns with default booleans, `matches_label` swapping `==` to `!=`, and `fmt::Debug` implementations simply outputting `Ok(Default::default())`.
 **Diagnosis:** WEAK_TEST / MISSING_TEST - Tests often asserted overall flow or simple positive logic paths without testing explicit exact equality returns for properties or structural content guarantees for strings. Some negative tests were missing entirely.
 **Kill Shot:** Appended targeted boundary and logic tests `test_get_property_behavior`, `test_has_label_behavior`, `test_has_label_str_behavior`, `test_matches_label_behavior`, and `test_debug_format_not_empty` into the `sentry_tests` module of `src/core/graph.rs`.
+
+**[Weak Test Coverage in Edge Connects Behavior]**
+**Module:** `src/core/graph.rs`
+**Summary:** Mutants regarding `Edge::connects` replacing boolean logic `&&` with `||`, equalities `==` with `!=`, and returning default `true` or `false` booleans survived.
+**Diagnosis:** WEAK_TEST - Existing tests verified positive path matching combinations and single mismatch, but neglected explicit exhaustive mismatches enforcing exact combinatorics and short-circuit `&&` behaviors alongside preventing a simple blanket return.
+**Kill Shot:** Appended explicit exact boundary combinatorial tests `test_edge_connects_exhaustive` directly to `tests` module inside `src/core/graph.rs`.
