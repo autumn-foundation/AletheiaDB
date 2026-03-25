@@ -703,4 +703,35 @@ mod sentry_tests {
             "Partial optimization (left branch) should trigger change"
         );
     }
+
+    #[test]
+    fn test_pushdown_unsupported_scan() {
+        let rule = PredicatePushdown;
+
+        let op = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+
+        // This is mainly for covering the LogicalOp::Scan match inside push_down
+        // where it returns `Ok((op.clone(), false))`
+        let (res_op, changed) = rule.push_down(&op).unwrap();
+        assert_eq!(res_op, op);
+        assert!(!changed);
+
+        let empty_op = LogicalOp::Empty;
+        let (res_empty, empty_changed) = rule.push_down(&empty_op).unwrap();
+        assert_eq!(res_empty, empty_op);
+        assert!(!empty_changed);
+    }
+
+    #[test]
+    fn test_apply_default() {
+        let rule = PredicatePushdown;
+        let stats = Statistics::default();
+
+        // Use an empty plan since apply() does `if changed { Ok(Some(..)) } else { Ok(None) }`
+        let plan = LogicalPlan::new(LogicalOp::Empty);
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(rule.name(), "predicate-pushdown");
+    }
 }

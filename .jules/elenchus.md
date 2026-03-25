@@ -339,3 +339,17 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[Operation Reordering Test Quality Audit]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Test coverage for `estimate_cardinality` lacked edge cases for binary operators (like `LogicalOp::Binary` calculating `left_card * right_card * 0.1`). Furthermore, structure matching tests for `filters_equal` and `predicates_equal` omitted permutations for variables like `True`, `False`, `Exists`, and `NotExists`, making them vulnerable to undetected logic mutations.
+**Evidence:** `cargo mutants` revealed missing mutations on binary operation math and several match block combinations.
+**Recommendation:** Added `test_estimate_cardinality_binary_and_filter` and `test_filters_equal_match_arms` with strict Oracle expectations.
+
+**[Predicate Pushdown Test Quality Audit]**
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** Predicate pushdown logic implicitly relied on `LogicalOp::Empty` and `LogicalOp::Scan` passing correctly without applying mutation logic, but explicitly verifying these structural returns was missing in test suites. The root test verifying `OptimizationRule::name` was also weakly covered.
+**Evidence:** `cargo mutants` showed surviving mutations mutating default return types and match branches handling `Empty` or `Scan`.
+**Recommendation:** Appended `test_pushdown_unsupported_scan` and `test_apply_default` to fortify base functionality returns and name verification.

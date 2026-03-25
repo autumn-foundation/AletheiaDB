@@ -1273,4 +1273,60 @@ mod tests {
             &Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
         ));
     }
+
+    #[test]
+    fn test_estimate_cardinality_binary_and_filter() {
+        let rule = OperationReordering;
+
+        let empty_op = LogicalOp::Empty;
+        assert_eq!(rule.estimate_cardinality(&empty_op), 0);
+
+        let limit_op = LogicalOp::unary(UnaryOp::Limit(42), LogicalOp::Empty);
+        assert_eq!(rule.estimate_cardinality(&limit_op), 42);
+
+        let filter_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::True),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        assert_eq!(rule.estimate_cardinality(&filter_op), 0); // 1 * 0.1 as usize -> 0
+
+        let bin_op = LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: Some(200),
+            }),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: Some(300),
+            }),
+        );
+        // left=200, right=300 -> 200 * 300 * 0.1 = 6000
+        assert_eq!(rule.estimate_cardinality(&bin_op), 6000);
+    }
+
+    #[test]
+    fn test_filters_equal_match_arms() {
+        let rule = OperationReordering;
+
+        let op1 = LogicalOp::unary(UnaryOp::Filter(Predicate::True), LogicalOp::Empty);
+        let op2 = LogicalOp::unary(UnaryOp::Filter(Predicate::False), LogicalOp::Empty);
+        assert!(!rule.filters_equal(&op1, &op2));
+
+        let p_exists1 = Predicate::exists("prop");
+        let p_exists2 = Predicate::exists("prop2");
+        assert!(!rule.predicates_equal(&p_exists1, &p_exists2));
+
+        let p_not_exists1 = Predicate::NotExists("prop".to_string());
+        let p_not_exists2 = Predicate::NotExists("prop2".to_string());
+        assert!(!rule.predicates_equal(&p_not_exists1, &p_not_exists2));
+
+        let p_true = Predicate::True;
+        let p_false = Predicate::False;
+        assert!(!rule.predicates_equal(&p_true, &p_false));
+
+        let p_not1 = Predicate::Not(Box::new(Predicate::True));
+        let p_not2 = Predicate::Not(Box::new(Predicate::False));
+        assert!(!rule.predicates_equal(&p_not1, &p_not2));
+    }
 }
