@@ -69,6 +69,12 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::BuildHasherDefault;
 
+/// Per-hop structural cost to prefer shorter paths when semantic costs are equal.
+const STRUCTURAL_HOP_COST: f32 = 0.1;
+
+/// Default cost assigned to nodes without embeddings.
+const NO_EMBEDDING_COST: f32 = 1.0;
+
 /// State for priority queue (min-heap based on cost).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct State {
@@ -200,6 +206,9 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             depth: 0,
         });
 
+        // Reuse allocation across iterations
+        let mut neighbors = Vec::new();
+
         while let Some(State { cost, node, depth }) = pq.pop() {
             if node == end {
                 return Ok(Some(self.reconstruct_path(came_from, end)));
@@ -219,7 +228,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             }
 
             // Collect neighbors (outgoing, or both directions if bidirectional)
-            let mut neighbors = Vec::new();
+            neighbors.clear();
 
             // Get outgoing edges
             for edge_id in self.db.get_outgoing_edges(node) {
@@ -238,14 +247,11 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             }
 
             // Process all neighbors
-            for target in neighbors {
+            for &target in &neighbors {
                 // Calculate semantic cost of moving to target
                 let semantic_cost = self.calculate_semantic_cost(target, query_embedding)?;
 
-                // Total cost = current cost + semantic cost + structural cost (1.0 for hop)
-                // We add 1.0 structural cost to prefer shorter paths if semantics are equal.
-                // Adjustable weight could be added later.
-                let new_cost = cost + semantic_cost + 0.1; // Small structural cost
+                let new_cost = cost + semantic_cost + STRUCTURAL_HOP_COST;
 
                 if new_cost < *dist.get(&target).unwrap_or(&f32::INFINITY) {
                     dist.insert(target, new_cost);
@@ -335,6 +341,9 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             depth: 0,
         });
 
+        // Reuse allocation across iterations
+        let mut neighbor_edges = Vec::new();
+
         while let Some(State { cost, node, depth }) = pq.pop() {
             if node == end {
                 return Ok(Some(self.reconstruct_path(came_from, end)));
@@ -353,7 +362,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             }
 
             // Collect neighbors (outgoing, or both directions if bidirectional)
-            let mut neighbor_edges = Vec::new();
+            neighbor_edges.clear();
 
             // Get outgoing edges at the specified time
             for edge_id in self.db.get_outgoing_edges_at_time(node, time, time) {
@@ -367,7 +376,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
                 }
             }
 
-            for (edge_id, is_outgoing) in neighbor_edges {
+            for &(edge_id, is_outgoing) in &neighbor_edges {
                 // Get edge details at the specified time
                 if let Ok(edge) = self.db.get_edge_at_time(edge_id, time, time) {
                     // For outgoing edges, target is the neighbor; for incoming, source is the neighbor
@@ -388,7 +397,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
                         let semantic_cost =
                             self.compute_semantic_cost(target_embedding, query_embedding)?;
 
-                        let new_cost = cost + semantic_cost + 0.1;
+                        let new_cost = cost + semantic_cost + STRUCTURAL_HOP_COST;
 
                         if new_cost < *dist.get(&target).unwrap_or(&f32::INFINITY) {
                             dist.insert(target, new_cost);
@@ -444,7 +453,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             }
         } else {
             // Penalize nodes without embeddings
-            Ok(1.0)
+            Ok(NO_EMBEDDING_COST)
         }
     }
 
