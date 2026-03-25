@@ -23,7 +23,7 @@ fn test_load_mappings_huge_count_small_file() {
     let mut file = File::create(&mappings_path).unwrap();
 
     // Magic (4 bytes)
-    file.write_all(b"GMAP").unwrap();
+    file.write_all(b"AMAP").unwrap();
     // Version (1 byte)
     file.write_all(&[1]).unwrap();
 
@@ -68,7 +68,7 @@ fn test_load_mappings_truncated_data() {
     index.save(&index_path).unwrap();
 
     let mut file = File::create(&mappings_path).unwrap();
-    file.write_all(b"GMAP").unwrap();
+    file.write_all(b"AMAP").unwrap();
     file.write_all(&[1]).unwrap();
 
     // Count: 10

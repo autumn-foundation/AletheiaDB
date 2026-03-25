@@ -26,8 +26,8 @@ fn test_hnsw_load_mappings_dos_prevention() {
     // Now overwrite the mappings file with our malicious one
     let mut file = File::create(&mappings_path).unwrap();
 
-    // Magic: GMAP
-    file.write_all(b"GMAP").unwrap();
+    // Magic: AMAP
+    file.write_all(b"AMAP").unwrap();
     // Version: 1
     file.write_all(&[1]).unwrap();
 
@@ -36,10 +36,10 @@ fn test_hnsw_load_mappings_dos_prevention() {
     file.write_all(&count.to_le_bytes()).unwrap();
 
     // We need to calculate CRC32 for:
-    // Header (GMAP + 1 + count)
+    // Header (AMAP + 1 + count)
     // Data (count * 16 bytes of zeros)
     let mut hasher = Hasher::new();
-    hasher.update(b"GMAP");
+    hasher.update(b"AMAP");
     hasher.update(&[1]);
     hasher.update(&count.to_le_bytes());
 
