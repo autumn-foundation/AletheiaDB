@@ -67,12 +67,32 @@ use crate::storage::CurrentStorage;
 
 use super::builder::Query;
 use super::ir::QueryOp;
-use super::plan::{LogicalOp, LogicalPlan, ScanOp, SortKey, TemporalContext, UnaryOp};
+use super::plan::{LogicalOp, LogicalPlan, ScanOp, TemporalContext, UnaryOp};
 
 pub use cost::{Cost, CostModel};
 pub use physical::{PhysicalOp, PhysicalPlan};
 pub use rules::OptimizationRule;
 pub use stats::Statistics;
+
+// ── Planner defaults ─────────────────────────────────────────────────────────
+
+/// Default estimated row count for a full node scan when no statistics are available.
+const DEFAULT_SCAN_ESTIMATED_ROWS: usize = 1000;
+
+/// Default estimated row count for a fused property-equality scan.
+const DEFAULT_PROPERTY_SCAN_ROWS: usize = 100;
+
+/// Fallback maximum traversal depth when the query specifies unbounded (`Variable`) depth.
+const DEFAULT_MAX_TRAVERSAL_DEPTH: usize = 10;
+
+/// Default `top_k` for vector re-rank when the caller does not provide one.
+const DEFAULT_VECTOR_TOP_K: usize = 10;
+
+/// Pseudo-property key used to represent the node label in filter predicates.
+const LABEL_PSEUDO_KEY: &str = "_label";
+
+/// Default property key assumed to hold a node's embedding vector.
+const DEFAULT_EMBEDDING_PROPERTY: &str = "embedding";
 
 /// Query planner that transforms queries into executable physical plans.
 ///
@@ -292,7 +312,10 @@ impl QueryPlanner {
                 // and performs k-NN search - all handled by the executor
                 Ok(Some(LogicalOp::Scan(ScanOp::SimilarToNode {
                     source_node: *source_node,
-                    property_key: property_key.as_deref().unwrap_or("embedding").to_string(),
+                    property_key: property_key
+                        .as_deref()
+                        .unwrap_or(DEFAULT_EMBEDDING_PROPERTY)
+                        .to_string(),
                     k: *k,
                     label_filter: label_filter.clone(),
                 })))
@@ -354,7 +377,7 @@ impl QueryPlanner {
 
             QueryOp::FilterLabel(label) => Ok(LogicalOp::unary(
                 UnaryOp::Filter(super::ir::Predicate::Eq {
-                    key: "_label".to_string(),
+                    key: LABEL_PSEUDO_KEY.to_string(),
                     value: super::ir::PredicateValue::String(label.clone()),
                 }),
                 input,
@@ -371,21 +394,13 @@ impl QueryPlanner {
 
             QueryOp::Project(props) => Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input)),
 
-            QueryOp::Sort { key, descending } => {
-                // Convert IR SortKey to Plan SortKey
-                let plan_key = match key {
-                    crate::query::ir::SortKey::Property(prop) => SortKey::Property(prop.clone()),
-                    crate::query::ir::SortKey::Score => SortKey::Score,
-                    crate::query::ir::SortKey::Timestamp => SortKey::Timestamp,
-                };
-                Ok(LogicalOp::unary(
-                    UnaryOp::Sort {
-                        key: plan_key,
-                        descending: *descending,
-                    },
-                    input,
-                ))
-            }
+            QueryOp::Sort { key, descending } => Ok(LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: key.clone(),
+                    descending: *descending,
+                },
+                input,
+            )),
 
             QueryOp::GetEdges { direction: _ } => {
                 // Handle get edges - for now, just pass through
@@ -500,7 +515,9 @@ impl QueryPlanner {
 
     /// Helper to validate vector index existence
     fn validate_vector_index(&self, property_key: Option<&str>) -> Result<String> {
-        let effective_property = property_key.unwrap_or("embedding").to_string();
+        let effective_property = property_key
+            .unwrap_or(DEFAULT_EMBEDDING_PROPERTY)
+            .to_string();
 
         if !self.storage.has_vector_index(&effective_property) {
             return Err(Error::Query(QueryError::IndexNotFound {
@@ -550,7 +567,7 @@ impl QueryPlanner {
                 estimated_rows,
             } => Ok(PhysicalOp::NodeScan {
                 label: label.clone(),
-                estimated_rows: estimated_rows.unwrap_or(1000),
+                estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
             }),
 
             ScanOp::VectorSearch {
@@ -629,8 +646,8 @@ impl QueryPlanner {
                 label: label.clone(),
                 key: key.clone(),
                 value: value.clone(),
-                // Property scans are selective - assume 10% of label's rows
-                estimated_rows: 100,
+                // Property scans are selective - assume a small fraction of label's rows
+                estimated_rows: DEFAULT_PROPERTY_SCAN_ROWS,
             }),
         }
     }
@@ -676,7 +693,7 @@ impl QueryPlanner {
                     input: Box::new(input),
                     direction: *direction,
                     label: label.clone(),
-                    depth: depth.max_depth().unwrap_or(10),
+                    depth: depth.max_depth().unwrap_or(DEFAULT_MAX_TRAVERSAL_DEPTH),
                     temporal_context: temporal_ctx,
                 })
             }
@@ -691,7 +708,7 @@ impl QueryPlanner {
                 Ok(PhysicalOp::VectorRerank {
                     input: Box::new(input),
                     embedding: embedding.clone(),
-                    k: top_k.unwrap_or(10),
+                    k: top_k.unwrap_or(DEFAULT_VECTOR_TOP_K),
                     property_key: property_key.clone(),
                 })
             }

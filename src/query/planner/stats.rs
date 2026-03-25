@@ -30,6 +30,15 @@ use parking_lot::RwLock;
 
 use crate::core::interning::InternedString;
 
+// ── Default estimates when statistics are unavailable ─────────────────────────
+
+/// Default average outgoing edges per node when the graph is empty or stats are uninitialized.
+const DEFAULT_AVG_OUT_DEGREE: f64 = 10.0;
+
+/// Default average delta-chain length when historical stats are unavailable.
+/// Corresponds to an anchor every 10 versions (average depth ~5).
+const DEFAULT_AVG_DELTA_CHAIN_LENGTH: f64 = 5.0;
+
 /// Atomic f64 for lock-free floating-point statistics.
 ///
 /// Converts `f64` into its bit representation to be stored
@@ -247,7 +256,7 @@ impl Statistics {
         let avg = self.avg_out_degree.load(Ordering::Relaxed);
         if avg < f64::EPSILON {
             // Default estimate if not initialized or near-zero
-            10.0
+            DEFAULT_AVG_OUT_DEGREE
         } else {
             avg
         }
@@ -269,7 +278,7 @@ impl Statistics {
         let avg = self.avg_delta_chain.load(Ordering::Relaxed);
         if avg < f64::EPSILON {
             // Default estimate (anchor every 10 versions -> avg depth ~5)
-            5.0
+            DEFAULT_AVG_DELTA_CHAIN_LENGTH
         } else {
             avg
         }
