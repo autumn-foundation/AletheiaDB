@@ -61,10 +61,8 @@ use crate::core::error::{Error, Result, VectorError};
 use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
-use crate::index::vector::{DistanceMetric, Quantization, VectorIndex};
+use crate::index::vector::{DistanceMetric, Quantization, VectorIndex, merge_top_k_results};
 use rayon::prelude::*;
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
@@ -1110,61 +1108,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
 
     /// Merge search results from multiple nodes using a min-heap for efficiency.
     fn merge_results(node_results: Vec<Vec<(NodeId, f32)>>, k: usize) -> Vec<(NodeId, f32)> {
-        if k == 0 {
-            return Vec::new();
-        }
-
-        let mut heap: BinaryHeap<(Reverse<OrderedFloat>, NodeId)> =
-            BinaryHeap::with_capacity(k + 1);
-
-        for results in node_results {
-            for (id, score) in results {
-                let ordered_score = OrderedFloat(score);
-
-                if heap.len() < k {
-                    heap.push((Reverse(ordered_score), id));
-                } else if let Some(&(Reverse(min_score), _)) = heap.peek()
-                    && ordered_score > min_score
-                {
-                    heap.pop();
-                    heap.push((Reverse(ordered_score), id));
-                }
-            }
-        }
-
-        let mut results: Vec<(NodeId, f32)> = heap
-            .into_iter()
-            .map(|(Reverse(score), id)| (id, score.0))
-            .collect();
-
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        results
-    }
-}
-
-/// Wrapper for f32 that implements Ord for use in BinaryHeap.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct OrderedFloat(f32);
-
-impl Eq for OrderedFloat {}
-
-impl PartialOrd for OrderedFloat {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedFloat {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or_else(|| match (self.0.is_nan(), other.0.is_nan()) {
-                (true, true) => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                (false, false) => unreachable!(),
-            })
+        merge_top_k_results(node_results, k)
     }
 }
 

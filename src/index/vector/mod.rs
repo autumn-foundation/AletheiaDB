@@ -746,6 +746,79 @@ pub use sharded::{
     ShardingStrategy,
 };
 
+// ============================================================================
+// Shared utilities for distributed and sharded vector indexes
+// ============================================================================
+
+/// Wrapper for f32 that implements Ord for use in BinaryHeap.
+///
+/// NaN values are treated as less than all other values for consistent ordering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OrderedFloat(pub f32);
+
+impl Eq for OrderedFloat {}
+
+impl PartialOrd for OrderedFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedFloat {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or_else(|| match (self.0.is_nan(), other.0.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => unreachable!(),
+            })
+    }
+}
+
+/// Merge search results from multiple sources using a min-heap for top-k efficiency.
+///
+/// O(n log k) where n is total results and k is the desired count.
+pub(crate) fn merge_top_k_results(
+    all_results: Vec<Vec<(crate::core::id::NodeId, f32)>>,
+    k: usize,
+) -> Vec<(crate::core::id::NodeId, f32)> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let mut heap: BinaryHeap<(Reverse<OrderedFloat>, crate::core::id::NodeId)> =
+        BinaryHeap::with_capacity(k + 1);
+
+    for results in all_results {
+        for (id, score) in results {
+            let ordered_score = OrderedFloat(score);
+
+            if heap.len() < k {
+                heap.push((Reverse(ordered_score), id));
+            } else if let Some(&(Reverse(min_score), _)) = heap.peek()
+                && ordered_score > min_score
+            {
+                heap.pop();
+                heap.push((Reverse(ordered_score), id));
+            }
+        }
+    }
+
+    let mut results: Vec<(crate::core::id::NodeId, f32)> = heap
+        .into_iter()
+        .map(|(Reverse(score), id)| (id, score.0))
+        .collect();
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    results
+}
+
 // Distributed vector index (VS-107)
 pub mod distributed;
 
