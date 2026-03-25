@@ -884,16 +884,15 @@ impl ShardCoordinator {
         let decisions = {
             let log = self.commit_log.read().expect("Commit log lock poisoned");
             log.pending_commits()
-                .into_iter()
-                .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
-                .collect::<Vec<_>>()
         };
 
         let mut recovered = Vec::new();
         let mut dead_lettered = Vec::new();
         let max_recovery_attempts = 5;
 
-        for (tx_id, participants, commit_timestamp) in decisions {
+        for d in decisions {
+            let (tx_id, participants, commit_timestamp) =
+                (d.tx_id, d.participants, d.commit_timestamp);
             // Create a transaction in committing state for recovery
             let mut tx = DistributedTransaction::new(tx_id, participants, self.transaction_timeout);
             tx.begin_prepare().ok();
@@ -1005,21 +1004,19 @@ impl ShardCoordinator {
         }
 
         // Re-attempt recovery using single-transaction recovery
-        let decisions = {
+        let decision = {
             let log = self
                 .commit_log
                 .read()
                 .map_err(|_| DistributedTxError::Aborted {
                     reason: "Lock poisoned".to_string(),
                 })?;
-            log.pending_commits()
-                .into_iter()
-                .filter(|d| d.tx_id == tx_id)
-                .map(|d| (d.tx_id, d.participants.clone(), d.commit_timestamp))
-                .collect::<Vec<_>>()
+            log.pending_commits().into_iter().find(|d| d.tx_id == tx_id)
         };
 
-        if let Some((found_tx_id, participants, commit_timestamp)) = decisions.into_iter().next() {
+        if let Some(d) = decision {
+            let (found_tx_id, participants, commit_timestamp) =
+                (d.tx_id, d.participants, d.commit_timestamp);
             let mut tx =
                 DistributedTransaction::new(found_tx_id, participants, self.transaction_timeout);
             tx.begin_prepare().ok();
