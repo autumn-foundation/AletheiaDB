@@ -700,7 +700,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Bi-temporal query (point-in-time)
     let results = db.execute_aql(
-        "AS OF '2024-01-15T10:00:00Z' MATCH (n:Person {name: 'Alice'}) RETURN n"
+        "AS OF 1705312800000000 MATCH (n:Person {name: 'Alice'}) RETURN n"
     )?;
 
     Ok(())
@@ -795,7 +795,7 @@ For complex operations involving multiple updates, use explicit transactions.
 use aletheiadb::prelude::*;
 
 // Explicit read transaction
-let result = db.read(|tx| {
+let _result = db.read(|tx| {
     tx.get_node(alice_id).map(|node| node.label.clone())
 })?;
 
@@ -822,6 +822,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
 
     // 1. Create embedding service
+    // Requires OPENAI_API_KEY environment variable
     let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
     let provider = Arc::new(OpenAIProvider::new(config)?);
     let service = EmbeddingService::new(provider);
@@ -885,7 +886,7 @@ fn main() {
     let config = observability::Config::from_env();
     observability::init(config);
 
-    let db = aletheiadb::AletheiaDB::new().unwrap();
+    let _db = aletheiadb::AletheiaDB::new().unwrap();
 
     // Metrics automatically collected
     // Check for critical errors
