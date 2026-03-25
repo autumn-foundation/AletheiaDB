@@ -248,7 +248,7 @@ impl CurrentStorage {
 
     /// Get the first/default property name that is currently indexed.
     ///
-    /// Equivalent to [`get_default_vector_property_name`](Self::get_default_vector_property_name).
+    /// Equivalent to `get_default_vector_property_name` (internal).
     /// For multi-property setups, use [`list_vector_indexes`](Self::list_vector_indexes) instead.
     pub fn get_indexed_property_name(&self) -> Option<String> {
         self.get_default_vector_property_name()
@@ -1835,7 +1835,7 @@ impl CurrentStorage {
 
     /// Get the name of the property used for vector indexing.
     ///
-    /// Equivalent to [`get_default_vector_property_name`](Self::get_default_vector_property_name).
+    /// Equivalent to `get_default_vector_property_name` (internal).
     /// Used by the query executor for vector reranking operations.
     pub fn get_vector_property_name(&self) -> Option<String> {
         self.get_default_vector_property_name()
