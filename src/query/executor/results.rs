@@ -11,6 +11,15 @@ use crate::core::{EdgeId, NodeId};
 
 use super::iterators::ResultIterator;
 
+/// Score threshold above which results are highlighted green in display output.
+const HIGH_SCORE_THRESHOLD: f64 = 0.8;
+
+/// Score threshold below which results are highlighted yellow in display output.
+const LOW_SCORE_THRESHOLD: f64 = 0.5;
+
+/// Maximum number of properties shown per node in display output.
+const MAX_DISPLAY_PROPERTIES: usize = 5;
+
 /// A path through the graph, represented as a sequence of entity IDs.
 pub type Path = Vec<EntityId>;
 
@@ -459,9 +468,9 @@ impl std::fmt::Display for QueryResult {
             if let Some(scores) = &self.scores {
                 if let Some(score) = scores.get(i) {
                     let mut cell = comfy_table::Cell::new(format!("{:.4}", score));
-                    if *score > 0.8 {
+                    if f64::from(*score) > HIGH_SCORE_THRESHOLD {
                         cell = cell.fg(comfy_table::Color::Green);
-                    } else if *score < 0.5 {
+                    } else if f64::from(*score) < LOW_SCORE_THRESHOLD {
                         cell = cell.fg(comfy_table::Color::Yellow);
                     }
                     row.add_cell(cell);
@@ -476,7 +485,7 @@ impl std::fmt::Display for QueryResult {
                     // Format map compactly
                     let mut parts: Vec<String> = map
                         .iter()
-                        .take(5) // Limit to 5 properties
+                        .take(MAX_DISPLAY_PROPERTIES)
                         .map(|(k, v)| {
                             // resolve key
                             let k_str = crate::core::interning::GLOBAL_INTERNER
@@ -486,8 +495,8 @@ impl std::fmt::Display for QueryResult {
                         })
                         .collect();
 
-                    if map.len() > 5 {
-                        parts.push(format!("... (+{})", map.len() - 5));
+                    if map.len() > MAX_DISPLAY_PROPERTIES {
+                        parts.push(format!("... (+{})", map.len() - MAX_DISPLAY_PROPERTIES));
                     }
 
                     let content = if parts.is_empty() {
@@ -557,22 +566,25 @@ impl QueryResults {
             rows.push(row?);
         }
 
-        // Determine which fields we have
-        let has_any_scores = rows.iter().any(|r| r.score.is_some());
-        let has_any_paths = rows.iter().any(|r| r.path.is_some());
-        let has_any_versions = rows.iter().any(|r| r.timestamp.is_some());
-        let has_any_nodes = rows.iter().any(|r| r.entity.as_node().is_some());
+        // Determine which fields we have (single pass)
+        let (mut has_any_scores, mut has_any_paths, mut has_any_versions, mut has_any_nodes) =
+            (false, false, false, false);
+        let mut node_count = 0usize;
+        for row in &rows {
+            has_any_scores = has_any_scores || row.score.is_some();
+            has_any_paths = has_any_paths || row.path.is_some();
+            has_any_versions = has_any_versions || row.timestamp.is_some();
+            if row.entity.as_node().is_some() {
+                has_any_nodes = true;
+                node_count += 1;
+            }
+        }
 
         // Second pass: extract data with padding
         let capacity = rows.len();
-        let node_capacity = if has_any_nodes {
-            rows.iter().filter(|r| r.entity.as_node().is_some()).count()
-        } else {
-            0
-        };
-        let mut nodes = Vec::with_capacity(node_capacity);
+        let mut nodes = Vec::with_capacity(node_count);
         let mut properties = if has_any_nodes {
-            Some(Vec::with_capacity(node_capacity))
+            Some(Vec::with_capacity(node_count))
         } else {
             None
         };
