@@ -7,6 +7,16 @@ use super::types::ShardId;
 use std::collections::HashMap;
 
 /// Result of a sharding simulation.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::storage::sharding::simulation::SimulationResult;
+///
+/// let result = SimulationResult::new(1000, 5000, 4);
+/// assert_eq!(result.total_nodes, 1000);
+/// assert_eq!(result.num_shards, 4);
+/// ```
 #[derive(Debug, Clone)]
 pub struct SimulationResult {
     /// Number of nodes in the simulation.
@@ -64,6 +74,15 @@ impl SimulationResult {
 }
 
 /// Analysis of edge cuts in a sharded graph.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::storage::sharding::simulation::EdgeCutAnalysis;
+///
+/// let analysis = EdgeCutAnalysis::new(200, 800);
+/// assert_eq!(analysis.cross_shard_ratio, 0.2); // 200 / (200 + 800)
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct EdgeCutAnalysis {
     /// Number of edges that cross shard boundaries.
@@ -171,6 +190,16 @@ impl LatencyEstimates {
 }
 
 /// Storage overhead analysis.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::storage::sharding::simulation::StorageAnalysis;
+///
+/// // 1000 nodes, 5000 edges, 500 cross-shard edges
+/// let analysis = StorageAnalysis::calculate(1000, 5000, 500);
+/// assert!(analysis.overhead_ratio > 0.0);
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct StorageAnalysis {
     /// Total storage without replication (bytes).
@@ -232,6 +261,20 @@ pub struct SimulationConfig {
 }
 
 /// Configuration for an edge type.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::storage::sharding::simulation::EdgeTypeConfig;
+///
+/// let config = EdgeTypeConfig {
+///     source_label: "User".to_string(),
+///     target_label: "Post".to_string(),
+///     edge_label: "CREATED".to_string(),
+///     proportion: 0.5,
+/// };
+/// assert_eq!(config.proportion, 0.5);
+/// ```
 #[derive(Debug, Clone)]
 pub struct EdgeTypeConfig {
     /// Source node label.
