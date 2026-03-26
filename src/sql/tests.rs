@@ -1263,6 +1263,58 @@ mod phase3_graph {
             err
         );
     }
+
+    #[test]
+    fn test_parse_multiple_match_clauses() {
+        // Multiple MATCH clauses should all be extracted
+        let result = parse_sql(
+            "SELECT * FROM nodes AS a MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:WORKS_AT]->(c) WHERE a.name = 'Alice'",
+        );
+        // Should either work (extracting both patterns) or give a clear error
+        match result {
+            Ok(query) => {
+                // If supported, should have two traversal ops
+                let traverse_count = query
+                    .ops
+                    .iter()
+                    .filter(|op| {
+                        matches!(
+                            op,
+                            QueryOp::TraverseOut { .. }
+                                | QueryOp::TraverseIn { .. }
+                                | QueryOp::TraverseBoth { .. }
+                        )
+                    })
+                    .count();
+                assert!(
+                    traverse_count >= 2,
+                    "Expected 2 traversal ops, got {}",
+                    traverse_count
+                );
+            }
+            Err(e) => {
+                // If not supported, error should be clear
+                assert!(
+                    e.to_string().contains("MATCH") || e.to_string().contains("multiple"),
+                    "Error should mention MATCH: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_match_no_edge_type() {
+        // MATCH without edge type should traverse any edge
+        let query = parse_sql("SELECT * FROM nodes AS a MATCH (a)-[]->(b)").unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { label: None, .. }))
+        );
+    }
 }
 
 // ============================================================================

@@ -96,36 +96,32 @@ impl GraphPattern {
 /// Returns `SqlError::ParseError` if the MATCH clause contains an invalid
 /// graph pattern.
 pub fn extract_match_clauses(sql: &str) -> Result<ExtractedMatch, SqlError> {
-    // Find the MATCH keyword position (outside string literals)
-    let match_pos = find_keyword_outside_strings(sql, "MATCH");
+    let mut cleaned = sql.to_string();
+    let mut patterns = Vec::new();
 
-    let match_pos = match match_pos {
-        Some(pos) => pos,
-        None => {
-            // No MATCH clause found - return SQL unchanged
-            return Ok(ExtractedMatch {
-                cleaned_sql: sql.to_string(),
-                patterns: Vec::new(),
-            });
+    while let Some(match_pos) = find_keyword_outside_strings(&cleaned, "MATCH") {
+        // Find where the MATCH clause ends (next SQL keyword or end of string)
+        let after_match = match_pos + "MATCH".len();
+        let match_end = find_match_end(&cleaned, after_match);
+
+        // Extract the pattern text between MATCH and the next keyword
+        let pattern_text = cleaned[after_match..match_end].trim().to_string();
+
+        if pattern_text.is_empty() {
+            return Err(SqlError::ParseError("Empty MATCH pattern".to_string()));
         }
-    };
 
-    // Find where the MATCH clause ends (next SQL keyword or end of string)
-    let after_match = match_pos + "MATCH".len();
-    let match_end = find_match_end(sql, after_match);
+        // Parse the graph pattern(s)
+        let parsed = parse_graph_patterns(&pattern_text)?;
+        patterns.extend(parsed);
 
-    // Extract the pattern text between MATCH and the next keyword
-    let pattern_text = &sql[after_match..match_end];
-
-    // Parse the graph pattern(s)
-    let patterns = parse_graph_patterns(pattern_text.trim())?;
-
-    // Build cleaned SQL by removing the MATCH clause
-    let cleaned = format!(
-        "{} {}",
-        sql[..match_pos].trim_end(),
-        sql[match_end..].trim_start()
-    );
+        // Remove the MATCH clause from cleaned SQL
+        cleaned = format!(
+            "{} {}",
+            cleaned[..match_pos].trim_end(),
+            cleaned[match_end..].trim_start()
+        );
+    }
 
     Ok(ExtractedMatch {
         cleaned_sql: cleaned,
@@ -139,7 +135,7 @@ pub fn extract_match_clauses(sql: &str) -> Result<ExtractedMatch, SqlError> {
 fn find_keyword_outside_strings(sql: &str, keyword: &str) -> Option<usize> {
     let sql_upper = sql.to_uppercase();
     let keyword_upper = keyword.to_uppercase();
-    let keyword_len = keyword_upper.len();
+    let keyword_len = keyword_upper.chars().count();
 
     let mut i = 0;
     let chars: Vec<char> = sql.chars().collect();
@@ -194,7 +190,9 @@ fn find_keyword_outside_strings(sql: &str, keyword: &str) -> Option<usize> {
 /// These keywords are: WHERE, ORDER, LIMIT, OFFSET, GROUP, HAVING, or end of string.
 fn find_match_end(sql: &str, start: usize) -> usize {
     let remainder = &sql[start..];
-    let keywords = ["WHERE", "ORDER", "LIMIT", "OFFSET", "GROUP", "HAVING"];
+    let keywords = [
+        "WHERE", "ORDER", "LIMIT", "OFFSET", "GROUP", "HAVING", "MATCH",
+    ];
 
     // Find the earliest keyword outside string literals
     let mut earliest: Option<usize> = None;
@@ -668,5 +666,33 @@ mod tests {
         assert!(result.cleaned_sql.contains("ORDER BY"));
         assert!(result.cleaned_sql.contains("LIMIT"));
         assert!(!result.cleaned_sql.to_uppercase().contains("MATCH"));
+    }
+
+    #[test]
+    fn test_extract_multiple_match_clauses() {
+        let result = extract_match_clauses(
+            "SELECT * FROM nodes AS a MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:WORKS_AT]->(c) WHERE a.name = 'Alice'",
+        )
+        .unwrap();
+
+        assert_eq!(result.patterns.len(), 2);
+        assert_eq!(result.patterns[0].edge_type, Some("KNOWS".to_string()));
+        assert_eq!(result.patterns[0].direction, PatternDirection::Outgoing);
+        assert_eq!(result.patterns[1].edge_type, Some("WORKS_AT".to_string()));
+        assert_eq!(result.patterns[1].direction, PatternDirection::Outgoing);
+
+        // Cleaned SQL should have NO MATCH keywords remaining
+        assert!(!result.cleaned_sql.to_uppercase().contains("MATCH"));
+        assert!(result.cleaned_sql.contains("WHERE"));
+    }
+
+    #[test]
+    fn test_extract_empty_edge_spec() {
+        let result = extract_match_clauses("SELECT * FROM nodes AS a MATCH (a)-[]->(b)").unwrap();
+
+        assert_eq!(result.patterns.len(), 1);
+        assert_eq!(result.patterns[0].edge_type, None);
+        assert_eq!(result.patterns[0].direction, PatternDirection::Outgoing);
+        assert_eq!(result.patterns[0].depth, TraversalDepth::Exact(1));
     }
 }
