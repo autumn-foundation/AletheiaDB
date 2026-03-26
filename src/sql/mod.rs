@@ -59,6 +59,7 @@ mod match_parser;
 mod parser;
 mod temporal;
 mod temporal_parser;
+mod vector_parser;
 
 pub use converter::{SqlConverter, parse_sql, parse_sql_with_params};
 pub use error::SqlError;

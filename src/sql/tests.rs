@@ -1317,71 +1317,7 @@ mod phase3_graph {
     }
 }
 
-// ============================================================================
-// PHASE 4: Vector Extension Tests
-// ============================================================================
-
-mod phase4_vector {
-    use super::*;
-
-    #[test]
-    fn test_parse_order_by_vector_distance() {
-        // PostgreSQL pgvector style: ORDER BY embedding <=> '[0.1, 0.2, 0.3]'::vector
-        let result = parse_sql(
-            "SELECT * FROM nodes ORDER BY embedding <=> '[0.1, 0.2, 0.3]'::vector LIMIT 10",
-        );
-        // This requires custom operator support
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::VectorSearch { .. }))
-            );
-        }
-    }
-
-    #[test]
-    fn test_parse_knn_function() {
-        // Alternative syntax: KNN(embedding, '[0.1, 0.2, 0.3]', 10)
-        let result = parse_sql("SELECT * FROM nodes WHERE KNN(embedding, '[0.1, 0.2, 0.3]', 10)");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::VectorSearch { k: 10, .. }))
-            );
-        }
-    }
-
-    #[test]
-    fn test_parse_similar_to_function() {
-        // SIMILAR_TO(node_id, 10) function
-        let result = parse_sql("SELECT * FROM nodes WHERE SIMILAR_TO(42, 10)");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::SimilarTo { k: 10, .. }))
-            );
-        }
-    }
-
-    #[test]
-    fn test_parse_rank_by_similarity() {
-        let result = parse_sql("SELECT * FROM nodes RANK BY SIMILARITY TO '[0.1, 0.2, 0.3]' TOP 5");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::RankBySimilarity { top_k: Some(5), .. }))
-            );
-        }
-    }
-}
+// Old phase4_vector TDD stubs removed — replaced by full implementation below.
 
 // ============================================================================
 // Integration Tests
@@ -1428,6 +1364,254 @@ mod integration {
 
         let plan = planner.plan(query);
         assert!(plan.is_ok());
+    }
+}
+
+// ============================================================================
+// PHASE 4: Vector Extensions Tests
+// ============================================================================
+
+mod phase4_vector {
+    use super::*;
+    use crate::sql::converter::SqlParameterValue;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_parse_vector_knn_with_literal() {
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2, 0.3]'::vector LIMIT 10",
+        )
+        .unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { k: 10, .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_vector_knn_with_parameter() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert(
+            "query_embedding".to_string(),
+            SqlParameterValue::Embedding(embedding),
+        );
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM Documents ORDER BY embedding <=> $query_embedding LIMIT 10",
+            params,
+        )
+        .unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_vector_knn_property_key() {
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2]'::vector LIMIT 5",
+        )
+        .unwrap();
+
+        if let Some(QueryOp::VectorSearch {
+            k, property_key, ..
+        }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(*k, 5);
+            assert_eq!(property_key.as_deref(), Some("embedding"));
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+    }
+
+    #[test]
+    fn test_parse_vector_knn_function() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM KNN('Documents', 'embedding', $query, 10)",
+            params,
+        )
+        .unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { k: 10, .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_hybrid_graph_plus_vector() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM nodes AS doctor MATCH (doctor)-[:COMPANION]->(companion) WHERE doctor.name = 'David Tennant' ORDER BY companion.embedding <=> $query LIMIT 10",
+            params,
+        )
+        .unwrap();
+
+        // Should have traversal + filter + RankBySimilarity (not VectorSearch) + Limit
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_full_hybrid_temporal_graph_vector() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("rec".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM nodes AS user FOR SYSTEM_TIME AS OF TIMESTAMP '2000000' MATCH (user)-[:VIEWED]->(item) WHERE item.price < 100 ORDER BY item.embedding <=> $rec LIMIT 10",
+            params,
+        )
+        .unwrap();
+
+        // Full hybrid: temporal + graph + vector
+        assert!(query.temporal_context.is_some());
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
+    }
+
+    #[test]
+    fn test_parse_vector_no_limit_defaults() {
+        // ORDER BY <=> without LIMIT should default k=10
+        let query =
+            parse_sql("SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2]'::vector")
+                .unwrap();
+
+        if let Some(QueryOp::VectorSearch { k, .. }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(*k, 10, "Default k should be 10");
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+    }
+
+    #[test]
+    fn test_parse_vector_unbound_parameter_error() {
+        let result =
+            parse_sql("SELECT * FROM Documents ORDER BY embedding <=> $nonexistent LIMIT 10");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent") || err.contains("Unbound"),
+            "Error should mention parameter: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_vector_l2_distance_metric() {
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <-> '[0.1, 0.2]'::vector LIMIT 5",
+        )
+        .unwrap();
+
+        if let Some(QueryOp::VectorSearch { metric, .. }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(
+                *metric,
+                crate::index::vector::DistanceMetric::Euclidean,
+                "Should use Euclidean for <->"
+            );
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+    }
+
+    #[test]
+    fn test_parse_vector_similar_to() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert(
+            "query_embedding".to_string(),
+            SqlParameterValue::Embedding(embedding),
+        );
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM Documents WHERE SIMILAR_TO(embedding, $query_embedding, 0.8)",
+            params,
+        )
+        .unwrap();
+
+        // SIMILAR_TO currently maps to a VectorSearch op
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_vector_knn_function_replaces_scan() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM KNN('Documents', 'embedding', $query, 10)",
+            params,
+        )
+        .unwrap();
+
+        // VectorSearch should be the first op, replacing ScanNodes
+        assert!(matches!(&query.ops[0], QueryOp::VectorSearch { .. }));
+        // No ScanNodes should remain
+        assert!(
+            !query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanNodes { .. }))
+        );
     }
 }
 
