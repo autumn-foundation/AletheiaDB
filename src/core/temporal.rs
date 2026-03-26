@@ -1606,6 +1606,185 @@ mod proptests {
 
 #[cfg(test)]
 mod sentry_tests {
+
+    #[test]
+    #[should_panic(expected = "Start timestamp exceeds MAX_VALID_TIMESTAMP")]
+    fn test_sentry_timerange_from_panics_on_invalid_timestamp() {
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let _ = TimeRange::from(invalid_ts);
+    }
+
+    #[test]
+    #[should_panic(expected = "Timestamp exceeds MAX_VALID_TIMESTAMP")]
+    fn test_sentry_timerange_at_panics_on_invalid_timestamp() {
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let _ = TimeRange::at(invalid_ts);
+    }
+
+    #[test]
+    fn test_sentry_timerange_is_closed() {
+        let open_range = TimeRange::from(100.into());
+        let closed_range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        assert!(!open_range.is_closed(), "Open range should not be closed");
+        assert!(closed_range.is_closed(), "Closed range should be closed");
+    }
+
+    #[test]
+    fn test_sentry_timerange_contains_strict_bounds() {
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        // Test strict `timestamp >= self.start && timestamp < self.end`
+        assert!(!range.contains(99.into()), "Should not contain < start");
+        assert!(range.contains(100.into()), "Should contain == start");
+        assert!(range.contains(199.into()), "Should contain < end");
+        assert!(!range.contains(200.into()), "Should not contain == end");
+    }
+
+    #[test]
+    fn test_sentry_timerange_contains_or_after_strict() {
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        assert!(
+            !range.contains_or_after(99.into()),
+            "Should be false for < start"
+        );
+        assert!(
+            range.contains_or_after(100.into()),
+            "Should be true for == start"
+        );
+        assert!(
+            range.contains_or_after(101.into()),
+            "Should be true for > start"
+        );
+    }
+
+    #[test]
+    fn test_sentry_timerange_contains_range_strict() {
+        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+
+        // Valid contained
+        let inner = TimeRange::new(150.into(), 250.into()).unwrap();
+        assert!(outer.contains_range(&inner), "Should contain inner range");
+
+        // Invalid: start is before outer start
+        let early_start = TimeRange::new(99.into(), 250.into()).unwrap();
+        assert!(
+            !outer.contains_range(&early_start),
+            "Should not contain range starting before"
+        );
+
+        // Invalid: end is after outer end
+        let late_end = TimeRange::new(150.into(), 301.into()).unwrap();
+        assert!(
+            !outer.contains_range(&late_end),
+            "Should not contain range ending after"
+        );
+    }
+
+    #[test]
+    fn test_sentry_timerange_close_at_strict() {
+        let range = TimeRange::from(100.into());
+
+        // Should fail if end < start
+        let result = range.close_at(99.into());
+        assert!(result.is_err(), "Should reject close_at with end < start");
+
+        // Should succeed if end == start
+        let result_eq = range.close_at(100.into());
+        assert!(result_eq.is_ok(), "Should allow close_at with end == start");
+
+        // Should fail if end > MAX_VALID_TIMESTAMP && end != TIMESTAMP_MAX
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let result_invalid = range.close_at(invalid_ts);
+        assert!(
+            result_invalid.is_err(),
+            "Should reject close_at with end > MAX_VALID_TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn test_sentry_timerange_deserialize_strict_length() {
+        let bytes = vec![0; 24];
+        assert!(
+            TimeRange::deserialize(&bytes).is_ok(),
+            "Should accept exactly 24 bytes"
+        );
+
+        let short_bytes = vec![0; 23];
+        assert!(
+            TimeRange::deserialize(&short_bytes).is_err(),
+            "Should reject < 24 bytes"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_visible_at_strict() {
+        let valid = TimeRange::new(100.into(), 200.into()).unwrap();
+        let tx = TimeRange::new(300.into(), 400.into()).unwrap();
+        let interval = BiTemporalInterval::new(valid, tx);
+
+        // Both true
+        assert!(
+            interval.is_visible_at(150.into(), 350.into()),
+            "Should be true when both contain"
+        );
+
+        // Valid false, Tx true
+        assert!(
+            !interval.is_visible_at(99.into(), 350.into()),
+            "Should be false when valid not contain"
+        );
+
+        // Valid true, Tx false
+        assert!(
+            !interval.is_visible_at(150.into(), 299.into()),
+            "Should be false when tx not contain"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_deserialize_strict_length() {
+        let bytes = vec![0; 48];
+        assert!(
+            BiTemporalInterval::deserialize(&bytes).is_ok(),
+            "Should accept exactly 48 bytes"
+        );
+
+        let short_bytes = vec![0; 47];
+        assert!(
+            BiTemporalInterval::deserialize(&short_bytes).is_err(),
+            "Should reject < 48 bytes"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_arithmetic_strict() {
+        // time::from_secs
+        let ts_secs = time::from_secs(2);
+        assert_eq!(
+            ts_secs.wallclock(),
+            2_000_000,
+            "from_secs should multiply by 1_000_000"
+        );
+
+        // time::from_millis
+        let ts_millis = time::from_millis(3);
+        assert_eq!(
+            ts_millis.wallclock(),
+            3_000,
+            "from_millis should multiply by 1_000"
+        );
+
+        // time::to_secs
+        let secs = time::to_secs(HybridTimestamp::new_unchecked(4_000_000, 0));
+        assert_eq!(secs, 4, "to_secs should divide by 1_000_000");
+
+        // time::to_millis
+        let millis = time::to_millis(HybridTimestamp::new_unchecked(5_000, 0));
+        assert_eq!(millis, 5, "to_millis should divide by 1_000");
+    }
+
     use super::*;
 
     #[test]
