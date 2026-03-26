@@ -101,8 +101,6 @@ impl SqlConverter {
         };
 
         let mut ops = Vec::new();
-        // Temporal context is populated by convert_sql() via temporal preprocessing
-        let temporal_context = None;
 
         // Convert FROM clause
         self.convert_from(&select.from, &mut ops)?;
@@ -135,7 +133,8 @@ impl SqlConverter {
 
         Ok(Query {
             ops,
-            temporal_context,
+            // Temporal context is set by convert_sql() after extraction
+            temporal_context: None,
             hints: QueryHints::default(),
         })
     }

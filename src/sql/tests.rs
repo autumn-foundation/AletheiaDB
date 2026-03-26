@@ -541,6 +541,86 @@ mod phase2_temporal {
             TemporalClause::system_time_between(Timestamp::from(2000), Timestamp::from(1000));
         assert!(clause.is_err());
     }
+
+    // ========================================================================
+    // Full Pipeline End-to-End Tests
+    // Verify temporal context flows through convert_sql() correctly
+    // ========================================================================
+
+    #[test]
+    fn test_temporal_context_wired_through_full_pipeline() {
+        // Verify temporal context flows correctly through the complete pipeline
+        let query = parse_sql(
+            "SELECT * FROM Person FOR SYSTEM_TIME AS OF TIMESTAMP '1705315200000000' WHERE name = 'Alice'",
+        )
+        .expect("Should parse temporal query");
+
+        // Must have temporal context
+        assert!(
+            query.temporal_context.is_some(),
+            "temporal_context must be set"
+        );
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (_valid_time, tx_time) = ctx.as_of_tuple().unwrap();
+        assert_eq!(tx_time.wallclock(), 1705315200000000);
+
+        // Must also have the WHERE filter
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+
+        // Must also have label scan (Person)
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::ScanNodes { label: Some(l) } if l == "person"
+        )));
+    }
+
+    #[test]
+    fn test_valid_time_wired_through_full_pipeline() {
+        let query =
+            parse_sql("SELECT * FROM nodes FOR VALID_TIME AS OF TIMESTAMP '1705315200000000'")
+                .expect("Should parse valid time query");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (valid_time, _tx_time) = ctx.as_of_tuple().unwrap();
+        assert_eq!(valid_time.wallclock(), 1705315200000000);
+    }
+
+    #[test]
+    fn test_bitemporal_wired_through_full_pipeline() {
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '2000000' FOR VALID_TIME AS OF TIMESTAMP '1500000'",
+        )
+        .expect("Should parse bi-temporal query");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (valid_time, tx_time) = ctx.as_of_tuple().unwrap();
+        assert_eq!(valid_time.wallclock(), 1500000);
+        assert_eq!(tx_time.wallclock(), 2000000);
+    }
+
+    #[test]
+    fn test_system_time_between_wired_through_full_pipeline() {
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME BETWEEN TIMESTAMP '1000000' AND TIMESTAMP '2000000' WHERE age > 21",
+        )
+        .expect("Should parse temporal range + filter");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.transaction_time_between.is_some());
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    #[test]
+    fn test_no_temporal_clause_leaves_context_none() {
+        let query = parse_sql("SELECT * FROM Person WHERE name = 'Alice'").expect("parse");
+        assert!(
+            query.temporal_context.is_none(),
+            "Non-temporal query should have None context"
+        );
+    }
 }
 
 // ============================================================================
