@@ -1028,6 +1028,79 @@ mod phase3_graph {
             );
         }
     }
+
+    // ========================================================================
+    // Edge Scanning Tests (#533)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_select_from_edges() {
+        let query = parse_sql("SELECT * FROM edges").unwrap();
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { edge_type: None }))
+        );
+    }
+
+    #[test]
+    fn test_parse_select_from_edges_with_filter() {
+        let query = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'").unwrap();
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    #[test]
+    fn test_parse_select_from_edges_with_limit() {
+        let query = parse_sql("SELECT * FROM edges LIMIT 10").unwrap();
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
+    }
+
+    #[test]
+    fn test_parse_select_from_edges_with_order_by() {
+        let query = parse_sql("SELECT * FROM edges ORDER BY timestamp DESC").unwrap();
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Timestamp,
+                descending: true
+            }
+        )));
+    }
+
+    // ========================================================================
+    // JOIN Error Improvement Tests (#538)
+    // ========================================================================
+
+    #[test]
+    fn test_join_gives_helpful_error() {
+        let result = parse_sql("SELECT p.name FROM Person p JOIN Company c ON p.company_id = c.id");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("MATCH"),
+            "Error should suggest MATCH alternative: {}",
+            err
+        );
+    }
 }
 
 // ============================================================================

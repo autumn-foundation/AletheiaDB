@@ -160,7 +160,9 @@ impl SqlConverter {
         let table = &from[0];
         if !table.joins.is_empty() {
             return Err(SqlError::UnsupportedFeature(
-                "JOIN clauses not yet supported".to_string(),
+                "JOIN clauses are not yet supported. Use MATCH for graph traversal: \
+                 MATCH (source)-[:EDGE_TYPE]->(target)"
+                    .to_string(),
             ));
         }
 
@@ -172,11 +174,7 @@ impl SqlConverter {
                         ops.push(QueryOp::ScanNodes { label: None });
                     }
                     "edges" => {
-                        // For edges, we'll need to implement edge scanning
-                        // For now, return unsupported
-                        return Err(SqlError::UnsupportedFeature(
-                            "Edge scanning not yet implemented".to_string(),
-                        ));
+                        ops.push(QueryOp::ScanEdges { edge_type: None });
                     }
                     _ => {
                         // Treat other table names as label filters

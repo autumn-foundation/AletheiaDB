@@ -208,6 +208,14 @@ pub enum ScanOp {
         label_filter: Option<String>,
     },
 
+    /// Full edge scan with optional edge type filter
+    EdgeScan {
+        /// Optional edge type to filter by (e.g., "KNOWS", "FOLLOWS")
+        edge_type: Option<String>,
+        /// Estimated number of rows (for cost estimation)
+        estimated_rows: Option<usize>,
+    },
+
     /// Property-based node scan: nodes with a given label where property == value.
     ///
     /// This is the fused form of `NodeScan { label } + Filter(Eq { key, value })`,
