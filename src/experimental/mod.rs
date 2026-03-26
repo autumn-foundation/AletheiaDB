@@ -250,3 +250,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// EchoChamber: Semantic Bubble Detector.
+pub mod echo_chamber;
