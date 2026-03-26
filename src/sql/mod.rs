@@ -55,6 +55,7 @@
 
 mod converter;
 mod error;
+mod match_parser;
 mod parser;
 mod temporal;
 mod temporal_parser;

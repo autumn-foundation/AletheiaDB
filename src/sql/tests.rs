@@ -972,61 +972,223 @@ mod phase3_graph {
     use super::*;
     use crate::query::ir::TraversalDepth;
 
+    // ========================================================================
+    // MATCH clause tests (Task 4: #532)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_match_outgoing_single_hop() {
+        let query = parse_sql(
+            "SELECT * FROM nodes AS source MATCH (source)-[:KNOWS]->(target) WHERE source.name = 'Alice'",
+        )
+        .unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Exact(1) } if l == "KNOWS"
+        )));
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    #[test]
+    fn test_parse_match_incoming_edge() {
+        let query =
+            parse_sql("SELECT * FROM nodes AS child MATCH (parent)<-[:PARENT_OF]-(child)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseIn { label: Some(l), depth: TraversalDepth::Exact(1) } if l == "PARENT_OF"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_bidirectional() {
+        let query = parse_sql("SELECT * FROM nodes AS n MATCH (n)-[:RELATED]-(related)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseBoth { label: Some(l), depth: TraversalDepth::Exact(1) } if l == "RELATED"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_with_where_order_limit() {
+        let query = parse_sql(
+            "SELECT * FROM nodes AS source MATCH (source)-[:KNOWS]->(target) WHERE source.name = 'Alice' ORDER BY target.name LIMIT 10",
+        )
+        .unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::Sort { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
+    }
+
+    #[test]
+    fn test_parse_match_no_where() {
+        let query = parse_sql("SELECT * FROM nodes AS a MATCH (a)-[:FOLLOWS]->(b)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), .. } if l == "FOLLOWS"
+        )));
+        assert!(!query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    #[test]
+    fn test_parse_match_with_label_table() {
+        let query = parse_sql("SELECT * FROM Person AS p MATCH (p)-[:KNOWS]->(friend)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::ScanNodes { label: Some(l) } if l == "person"
+        )));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+    }
+
+    // ========================================================================
+    // Variable-length traversal tests (Task 5: #534)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_match_variable_length_range() {
+        let query = parse_sql(
+            "SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*1..3]->(target) WHERE source.name = 'Alice'",
+        )
+        .unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Range { min: 1, max: 3 } } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_exact_depth() {
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*2]->(target)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Exact(2) } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_unbounded() {
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*]->(target)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Variable } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_open_ended_min() {
+        // *2.. means min=2, max=default(10)
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*2..]->(target)")
+                .unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Range { min: 2, max: 10 } } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_open_ended_max() {
+        // *..3 means min=1, max=3
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*..3]->(target)")
+                .unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Range { min: 1, max: 3 } } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_with_temporal() {
+        // MATCH + temporal should both work
+        let query = parse_sql(
+            "SELECT * FROM nodes AS a FOR SYSTEM_TIME AS OF TIMESTAMP '2000000' MATCH (a)-[:KNOWS]->(b) WHERE a.name = 'Alice'",
+        )
+        .unwrap();
+
+        assert!(query.temporal_context.is_some());
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    // ========================================================================
+    // Original placeholder tests (now properly asserting)
+    // ========================================================================
+
     #[test]
     fn test_parse_match_simple_traversal() {
-        // MATCH (n)-[:KNOWS]->(m) style syntax embedded in SQL
-        // This requires custom syntax extensions
-        let result = parse_sql("SELECT * FROM nodes MATCH (source)-[:KNOWS]->(target)");
-        // This may not be supported initially - that's OK for TDD
-        // The test documents the expected behavior
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
-            );
-        }
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS]->(target)").unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
     }
 
     #[test]
     fn test_parse_match_variable_length() {
-        let result = parse_sql("SELECT * FROM nodes MATCH (source)-[:KNOWS*1..3]->(target)");
-        if let Ok(query) = result {
-            let traverse = query
-                .ops
-                .iter()
-                .find(|op| matches!(op, QueryOp::TraverseOut { .. }));
-            if let Some(QueryOp::TraverseOut { depth, .. }) = traverse {
-                assert!(matches!(depth, TraversalDepth::Range { min: 1, max: 3 }));
-            }
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*1..3]->(target)")
+                .unwrap();
+
+        let traverse = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::TraverseOut { .. }));
+        if let Some(QueryOp::TraverseOut { depth, .. }) = traverse {
+            assert!(matches!(depth, TraversalDepth::Range { min: 1, max: 3 }));
+        } else {
+            panic!("Expected TraverseOut op");
         }
     }
 
     #[test]
     fn test_parse_match_incoming() {
-        let result = parse_sql("SELECT * FROM nodes MATCH (source)<-[:FOLLOWS]-(target)");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::TraverseIn { .. }))
-            );
-        }
-    }
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)<-[:FOLLOWS]-(target)").unwrap();
 
-    #[test]
-    fn test_parse_match_bidirectional() {
-        let result = parse_sql("SELECT * FROM nodes MATCH (source)-[:RELATED]-(target)");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::TraverseBoth { .. }))
-            );
-        }
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseIn { .. }))
+        );
     }
 
     // ========================================================================

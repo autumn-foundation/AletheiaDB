@@ -16,6 +16,7 @@ use crate::query::ir::{Predicate, PredicateValue, QueryOp, SortKey};
 use crate::query::plan::QueryHints;
 
 use super::error::SqlError;
+use super::match_parser;
 use super::parser::SqlParser;
 use super::temporal_parser;
 
@@ -65,14 +66,28 @@ impl SqlConverter {
     /// Convert a SQL string to a Query.
     pub fn convert_sql(&self, sql: &str) -> Result<Query, SqlError> {
         // Extract temporal clauses first
-        let extracted = temporal_parser::extract_temporal_clauses(sql)?;
+        let extracted_temporal = temporal_parser::extract_temporal_clauses(sql)?;
 
-        // Parse the cleaned SQL (without temporal clauses)
-        let stmt = SqlParser::parse(&extracted.cleaned_sql)?;
+        // Extract MATCH clauses from the (already temporal-cleaned) SQL
+        let extracted_match = match_parser::extract_match_clauses(&extracted_temporal.cleaned_sql)?;
+
+        // Parse the cleaned SQL (without temporal or MATCH clauses)
+        let stmt = SqlParser::parse(&extracted_match.cleaned_sql)?;
 
         // Convert to Query and add temporal context
         let mut query = self.convert(&stmt)?;
-        query.temporal_context = extracted.to_temporal_context()?;
+        query.temporal_context = extracted_temporal.to_temporal_context()?;
+
+        // Insert graph traversal ops after source ops (ScanNodes/ScanEdges)
+        // but before filter/projection/sort/limit ops.
+        for pattern in extracted_match.patterns.iter().rev() {
+            let insert_pos = query
+                .ops
+                .iter()
+                .position(|op| !matches!(op, QueryOp::ScanNodes { .. } | QueryOp::ScanEdges { .. }))
+                .unwrap_or(query.ops.len());
+            query.ops.insert(insert_pos, pattern.to_query_op());
+        }
 
         Ok(query)
     }
