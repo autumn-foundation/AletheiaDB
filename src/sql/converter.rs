@@ -140,16 +140,17 @@ impl SqlConverter {
             self.convert_order_by(order_by, &mut ops)?;
         }
 
+        // Convert OFFSET (must come before LIMIT for correct SQL semantics:
+        // skip N rows first, then take M rows from the result)
+        if let Some(ref offset) = query.offset {
+            let n = self.expr_to_usize(&offset.value)?;
+            ops.push(QueryOp::Skip(n));
+        }
+
         // Convert LIMIT
         if let Some(ref limit) = query.limit {
             let n = self.expr_to_usize(limit)?;
             ops.push(QueryOp::Limit(n));
-        }
-
-        // Convert OFFSET
-        if let Some(ref offset) = query.offset {
-            let n = self.expr_to_usize(&offset.value)?;
-            ops.push(QueryOp::Skip(n));
         }
 
         Ok(Query {

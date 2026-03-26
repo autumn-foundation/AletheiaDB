@@ -713,13 +713,12 @@ mod complex_queries {
         let results = db.execute_query(query).expect("Failed to execute query");
         let nodes = results.collect_nodes().expect("Failed to collect nodes");
 
-        // Implementation note: The SQL converter emits ops in order [Filter, Limit, Skip].
-        // The planner wraps Skip around Limit, so OFFSET applies after LIMIT:
-        // Filter(3 results) -> Limit(2) -> Skip(1) = 1 result.
+        // Correct SQL semantics: OFFSET first (skip 1), then LIMIT 2.
+        // Filter(3 results) -> Skip(1) -> Limit(2) = 2 results.
         assert_eq!(
             nodes.len(),
-            1,
-            "WHERE + LIMIT 2 + OFFSET 1 should return 1 result (limit applied before offset)"
+            2,
+            "WHERE + LIMIT 2 + OFFSET 1: filter 3 results, skip 1, take 2"
         );
     }
 }
@@ -957,11 +956,8 @@ mod real_world_patterns {
 
         assert_eq!(first_nodes.len(), 2, "First page should have 2 results");
 
-        // Note: The SQL converter emits Limit before Skip in ops order, so
-        // OFFSET wraps around LIMIT. With `LIMIT 2 OFFSET 2`, the inner Limit
-        // returns 2 results, then outer Skip(2) skips all of them = 0 results.
-        // For proper pagination, OFFSET should come before LIMIT in execution,
-        // but the current implementation inverts this. Test the actual behavior.
+        // OFFSET comes before LIMIT: skip 2 rows first, then take 2.
+        // With 3 nodes total, OFFSET 2 skips 2, LIMIT 2 takes remaining 1.
         let second_page =
             parse_sql("SELECT * FROM nodes LIMIT 2 OFFSET 2").expect("Failed to parse SQL");
         let second_results = db
@@ -973,8 +969,8 @@ mod real_world_patterns {
 
         assert_eq!(
             second_nodes.len(),
-            0,
-            "LIMIT 2 OFFSET 2: limit applied first (2 results), then offset skips 2 = 0"
+            1,
+            "LIMIT 2 OFFSET 2: skip 2 rows, then take up to 2 from remaining 1"
         );
     }
 
