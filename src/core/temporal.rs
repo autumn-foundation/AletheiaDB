@@ -1994,15 +1994,9 @@ mod sentry_coverage_tests {
         assert!(!open_range.is_closed());
 
         // BiTemporalInterval::is_visible_at
-        assert!(
-            interval.is_visible_at(time::from_secs(150), time::from_secs(350))
-        );
-        assert!(
-            !interval.is_visible_at(time::from_secs(250), time::from_secs(350))
-        );
-        assert!(
-            !interval.is_visible_at(time::from_secs(150), time::from_secs(450))
-        );
+        assert!(interval.is_visible_at(time::from_secs(150), time::from_secs(350)));
+        assert!(!interval.is_visible_at(time::from_secs(250), time::from_secs(350)));
+        assert!(!interval.is_visible_at(time::from_secs(150), time::from_secs(450)));
 
         // time::from_secs and time::to_secs
         let secs_ts = time::from_secs(12345);
