@@ -1,6 +1,6 @@
 use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
-use crate::core::error::{Result, ResultExt};
+use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::id::{IdGenerator, TxIdGenerator};
 use crate::core::temporal::time;
 use crate::core::version::AnchorConfig;
@@ -62,12 +62,35 @@ fn bootstrap_timestamp(
 fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
     let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
     let mut current_timestamp = db.current_timestamp.lock().map_err(|_| {
-        crate::core::error::Error::other(
-            "failed to seed startup current_timestamp due to lock poisoning",
-        )
+        crate::core::error::Error::Storage(StorageError::LockPoisoned {
+            resource: "current_timestamp".to_string(),
+        })
     })?;
     *current_timestamp = startup_timestamp;
     Ok(())
+}
+
+/// Extract the effective flush interval from a durability mode, falling back to a default.
+fn flush_interval_from_durability(mode: DurabilityMode, default_ms: u64) -> u64 {
+    match mode {
+        DurabilityMode::Async { flush_interval_ms } => flush_interval_ms,
+        DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
+        DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
+        _ => default_ms,
+    }
+}
+
+/// Wire temporal indexes into historical storage in a single write-lock acquisition.
+fn wire_temporal_indexes(db: &AletheiaDB) {
+    let temporal_adjacency_index = Arc::new(
+        crate::index::temporal_adjacency::TemporalAdjacencyIndex::new(
+            crate::index::temporal_adjacency::TemporalAdjacencyConfig::default(),
+        ),
+    );
+
+    let mut hist = db.historical.write();
+    hist.set_temporal_indexes(Arc::clone(&db.temporal_indexes));
+    hist.set_temporal_adjacency_index(temporal_adjacency_index);
 }
 
 impl AletheiaDB {
@@ -153,25 +176,21 @@ impl AletheiaDB {
         let result = (|| {
             let durability_mode = config.wal.durability_mode;
 
-            // Create ConcurrentWalSystem config from unified WalConfig
             let wal_system_config = ConcurrentWalSystemConfig {
                 wal_dir: config.wal.wal_dir,
                 num_stripes: config.wal.num_stripes,
                 stripe_capacity: config.wal.stripe_capacity,
                 segment_size: config.wal.segment_size,
                 segments_to_retain: config.wal.segments_to_retain,
-                flush_interval_ms: match durability_mode {
-                    DurabilityMode::Async { flush_interval_ms } => flush_interval_ms,
-                    DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
-                    DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
-                    _ => config.wal.flush_interval_ms, // Use config default
-                },
+                flush_interval_ms: flush_interval_from_durability(
+                    durability_mode,
+                    config.wal.flush_interval_ms,
+                ),
                 durability_mode,
                 write_buffer_size: config.wal.write_buffer_size,
             };
 
-            let wal = ConcurrentWalSystem::new(wal_system_config)?;
-            let wal = Arc::new(wal);
+            let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
 
             // Create persistence manager if enabled
             let persistence_manager = if config.persistence.enabled {
@@ -318,20 +337,7 @@ impl AletheiaDB {
                 db.persistence_thread_handle = Some(handle);
             }
 
-            // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
-            db.historical
-                .write()
-                .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
-
-            // Initialize and enable temporal adjacency index for efficient temporal pathfinding
-            let temporal_adjacency_index = Arc::new(
-                crate::index::temporal_adjacency::TemporalAdjacencyIndex::new(
-                    crate::index::temporal_adjacency::TemporalAdjacencyConfig::default(),
-                ),
-            );
-            db.historical
-                .write()
-                .set_temporal_adjacency_index(temporal_adjacency_index);
+            wire_temporal_indexes(&db);
 
             // Initialize cold storage if enabled
             if enable_cold_storage && let Some(cold_storage_path) = cold_storage_path {
@@ -373,25 +379,21 @@ impl AletheiaDB {
         let result = (|| {
             let durability_mode = wal_config.durability_mode;
 
-            // Create ConcurrentWalSystem config from unified WalConfig
             let wal_system_config = ConcurrentWalSystemConfig {
                 wal_dir: wal_config.wal_dir,
                 num_stripes: wal_config.num_stripes,
                 stripe_capacity: wal_config.stripe_capacity,
                 segment_size: wal_config.segment_size,
                 segments_to_retain: wal_config.segments_to_retain,
-                flush_interval_ms: match durability_mode {
-                    DurabilityMode::Async { flush_interval_ms } => flush_interval_ms,
-                    DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
-                    DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
-                    _ => wal_config.flush_interval_ms,
-                },
+                flush_interval_ms: flush_interval_from_durability(
+                    durability_mode,
+                    wal_config.flush_interval_ms,
+                ),
                 durability_mode,
                 write_buffer_size: wal_config.write_buffer_size,
             };
 
-            let wal = ConcurrentWalSystem::new(wal_system_config)?;
-            let wal = Arc::new(wal);
+            let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
 
             let db = AletheiaDB {
                 current: Arc::new(CurrentStorage::new()),
@@ -414,21 +416,7 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
             };
             seed_startup_current_timestamp(&db)?;
-
-            // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
-            db.historical
-                .write()
-                .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
-
-            // Initialize and enable temporal adjacency index for efficient temporal pathfinding
-            let temporal_adjacency_index = Arc::new(
-                crate::index::temporal_adjacency::TemporalAdjacencyIndex::new(
-                    crate::index::temporal_adjacency::TemporalAdjacencyConfig::default(),
-                ),
-            );
-            db.historical
-                .write()
-                .set_temporal_adjacency_index(temporal_adjacency_index);
+            wire_temporal_indexes(&db);
 
             Ok(db)
         })();
