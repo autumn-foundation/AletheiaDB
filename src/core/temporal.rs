@@ -1945,3 +1945,73 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+
+#[cfg(test)]
+mod sentry_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn test_sentry_mutants_coverage() {
+        let valid_start = time::from_secs(100);
+        let valid_end = time::from_secs(200);
+        let tx_start = time::from_secs(300);
+        let tx_end = time::from_secs(400);
+
+        let v_range = TimeRange::new(valid_start, valid_end).unwrap();
+        let t_range = TimeRange::new(tx_start, tx_end).unwrap();
+        let interval = BiTemporalInterval::new(v_range, t_range);
+
+        // BiTemporalInterval::is_currently_valid
+        assert!(!interval.is_currently_valid());
+        let current_v_interval = BiTemporalInterval::new(TimeRange::from(valid_start), t_range);
+        assert!(current_v_interval.is_currently_valid());
+
+        // BiTemporalInterval::is_currently_recorded
+        assert!(!interval.is_currently_recorded());
+        let current_t_interval = BiTemporalInterval::new(v_range, TimeRange::from(tx_start));
+        assert!(current_t_interval.is_currently_recorded());
+
+        // BiTemporalInterval::is_valid_at
+        assert!(interval.is_valid_at(time::from_secs(150)));
+        assert!(!interval.is_valid_at(time::from_secs(250)));
+
+        // BiTemporalInterval::is_recorded_at
+        assert!(interval.is_recorded_at(time::from_secs(350)));
+        assert!(!interval.is_recorded_at(time::from_secs(450)));
+
+        // TimeRange::contains
+        let contains_range = TimeRange::new(time::from_secs(10), time::from_secs(20)).unwrap();
+        assert!(contains_range.contains(time::from_secs(15)));
+        assert!(!contains_range.contains(time::from_secs(25)));
+
+        // TimeRange::contains_or_after
+        assert!(contains_range.contains_or_after(time::from_secs(15)));
+        assert!(!contains_range.contains_or_after(time::from_secs(5)));
+
+        // TimeRange::is_closed
+        assert!(contains_range.is_closed());
+        let open_range = TimeRange::from(time::from_secs(10));
+        assert!(!open_range.is_closed());
+
+        // BiTemporalInterval::is_visible_at
+        assert!(
+            interval.is_visible_at(time::from_secs(150), time::from_secs(350))
+        );
+        assert!(
+            !interval.is_visible_at(time::from_secs(250), time::from_secs(350))
+        );
+        assert!(
+            !interval.is_visible_at(time::from_secs(150), time::from_secs(450))
+        );
+
+        // time::from_secs and time::to_secs
+        let secs_ts = time::from_secs(12345);
+        assert_eq!(secs_ts.wallclock(), 12345 * 1_000_000);
+        assert_eq!(time::to_secs(secs_ts), 12345);
+
+        // time::from_millis and time::to_millis
+        let millis_ts = time::from_millis(12345678);
+        assert_eq!(millis_ts.wallclock(), 12345678 * 1_000);
+        assert_eq!(time::to_millis(millis_ts), 12345678);
+    }
+}
