@@ -1640,3 +1640,88 @@ mod errors {
         assert!(matches!(result, Err(SqlError::UnsupportedFeature(_))));
     }
 }
+
+// ============================================================================
+// POLISH: ORDER BY and misc improvements
+// ============================================================================
+
+mod polish {
+    use super::*;
+
+    #[test]
+    fn test_order_by_simple_identifier() {
+        let query = parse_sql("SELECT * FROM Person ORDER BY name").unwrap();
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Property(p),
+                descending: false
+            } if p == "name"
+        )));
+    }
+
+    #[test]
+    fn test_order_by_compound_identifier() {
+        let query = parse_sql("SELECT * FROM Person ORDER BY person.age DESC").unwrap();
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Property(p),
+                descending: true
+            } if p == "age"
+        )));
+    }
+
+    #[test]
+    fn test_order_by_score_special_key() {
+        let query = parse_sql("SELECT * FROM nodes ORDER BY score DESC").unwrap();
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Score,
+                descending: true
+            }
+        )));
+    }
+
+    #[test]
+    fn test_order_by_timestamp_special_key() {
+        let query = parse_sql("SELECT * FROM nodes ORDER BY timestamp ASC").unwrap();
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Timestamp,
+                descending: false
+            }
+        )));
+    }
+
+    #[test]
+    fn test_order_by_complex_expression_gives_clear_error() {
+        let result = parse_sql("SELECT * FROM nodes ORDER BY price * quantity");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ORDER BY") || err.contains("Complex") || err.contains("not supported"),
+            "Error should be about ORDER BY expressions: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_order_by_function_gives_clear_error() {
+        let result = parse_sql("SELECT * FROM nodes ORDER BY LOWER(name)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multiple_order_by_clauses() {
+        let query = parse_sql("SELECT * FROM Person ORDER BY age DESC, name ASC").unwrap();
+        let sort_ops: Vec<_> = query
+            .ops
+            .iter()
+            .filter(|op| matches!(op, QueryOp::Sort { .. }))
+            .collect();
+        assert_eq!(sort_ops.len(), 2, "Should have two sort operations");
+    }
+}

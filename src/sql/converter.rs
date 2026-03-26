@@ -278,7 +278,7 @@ impl SqlConverter {
             }
             _ => {
                 return Err(SqlError::UnsupportedFeature(
-                    "Complex ORDER BY expressions not supported".to_string(),
+                    "Complex ORDER BY expressions not yet supported. Use simple column names (e.g., ORDER BY name DESC)".to_string(),
                 ));
             }
         };
