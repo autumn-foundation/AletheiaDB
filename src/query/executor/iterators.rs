@@ -829,7 +829,10 @@ impl ResultIterator for TraversalIterator {
                 let neighbors = self.get_neighbors(node_id);
                 for (target, edge_id) in neighbors {
                     if self.visited.insert(target) {
-                        let mut new_path = path.clone();
+                        // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
+                        // We are adding exactly 2 elements (edge and node) to the current path length.
+                        let mut new_path = Vec::with_capacity(path.len() + 2);
+                        new_path.extend_from_slice(&path);
                         new_path.push(EntityId::Edge(edge_id));
                         new_path.push(EntityId::Node(target));
                         self.frontier
