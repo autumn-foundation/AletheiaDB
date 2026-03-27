@@ -58,6 +58,7 @@ use crate::storage::wal::LSN;
 use rayon::prelude::*;
 use redb::{ReadableDatabase, ReadableTable, TableHandle};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "config-toml")]
@@ -420,6 +421,8 @@ pub struct RedbColdStorage {
     config: RedbConfig,
     /// Statistics tracker.
     stats: AtomicColdStorageStats,
+    /// Optional cipher for encrypting data at rest.
+    cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
     /// Fault injection flag for testing.
     #[cfg(test)]
     fail_writes: AtomicBool,
@@ -475,6 +478,7 @@ impl RedbColdStorage {
             db,
             config,
             stats: AtomicColdStorageStats::new(),
+            cipher: None,
             #[cfg(test)]
             fail_writes: AtomicBool::new(false),
             #[cfg(test)]
@@ -487,6 +491,47 @@ impl RedbColdStorage {
     /// Equivalent to `RedbColdStorage::new(path, RedbConfig::default())`.
     pub fn with_default_config<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::new(path, RedbConfig::default())
+    }
+
+    /// Set the encryption cipher for at-rest encryption of stored data.
+    ///
+    /// When a cipher is set, all stored version data is encrypted after
+    /// compression and decrypted before decompression. Metadata (LSN, table
+    /// structure) remains unencrypted.
+    #[must_use]
+    pub fn with_cipher(mut self, cipher: Arc<dyn crate::encryption::cipher::Cipher>) -> Self {
+        self.cipher = Some(cipher);
+        self
+    }
+
+    /// Encrypt data if a cipher is configured, otherwise return as-is.
+    fn encrypt_if_needed(&self, data: Vec<u8>) -> Result<Vec<u8>> {
+        match self.cipher {
+            Some(ref cipher) => {
+                cipher
+                    .encrypt(&data, &[])
+                    .map_err(|e| -> crate::core::error::Error {
+                        StorageError::Encryption(format!("Cold storage encryption failed: {e}"))
+                            .into()
+                    })
+            }
+            None => Ok(data),
+        }
+    }
+
+    /// Decrypt data if a cipher is configured, otherwise return as-is.
+    fn decrypt_if_needed(&self, data: &[u8]) -> Result<Vec<u8>> {
+        match self.cipher {
+            Some(ref cipher) => {
+                cipher
+                    .decrypt(data, &[])
+                    .map_err(|e| -> crate::core::error::Error {
+                        StorageError::Encryption(format!("Cold storage decryption failed: {e}"))
+                            .into()
+                    })
+            }
+            None => Ok(data.to_vec()),
+        }
     }
 
     /// Get the database file path.
@@ -520,6 +565,23 @@ impl RedbColdStorage {
         EncodeFn: Fn(&V) -> Vec<u8> + Sync + Send,
     {
         let cold_config = self.config.to_cold_storage_config();
+        let cipher_ref = &self.cipher;
+
+        // Helper closure: compress then optionally encrypt.
+        let compress_and_encrypt = |data: &[u8]| -> Result<Vec<u8>> {
+            let compressed = crate::storage::compression::compress(data, &cold_config)?;
+            match cipher_ref {
+                Some(cipher) => {
+                    cipher
+                        .encrypt(&compressed, &[])
+                        .map_err(|e| -> crate::core::error::Error {
+                            StorageError::Encryption(format!("Cold storage encryption failed: {e}"))
+                                .into()
+                        })
+                }
+                None => Ok(compressed),
+            }
+        };
 
         if self.should_parallel_compress(versions.len()) {
             versions
@@ -527,8 +589,8 @@ impl RedbColdStorage {
                 .try_fold(PreparedVersionBatch::default, |mut prepared, version| {
                     let encoded = encode_version(version);
                     let raw_size_bytes = encoded.len() as u64;
-                    let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
-                    prepared.add_entry(version.version_id(), compressed, raw_size_bytes);
+                    let to_store = compress_and_encrypt(&encoded)?;
+                    prepared.add_entry(version.version_id(), to_store, raw_size_bytes);
                     Ok::<_, crate::core::error::Error>(prepared)
                 })
                 .try_reduce(PreparedVersionBatch::default, |mut left, right| {
@@ -540,8 +602,8 @@ impl RedbColdStorage {
             for version in versions {
                 let encoded = encode_version(version);
                 let raw_size_bytes = encoded.len() as u64;
-                let compressed = crate::storage::compression::compress(&encoded, &cold_config)?;
-                prepared.add_entry(version.version_id(), compressed, raw_size_bytes);
+                let to_store = compress_and_encrypt(&encoded)?;
+                prepared.add_entry(version.version_id(), to_store, raw_size_bytes);
             }
 
             Ok(prepared)
@@ -674,7 +736,8 @@ impl RedbColdStorage {
         let encoded = encode_fn(version);
         let raw_size = encoded.len();
         let compressed = self.compress(&encoded)?;
-        let compressed_size = compressed.len();
+        let to_store = self.encrypt_if_needed(compressed)?;
+        let stored_size = to_store.len();
 
         let write_txn = self
             .db
@@ -695,7 +758,7 @@ impl RedbColdStorage {
                     })?;
 
             table
-                .insert(version.version_id().as_u64(), compressed.as_slice())
+                .insert(version.version_id().as_u64(), to_store.as_slice())
                 .map_err(map_storage_error("Failed to store version"))?;
         }
 
@@ -709,7 +772,7 @@ impl RedbColdStorage {
             .fetch_add(raw_size as u64, Ordering::Relaxed);
         self.stats
             .bytes_written_compressed
-            .fetch_add(compressed_size as u64, Ordering::Relaxed);
+            .fetch_add(stored_size as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -744,12 +807,13 @@ impl RedbColdStorage {
 
         match table.get(id.as_u64()) {
             Ok(Some(value)) => {
-                let compressed: &[u8] = value.value();
+                let raw: &[u8] = value.value();
                 self.stats
                     .bytes_read_compressed
-                    .fetch_add(compressed.len() as u64, Ordering::Relaxed);
+                    .fetch_add(raw.len() as u64, Ordering::Relaxed);
 
-                let decompressed = self.decompress(compressed)?;
+                let compressed = self.decrypt_if_needed(raw)?;
+                let decompressed = self.decompress(&compressed)?;
                 self.stats
                     .bytes_read_decompressed
                     .fetch_add(decompressed.len() as u64, Ordering::Relaxed);
@@ -3411,5 +3475,155 @@ mod tests {
 
         assert!(result.is_err());
         assert!(storage.was_write_attempted());
+    }
+
+    // ========================================================================
+    // Encryption at rest tests
+    // ========================================================================
+
+    fn test_cipher() -> Arc<dyn crate::encryption::cipher::Cipher> {
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+
+        let mut key = Zeroizing::new([0u8; 32]);
+        key[0] = 0xAB;
+        key[1] = 0xCD;
+        Arc::new(Aes256GcmCipher::new(&key))
+    }
+
+    #[test]
+    fn test_encrypted_store_and_retrieve_node() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("enc_test.redb");
+        let cipher = test_cipher();
+
+        let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(cipher);
+
+        let version = create_test_node_version(1);
+        storage.store_node_version(&version).unwrap();
+
+        let loaded = storage
+            .get_node_version(version.version_id())
+            .unwrap()
+            .expect("node version should exist");
+
+        assert_eq!(loaded.version_id(), version.version_id());
+        assert_eq!(loaded.node_id, version.node_id);
+    }
+
+    #[test]
+    fn test_encrypted_store_and_retrieve_edge() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("enc_test.redb");
+        let cipher = test_cipher();
+
+        let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(cipher);
+
+        let version = create_test_edge_version(1);
+        storage.store_edge_version(&version).unwrap();
+
+        let loaded = storage
+            .get_edge_version(version.version_id())
+            .unwrap()
+            .expect("edge version should exist");
+
+        assert_eq!(loaded.version_id(), version.version_id());
+    }
+
+    #[test]
+    fn test_encrypted_batch_store_and_retrieve() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("enc_batch.redb");
+        let cipher = test_cipher();
+
+        let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(cipher);
+
+        let nodes: Vec<NodeVersion> = (1..=5).map(create_test_node_version).collect();
+        let edges: Vec<EdgeVersion> = (10..=12).map(create_test_edge_version).collect();
+
+        storage
+            .store_batch_with_lsn(&nodes, &edges, LSN(100))
+            .unwrap();
+
+        // Verify all nodes
+        for node in &nodes {
+            let loaded = storage
+                .get_node_version(node.version_id())
+                .unwrap()
+                .expect("node version should exist");
+            assert_eq!(loaded.version_id(), node.version_id());
+        }
+
+        // Verify all edges
+        for edge in &edges {
+            let loaded = storage
+                .get_edge_version(edge.version_id())
+                .unwrap()
+                .expect("edge version should exist");
+            assert_eq!(loaded.version_id(), edge.version_id());
+        }
+
+        // Verify LSN
+        assert_eq!(storage.get_flushed_lsn().unwrap(), Some(LSN(100)));
+    }
+
+    #[test]
+    fn test_encrypted_wrong_key_fails_read() {
+        use crate::encryption::Aes256GcmCipher;
+        use zeroize::Zeroizing;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("enc_wrong_key.redb");
+
+        // Write with one cipher
+        let cipher1 = test_cipher();
+        let storage1 = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(cipher1);
+
+        let version = create_test_node_version(1);
+        storage1.store_node_version(&version).unwrap();
+
+        // Explicitly drop to release file lock
+        drop(storage1);
+
+        // Read with a different cipher
+        let mut key2 = Zeroizing::new([0u8; 32]);
+        key2[0] = 0x12;
+        key2[1] = 0x34;
+        let cipher2: Arc<dyn crate::encryption::cipher::Cipher> =
+            Arc::new(Aes256GcmCipher::new(&key2));
+
+        let storage2 = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(cipher2);
+
+        let result = storage2.get_node_version(version.version_id());
+        assert!(result.is_err(), "Reading with wrong key should fail");
+    }
+
+    #[test]
+    fn test_no_cipher_backward_compatible() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("no_enc.redb");
+
+        // No cipher -- should work exactly like before
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let version = create_test_node_version(1);
+        storage.store_node_version(&version).unwrap();
+
+        let loaded = storage
+            .get_node_version(version.version_id())
+            .unwrap()
+            .expect("node version should exist");
+
+        assert_eq!(loaded.version_id(), version.version_id());
     }
 }

@@ -176,6 +176,22 @@ impl AletheiaDB {
         let result = (|| {
             let durability_mode = config.wal.durability_mode;
 
+            // Create encryption manager if encryption is enabled
+            let encryption_manager = if config.encryption.enabled {
+                let manager = crate::encryption::EncryptionManager::from_config(&config.encryption)
+                    .map_err(|e| -> crate::core::error::Error {
+                        crate::core::error::StorageError::KeyProvider(e.to_string()).into()
+                    })?;
+                Some(Arc::new(manager))
+            } else {
+                None
+            };
+
+            // Extract WAL cipher from encryption manager (if enabled)
+            let wal_cipher = encryption_manager
+                .as_ref()
+                .map(|mgr| Arc::clone(mgr.wal_cipher()));
+
             let wal_system_config = ConcurrentWalSystemConfig {
                 wal_dir: config.wal.wal_dir,
                 num_stripes: config.wal.num_stripes,
@@ -188,7 +204,7 @@ impl AletheiaDB {
                 ),
                 durability_mode,
                 write_buffer_size: config.wal.write_buffer_size,
-                wal_cipher: None,
+                wal_cipher,
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
@@ -236,6 +252,7 @@ impl AletheiaDB {
                 persistence_tracker: persistence_tracker.clone(),
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
+                encryption_manager: encryption_manager.clone(),
             };
 
             // Load indexes on startup if enabled
@@ -342,9 +359,14 @@ impl AletheiaDB {
 
             // Initialize cold storage if enabled
             if enable_cold_storage && let Some(cold_storage_path) = cold_storage_path {
-                // Create Redb cold storage backend
-                let cold_storage =
-                    Arc::new(RedbColdStorage::new(&cold_storage_path, RedbConfig::new())?);
+                // Create Redb cold storage backend, with optional encryption cipher
+                let mut cold_storage = RedbColdStorage::new(&cold_storage_path, RedbConfig::new())?;
+
+                if let Some(ref enc_mgr) = encryption_manager {
+                    cold_storage = cold_storage.with_cipher(Arc::clone(enc_mgr.cold_cipher()));
+                }
+
+                let cold_storage = Arc::new(cold_storage);
 
                 // Create tiered storage with warm cache configuration
                 let tiered_config = TieredStorageConfig::default();
@@ -416,6 +438,7 @@ impl AletheiaDB {
                 persistence_tracker: None,
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
+                encryption_manager: None,
             };
             seed_startup_current_timestamp(&db)?;
             wire_temporal_indexes(&db);
@@ -428,5 +451,15 @@ impl AletheiaDB {
     /// Get the default durability mode for this database.
     pub fn default_durability(&self) -> DurabilityMode {
         self.default_durability
+    }
+
+    /// Returns `true` if encryption at rest is enabled.
+    pub fn is_encryption_enabled(&self) -> bool {
+        self.encryption_manager.is_some()
+    }
+
+    /// Get a reference to the encryption manager, if encryption is enabled.
+    pub fn encryption_manager(&self) -> Option<&Arc<crate::encryption::EncryptionManager>> {
+        self.encryption_manager.as_ref()
     }
 }
