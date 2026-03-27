@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+use aletheiadb::core::temporal::{TIMESTAMP_MAX, TimeRange};
 #[test]
 fn test_timerange_duration_micros_exact() {
     let start_ts = 150_000.into();
@@ -121,7 +123,7 @@ fn test_bitemporal_is_valid_at_and_recorded_at() {
 #[test]
 fn test_timerange_from_at_exact_boundaries() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TimeRange};
 
     // Test exact MAX_VALID_TIMESTAMP boundary
     let exact_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
@@ -284,7 +286,7 @@ fn test_timerange_is_current_closed_exact() {
 #[test]
 fn test_timerange_close_at_exact() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TimeRange};
 
     let start = HybridTimestamp::new(100, 0).unwrap();
     let range = TimeRange::from(start);
@@ -481,7 +483,7 @@ fn test_bitemporal_constructors_exact() {
 #[test]
 fn test_temporal_display_exact() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+    use aletheiadb::core::temporal::BiTemporalInterval;
 
     let ts_start = HybridTimestamp::new(100_000, 0).unwrap();
     let ts_end = HybridTimestamp::new(200_000, 0).unwrap();
@@ -1052,7 +1054,7 @@ fn test_timerange_contains_or_after_mutants_strict() {
 #[test]
 fn test_timerange_from_at_mutants_strict() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TimeRange};
 
     let valid_start = HybridTimestamp::new(100, 0).unwrap();
     let range = TimeRange::from(valid_start);
@@ -1273,7 +1275,7 @@ fn test_timerange_deserialize_mutants() {
 #[test]
 fn test_bitemporal_deserialize_mutants() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{BiTemporalInterval, TimeRange};
+    use aletheiadb::core::temporal::BiTemporalInterval;
 
     let start = HybridTimestamp::new(100, 0).unwrap();
     let end = HybridTimestamp::new(200, 0).unwrap();
@@ -1293,4 +1295,707 @@ fn test_bitemporal_deserialize_mutants() {
         BiTemporalInterval::deserialize(&bytes[0..48]).is_ok(),
         "Should succeed on == 48"
     );
+}
+
+#[test]
+fn test_sentry_timerange_is_current_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let open_range = TimeRange::from(HybridTimestamp::new(100, 0).unwrap());
+    // mutant: replace is_current -> bool with false
+    assert!(open_range.is_current(), "open_range should be current");
+
+    // mutant: replace == with != in TimeRange::is_current
+    let closed_range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !closed_range.is_current(),
+        "closed_range should not be current"
+    );
+}
+
+#[test]
+fn test_sentry_timerange_is_closed_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TimeRange};
+
+    let open_range = TimeRange::from(HybridTimestamp::new(100, 0).unwrap());
+    // mutant: replace is_closed -> bool with true
+    assert!(!open_range.is_closed(), "open_range should not be closed");
+
+    let closed_range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    // mutant: replace is_closed -> bool with false
+    assert!(closed_range.is_closed(), "closed_range should be closed");
+
+    // mutant: replace < with == in TimeRange::is_closed
+    // mutant: replace < with > in TimeRange::is_closed
+    // mutant: replace < with <= in TimeRange::is_closed
+    let max_valid_end_range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        max_valid_end_range.is_closed(),
+        "range ending at MAX_VALID_TIMESTAMP should be closed"
+    );
+}
+
+#[test]
+fn test_sentry_timerange_contains_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    // mutant: replace contains -> bool with true
+    assert!(
+        !range.contains(HybridTimestamp::new(50, 0).unwrap()),
+        "should not contain 50"
+    );
+    // mutant: replace contains -> bool with false
+    assert!(
+        range.contains(HybridTimestamp::new(150, 0).unwrap()),
+        "should contain 150"
+    );
+
+    // mutant: replace && with || in TimeRange::contains
+    assert!(
+        !range.contains(HybridTimestamp::new(250, 0).unwrap()),
+        "should not contain 250"
+    );
+    assert!(
+        !range.contains(HybridTimestamp::new(50, 0).unwrap()),
+        "should not contain 50"
+    );
+
+    // mutant: replace >= with < in TimeRange::contains
+    assert!(
+        range.contains(HybridTimestamp::new(100, 0).unwrap()),
+        "should contain exactly start"
+    );
+
+    // mutant: replace < with == in TimeRange::contains
+    // mutant: replace < with > in TimeRange::contains
+    // mutant: replace < with <= in TimeRange::contains
+    assert!(
+        !range.contains(HybridTimestamp::new(200, 0).unwrap()),
+        "should not contain exactly end"
+    );
+}
+
+#[test]
+fn test_sentry_timerange_contains_or_after_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    // mutant: replace contains_or_after -> bool with true
+    assert!(
+        !range.contains_or_after(HybridTimestamp::new(50, 0).unwrap()),
+        "should not contain 50"
+    );
+    // mutant: replace contains_or_after -> bool with false
+    assert!(
+        range.contains_or_after(HybridTimestamp::new(150, 0).unwrap()),
+        "should contain 150"
+    );
+
+    // mutant: replace >= with < in TimeRange::contains_or_after
+    assert!(
+        range.contains_or_after(HybridTimestamp::new(100, 0).unwrap()),
+        "should contain exactly start"
+    );
+}
+
+#[test]
+fn test_sentry_timerange_is_empty_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    // mutant: replace is_empty -> bool with true
+    assert!(!range.is_empty(), "should not be empty");
+
+    let empty_range = TimeRange::at(HybridTimestamp::new(100, 0).unwrap());
+    // mutant: replace is_empty -> bool with false
+    assert!(empty_range.is_empty(), "should be empty");
+
+    // mutant: replace == with != in TimeRange::is_empty
+    assert!(empty_range.is_empty(), "should be empty");
+}
+
+#[test]
+fn test_sentry_timerange_overlaps_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range1 = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    let range2 = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+
+    // mutant: replace overlaps -> bool with false
+    assert!(range1.overlaps(&range2), "should overlap");
+
+    let range3 = TimeRange::new(
+        HybridTimestamp::new(250, 0).unwrap(),
+        HybridTimestamp::new(350, 0).unwrap(),
+    )
+    .unwrap();
+    // mutant: replace overlaps -> bool with true
+    assert!(!range1.overlaps(&range3), "should not overlap");
+
+    // mutant: replace || with && in TimeRange::overlaps
+    let empty_range1 = TimeRange::at(HybridTimestamp::new(150, 0).unwrap());
+    let empty_range2 = TimeRange::at(HybridTimestamp::new(150, 0).unwrap());
+    assert!(
+        !empty_range1.overlaps(&range1),
+        "empty range should not overlap"
+    );
+    assert!(
+        !empty_range1.overlaps(&empty_range2),
+        "empty ranges should not overlap"
+    );
+
+    // mutant: replace && with || in TimeRange::overlaps (self.start < other.end && other.start < self.end)
+    let left_disjoint = TimeRange::new(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(90, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !range1.overlaps(&left_disjoint),
+        "left disjoint should not overlap"
+    );
+    let right_disjoint = TimeRange::new(
+        HybridTimestamp::new(210, 0).unwrap(),
+        HybridTimestamp::new(300, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !range1.overlaps(&right_disjoint),
+        "right disjoint should not overlap"
+    );
+
+    // mutant: replace < with == in TimeRange::overlaps (self.start < other.end)
+    // mutant: replace < with > in TimeRange::overlaps
+    // mutant: replace < with <= in TimeRange::overlaps
+    let touching_left = TimeRange::new(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(100, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !range1.overlaps(&touching_left),
+        "touching left should not overlap"
+    );
+
+    // mutant: replace < with == in TimeRange::overlaps (other.start < self.end)
+    // mutant: replace < with > in TimeRange::overlaps
+    // mutant: replace < with <= in TimeRange::overlaps
+    let touching_right = TimeRange::new(
+        HybridTimestamp::new(200, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !range1.overlaps(&touching_right),
+        "touching right should not overlap"
+    );
+}
+
+#[test]
+fn test_sentry_timerange_contains_range_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let outer = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(300, 0).unwrap(),
+    )
+    .unwrap();
+    let inner = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+
+    // mutant: replace contains_range -> bool with false
+    assert!(outer.contains_range(&inner), "should contain inner range");
+
+    let not_inner = TimeRange::new(
+        HybridTimestamp::new(50, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    // mutant: replace contains_range -> bool with true
+    assert!(
+        !outer.contains_range(&not_inner),
+        "should not contain overlapping but sticking out range"
+    );
+
+    // mutant: replace && with || in TimeRange::contains_range (self.start <= other.start && other.end <= self.end)
+    let sticking_out_right = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(350, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !outer.contains_range(&sticking_out_right),
+        "should not contain range sticking out right"
+    );
+
+    // mutant: replace <= with > in TimeRange::contains_range (self.start <= other.start)
+    let inner_exact_start = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        outer.contains_range(&inner_exact_start),
+        "should contain range with exact start"
+    );
+
+    // mutant: replace <= with > in TimeRange::contains_range (other.end <= self.end)
+    let inner_exact_end = TimeRange::new(
+        HybridTimestamp::new(150, 0).unwrap(),
+        HybridTimestamp::new(300, 0).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        outer.contains_range(&inner_exact_end),
+        "should contain range with exact end"
+    );
+}
+
+#[test]
+fn test_sentry_timerange_close_at_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TimeRange};
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let range = TimeRange::from(start);
+
+    // mutant: replace close_at -> Result<Self, TemporalError> with Ok(Default::default())
+    let default_ts = HybridTimestamp::new(0, 0).unwrap();
+    let closed = range
+        .close_at(HybridTimestamp::new(150, 0).unwrap())
+        .unwrap();
+    assert_ne!(
+        closed.start(),
+        default_ts,
+        "close_at should not return Default"
+    );
+
+    // mutant: replace < with <= in TimeRange::close_at
+    // mutant: replace < with == in TimeRange::close_at
+    // mutant: replace < with > in TimeRange::close_at
+    let end_eq = HybridTimestamp::new(100, 0).unwrap();
+    assert!(
+        range.close_at(end_eq).is_ok(),
+        "close_at exact start should be Ok"
+    );
+
+    // mutant: replace && with || in TimeRange::close_at
+    // mutant: replace > with == in TimeRange::close_at (end.wallclock() > MAX_VALID_TIMESTAMP)
+    // mutant: replace > with < in TimeRange::close_at
+    // mutant: replace > with >= in TimeRange::close_at
+    let end_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    assert!(
+        range.close_at(end_max).is_ok(),
+        "close_at exactly MAX_VALID_TIMESTAMP should be Ok"
+    );
+
+    // mutant: replace != with == in TimeRange::close_at (end != TIMESTAMP_MAX)
+    assert!(
+        range.close_at(TIMESTAMP_MAX).is_ok(),
+        "close_at TIMESTAMP_MAX should be Ok"
+    );
+}
+
+#[test]
+fn test_sentry_timerange_duration_micros_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(250, 0).unwrap(),
+    )
+    .unwrap();
+
+    let duration = range.duration_micros();
+    // mutant: replace duration_micros -> Option<i64> with None
+    assert!(duration.is_some(), "duration should not be None");
+
+    let d = duration.unwrap();
+    // mutant: replace duration_micros -> Option<i64> with Some(0)
+    // mutant: replace duration_micros -> Option<i64> with Some(1)
+    // mutant: replace duration_micros -> Option<i64> with Some(-1)
+    assert_eq!(d, 150, "duration should be exactly 150");
+}
+
+#[test]
+fn test_sentry_timerange_serialize_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+
+    let bytes = range.serialize();
+    // mutant: replace serialize -> Vec<u8> with vec![]
+    // mutant: replace serialize -> Vec<u8> with vec![0]
+    // mutant: replace serialize -> Vec<u8> with vec![1]
+    assert_eq!(bytes.len(), 24, "serialized bytes should have length 24");
+    assert_ne!(
+        bytes,
+        Vec::<u8>::new(),
+        "serialized bytes should not be empty"
+    );
+    assert_ne!(bytes, vec![0u8], "serialized bytes should not be vec![0]");
+    assert_ne!(bytes, vec![1u8], "serialized bytes should not be vec![1]");
+}
+
+#[test]
+fn test_sentry_timerange_deserialize_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+    let bytes = range.serialize();
+
+    // mutant: replace deserialize -> Result<(Self, usize), StorageError> with Ok((Default::default(), 0))
+    // mutant: replace deserialize -> Result<(Self, usize), StorageError> with Ok((Default::default(), 1))
+    let (deserialized, size) = TimeRange::deserialize(&bytes).unwrap();
+    assert_eq!(size, 24, "size should be 24");
+    assert_eq!(deserialized.start(), start, "start should match");
+    assert_ne!(
+        deserialized.start(),
+        HybridTimestamp::new(0, 0).unwrap(),
+        "should not be Default"
+    );
+
+    // mutant: replace < with == in TimeRange::deserialize (bytes.len() < 24)
+    // mutant: replace < with > in TimeRange::deserialize
+    // mutant: replace < with <= in TimeRange::deserialize
+    assert!(
+        TimeRange::deserialize(&bytes[0..23]).is_err(),
+        "deserialize with 23 bytes should error"
+    );
+    assert!(
+        TimeRange::deserialize(&bytes[0..24]).is_ok(),
+        "deserialize with 24 bytes should be ok"
+    );
+
+    // mutant: replace > with == in TimeRange::deserialize (start > end)
+    // mutant: replace > with < in TimeRange::deserialize
+    // mutant: replace > with >= in TimeRange::deserialize
+    let mut bad_bytes = end.serialize();
+    bad_bytes.extend(start.serialize());
+    assert!(
+        TimeRange::deserialize(&bad_bytes).is_err(),
+        "deserialize with start > end should error"
+    );
+
+    let eq_bytes = start
+        .serialize()
+        .into_iter()
+        .chain(start.serialize())
+        .collect::<Vec<_>>();
+    assert!(
+        TimeRange::deserialize(&eq_bytes).is_ok(),
+        "deserialize with start == end should be ok"
+    );
+}
+
+#[test]
+fn test_sentry_timerange_display_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+
+    let range = TimeRange::new(
+        HybridTimestamp::new(100, 0).unwrap(),
+        HybridTimestamp::new(200, 0).unwrap(),
+    )
+    .unwrap();
+    let display = format!("{}", range);
+    // mutant: replace <impl fmt::Display for TimeRange>::fmt -> fmt::Result with Ok(Default::default())
+    assert!(!display.is_empty(), "display should not be empty");
+    assert!(display.contains("100"), "display should contain start time");
+}
+
+#[test]
+fn test_sentry_bitemporal_is_currently_valid_recorded_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let valid_start = HybridTimestamp::new(100, 0).unwrap();
+    let tx_start = HybridTimestamp::new(200, 0).unwrap();
+    let interval = BiTemporalInterval::now(valid_start, tx_start);
+
+    // mutant: replace is_currently_valid -> bool with false
+    assert!(
+        interval.is_currently_valid(),
+        "now() should be currently valid"
+    );
+    // mutant: replace is_currently_recorded -> bool with false
+    assert!(
+        interval.is_currently_recorded(),
+        "now() should be currently recorded"
+    );
+
+    let closed_valid = interval
+        .close_valid_time(HybridTimestamp::new(150, 0).unwrap())
+        .unwrap();
+    // mutant: replace is_currently_valid -> bool with true
+    assert!(
+        !closed_valid.is_currently_valid(),
+        "closed valid should not be currently valid"
+    );
+
+    let closed_tx = interval
+        .close_transaction_time(HybridTimestamp::new(250, 0).unwrap())
+        .unwrap();
+    // mutant: replace is_currently_recorded -> bool with true
+    assert!(
+        !closed_tx.is_currently_recorded(),
+        "closed tx should not be currently recorded"
+    );
+}
+
+#[test]
+#[allow(unused_imports)]
+fn test_sentry_bitemporal_is_valid_recorded_at_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let interval = BiTemporalInterval::new(
+        TimeRange::new(start, end).unwrap(),
+        TimeRange::new(start, end).unwrap(),
+    );
+
+    // mutant: replace is_valid_at -> bool with true
+    assert!(
+        !interval.is_valid_at(HybridTimestamp::new(50, 0).unwrap()),
+        "should not be valid at 50"
+    );
+    // mutant: replace is_valid_at -> bool with false
+    assert!(
+        interval.is_valid_at(HybridTimestamp::new(150, 0).unwrap()),
+        "should be valid at 150"
+    );
+
+    // mutant: replace is_recorded_at -> bool with true
+    assert!(
+        !interval.is_recorded_at(HybridTimestamp::new(50, 0).unwrap()),
+        "should not be recorded at 50"
+    );
+    // mutant: replace is_recorded_at -> bool with false
+    assert!(
+        interval.is_recorded_at(HybridTimestamp::new(150, 0).unwrap()),
+        "should be recorded at 150"
+    );
+}
+
+#[test]
+fn test_sentry_bitemporal_is_visible_at_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::BiTemporalInterval;
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let interval = BiTemporalInterval::new(
+        TimeRange::new(start, end).unwrap(),
+        TimeRange::new(start, end).unwrap(),
+    );
+
+    // mutant: replace is_visible_at -> bool with true
+    assert!(
+        !interval.is_visible_at(
+            HybridTimestamp::new(50, 0).unwrap(),
+            HybridTimestamp::new(150, 0).unwrap()
+        ),
+        "should not be visible at 50 (valid)"
+    );
+    // mutant: replace is_visible_at -> bool with false
+    assert!(
+        interval.is_visible_at(
+            HybridTimestamp::new(150, 0).unwrap(),
+            HybridTimestamp::new(150, 0).unwrap()
+        ),
+        "should be visible at 150/150"
+    );
+
+    // mutant: replace && with || in BiTemporalInterval::is_visible_at
+    assert!(
+        !interval.is_visible_at(
+            HybridTimestamp::new(50, 0).unwrap(),
+            HybridTimestamp::new(150, 0).unwrap()
+        ),
+        "should fail if valid is false"
+    );
+    assert!(
+        !interval.is_visible_at(
+            HybridTimestamp::new(150, 0).unwrap(),
+            HybridTimestamp::new(50, 0).unwrap()
+        ),
+        "should fail if tx is false"
+    );
+    assert!(
+        !interval.is_visible_at(
+            HybridTimestamp::new(50, 0).unwrap(),
+            HybridTimestamp::new(50, 0).unwrap()
+        ),
+        "should fail if both are false"
+    );
+}
+
+#[test]
+fn test_sentry_time_to_iso8601_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{TIMESTAMP_MAX, time};
+
+    // mutant: replace to_iso8601 -> String with String::new()
+    // mutant: replace to_iso8601 -> String with "xyzzy".into()
+    let ts = HybridTimestamp::new(100_000_000, 0).unwrap();
+    let display = time::to_iso8601(ts);
+    assert!(!display.is_empty(), "display should not be empty");
+    assert_ne!(display, "xyzzy", "display should not be xyzzy");
+
+    // mutant: replace == with != in time::to_iso8601
+    let max_display = time::to_iso8601(TIMESTAMP_MAX);
+    assert_eq!(
+        max_display, "current",
+        "TIMESTAMP_MAX should display as current"
+    );
+
+    // Arithmetic mutants:
+    // replace / with % in time::to_iso8601 (secs = wallclock / 1_000_000)
+    // replace / with * in time::to_iso8601
+    // replace % with / in time::to_iso8601 (nanos = wallclock % 1_000_000)
+    // replace % with + in time::to_iso8601
+    // replace * with + in time::to_iso8601 (nanos * 1000)
+    // replace * with / in time::to_iso8601
+    // replace + with - in time::to_iso8601 (UNIX_EPOCH + Duration)
+    // replace + with * in time::to_iso8601
+    let ts_frac = HybridTimestamp::new(1_000_500, 0).unwrap(); // 1s + 500us
+    let output = time::to_iso8601(ts_frac);
+    if cfg!(windows) {
+        assert!(
+            output.contains("10005000"),
+            "Windows output should contain correct exact math. Got: {}",
+            output
+        );
+    } else {
+        assert!(
+            output.contains("500000"),
+            "Unix output should contain correct nanoseconds (500000). Got: {}",
+            output
+        );
+    }
+}
+
+#[test]
+fn test_sentry_time_from_secs_millis_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::time;
+
+    // mutant: replace from_secs -> Timestamp with Default::default()
+    let ts_secs = time::from_secs(5);
+    assert_ne!(
+        ts_secs,
+        HybridTimestamp::new(0, 0).unwrap(),
+        "from_secs should not be Default"
+    );
+
+    // mutant: replace * with + in time::from_secs
+    // mutant: replace * with / in time::from_secs
+    assert_eq!(
+        ts_secs.wallclock(),
+        5_000_000,
+        "from_secs arithmetic should be exact"
+    );
+
+    // mutant: replace from_millis -> Timestamp with Default::default()
+    let ts_millis = time::from_millis(5);
+    assert_ne!(
+        ts_millis,
+        HybridTimestamp::new(0, 0).unwrap(),
+        "from_millis should not be Default"
+    );
+
+    // mutant: replace * with + in time::from_millis
+    // mutant: replace * with / in time::from_millis
+    assert_eq!(
+        ts_millis.wallclock(),
+        5_000,
+        "from_millis arithmetic should be exact"
+    );
+}
+
+#[test]
+fn test_sentry_time_to_secs_millis_mutants_strict_extra() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::time;
+
+    let ts = HybridTimestamp::new(10_000_000, 0).unwrap();
+
+    // mutant: replace to_secs -> i64 with 0
+    // mutant: replace to_secs -> i64 with 1
+    // mutant: replace to_secs -> i64 with -1
+    let secs = time::to_secs(ts);
+    assert_eq!(secs, 10, "to_secs should be exactly 10");
+
+    // mutant: replace / with % in time::to_secs
+    // mutant: replace / with * in time::to_secs
+    assert_ne!(secs, 0, "to_secs should not use modulo");
+    assert_ne!(secs, 10_000_000_000_000, "to_secs should not use multiply");
+
+    // mutant: replace to_millis -> i64 with 0
+    // mutant: replace to_millis -> i64 with 1
+    // mutant: replace to_millis -> i64 with -1
+    let millis = time::to_millis(ts);
+    assert_eq!(millis, 10_000, "to_millis should be exactly 10000");
+
+    // mutant: replace / with % in time::to_millis
+    // mutant: replace / with * in time::to_millis
+    assert_ne!(millis, 0, "to_millis should not use modulo");
+    assert_ne!(millis, 10_000_000_000, "to_millis should not use multiply");
 }
