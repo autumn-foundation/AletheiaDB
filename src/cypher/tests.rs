@@ -3,6 +3,8 @@
 //! These tests follow TDD methodology -- tests are written first to define
 //! expected behavior, then implementation is added to make them pass.
 
+use std::sync::Arc;
+
 use super::*;
 
 // ============================================================================
@@ -1040,4 +1042,81 @@ fn test_convert_temporal_as_of() {
     let query =
         parse_cypher("MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00Z' RETURN n").unwrap();
     assert!(query.temporal_context.is_some());
+}
+
+// ============================================================================
+// Vector extension tests (Task 8)
+// ============================================================================
+
+#[test]
+fn test_parse_vector_similarity_in_order_by() {
+    let ast = CypherParser::parse(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $query) DESC LIMIT 10",
+    )
+    .unwrap();
+    let CypherStatement::Match { return_clause, .. } = ast;
+    assert_eq!(return_clause.order_by.len(), 1);
+    assert!(matches!(
+        &return_clause.order_by[0].expr,
+        CypherExpr::FunctionCall { name, .. } if name == "vector.similarity"
+    ));
+}
+
+#[test]
+fn test_parse_vector_cosine() {
+    let ast = CypherParser::parse(
+        "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, $query) AS score ORDER BY score DESC",
+    )
+    .unwrap();
+    let CypherStatement::Match { return_clause, .. } = ast;
+    assert!(return_clause.items.len() >= 2);
+}
+
+#[test]
+fn test_convert_vector_rank() {
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    let emb: Arc<[f32]> = Arc::from([0.1f32, 0.2, 0.3].as_slice());
+    params.insert("query".to_string(), CypherParameterValue::Embedding(emb));
+
+    let query = parse_cypher_with_params(
+        "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $query) DESC LIMIT 10",
+        params,
+    )
+    .unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+    );
+}
+
+#[test]
+fn test_convert_hybrid_traverse_then_rank() {
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    let emb: Arc<[f32]> = Arc::from([0.1f32, 0.2, 0.3].as_slice());
+    params.insert(
+        "targetEmbedding".to_string(),
+        CypherParameterValue::Embedding(emb),
+    );
+
+    let query = parse_cypher_with_params(
+        "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b ORDER BY vector.similarity(b.embedding, $targetEmbedding) DESC LIMIT 10",
+        params,
+    )
+    .unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+    );
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+    );
 }

@@ -168,12 +168,18 @@ impl CypherConverter {
                     ops.push(QueryOp::Distinct);
                 }
 
-                for order_item in &return_clause.order_by {
-                    let sort_key = self.convert_order_item_to_sort_key(order_item);
-                    ops.push(QueryOp::Sort {
-                        key: sort_key,
-                        descending: order_item.descending,
-                    });
+                // Check if ORDER BY contains a vector function call that should
+                // be converted to RankBySimilarity instead of Sort.
+                let vector_rank_emitted = self.try_emit_vector_rank(&return_clause, &mut ops)?;
+
+                if !vector_rank_emitted {
+                    for order_item in &return_clause.order_by {
+                        let sort_key = self.convert_order_item_to_sort_key(order_item);
+                        ops.push(QueryOp::Sort {
+                            key: sort_key,
+                            descending: order_item.descending,
+                        });
+                    }
                 }
 
                 if let Some(skip) = return_clause.skip {
@@ -181,6 +187,8 @@ impl CypherConverter {
                 }
 
                 if let Some(limit) = return_clause.limit {
+                    // If we already emitted a RankBySimilarity (which includes top_k),
+                    // still emit the Limit for the general pipeline.
                     ops.push(QueryOp::Limit(limit));
                 }
 
@@ -498,6 +506,114 @@ impl CypherConverter {
             }
         }
     }
+
+    // =======================================================================
+    // Vector / similarity conversion
+    // =======================================================================
+
+    /// Check if the ORDER BY clause contains a vector similarity function call
+    /// and, if so, emit a [`QueryOp::RankBySimilarity`] instead of a regular Sort.
+    ///
+    /// Returns `true` if a vector rank was emitted (meaning the caller should
+    /// skip normal sort emission for this ORDER BY).
+    fn try_emit_vector_rank(
+        &self,
+        return_clause: &CypherReturn,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<bool, CypherError> {
+        if return_clause.order_by.len() != 1 {
+            return Ok(false);
+        }
+
+        let order_item = &return_clause.order_by[0];
+        if let CypherExpr::FunctionCall { name, args } = &order_item.expr
+            && is_vector_function(name)
+        {
+            let (property_key, embedding) = self.extract_vector_args(args)?;
+            let top_k = return_clause.limit;
+            ops.push(QueryOp::RankBySimilarity {
+                embedding,
+                top_k,
+                property_key: Some(property_key),
+            });
+            return Ok(true);
+        }
+
+        // Also check if the ORDER BY references an alias that was defined as a
+        // vector function in the RETURN items (e.g., `vector.cosine(...) AS score`
+        // then `ORDER BY score DESC`).
+        if let CypherExpr::Variable(ref alias_name) = order_item.expr {
+            for item in &return_clause.items {
+                if let CypherReturnItem::Expression {
+                    expr: CypherExpr::FunctionCall { name, args },
+                    alias: Some(alias),
+                } = item
+                    && alias == alias_name
+                    && is_vector_function(name)
+                {
+                    let (property_key, embedding) = self.extract_vector_args(args)?;
+                    let top_k = return_clause.limit;
+                    ops.push(QueryOp::RankBySimilarity {
+                        embedding,
+                        top_k,
+                        property_key: Some(property_key),
+                    });
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Extract the property key and embedding from vector function arguments.
+    ///
+    /// Expected args: `(entity.property, $param)` or `(entity.property, [...])`
+    fn extract_vector_args(
+        &self,
+        args: &[CypherExpr],
+    ) -> Result<(String, Arc<[f32]>), CypherError> {
+        if args.len() != 2 {
+            return Err(CypherError::SemanticError(
+                "vector similarity function expects exactly 2 arguments".to_string(),
+            ));
+        }
+
+        // First arg: property access (e.g., d.embedding)
+        let property_key = match &args[0] {
+            CypherExpr::Property { property, .. } => property.clone(),
+            _ => return Err(CypherError::SemanticError(
+                "first argument to vector function must be a property access (e.g., d.embedding)"
+                    .to_string(),
+            )),
+        };
+
+        // Second arg: parameter reference or vector literal
+        let embedding = match &args[1] {
+            CypherExpr::Value(CypherValue::Parameter(param_name)) => {
+                let param = self.params.get(param_name).ok_or_else(|| {
+                    CypherError::ParameterError(format!("unbound parameter: ${param_name}"))
+                })?;
+                match param {
+                    CypherParameterValue::Embedding(emb) => Arc::clone(emb),
+                    _ => {
+                        return Err(CypherError::ParameterError(format!(
+                            "parameter ${param_name} must be an Embedding, got: {param:?}"
+                        )));
+                    }
+                }
+            }
+            CypherExpr::Value(CypherValue::Vector(v)) => Arc::clone(v),
+            _ => {
+                return Err(CypherError::SemanticError(
+                    "second argument to vector function must be a parameter or vector literal"
+                        .to_string(),
+                ));
+            }
+        };
+
+        Ok((property_key, embedding))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +647,14 @@ fn parse_timestamp_string(s: &str) -> Result<Timestamp, CypherError> {
     }
 
     Err(CypherError::InvalidTimestamp(s.to_string()))
+}
+
+/// Returns `true` if the function name is a vector similarity function.
+fn is_vector_function(name: &str) -> bool {
+    matches!(
+        name,
+        "vector.similarity" | "vector.cosine" | "vector.euclidean"
+    )
 }
 
 // ---------------------------------------------------------------------------

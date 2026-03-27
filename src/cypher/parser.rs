@@ -475,19 +475,36 @@ impl CypherParser {
                 Ok(CypherExpr::Grouped(Box::new(inner)))
             }
 
-            // Identifier: could be variable, property access, or function call
+            // Identifier: could be variable, property access, dot-qualified function call,
+            // or simple function call
             TokenKind::Identifier => {
                 let name_tok = self.advance().clone();
                 let name = name_tok.text;
 
                 if self.at(TokenKind::Dot) {
-                    // Property access: var.prop
-                    self.advance();
-                    let prop_tok = self.expect(TokenKind::Identifier)?;
-                    Ok(CypherExpr::Property {
-                        variable: name,
-                        property: prop_tok.text,
-                    })
+                    // Could be property access: var.prop
+                    // Or dot-qualified function call: namespace.func(args...)
+                    self.advance(); // consume '.'
+                    let next_tok = self.expect(TokenKind::Identifier)?;
+
+                    if self.at(TokenKind::LParen) {
+                        // Dot-qualified function call: namespace.func(args...)
+                        // e.g., vector.similarity(d.embedding, $query)
+                        self.advance(); // consume '('
+                        let args = self.parse_function_args()?;
+                        self.expect(TokenKind::RParen)?;
+                        let qualified_name = format!("{name}.{}", next_tok.text);
+                        Ok(CypherExpr::FunctionCall {
+                            name: qualified_name,
+                            args,
+                        })
+                    } else {
+                        // Property access: var.prop
+                        Ok(CypherExpr::Property {
+                            variable: name,
+                            property: next_tok.text,
+                        })
+                    }
                 } else if self.at(TokenKind::LParen) {
                     // Function call: name(args...)
                     self.advance();
