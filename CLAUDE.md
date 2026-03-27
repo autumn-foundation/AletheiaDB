@@ -331,6 +331,53 @@ LIMIT 10
 
 **See [docs/query-language-design.md](docs/query-language-design.md) for complete grammar and semantics.**
 
+### Cypher Query Language
+
+OpenCypher-compatible query language with temporal and vector extensions.
+
+**Quick Start:**
+```rust
+// Enable the feature: cypher = [] in Cargo.toml
+use aletheiadb::AletheiaDB;
+
+let db = AletheiaDB::new()?;
+
+// Basic graph query
+let results = db.execute_cypher("MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend) RETURN friend")?;
+
+// With parameters
+use std::collections::HashMap;
+use aletheiadb::cypher::CypherParameterValue;
+let mut params = HashMap::new();
+params.insert("name".into(), CypherParameterValue::String("Alice".into()));
+let results = db.execute_cypher_with_params("MATCH (n:Person {name: $name}) RETURN n", params)?;
+```
+
+**Supported Syntax:**
+- Graph patterns: `MATCH (n:Label {prop: value})-[:REL]->(m)`
+- Variable-depth: `-[:KNOWS*1..3]->`
+- Directions: `->` (outgoing), `<-` (incoming), `-` (both)
+- Filtering: `WHERE n.age > 18 AND n.name = 'Alice'`
+- Results: `RETURN`, `RETURN DISTINCT`, `AS` aliases
+- Ordering: `ORDER BY n.age DESC`
+- Pagination: `SKIP 10 LIMIT 20`
+- Query chaining: `WITH b WHERE b.score > 0.5 RETURN b`
+- Parameters: `$paramName`
+
+**Temporal Extensions:**
+- `AS OF TIMESTAMP '2024-01-15T10:00:00Z'`
+- `AS OF VALID_TIME '2024-01-15'`
+- `AS OF SYSTEM_TIME '2024-01-15'` / `FOR SYSTEM_TIME AS OF '...'`
+- Bi-temporal: `AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...'`
+- `BETWEEN '2024-01-01' AND '2024-12-31'`
+
+**Vector Extensions:**
+- `ORDER BY vector.similarity(n.embedding, $query) DESC LIMIT 10`
+- `vector.cosine()`, `vector.euclidean()` distance functions
+- Hybrid: graph traversal + vector ranking in one query
+
+**See [docs/query-language-design.md](docs/query-language-design.md) for complete grammar.**
+
 ### Graph Sharding
 
 Domain-based horizontal scaling for datasets exceeding single-machine capacity.

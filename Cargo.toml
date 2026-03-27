@@ -155,6 +155,9 @@ sharding-rpc = ["dep:reqwest", "dep:serde"]
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
 
+# Cypher query language support
+cypher = []
+
 # HTTP server support (Issue #465)
 http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde", "dep:actix-governor"]
 
