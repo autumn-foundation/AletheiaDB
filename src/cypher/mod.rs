@@ -50,9 +50,11 @@
 //! - `SIMILAR TO $embedding LIMIT k` -- k-NN search
 //! - `RANK BY SIMILARITY` -- hybrid graph + vector queries
 
+pub mod ast;
 mod error;
 pub mod lexer;
 
+pub use ast::*;
 pub use error::CypherError;
 pub use lexer::{CypherLexer, Token, TokenKind};
 

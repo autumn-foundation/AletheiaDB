@@ -70,6 +70,63 @@ fn smoke_test_semantic_error() {
 }
 
 // ============================================================================
+// AST construction tests
+// ============================================================================
+
+// All AST types are available via `use super::*;` above.
+
+#[test]
+fn test_cypher_ast_basic_match() {
+    let ast = CypherStatement::Match {
+        optional: false,
+        pattern: vec![CypherPattern {
+            elements: vec![CypherPatternElement::Node(CypherNodePattern {
+                variable: Some("n".into()),
+                labels: vec!["Person".into()],
+                properties: vec![],
+            })],
+        }],
+        where_clause: None,
+        return_clause: CypherReturn {
+            distinct: false,
+            items: vec![CypherReturnItem::Variable("n".into())],
+            order_by: vec![],
+            skip: None,
+            limit: None,
+        },
+        temporal: None,
+        with_clauses: vec![],
+    };
+    assert!(matches!(ast, CypherStatement::Match { .. }));
+}
+
+#[test]
+fn test_cypher_pattern_chain() {
+    let pattern = CypherPattern {
+        elements: vec![
+            CypherPatternElement::Node(CypherNodePattern {
+                variable: Some("a".into()),
+                labels: vec!["Person".into()],
+                properties: vec![],
+            }),
+            CypherPatternElement::Relationship(CypherRelPattern {
+                variable: None,
+                rel_types: vec!["KNOWS".into()],
+                direction: CypherDirection::Outgoing,
+                depth: None,
+                properties: vec![],
+            }),
+            CypherPatternElement::Node(CypherNodePattern {
+                variable: Some("b".into()),
+                labels: vec![],
+                properties: vec![],
+            }),
+        ],
+    };
+    assert_eq!(pattern.elements.len(), 3);
+}
+
+// ============================================================================
 // Lexer tests
 // ============================================================================
 
