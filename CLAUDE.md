@@ -376,7 +376,7 @@ let results = db.execute_cypher_with_params("MATCH (n:Person {name: $name}) RETU
 - `vector.cosine()`, `vector.euclidean()` distance functions
 - Hybrid: graph traversal + vector ranking in one query
 
-**See [docs/query-language-design.md](docs/query-language-design.md) for complete grammar.**
+**See [docs/plans/2026-03-26-cypher-query-language.md](docs/plans/2026-03-26-cypher-query-language.md) for complete Cypher grammar and implementation details.**
 
 ### Graph Sharding
 
