@@ -1294,3 +1294,100 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_timerange_start_end_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::new(start, end).unwrap();
+    assert_eq!(
+        range.start(),
+        start,
+        "start() must return exact start timestamp, not default"
+    );
+    assert_eq!(
+        range.end(),
+        end,
+        "end() must return exact end timestamp, not default"
+    );
+}
+
+#[test]
+fn test_timerange_between_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let range = TimeRange::between(start, end).unwrap();
+    assert_eq!(range.start(), start, "between() must set exact start");
+    assert_eq!(range.end(), end, "between() must set exact end");
+}
+
+#[test]
+fn test_timerange_is_closed_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let closed = TimeRange::new(start, end).unwrap();
+    let current = TimeRange::from(start);
+
+    // Test that the exact boundary behavior is covered for is_closed
+    assert!(
+        closed.is_closed(),
+        "range with end < TIMESTAMP_MAX must be closed"
+    );
+    assert!(
+        !current.is_closed(),
+        "range with end == TIMESTAMP_MAX must not be closed"
+    );
+}
+
+#[test]
+fn test_timerange_is_current_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let closed = TimeRange::new(start, end).unwrap();
+    let current = TimeRange::from(start);
+
+    // Test that the exact boundary behavior is covered for is_current
+    assert!(
+        current.is_current(),
+        "range with end == TIMESTAMP_MAX must be current"
+    );
+    assert!(
+        !closed.is_current(),
+        "range with end < TIMESTAMP_MAX must not be current"
+    );
+}
+
+#[test]
+fn test_timerange_is_empty_mutants() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::TimeRange;
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let empty = TimeRange::new(start, start).unwrap();
+    let not_empty = TimeRange::new(start, HybridTimestamp::new(200, 0).unwrap()).unwrap();
+
+    assert!(empty.is_empty(), "range with start == end must be empty");
+    assert!(
+        !not_empty.is_empty(),
+        "range with start != end must not be empty"
+    );
+}
+
+#[test]
+fn test_max_valid_timestamp_mutants() {
+    use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
+    // test exact bound, replacing - with + or /
+    // i64::MAX - 1000
+    assert_eq!(
+        MAX_VALID_TIMESTAMP,
+        i64::MAX - 1000,
+        "MAX_VALID_TIMESTAMP must be exactly i64::MAX - 1000"
+    );
+}
