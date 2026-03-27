@@ -1211,3 +1211,120 @@ fn test_convert_full_hybrid() {
             .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
     );
 }
+
+// ============================================================================
+// Comprehensive end-to-end integration tests (Task 10)
+// ============================================================================
+
+#[test]
+fn test_e2e_multi_hop_traversal() {
+    let db = AletheiaDB::new().unwrap();
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    let bob = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
+    let charlie = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Charlie").build(),
+        )
+        .unwrap();
+    db.create_edge(alice, bob, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(bob, charlie, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+
+    // 1-hop: Alice -> Bob
+    let results = db
+        .execute_cypher("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 1); // Bob
+
+    // 2-hop: Alice -> Bob -> Charlie (yields nodes at depth 2)
+    let results = db
+        .execute_cypher("MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..2]->(b) RETURN b")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert!(!rows.is_empty()); // At least Charlie at depth 2
+}
+
+#[test]
+fn test_e2e_where_complex() {
+    let db = AletheiaDB::new().unwrap();
+    for (name, age) in [("Alice", 30), ("Bob", 25), ("Charlie", 35)] {
+        let props = PropertyMapBuilder::new()
+            .insert("name", name)
+            .insert("age", age as i64)
+            .build();
+        db.create_node("Person", props).unwrap();
+    }
+
+    let results = db
+        .execute_cypher("MATCH (n:Person) WHERE n.age > 26 AND n.age < 34 RETURN n")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 1); // Only Alice (age 30)
+}
+
+#[test]
+fn test_e2e_skip_limit() {
+    let db = AletheiaDB::new().unwrap();
+    for i in 0..20 {
+        let props = PropertyMapBuilder::new()
+            .insert("name", format!("P{i:02}"))
+            .insert("rank", i as i64)
+            .build();
+        db.create_node("Item", props).unwrap();
+    }
+
+    // SKIP + LIMIT without ORDER BY (Sort not yet in physical executor)
+    let results = db
+        .execute_cypher("MATCH (n:Item) RETURN n SKIP 5 LIMIT 5")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 5);
+}
+
+#[test]
+fn test_e2e_bidirectional() {
+    let db = AletheiaDB::new().unwrap();
+    let a = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "A").build(),
+        )
+        .unwrap();
+    let b = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "B").build(),
+        )
+        .unwrap();
+    db.create_edge(a, b, "FRIEND", CorePropertyMap::new())
+        .unwrap();
+
+    let results = db
+        .execute_cypher("MATCH (x:Person {name: 'B'})-[:FRIEND]-(y) RETURN y")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn test_e2e_no_results() {
+    let db = AletheiaDB::new().unwrap();
+    let results = db
+        .execute_cypher("MATCH (n:NonexistentLabel) RETURN n")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 0);
+}
