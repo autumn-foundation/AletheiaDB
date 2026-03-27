@@ -30,6 +30,7 @@
 //! The coordinator is designed to be run from a single thread. Multiple
 //! threads should not call `flush()` concurrently.
 
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -43,7 +44,7 @@ use super::ring_buffer::PendingEntry;
 
 use crate::core::error::{Error, Result, StorageError};
 
-use super::segment_reader::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
+use super::segment_reader::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION, WAL_VERSION_ENCRYPTED};
 
 /// Metadata about a WAL segment's LSN range.
 ///
@@ -101,7 +102,7 @@ impl SegmentMetadata {
 }
 
 /// Configuration for the flush coordinator.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FlushCoordinatorConfig {
     /// WAL directory path.
     pub wal_dir: PathBuf,
@@ -115,6 +116,29 @@ pub struct FlushCoordinatorConfig {
     pub sync_on_flush: bool,
     /// Write buffer size for segment files.
     pub write_buffer_size: usize,
+    /// Optional cipher for encrypting WAL entries before writing to disk.
+    ///
+    /// When set, entries are encrypted with a 4-byte length prefix and
+    /// segments use version 2 format. When `None`, segments use version 1
+    /// (plaintext, backward compatible).
+    pub wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+}
+
+impl std::fmt::Debug for FlushCoordinatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlushCoordinatorConfig")
+            .field("wal_dir", &self.wal_dir)
+            .field("segment_size", &self.segment_size)
+            .field("segments_to_retain", &self.segments_to_retain)
+            .field("flush_interval_ms", &self.flush_interval_ms)
+            .field("sync_on_flush", &self.sync_on_flush)
+            .field("write_buffer_size", &self.write_buffer_size)
+            .field(
+                "wal_cipher",
+                &self.wal_cipher.as_ref().map(|c| c.algorithm_name()),
+            )
+            .finish()
+    }
 }
 
 impl Default for FlushCoordinatorConfig {
@@ -126,6 +150,7 @@ impl Default for FlushCoordinatorConfig {
             flush_interval_ms: 10, // 10ms
             sync_on_flush: true,
             write_buffer_size: 64 * 1024, // 64 KB
+            wal_cipher: None,
         }
     }
 }
@@ -353,7 +378,13 @@ impl FlushCoordinator {
                     e
                 )))
             })?;
-            writer.write_all(&[WAL_VERSION]).map_err(|e| {
+            // Use version 2 for encrypted segments, version 1 for plaintext.
+            let version = if self.config.wal_cipher.is_some() {
+                WAL_VERSION_ENCRYPTED
+            } else {
+                WAL_VERSION
+            };
+            writer.write_all(&[version]).map_err(|e| {
                 Error::Storage(StorageError::IoError(format!(
                     "Failed to write WAL version: {}",
                     e
@@ -640,13 +671,34 @@ impl FlushCoordinator {
                     batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
                     batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
 
-                    writer.write_all(&entry.data).map_err(|e| {
+                    // When a cipher is present, encrypt the entry and prepend a
+                    // 4-byte LE length prefix so the reader knows how many bytes
+                    // each encrypted entry occupies. Without a cipher, write the
+                    // raw entry data directly (no allocation, zero overhead).
+                    let write_data: Cow<'_, [u8]> = if let Some(ref cipher) = self.config.wal_cipher
+                    {
+                        let encrypted = crate::encryption::wal_encryption::encrypt_wal_payload(
+                            &entry.data,
+                            cipher,
+                        )
+                        .map_err(|e| Error::Storage(StorageError::Encryption(e.to_string())))?;
+                        // Prepend 4-byte LE length of the encrypted block
+                        let len_bytes = (encrypted.len() as u32).to_le_bytes();
+                        let mut framed = Vec::with_capacity(4 + encrypted.len());
+                        framed.extend_from_slice(&len_bytes);
+                        framed.extend_from_slice(&encrypted);
+                        Cow::Owned(framed)
+                    } else {
+                        Cow::Borrowed(&entry.data)
+                    };
+
+                    writer.write_all(&write_data).map_err(|e| {
                         Error::Storage(StorageError::IoError(format!(
                             "Failed to write WAL entry: {}",
                             e
                         )))
                     })?;
-                    bytes_written += entry.data.len();
+                    bytes_written += write_data.len();
                 }
 
                 // Flush buffer to OS

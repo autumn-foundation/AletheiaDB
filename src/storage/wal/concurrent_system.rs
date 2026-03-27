@@ -57,7 +57,7 @@ use crate::core::error::{Error, Result, StorageError};
 use crate::storage::wal::DurabilityMode;
 
 /// Configuration for the concurrent WAL system.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConcurrentWalSystemConfig {
     /// WAL directory path.
     pub wal_dir: PathBuf,
@@ -75,6 +75,30 @@ pub struct ConcurrentWalSystemConfig {
     pub durability_mode: DurabilityMode,
     /// Write buffer size for segment files.
     pub write_buffer_size: usize,
+    /// Optional cipher for WAL entry encryption.
+    ///
+    /// When set, entries are encrypted before writing to disk and segments
+    /// use version 2 format. Passed through to `FlushCoordinatorConfig`.
+    pub wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+}
+
+impl std::fmt::Debug for ConcurrentWalSystemConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConcurrentWalSystemConfig")
+            .field("wal_dir", &self.wal_dir)
+            .field("num_stripes", &self.num_stripes)
+            .field("stripe_capacity", &self.stripe_capacity)
+            .field("segment_size", &self.segment_size)
+            .field("segments_to_retain", &self.segments_to_retain)
+            .field("flush_interval_ms", &self.flush_interval_ms)
+            .field("durability_mode", &self.durability_mode)
+            .field("write_buffer_size", &self.write_buffer_size)
+            .field(
+                "wal_cipher",
+                &self.wal_cipher.as_ref().map(|c| c.algorithm_name()),
+            )
+            .finish()
+    }
 }
 
 impl Default for ConcurrentWalSystemConfig {
@@ -88,6 +112,7 @@ impl Default for ConcurrentWalSystemConfig {
             flush_interval_ms: 10,
             durability_mode: DurabilityMode::Synchronous,
             write_buffer_size: 64 * 1024, // 64 KB
+            wal_cipher: None,
         }
     }
 }
@@ -307,6 +332,7 @@ impl ConcurrentWalSystem {
                 DurabilityMode::Synchronous | DurabilityMode::GroupCommit { .. }
             ),
             write_buffer_size: config.write_buffer_size,
+            wal_cipher: config.wal_cipher.clone(),
         };
 
         let wal = Arc::new(ConcurrentWal::new(wal_config)?);

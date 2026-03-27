@@ -59,6 +59,8 @@ pub mod api;
 pub mod config;
 pub mod core;
 pub mod db;
+/// Encryption at rest (ADR-0028).
+pub mod encryption;
 pub mod index;
 pub mod query;
 pub mod storage;
