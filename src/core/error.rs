@@ -355,6 +355,12 @@ pub enum StorageError {
         /// The resource whose lock was poisoned
         resource: String,
     },
+    /// Encryption or decryption operation failed.
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+    /// Key provider could not load or access the encryption key.
+    #[error("Key provider error: {0}")]
+    KeyProvider(String),
 }
 
 impl StorageError {
@@ -389,6 +395,18 @@ impl From<crate::storage::index_persistence::IndexPersistenceError> for StorageE
             kind,
             message: e.to_string(),
         }
+    }
+}
+
+impl From<crate::encryption::EncryptionError> for StorageError {
+    fn from(e: crate::encryption::EncryptionError) -> Self {
+        StorageError::Encryption(e.to_string())
+    }
+}
+
+impl From<crate::encryption::KeyProviderError> for StorageError {
+    fn from(e: crate::encryption::KeyProviderError) -> Self {
+        StorageError::KeyProvider(e.to_string())
     }
 }
 
