@@ -51,8 +51,10 @@
 //! - `RANK BY SIMILARITY` -- hybrid graph + vector queries
 
 mod error;
+pub mod lexer;
 
 pub use error::CypherError;
+pub use lexer::{CypherLexer, Token, TokenKind};
 
 #[cfg(test)]
 mod tests;
