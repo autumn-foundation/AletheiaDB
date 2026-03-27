@@ -13,6 +13,7 @@
 //! - **KeyDerivation**: Derives per-component DEKs via HKDF-SHA256
 //! - **Cipher**: AES-256-GCM or ChaCha20-Poly1305 AEAD encryption
 
+pub mod audit;
 pub mod cipher;
 pub mod config;
 pub mod error;
@@ -20,8 +21,10 @@ pub mod factory;
 pub mod key_derivation;
 pub mod key_provider;
 pub mod manager;
+pub mod rotation;
 pub mod wal_encryption;
 
+pub use audit::{AuditEvent, AuditLevel, EncryptionAuditLogger};
 pub use cipher::{
     AES_256_GCM_ID, Aes256GcmCipher, CHACHA20_POLY1305_ID, ChaCha20Poly1305Cipher, Cipher,
 };
@@ -33,4 +36,5 @@ pub use key_derivation::{
 };
 pub use key_provider::{EnvKeyProvider, FileKeyProvider, KeyFormat, KeyProvider};
 pub use manager::EncryptionManager;
+pub use rotation::{KeyRotationManager, KeyVersion, RotationState};
 pub use wal_encryption::{decrypt_wal_payload, encrypt_wal_payload};
