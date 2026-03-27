@@ -188,6 +188,7 @@ impl AletheiaDB {
                 ),
                 durability_mode,
                 write_buffer_size: config.wal.write_buffer_size,
+                wal_cipher: None,
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
@@ -391,6 +392,7 @@ impl AletheiaDB {
                 ),
                 durability_mode,
                 write_buffer_size: wal_config.write_buffer_size,
+                wal_cipher: None,
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);

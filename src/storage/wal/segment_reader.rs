@@ -18,6 +18,7 @@
 
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::core::error::{Error, Result, StorageError};
 use crate::core::hlc::HybridTimestamp;
@@ -33,8 +34,18 @@ use super::{LSN, WalEntry, WalOperation};
 /// Magic bytes identifying a AletheiaDB WAL segment file.
 pub(crate) const WAL_MAGIC: [u8; 4] = *b"GWAL";
 
-/// Current WAL format version.
+/// Current WAL format version (plaintext entries).
 pub(crate) const WAL_VERSION: u8 = 1;
+
+/// WAL format version for encrypted segments.
+///
+/// Version 2 segments use length-prefixed encrypted entries:
+/// `[4-byte LE entry length][encrypted entry bytes]`
+/// The header (magic + version) remains plaintext.
+pub(crate) const WAL_VERSION_ENCRYPTED: u8 = 2;
+
+/// Maximum supported WAL version (inclusive).
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED;
 
 /// Size of the WAL segment header (magic + version).
 pub(crate) const WAL_HEADER_SIZE: usize = 5;
@@ -83,6 +94,30 @@ pub(crate) const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 /// assert!(entries.is_empty());
 /// ```
 pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
+    read_entries_from_dir_with_cipher(wal_dir, start_lsn, None)
+}
+
+/// Read all WAL entries from a directory with optional decryption.
+///
+/// This function scans the directory for segment files (*.log), reads them in order,
+/// and returns all entries with LSN >= start_lsn. If a cipher is provided, version 2
+/// (encrypted) segments are decrypted transparently. Version 1 (plaintext) segments
+/// are always read without decryption regardless of the cipher parameter.
+///
+/// # Arguments
+///
+/// * `wal_dir` - Path to the WAL directory containing segment files
+/// * `start_lsn` - Only entries with LSN >= this value are returned
+/// * `cipher` - Optional cipher for decrypting version 2 segments
+///
+/// # Returns
+///
+/// A vector of WAL entries sorted by LSN.
+pub fn read_entries_from_dir_with_cipher(
+    wal_dir: &Path,
+    start_lsn: LSN,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+) -> Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
 
     // Find all WAL segments
@@ -105,7 +140,7 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 
     // Read entries from each segment
     for (_, path) in segments {
-        let segment_entries = read_segment(&path, start_lsn)?;
+        let segment_entries = read_segment_with_cipher(&path, start_lsn, cipher)?;
         entries.extend(segment_entries);
     }
 
@@ -160,6 +195,39 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 /// assert!(entries.is_empty());
 /// ```
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
+    read_segment_with_cipher(path, start_lsn, None)
+}
+
+/// Read WAL entries from a single segment file with optional decryption.
+///
+/// This function uses memory-mapped I/O for efficient reading. It transparently
+/// handles both version 1 (plaintext) and version 2 (encrypted) segments:
+///
+/// - **Version 1**: Entries are parsed directly (no cipher needed).
+/// - **Version 2**: Each entry is length-prefixed (`[4-byte LE len][encrypted data]`).
+///   A cipher must be provided to decrypt version 2 segments.
+///
+/// # Arguments
+///
+/// * `path` - Path to the segment file
+/// * `start_lsn` - Only entries with LSN >= this value are returned
+/// * `cipher` - Optional cipher for decrypting version 2 segments
+///
+/// # Returns
+///
+/// A vector of WAL entries from this segment.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The segment is version 2 but no cipher is provided
+/// - Decryption fails (wrong key, corrupted data, tampered header)
+/// - The segment format is invalid
+pub fn read_segment_with_cipher(
+    path: &Path,
+    start_lsn: LSN,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+) -> Result<Vec<WalEntry>> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
@@ -212,10 +280,10 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     let (version, mut offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
         // Version 1+ format: has magic header
         let ver = buffer[4];
-        if ver > WAL_VERSION {
+        if ver > WAL_VERSION_MAX {
             return Err(StorageError::CorruptedData(format!(
                 "Unsupported WAL version: {} (max supported: {})",
-                ver, WAL_VERSION
+                ver, WAL_VERSION_MAX
             ))
             .into());
         }
@@ -230,22 +298,47 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         return Ok(Vec::new()); // Empty segment
     };
 
-    // Parse entries using the extracted helper function (issue #218)
-    while offset < buffer.len() {
-        // Try to parse an entry at the current offset
-        match parse_entry_at(buffer, offset, version) {
+    // Version 2 (encrypted) segments require a cipher for decryption.
+    if version == WAL_VERSION_ENCRYPTED && cipher.is_none() {
+        return Err(StorageError::Encryption(
+            "Cannot read encrypted WAL segment (version 2) without a cipher".to_string(),
+        )
+        .into());
+    }
+
+    // Dispatch to the appropriate parsing loop based on version.
+    if version == WAL_VERSION_ENCRYPTED {
+        // Version 2: length-prefixed encrypted entries.
+        let cipher = cipher.expect("cipher presence checked above");
+        parse_encrypted_entries(buffer, &mut offset, start_lsn, cipher, path, &mut entries)?;
+    } else {
+        // Version 1: plaintext entries (original format).
+        parse_plaintext_entries(buffer, &mut offset, version, start_lsn, path, &mut entries)?;
+    }
+
+    Ok(entries)
+}
+
+/// Parse plaintext (version 1) entries from a WAL segment buffer.
+fn parse_plaintext_entries(
+    buffer: &[u8],
+    offset: &mut usize,
+    version: u8,
+    start_lsn: LSN,
+    path: &Path,
+    entries: &mut Vec<WalEntry>,
+) -> Result<()> {
+    while *offset < buffer.len() {
+        match parse_entry_at(buffer, *offset, version) {
             Ok((entry, bytes_consumed)) => {
-                // Only include entries >= start_lsn
                 if entry.lsn >= start_lsn {
                     entries.push(entry);
                 }
-                offset += bytes_consumed;
+                *offset += bytes_consumed;
             }
             Err(e) => {
                 // Distinguish between expected EOF truncation vs. unexpected corruption
-                if offset + 24 > buffer.len() {
-                    // Insufficient bytes for next entry header - expected at EOF
-                    // This can happen if a write was interrupted mid-entry
+                if *offset + 24 > buffer.len() {
                     #[cfg(feature = "observability")]
                     tracing::debug!(
                         "Partial entry at end of WAL segment {:?} (offset {}/{}), stopping read",
@@ -255,13 +348,7 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                     );
                     break;
                 } else {
-                    // Check if we hit a zeroed region (common in pre-allocated files)
-                    // If the header area (next 24 bytes) is all zeros, treat as EOF.
-                    // LSN 0 is reserved/invalid, so a valid entry cannot start with 8 bytes of zeros
-                    // if we assume LSNs start at 1.
-                    // Even if LSN 0 is valid, a full 24 bytes of zeros (LSN+TS+Checksum) is extremely unlikely to be valid
-                    // (Checksum 0 implies data is 0, but OpType would be 0 which is invalid).
-                    let header_slice = &buffer[offset..offset + 24];
+                    let header_slice = &buffer[*offset..*offset + 24];
                     if header_slice.iter().all(|&b| b == 0) {
                         #[cfg(feature = "observability")]
                         tracing::debug!(
@@ -273,7 +360,6 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                         break;
                     }
 
-                    // Corruption or invalid data in the middle of the file - this is serious
                     #[cfg(feature = "observability")]
                     tracing::error!(
                         "Failed to parse WAL entry in segment {:?} at offset {}: {}",
@@ -294,8 +380,100 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
             }
         }
     }
+    Ok(())
+}
 
-    Ok(entries)
+/// Parse encrypted (version 2) entries from a WAL segment buffer.
+///
+/// Each entry is stored as `[4-byte LE length][encrypted entry bytes]`.
+/// The encrypted entry bytes are decrypted using the provided cipher,
+/// then parsed as a normal WAL entry (version 1 format).
+fn parse_encrypted_entries(
+    buffer: &[u8],
+    offset: &mut usize,
+    start_lsn: LSN,
+    cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
+    path: &Path,
+    entries: &mut Vec<WalEntry>,
+) -> Result<()> {
+    while *offset < buffer.len() {
+        // Need at least 4 bytes for the length prefix
+        if *offset + 4 > buffer.len() {
+            // Partial length prefix at EOF -- truncated write
+            #[cfg(feature = "observability")]
+            tracing::debug!(
+                "Partial length prefix at end of encrypted WAL segment {:?} (offset {}/{}), stopping read",
+                path,
+                offset,
+                buffer.len()
+            );
+            break;
+        }
+
+        // Check for zeroed length prefix (indicates end of data in pre-allocated files)
+        let len_bytes: [u8; 4] = buffer[*offset..*offset + 4]
+            .try_into()
+            .expect("slice length verified above");
+        let entry_len = u32::from_le_bytes(len_bytes) as usize;
+
+        if entry_len == 0 {
+            // Zero-length entry marks end of valid data
+            break;
+        }
+
+        *offset += 4;
+
+        // Validate entry length
+        if *offset + entry_len > buffer.len() {
+            // Truncated encrypted entry at EOF
+            #[cfg(feature = "observability")]
+            tracing::debug!(
+                "Truncated encrypted entry at end of WAL segment {:?} (offset {}, entry_len {}, buf_len {}), stopping read",
+                path,
+                offset,
+                entry_len,
+                buffer.len()
+            );
+            break;
+        }
+
+        let encrypted_entry = &buffer[*offset..*offset + entry_len];
+        *offset += entry_len;
+
+        // Decrypt the entry
+        let decrypted =
+            crate::encryption::wal_encryption::decrypt_wal_payload(encrypted_entry, cipher)
+                .map_err(|e| {
+                    Error::Storage(StorageError::Encryption(format!(
+                        "Failed to decrypt WAL entry in segment {:?}: {}",
+                        path, e
+                    )))
+                })?;
+
+        // Parse the decrypted bytes as a normal (version 1) entry
+        match parse_entry_at(&decrypted, 0, WAL_VERSION) {
+            Ok((entry, _bytes_consumed)) => {
+                if entry.lsn >= start_lsn {
+                    entries.push(entry);
+                }
+            }
+            Err(e) => {
+                #[cfg(feature = "observability")]
+                tracing::error!(
+                    "Failed to parse decrypted WAL entry in segment {:?}: {}",
+                    path,
+                    e
+                );
+                #[cfg(not(feature = "observability"))]
+                eprintln!(
+                    "CRITICAL: Failed to parse decrypted WAL entry in segment {:?}: {}",
+                    path, e
+                );
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse a single WAL entry from a buffer at the specified offset.
