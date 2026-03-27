@@ -40,6 +40,9 @@ use super::{OptimizationRule, Statistics};
 /// Default cardinality estimate for node scans without statistics.
 const DEFAULT_NODE_SCAN_CARDINALITY: usize = 1000;
 
+/// Default cardinality estimate for edge scans without statistics.
+const DEFAULT_EDGE_SCAN_CARDINALITY: usize = 1000;
+
 /// Default cardinality estimate for property-indexed scans (~10% of full scan).
 const DEFAULT_PROPERTY_SCAN_CARDINALITY: usize = 100;
 
@@ -389,7 +392,7 @@ impl OperationReordering {
                 ScanOp::SimilarToNode { k, .. } => *k,
                 ScanOp::PropertyScan { .. } => DEFAULT_PROPERTY_SCAN_CARDINALITY,
                 ScanOp::EdgeScan { estimated_rows, .. } => {
-                    estimated_rows.unwrap_or(DEFAULT_NODE_SCAN_CARDINALITY)
+                    estimated_rows.unwrap_or(DEFAULT_EDGE_SCAN_CARDINALITY)
                 }
             },
             LogicalOp::Unary {

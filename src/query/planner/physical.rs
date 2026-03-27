@@ -1981,4 +1981,65 @@ mod tests {
         assert!(explain.contains("label: Some(\"Document\")"));
         assert!(explain.contains("prop: document_embedding"));
     }
+
+    // ==================== EdgeScan Coverage Tests ====================
+
+    #[test]
+    fn test_edge_scan_name() {
+        let op = PhysicalOp::EdgeScan {
+            edge_type: Some("KNOWS".to_string()),
+            estimated_rows: 500,
+        };
+        assert_eq!(op.name(), "EdgeScan");
+    }
+
+    #[test]
+    fn test_edge_scan_is_leaf() {
+        let op = PhysicalOp::EdgeScan {
+            edge_type: None,
+            estimated_rows: 100,
+        };
+        assert!(op.is_leaf());
+    }
+
+    #[test]
+    fn test_edge_scan_depth() {
+        let op = PhysicalOp::EdgeScan {
+            edge_type: Some("FOLLOWS".to_string()),
+            estimated_rows: 200,
+        };
+        assert_eq!(op.depth(), 1);
+    }
+
+    #[test]
+    fn test_edge_scan_explain_with_type() {
+        let op = PhysicalOp::EdgeScan {
+            edge_type: Some("KNOWS".to_string()),
+            estimated_rows: 500,
+        };
+        let explain = op.explain();
+        assert!(explain.contains("EdgeScan"));
+        assert!(explain.contains("KNOWS"));
+        assert!(explain.contains("500"));
+    }
+
+    #[test]
+    fn test_edge_scan_explain_without_type() {
+        let op = PhysicalOp::EdgeScan {
+            edge_type: None,
+            estimated_rows: 1000,
+        };
+        let explain = op.explain();
+        assert!(explain.contains("EdgeScan"));
+        assert!(explain.contains("1000"));
+    }
+
+    #[test]
+    fn test_edge_scan_get_input_is_none() {
+        let op = PhysicalOp::EdgeScan {
+            edge_type: None,
+            estimated_rows: 100,
+        };
+        assert!(op.get_input().is_none());
+    }
 }
