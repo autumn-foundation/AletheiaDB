@@ -25,6 +25,15 @@ pub enum EncryptionError {
         /// Actual length received.
         actual: usize,
     },
+
+    /// Serialized WAL entry is too short to contain the required header.
+    #[error("Invalid WAL entry: expected at least {expected} bytes, got {actual}")]
+    InvalidWalEntry {
+        /// Minimum expected length (25 bytes: 24 header + 1 op type).
+        expected: usize,
+        /// Actual length received.
+        actual: usize,
+    },
 }
 
 /// Errors from key provider operations.
