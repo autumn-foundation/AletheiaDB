@@ -860,3 +860,99 @@ fn test_lex_whitespace_only() {
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].kind, TokenKind::Eof);
 }
+
+// ============================================================================
+// DB API integration tests (execute_cypher / execute_cypher_with_params)
+// ============================================================================
+
+use crate::AletheiaDB;
+use crate::core::property::{PropertyMap as CorePropertyMap, PropertyMapBuilder};
+
+#[test]
+fn test_execute_cypher_simple() {
+    let db = AletheiaDB::new().unwrap();
+    let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+    db.create_node("Person", props).unwrap();
+
+    let results = db.execute_cypher("MATCH (n:Person) RETURN n").unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn test_execute_cypher_property_filter() {
+    let db = AletheiaDB::new().unwrap();
+    let props1 = PropertyMapBuilder::new().insert("name", "Alice").build();
+    db.create_node("Person", props1).unwrap();
+    let props2 = PropertyMapBuilder::new().insert("name", "Bob").build();
+    db.create_node("Person", props2).unwrap();
+
+    let results = db
+        .execute_cypher("MATCH (n:Person {name: 'Alice'}) RETURN n")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn test_execute_cypher_traversal() {
+    let db = AletheiaDB::new().unwrap();
+    let props_a = PropertyMapBuilder::new().insert("name", "Alice").build();
+    let alice = db.create_node("Person", props_a).unwrap();
+
+    let props_b = PropertyMapBuilder::new().insert("name", "Bob").build();
+    let bob = db.create_node("Person", props_b).unwrap();
+
+    db.create_edge(alice, bob, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+
+    let results = db
+        .execute_cypher("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn test_execute_cypher_limit() {
+    let db = AletheiaDB::new().unwrap();
+    for i in 0..10 {
+        let props = PropertyMapBuilder::new()
+            .insert("name", format!("Person{i}"))
+            .build();
+        db.create_node("Person", props).unwrap();
+    }
+
+    let results = db
+        .execute_cypher("MATCH (n:Person) RETURN n LIMIT 5")
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 5);
+}
+
+#[test]
+fn test_execute_cypher_with_params() {
+    let db = AletheiaDB::new().unwrap();
+    let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+    db.create_node("Person", props).unwrap();
+
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    params.insert(
+        "name".to_string(),
+        CypherParameterValue::String("Alice".into()),
+    );
+
+    let results = db
+        .execute_cypher_with_params("MATCH (n:Person {name: $name}) RETURN n", params)
+        .unwrap();
+    let rows: Vec<_> = results.collect();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn test_execute_cypher_parse_error() {
+    let db = AletheiaDB::new().unwrap();
+    let result = db.execute_cypher("NOT VALID CYPHER");
+    assert!(result.is_err());
+}
