@@ -1,46 +1,10 @@
-# Echo's DX Audit Report: Story Feature & Experimental Modules 🗣️
+# 🗣️ Echo: Missing OPENAI_API_KEY environment variable in Embedding Example
 
-**Date:** 2025-05-24
-**Auditor:** Echo (The Impatient User)
+🤦 **The Confusion:**
+I copy-pasted the "Embedding Generation" example from the README into a new project and ran `cargo run`. It compiled perfectly, but immediately crashed at runtime with `Error: ConfigError("OPENAI_API_KEY environment variable not set")`. There was no mention of needing this variable in the README snippet.
 
-## Summary
+🕵️ **The Reality:**
+The example uses `OpenAIConfig::from_env(...)` which silently depends on an environment variable (`OPENAI_API_KEY`) being present. Since it's a "Quick Start" example, users shouldn't have to guess what environment variables are required to make it run.
 
-I audited the "Story" feature (Narrative Generation) and other experimental modules. I found that while the `nova` feature flag is generally well-documented, there are inconsistencies in how modules are gated, and a friction point with `Result` types in the prelude.
-
-## 🟢 The Good
-
-- **Narrative Generator**: The example code works as advertised when the `nova` feature is enabled.
-- **Error Messages**: When `nova` is missing, the compiler error correctly identifies that `temporal_narrative` is configured out.
-
-## 🔴 The Bad
-
-### 1. `Result` Shadowing in Prelude
-
-The `aletheiadb::prelude` module exports `Result` (which is `Result<T, aletheiadb::Error>`). This shadows `std::result::Result`.
-
-**The Friction:**
-A user copy-pasting code into `fn main()` naturally writes:
-```rust
-fn main() -> Result<(), Box<dyn std::error::Error>> { ... }
-```
-This fails to compile because `Result` expects 1 type argument, not 2.
-
-**The Fix:**
-- Document this behavior clearly.
-- Update examples to use explicit `std::result::Result` for `main` or show the full file context.
-
-### 2. Inconsistent Feature Gating (Muse & Metaphor)
-
-The documentation states that all experimental features are gated behind the `nova` feature flag. However, `muse` and `metaphor` were accessible without it.
-
-**The Friction:**
-- Inconsistent API surface.
-- Users might rely on these modules without enabling the feature, leading to breakage if they are later gated (which they should be).
-
-**The Fix:**
-- Apply `#[cfg(feature = "nova")]` to `mod muse;` and `mod metaphor;` in `src/experimental/mod.rs`.
-
-## Action Items
-
-- [x] Fix inconsistent gating in `src/experimental/mod.rs`.
-- [ ] Update README to clarify `Result` usage in examples (future task).
+💡 **The Fix:**
+Add a comment in the README code block explicitly showing that the `OPENAI_API_KEY` environment variable must be set, and add a small note above the code block.
