@@ -956,3 +956,88 @@ fn test_execute_cypher_parse_error() {
     let result = db.execute_cypher("NOT VALID CYPHER");
     assert!(result.is_err());
 }
+
+// ============================================================================
+// Temporal extension tests (Task 7)
+// ============================================================================
+
+#[test]
+fn test_parse_as_of_timestamp() {
+    let ast =
+        CypherParser::parse("MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00Z' RETURN n")
+            .unwrap();
+    if let CypherStatement::Match {
+        temporal: Some(t), ..
+    } = ast
+    {
+        assert!(matches!(t, CypherTemporal::AsOfTimestamp(_)));
+    } else {
+        panic!("Expected temporal clause");
+    }
+}
+
+#[test]
+fn test_parse_as_of_valid_time() {
+    let ast =
+        CypherParser::parse("MATCH (n:Person) AS OF VALID_TIME '2024-01-15' RETURN n").unwrap();
+    if let CypherStatement::Match {
+        temporal: Some(t), ..
+    } = ast
+    {
+        assert!(matches!(t, CypherTemporal::AsOfValidTime(_)));
+    } else {
+        panic!("Expected temporal clause");
+    }
+}
+
+#[test]
+fn test_parse_as_of_system_time() {
+    let ast = CypherParser::parse("MATCH (n:Person) FOR SYSTEM_TIME AS OF '2024-01-15' RETURN n")
+        .unwrap();
+    if let CypherStatement::Match {
+        temporal: Some(t), ..
+    } = ast
+    {
+        assert!(matches!(t, CypherTemporal::AsOfSystemTime(_)));
+    } else {
+        panic!("Expected temporal clause");
+    }
+}
+
+#[test]
+fn test_parse_bitemporal() {
+    let ast = CypherParser::parse(
+        "MATCH (n:Person) AS OF VALID_TIME '2024-01-01' AS OF SYSTEM_TIME '2024-06-15' RETURN n",
+    )
+    .unwrap();
+    if let CypherStatement::Match {
+        temporal: Some(t), ..
+    } = ast
+    {
+        assert!(matches!(t, CypherTemporal::BiTemporal { .. }));
+    } else {
+        panic!("Expected bi-temporal clause");
+    }
+}
+
+#[test]
+fn test_parse_between() {
+    let ast =
+        CypherParser::parse("MATCH (n:Person) BETWEEN '2024-01-01' AND '2024-12-31' RETURN n")
+            .unwrap();
+    if let CypherStatement::Match {
+        temporal: Some(t), ..
+    } = ast
+    {
+        assert!(matches!(t, CypherTemporal::Between { .. }));
+    } else {
+        panic!("Expected BETWEEN clause");
+    }
+}
+
+#[test]
+fn test_convert_temporal_as_of() {
+    let query =
+        parse_cypher("MATCH (n:Person) AS OF TIMESTAMP '2024-01-15T10:00:00Z' RETURN n").unwrap();
+    assert!(query.temporal_context.is_some());
+}

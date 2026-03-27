@@ -141,7 +141,7 @@ impl CypherParser {
     }
 
     /// ```text
-    /// match_stmt := [OPTIONAL] MATCH pattern_list [where_clause] return_clause
+    /// match_stmt := [OPTIONAL] MATCH pattern_list [where_clause] [temporal_clause] return_clause
     /// ```
     fn parse_match(
         &mut self,
@@ -156,6 +156,14 @@ impl CypherParser {
             Some(self.parse_where()?)
         } else {
             None
+        };
+
+        // Check for post-pattern temporal clause (between WHERE and RETURN).
+        // If a leading temporal clause was already parsed, this is skipped.
+        let temporal = if temporal.is_some() {
+            temporal
+        } else {
+            self.try_parse_post_pattern_temporal()?
         };
 
         // TODO: future -- WITH clauses between MATCH and RETURN.
@@ -726,6 +734,107 @@ impl CypherParser {
             }
             TokenKind::Between => {
                 // BETWEEN '...' AND '...'
+                self.advance(); // BETWEEN
+                let start_tok = self.expect(TokenKind::StringLiteral)?;
+                self.expect(TokenKind::And)?;
+                let end_tok = self.expect(TokenKind::StringLiteral)?;
+                Ok(Some(CypherTemporal::Between {
+                    start: start_tok.text,
+                    end: end_tok.text,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    // -- Post-pattern temporal -----------------------------------------------
+
+    /// Try to parse a temporal clause that appears after the pattern/WHERE
+    /// but before RETURN. Returns `None` if the next token is not the start
+    /// of a temporal clause.
+    ///
+    /// Supported forms (post-pattern position):
+    /// - `AS OF TIMESTAMP '...'`
+    /// - `AS OF VALID_TIME '...'`
+    /// - `AS OF SYSTEM_TIME '...'`
+    /// - `AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...'`
+    /// - `FOR SYSTEM_TIME AS OF '...'`
+    /// - `BETWEEN '...' AND '...'`
+    fn try_parse_post_pattern_temporal(&mut self) -> Result<Option<CypherTemporal>, CypherError> {
+        match self.peek().kind {
+            TokenKind::As => {
+                self.advance(); // AS
+                self.expect(TokenKind::Of)?;
+
+                match self.peek().kind {
+                    TokenKind::Timestamp => {
+                        // AS OF TIMESTAMP '...'
+                        self.advance();
+                        let ts_tok = self.expect(TokenKind::StringLiteral)?;
+                        Ok(Some(CypherTemporal::AsOfTimestamp(ts_tok.text)))
+                    }
+                    TokenKind::ValidTime => {
+                        // AS OF VALID_TIME '...' [AS OF SYSTEM_TIME '...']
+                        self.advance();
+                        let vt_tok = self.expect(TokenKind::StringLiteral)?;
+
+                        // Check for bi-temporal: AS OF SYSTEM_TIME '...'
+                        if self.at(TokenKind::As) {
+                            let saved_pos = self.pos;
+                            self.advance(); // AS
+                            if self.at(TokenKind::Of) {
+                                self.advance(); // OF
+                                if self.at(TokenKind::SystemTime) {
+                                    self.advance(); // SYSTEM_TIME
+                                    let st_tok = self.expect(TokenKind::StringLiteral)?;
+                                    return Ok(Some(CypherTemporal::BiTemporal {
+                                        valid_time: vt_tok.text,
+                                        system_time: st_tok.text,
+                                    }));
+                                }
+                                // Not SYSTEM_TIME -- backtrack
+                                self.pos = saved_pos;
+                            } else {
+                                // Not OF -- backtrack
+                                self.pos = saved_pos;
+                            }
+                        }
+
+                        Ok(Some(CypherTemporal::AsOfValidTime(vt_tok.text)))
+                    }
+                    TokenKind::SystemTime => {
+                        // AS OF SYSTEM_TIME '...'
+                        self.advance();
+                        let ts_tok = self.expect(TokenKind::StringLiteral)?;
+                        Ok(Some(CypherTemporal::AsOfSystemTime(ts_tok.text)))
+                    }
+                    _ => {
+                        Err(self
+                            .error("expected TIMESTAMP, VALID_TIME, or SYSTEM_TIME after AS OF"))
+                    }
+                }
+            }
+            TokenKind::For => {
+                self.advance(); // FOR
+                if self.at(TokenKind::SystemTime) {
+                    // FOR SYSTEM_TIME AS OF '...'
+                    self.advance(); // SYSTEM_TIME
+                    self.expect(TokenKind::As)?;
+                    self.expect(TokenKind::Of)?;
+                    let ts_tok = self.expect(TokenKind::StringLiteral)?;
+                    Ok(Some(CypherTemporal::AsOfSystemTime(ts_tok.text)))
+                } else if self.at(TokenKind::ValidTime) {
+                    // FOR VALID_TIME AS OF '...'
+                    self.advance(); // VALID_TIME
+                    self.expect(TokenKind::As)?;
+                    self.expect(TokenKind::Of)?;
+                    let ts_tok = self.expect(TokenKind::StringLiteral)?;
+                    Ok(Some(CypherTemporal::AsOfValidTime(ts_tok.text)))
+                } else {
+                    Err(self.error("expected SYSTEM_TIME or VALID_TIME after FOR"))
+                }
+            }
+            TokenKind::Between => {
                 self.advance(); // BETWEEN
                 let start_tok = self.expect(TokenKind::StringLiteral)?;
                 self.expect(TokenKind::And)?;

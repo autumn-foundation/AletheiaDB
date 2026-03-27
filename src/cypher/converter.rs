@@ -36,9 +36,10 @@ use std::sync::Arc;
 use super::ast::*;
 use super::error::CypherError;
 use super::parser::CypherParser;
+use crate::core::temporal::{TimeRange, Timestamp};
 use crate::query::builder::Query;
 use crate::query::ir::{Predicate, PredicateValue, QueryOp, SortKey, TraversalDepth};
-use crate::query::plan::QueryHints;
+use crate::query::plan::{QueryHints, TemporalContext};
 
 // ---------------------------------------------------------------------------
 // Parameter values
@@ -139,6 +140,7 @@ impl CypherConverter {
                 pattern,
                 where_clause,
                 return_clause,
+                temporal,
                 ..
             } => {
                 let mut ops = Vec::new();
@@ -154,7 +156,14 @@ impl CypherConverter {
                     ops.push(QueryOp::Filter(predicate));
                 }
 
-                // 3. Convert RETURN clause modifiers
+                // 3. Convert temporal clause → TemporalContext + ops
+                let temporal_context = if let Some(ref temporal_clause) = temporal {
+                    Some(self.convert_temporal(temporal_clause, &mut ops)?)
+                } else {
+                    None
+                };
+
+                // 4. Convert RETURN clause modifiers
                 if return_clause.distinct {
                     ops.push(QueryOp::Distinct);
                 }
@@ -177,7 +186,7 @@ impl CypherConverter {
 
                 Ok(Query {
                     ops,
-                    temporal_context: None,
+                    temporal_context,
                     hints: QueryHints::default(),
                 })
             }
@@ -440,6 +449,88 @@ impl CypherConverter {
             _ => SortKey::Property("_unknown".to_string()),
         }
     }
+
+    // =======================================================================
+    // Temporal conversion
+    // =======================================================================
+
+    /// Convert a temporal AST clause into a [`TemporalContext`] and optionally
+    /// emit temporal query operations.
+    fn convert_temporal(
+        &self,
+        temporal: &CypherTemporal,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<TemporalContext, CypherError> {
+        match temporal {
+            CypherTemporal::AsOfTimestamp(ts_str) => {
+                let ts = parse_timestamp_string(ts_str)?;
+                // AS OF TIMESTAMP sets both valid time and transaction time
+                Ok(TemporalContext::as_of(ts, ts))
+            }
+            CypherTemporal::AsOfValidTime(ts_str) => {
+                let ts = parse_timestamp_string(ts_str)?;
+                Ok(TemporalContext::as_of_valid_time(ts))
+            }
+            CypherTemporal::AsOfSystemTime(ts_str) => {
+                let ts = parse_timestamp_string(ts_str)?;
+                Ok(TemporalContext::as_of_transaction_time(ts))
+            }
+            CypherTemporal::BiTemporal {
+                valid_time,
+                system_time,
+            } => {
+                let vt = parse_timestamp_string(valid_time)?;
+                let st = parse_timestamp_string(system_time)?;
+                Ok(TemporalContext::as_of(vt, st))
+            }
+            CypherTemporal::Between { start, end } => {
+                let start_ts = parse_timestamp_string(start)?;
+                let end_ts = parse_timestamp_string(end)?;
+                let time_range = TimeRange::new(start_ts, end_ts).map_err(|e| {
+                    CypherError::InvalidTemporalClause(format!("invalid time range: {e}"))
+                })?;
+                ops.push(QueryOp::Between { time_range });
+                Ok(TemporalContext {
+                    valid_time_between: Some(time_range),
+                    include_history: true,
+                    ..Default::default()
+                })
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp parsing
+// ---------------------------------------------------------------------------
+
+/// Parse a timestamp string into a [`Timestamp`] (HybridTimestamp).
+///
+/// Supports:
+/// - Unix microseconds: `"1705312800000000"`
+/// - ISO 8601 with timezone: `"2024-01-15T10:00:00Z"`
+/// - Date only: `"2024-01-15"` (midnight UTC)
+fn parse_timestamp_string(s: &str) -> Result<Timestamp, CypherError> {
+    let trimmed = s.trim().trim_matches('\'').trim_matches('"');
+
+    // Try unix microseconds first
+    if let Ok(micros) = trimmed.parse::<i64>() {
+        return Ok(Timestamp::from(micros));
+    }
+
+    // ISO 8601 with timezone: 2024-01-15T10:00:00Z
+    if let Ok(dt) = trimmed.parse::<chrono::DateTime<chrono::Utc>>() {
+        return Ok(Timestamp::from(dt.timestamp_micros()));
+    }
+
+    // Date only: 2024-01-15
+    if let Ok(date) = trimmed.parse::<chrono::NaiveDate>()
+        && let Some(dt) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
+    }
+
+    Err(CypherError::InvalidTimestamp(s.to_string()))
 }
 
 // ---------------------------------------------------------------------------
