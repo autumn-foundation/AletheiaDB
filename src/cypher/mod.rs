@@ -53,10 +53,12 @@
 pub mod ast;
 mod error;
 pub mod lexer;
+pub mod parser;
 
 pub use ast::*;
 pub use error::CypherError;
 pub use lexer::{CypherLexer, Token, TokenKind};
+pub use parser::CypherParser;
 
 #[cfg(test)]
 mod tests;

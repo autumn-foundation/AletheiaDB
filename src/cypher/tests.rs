@@ -73,7 +73,7 @@ fn smoke_test_semantic_error() {
 // AST construction tests
 // ============================================================================
 
-// All AST types are available via `use super::*;` above.
+// CypherParser and all AST types are available via `use super::*;` above.
 
 #[test]
 fn test_cypher_ast_basic_match() {
@@ -124,6 +124,271 @@ fn test_cypher_pattern_chain() {
         ],
     };
     assert_eq!(pattern.elements.len(), 3);
+}
+
+// ============================================================================
+// Parser tests
+// ============================================================================
+
+#[test]
+fn test_parse_simple_match() {
+    let ast = CypherParser::parse("MATCH (n) RETURN n").unwrap();
+    match ast {
+        CypherStatement::Match {
+            pattern,
+            return_clause,
+            ..
+        } => {
+            assert_eq!(pattern.len(), 1);
+            assert_eq!(pattern[0].elements.len(), 1);
+            assert_eq!(return_clause.items.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn test_parse_match_with_label() {
+    let ast = CypherParser::parse("MATCH (n:Person) RETURN n").unwrap();
+    match ast {
+        CypherStatement::Match { pattern, .. } => {
+            let node = match &pattern[0].elements[0] {
+                CypherPatternElement::Node(n) => n,
+                _ => panic!("expected node"),
+            };
+            assert_eq!(node.variable, Some("n".into()));
+            assert_eq!(node.labels, vec!["Person".to_string()]);
+        }
+    }
+}
+
+#[test]
+fn test_parse_match_with_properties() {
+    let ast = CypherParser::parse("MATCH (n:Person {name: 'Alice', age: 30}) RETURN n").unwrap();
+    match ast {
+        CypherStatement::Match { pattern, .. } => {
+            let node = match &pattern[0].elements[0] {
+                CypherPatternElement::Node(n) => n,
+                _ => panic!("expected node"),
+            };
+            assert_eq!(node.properties.len(), 2);
+            assert_eq!(node.properties[0].0, "name");
+            assert_eq!(
+                node.properties[0].1,
+                CypherValue::String("Alice".to_string())
+            );
+            assert_eq!(node.properties[1].0, "age");
+            assert_eq!(node.properties[1].1, CypherValue::Int(30));
+        }
+    }
+}
+
+#[test]
+fn test_parse_traversal() {
+    let ast = CypherParser::parse("MATCH (a:Person)-[:KNOWS]->(b) RETURN b").unwrap();
+    match ast {
+        CypherStatement::Match { pattern, .. } => {
+            assert_eq!(pattern[0].elements.len(), 3);
+            let rel = match &pattern[0].elements[1] {
+                CypherPatternElement::Relationship(r) => r,
+                _ => panic!("expected relationship"),
+            };
+            assert_eq!(rel.rel_types, vec!["KNOWS".to_string()]);
+            assert_eq!(rel.direction, CypherDirection::Outgoing);
+        }
+    }
+}
+
+#[test]
+fn test_parse_incoming_relationship() {
+    let ast = CypherParser::parse("MATCH (a)<-[:FOLLOWS]-(b) RETURN a").unwrap();
+    match ast {
+        CypherStatement::Match { pattern, .. } => {
+            let rel = match &pattern[0].elements[1] {
+                CypherPatternElement::Relationship(r) => r,
+                _ => panic!("expected relationship"),
+            };
+            assert_eq!(rel.direction, CypherDirection::Incoming);
+        }
+    }
+}
+
+#[test]
+fn test_parse_bidirectional_relationship() {
+    let ast = CypherParser::parse("MATCH (a)-[:KNOWS]-(b) RETURN a").unwrap();
+    match ast {
+        CypherStatement::Match { pattern, .. } => {
+            let rel = match &pattern[0].elements[1] {
+                CypherPatternElement::Relationship(r) => r,
+                _ => panic!("expected relationship"),
+            };
+            assert_eq!(rel.direction, CypherDirection::Both);
+        }
+    }
+}
+
+#[test]
+fn test_parse_variable_length_path() {
+    let ast = CypherParser::parse("MATCH (a)-[:KNOWS*1..3]->(b) RETURN b").unwrap();
+    match ast {
+        CypherStatement::Match { pattern, .. } => {
+            let rel = match &pattern[0].elements[1] {
+                CypherPatternElement::Relationship(r) => r,
+                _ => panic!("expected relationship"),
+            };
+            assert_eq!(rel.depth, Some(CypherDepth::Range { min: 1, max: 3 }));
+        }
+    }
+}
+
+#[test]
+fn test_parse_unbounded_path() {
+    let ast = CypherParser::parse("MATCH (a)-[:KNOWS*]->(b) RETURN b").unwrap();
+    match ast {
+        CypherStatement::Match { pattern, .. } => {
+            let rel = match &pattern[0].elements[1] {
+                CypherPatternElement::Relationship(r) => r,
+                _ => panic!("expected relationship"),
+            };
+            assert_eq!(rel.depth, Some(CypherDepth::Unbounded));
+        }
+    }
+}
+
+#[test]
+fn test_parse_where_clause() {
+    let ast = CypherParser::parse("MATCH (n:Person) WHERE n.age > 18 RETURN n").unwrap();
+    match ast {
+        CypherStatement::Match { where_clause, .. } => {
+            assert!(where_clause.is_some());
+        }
+    }
+}
+
+#[test]
+fn test_parse_where_and() {
+    let ast =
+        CypherParser::parse("MATCH (n:Person) WHERE n.age > 18 AND n.name = 'Alice' RETURN n")
+            .unwrap();
+    match ast {
+        CypherStatement::Match { where_clause, .. } => {
+            assert!(matches!(where_clause, Some(CypherExpr::And(_, _))));
+        }
+    }
+}
+
+#[test]
+fn test_parse_limit() {
+    let ast = CypherParser::parse("MATCH (n) RETURN n LIMIT 10").unwrap();
+    match ast {
+        CypherStatement::Match { return_clause, .. } => {
+            assert_eq!(return_clause.limit, Some(10));
+        }
+    }
+}
+
+#[test]
+fn test_parse_skip_limit() {
+    let ast = CypherParser::parse("MATCH (n) RETURN n SKIP 5 LIMIT 10").unwrap();
+    match ast {
+        CypherStatement::Match { return_clause, .. } => {
+            assert_eq!(return_clause.skip, Some(5));
+            assert_eq!(return_clause.limit, Some(10));
+        }
+    }
+}
+
+#[test]
+fn test_parse_order_by() {
+    let ast = CypherParser::parse("MATCH (n) RETURN n ORDER BY n.age DESC").unwrap();
+    match ast {
+        CypherStatement::Match { return_clause, .. } => {
+            assert_eq!(return_clause.order_by.len(), 1);
+            assert!(return_clause.order_by[0].descending);
+        }
+    }
+}
+
+#[test]
+fn test_parse_return_distinct() {
+    let ast = CypherParser::parse("MATCH (n)-[:KNOWS]->(m) RETURN DISTINCT m").unwrap();
+    match ast {
+        CypherStatement::Match { return_clause, .. } => {
+            assert!(return_clause.distinct);
+        }
+    }
+}
+
+#[test]
+fn test_parse_return_expression_with_alias() {
+    let ast = CypherParser::parse("MATCH (n:Person) RETURN n.name AS personName, n.age").unwrap();
+    match ast {
+        CypherStatement::Match { return_clause, .. } => {
+            assert_eq!(return_clause.items.len(), 2);
+            match &return_clause.items[0] {
+                CypherReturnItem::Expression {
+                    alias: Some(alias), ..
+                } => {
+                    assert_eq!(alias, "personName");
+                }
+                other => panic!("expected Expression with alias, got: {other:?}"),
+            }
+            // Second item has no alias
+            match &return_clause.items[1] {
+                CypherReturnItem::Expression { alias: None, .. } => {}
+                other => panic!("expected Expression without alias, got: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn test_parse_return_star() {
+    let ast = CypherParser::parse("MATCH (n) RETURN *").unwrap();
+    match ast {
+        CypherStatement::Match { return_clause, .. } => {
+            assert_eq!(return_clause.items.len(), 1);
+            assert!(matches!(return_clause.items[0], CypherReturnItem::Star));
+        }
+    }
+}
+
+#[test]
+fn test_parse_parameter() {
+    let ast = CypherParser::parse("MATCH (n:Person {name: $name}) RETURN n").unwrap();
+    match ast {
+        CypherStatement::Match { pattern, .. } => {
+            let node = match &pattern[0].elements[0] {
+                CypherPatternElement::Node(n) => n,
+                _ => panic!("expected node"),
+            };
+            assert_eq!(node.properties.len(), 1);
+            assert_eq!(
+                node.properties[0].1,
+                CypherValue::Parameter("name".to_string())
+            );
+        }
+    }
+}
+
+#[test]
+fn test_parse_error_missing_return() {
+    let result = CypherParser::parse("MATCH (n:Person)");
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        CypherError::ParseError { message, .. } => {
+            assert!(
+                message.contains("expected Return"),
+                "error should mention RETURN: {message}"
+            );
+        }
+        other => panic!("expected ParseError, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_error_invalid_syntax() {
+    let result = CypherParser::parse("MATCH RETURN");
+    assert!(result.is_err());
 }
 
 // ============================================================================
