@@ -15,6 +15,7 @@
 
 pub mod audit;
 pub mod cipher;
+pub mod cli;
 pub mod config;
 pub mod error;
 pub mod factory;
@@ -27,6 +28,10 @@ pub mod wal_encryption;
 pub use audit::{AuditEvent, AuditLevel, EncryptionAuditLogger};
 pub use cipher::{
     AES_256_GCM_ID, Aes256GcmCipher, CHACHA20_POLY1305_ID, ChaCha20Poly1305Cipher, Cipher,
+};
+pub use cli::{
+    EncryptionStatus, KeyGenResult, format_encryption_status, generate_key, get_encryption_status,
+    validate_key_file,
 };
 pub use config::{EncryptionConfig, KeyProviderConfig};
 pub use error::{EncryptionError, KeyDerivationError, KeyProviderError};

@@ -1,6 +1,6 @@
 # ADR-0026: Encryption-at-Rest Architecture
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-01-27
 **Deciders:** AletheiaDB Core Team
 **Categories:** security, storage, durability, encryption
