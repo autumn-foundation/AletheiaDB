@@ -366,6 +366,8 @@ impl CostModel {
 
             PhysicalOp::NodeScan { estimated_rows, .. } => self.estimate_node_scan(*estimated_rows),
 
+            PhysicalOp::EdgeScan { estimated_rows, .. } => self.estimate_node_scan(*estimated_rows),
+
             // PropertyScan is cheaper than NodeScan+Filter because it skips predicate
             // evaluation on non-matching nodes at the storage level
             PhysicalOp::PropertyScan { estimated_rows, .. } => {
@@ -473,6 +475,7 @@ impl CostModel {
         match op {
             PhysicalOp::NodeLookup { node_ids } => node_ids.len(),
             PhysicalOp::NodeScan { estimated_rows, .. } => *estimated_rows,
+            PhysicalOp::EdgeScan { estimated_rows, .. } => *estimated_rows,
             PhysicalOp::PropertyScan { estimated_rows, .. } => *estimated_rows,
             PhysicalOp::HnswSearch { k, .. } => *k,
             PhysicalOp::TemporalNodeLookup { node_ids, .. } => node_ids.len(),

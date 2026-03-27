@@ -34,6 +34,12 @@ pub enum QueryOp {
         label: Option<String>,
     },
 
+    /// Scan all edges, optionally filtered by edge type
+    ScanEdges {
+        /// Optional edge type filter (e.g., "KNOWS", "FOLLOWS")
+        edge_type: Option<String>,
+    },
+
     // === Graph Operations ===
     /// Traverse outgoing edges
     TraverseOut {

@@ -289,6 +289,11 @@ impl QueryPlanner {
                 estimated_rows: None,
             }))),
 
+            QueryOp::ScanEdges { edge_type } => Ok(Some(LogicalOp::Scan(ScanOp::EdgeScan {
+                edge_type: edge_type.clone(),
+                estimated_rows: None,
+            }))),
+
             QueryOp::VectorSearch {
                 embedding,
                 k,
@@ -567,6 +572,14 @@ impl QueryPlanner {
                 estimated_rows,
             } => Ok(PhysicalOp::NodeScan {
                 label: label.clone(),
+                estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
+            }),
+
+            ScanOp::EdgeScan {
+                edge_type,
+                estimated_rows,
+            } => Ok(PhysicalOp::EdgeScan {
+                edge_type: edge_type.clone(),
                 estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
             }),
 

@@ -178,6 +178,15 @@ impl PhysicalPlan {
                     line.push_str(&format!(" [label={}]", l));
                 }
             }
+            PhysicalOp::EdgeScan {
+                edge_type,
+                estimated_rows,
+            } => {
+                line.push_str(&format!(" (rows: ~{})", estimated_rows));
+                if let Some(t) = edge_type {
+                    line.push_str(&format!(" [type={}]", t));
+                }
+            }
             PhysicalOp::HnswSearch {
                 k,
                 label_filter,
@@ -357,6 +366,14 @@ pub enum PhysicalOp {
     NodeScan {
         /// Optional label filter
         label: Option<String>,
+        /// Estimated number of rows
+        estimated_rows: usize,
+    },
+
+    /// Full edge scan with optional edge type filter
+    EdgeScan {
+        /// Optional edge type filter (e.g., "KNOWS", "FOLLOWS")
+        edge_type: Option<String>,
         /// Estimated number of rows
         estimated_rows: usize,
     },
@@ -568,6 +585,7 @@ impl PhysicalOp {
         match self {
             PhysicalOp::NodeLookup { .. } => "NodeLookup",
             PhysicalOp::NodeScan { .. } => "NodeScan",
+            PhysicalOp::EdgeScan { .. } => "EdgeScan",
             PhysicalOp::HnswSearch { .. } => "HnswSearch",
             PhysicalOp::TemporalNodeLookup { .. } => "TemporalNodeLookup",
             PhysicalOp::TemporalVectorSearch { .. } => "TemporalVectorSearch",
@@ -598,6 +616,7 @@ impl PhysicalOp {
             self,
             PhysicalOp::NodeLookup { .. }
                 | PhysicalOp::NodeScan { .. }
+                | PhysicalOp::EdgeScan { .. }
                 | PhysicalOp::HnswSearch { .. }
                 | PhysicalOp::TemporalNodeLookup { .. }
                 | PhysicalOp::TemporalVectorSearch { .. }
@@ -613,6 +632,7 @@ impl PhysicalOp {
         match self {
             PhysicalOp::NodeLookup { .. }
             | PhysicalOp::NodeScan { .. }
+            | PhysicalOp::EdgeScan { .. }
             | PhysicalOp::HnswSearch { .. }
             | PhysicalOp::TemporalNodeLookup { .. }
             | PhysicalOp::TemporalVectorSearch { .. }
@@ -659,6 +679,15 @@ impl PhysicalOp {
                 format!(
                     "{prefix}{name} (label: {:?}, est_rows: {})",
                     label, estimated_rows
+                )
+            }
+            PhysicalOp::EdgeScan {
+                edge_type,
+                estimated_rows,
+            } => {
+                format!(
+                    "{prefix}{name} (edge_type: {:?}, est_rows: {})",
+                    edge_type, estimated_rows
                 )
             }
             PhysicalOp::HnswSearch {

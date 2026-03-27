@@ -109,7 +109,7 @@ impl TemporalClause {
     /// # Examples
     ///
     /// ```
-    /// use aletheiadb::sql::temporal::TemporalClause;
+    /// use aletheiadb::sql::TemporalClause;
     ///
     /// // Unix microseconds
     /// let ts = TemporalClause::parse_timestamp("1705315200000000").unwrap();
