@@ -51,11 +51,15 @@
 //! - `RANK BY SIMILARITY` -- hybrid graph + vector queries
 
 pub mod ast;
+pub mod converter;
 mod error;
 pub mod lexer;
 pub mod parser;
 
 pub use ast::*;
+pub use converter::{
+    CypherConverter, CypherParameterValue, parse_cypher, parse_cypher_with_params,
+};
 pub use error::CypherError;
 pub use lexer::{CypherLexer, Token, TokenKind};
 pub use parser::CypherParser;

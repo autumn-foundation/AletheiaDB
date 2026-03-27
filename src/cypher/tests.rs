@@ -395,6 +395,154 @@ fn test_parse_error_invalid_syntax() {
 // Lexer tests
 // ============================================================================
 
+// ============================================================================
+// Converter tests (AST → Query IR)
+// ============================================================================
+
+use super::{CypherParameterValue, parse_cypher, parse_cypher_with_params};
+use crate::query::ir::{Predicate, QueryOp, TraversalDepth};
+
+#[test]
+fn test_convert_simple_scan() {
+    let query = parse_cypher("MATCH (n:Person) RETURN n").unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::ScanNodes { label: Some(l) } if l == "Person"))
+    );
+}
+
+#[test]
+fn test_convert_scan_all() {
+    let query = parse_cypher("MATCH (n) RETURN n").unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::ScanNodes { label: None }))
+    );
+}
+
+#[test]
+fn test_convert_property_filter() {
+    let query = parse_cypher("MATCH (n:Person {name: 'Alice'}) RETURN n").unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::Filter(Predicate::Eq { .. })))
+    );
+}
+
+#[test]
+fn test_convert_where_filter() {
+    let query = parse_cypher("MATCH (n:Person) WHERE n.age > 18 RETURN n").unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::Filter(Predicate::Gt { .. })))
+    );
+}
+
+#[test]
+fn test_convert_traversal() {
+    let query = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN b").unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::TraverseOut { label: Some(l), .. } if l == "KNOWS"))
+    );
+}
+
+#[test]
+fn test_convert_incoming_traversal() {
+    let query = parse_cypher("MATCH (a)<-[:FOLLOWS]-(b) RETURN b").unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::TraverseIn { label: Some(l), .. } if l == "FOLLOWS"))
+    );
+}
+
+#[test]
+fn test_convert_bidirectional_traversal() {
+    let query = parse_cypher("MATCH (a)-[:KNOWS]-(b) RETURN b").unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::TraverseBoth { .. }))
+    );
+}
+
+#[test]
+fn test_convert_variable_length() {
+    let query = parse_cypher("MATCH (a)-[:KNOWS*1..3]->(b) RETURN b").unwrap();
+    assert!(query.ops.iter().any(|op| matches!(
+        op,
+        QueryOp::TraverseOut {
+            depth: TraversalDepth::Range { min: 1, max: 3 },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn test_convert_limit() {
+    let query = parse_cypher("MATCH (n:Person) RETURN n LIMIT 10").unwrap();
+    assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
+}
+
+#[test]
+fn test_convert_skip() {
+    let query = parse_cypher("MATCH (n:Person) RETURN n SKIP 5").unwrap();
+    assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Skip(5))));
+}
+
+#[test]
+fn test_convert_distinct() {
+    let query = parse_cypher("MATCH (a)-[:KNOWS]->(b) RETURN DISTINCT b").unwrap();
+    assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Distinct)));
+}
+
+#[test]
+fn test_convert_order_by() {
+    let query = parse_cypher("MATCH (n:Person) RETURN n ORDER BY n.age DESC LIMIT 10").unwrap();
+    assert!(query.ops.iter().any(|op| matches!(
+        op,
+        QueryOp::Sort {
+            descending: true,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn test_convert_with_params() {
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    params.insert(
+        "name".to_string(),
+        CypherParameterValue::String("Alice".into()),
+    );
+    let query =
+        parse_cypher_with_params("MATCH (n:Person {name: $name}) RETURN n", params).unwrap();
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::Filter(Predicate::Eq { .. })))
+    );
+}
+
+// ============================================================================
+// Lexer tests
+// ============================================================================
+
 use crate::cypher::lexer::{CypherLexer, Token, TokenKind};
 
 /// Helper to extract just the kinds from a token list.
