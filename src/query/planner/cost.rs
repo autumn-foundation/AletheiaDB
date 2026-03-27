@@ -366,7 +366,7 @@ impl CostModel {
 
             PhysicalOp::NodeScan { estimated_rows, .. } => self.estimate_node_scan(*estimated_rows),
 
-            PhysicalOp::EdgeScan { estimated_rows, .. } => self.estimate_node_scan(*estimated_rows),
+            PhysicalOp::EdgeScan { estimated_rows, .. } => self.estimate_edge_scan(*estimated_rows),
 
             // PropertyScan is cheaper than NodeScan+Filter because it skips predicate
             // evaluation on non-matching nodes at the storage level
@@ -538,6 +538,21 @@ impl CostModel {
         Cost {
             cpu: self.operation_costs.node_lookup * estimated_rows as f64,
             io: (estimated_rows as f64 / BATCH_IO_ROWS).ceil(), // Batch I/O
+            memory: estimated_rows * std::mem::size_of::<u64>() * ESTIMATED_FIELDS_PER_NODE,
+            network: 0.0,
+        }
+    }
+
+    /// Estimate cost for a full edge scan.
+    ///
+    /// Currently mirrors `estimate_node_scan` since edges and nodes have similar
+    /// storage characteristics, but is kept as a separate method so the cost model
+    /// can diverge later (e.g. edges may have fewer properties or different I/O
+    /// patterns).
+    fn estimate_edge_scan(&self, estimated_rows: usize) -> Cost {
+        Cost {
+            cpu: self.operation_costs.node_lookup * estimated_rows as f64,
+            io: (estimated_rows as f64 / BATCH_IO_ROWS).ceil(),
             memory: estimated_rows * std::mem::size_of::<u64>() * ESTIMATED_FIELDS_PER_NODE,
             network: 0.0,
         }
@@ -802,5 +817,61 @@ mod tests {
             offset: 0,
         };
         assert_eq!(model.estimate_cardinality(&limit, &stats), 5);
+    }
+
+    #[test]
+    fn test_edge_scan_cost() {
+        let model = CostModel::default();
+        let stats = test_stats();
+
+        let op = PhysicalOp::EdgeScan {
+            edge_type: Some("KNOWS".to_string()),
+            estimated_rows: 500,
+        };
+
+        let cost = model.estimate(&op, &stats);
+        assert!(cost.cpu > 0.0, "EdgeScan should have positive CPU cost");
+        assert!(cost.io > 0.0, "EdgeScan should have positive I/O cost");
+        assert!(cost.memory > 0, "EdgeScan should have positive memory cost");
+    }
+
+    #[test]
+    fn test_edge_scan_cardinality() {
+        let model = CostModel::default();
+        let stats = test_stats();
+
+        let op = PhysicalOp::EdgeScan {
+            edge_type: None,
+            estimated_rows: 750,
+        };
+        assert_eq!(model.estimate_cardinality(&op, &stats), 750);
+    }
+
+    #[test]
+    fn test_edge_scan_cost_matches_node_scan_for_now() {
+        // The edge scan cost model currently mirrors node scan.
+        // This test documents that contract so we notice when they diverge.
+        let model = CostModel::default();
+        let stats = test_stats();
+        let rows = 200;
+
+        let node_cost = model.estimate(
+            &PhysicalOp::NodeScan {
+                label: None,
+                estimated_rows: rows,
+            },
+            &stats,
+        );
+        let edge_cost = model.estimate(
+            &PhysicalOp::EdgeScan {
+                edge_type: None,
+                estimated_rows: rows,
+            },
+            &stats,
+        );
+
+        assert_eq!(node_cost.cpu, edge_cost.cpu);
+        assert_eq!(node_cost.io, edge_cost.io);
+        assert_eq!(node_cost.memory, edge_cost.memory);
     }
 }

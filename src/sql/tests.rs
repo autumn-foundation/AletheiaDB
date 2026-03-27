@@ -1266,41 +1266,29 @@ mod phase3_graph {
 
     #[test]
     fn test_parse_multiple_match_clauses() {
-        // Multiple MATCH clauses should all be extracted
-        let result = parse_sql(
+        // Multiple MATCH clauses should all be extracted and produce two traversal ops.
+        let query = parse_sql(
             "SELECT * FROM nodes AS a MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:WORKS_AT]->(c) WHERE a.name = 'Alice'",
+        )
+        .unwrap();
+
+        let traverse_count = query
+            .ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    QueryOp::TraverseOut { .. }
+                        | QueryOp::TraverseIn { .. }
+                        | QueryOp::TraverseBoth { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            traverse_count, 2,
+            "Expected exactly 2 traversal ops, got {}",
+            traverse_count
         );
-        // Should either work (extracting both patterns) or give a clear error
-        match result {
-            Ok(query) => {
-                // If supported, should have two traversal ops
-                let traverse_count = query
-                    .ops
-                    .iter()
-                    .filter(|op| {
-                        matches!(
-                            op,
-                            QueryOp::TraverseOut { .. }
-                                | QueryOp::TraverseIn { .. }
-                                | QueryOp::TraverseBoth { .. }
-                        )
-                    })
-                    .count();
-                assert!(
-                    traverse_count >= 2,
-                    "Expected 2 traversal ops, got {}",
-                    traverse_count
-                );
-            }
-            Err(e) => {
-                // If not supported, error should be clear
-                assert!(
-                    e.to_string().contains("MATCH") || e.to_string().contains("multiple"),
-                    "Error should mention MATCH: {}",
-                    e
-                );
-            }
-        }
     }
 
     #[test]
@@ -1605,6 +1593,135 @@ mod phase4_vector {
 
         // VectorSearch should be the first op, replacing ScanNodes
         assert!(matches!(&query.ops[0], QueryOp::VectorSearch { .. }));
+        // No ScanNodes should remain
+        assert!(
+            !query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanNodes { .. }))
+        );
+    }
+
+    #[test]
+    fn test_similar_to_enforces_threshold() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert(
+            "query_embedding".to_string(),
+            SqlParameterValue::Embedding(embedding),
+        );
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM Documents WHERE SIMILAR_TO(embedding, $query_embedding, 0.8)",
+            params,
+        )
+        .unwrap();
+
+        // Should have a VectorSearch followed by a Filter(Gte score 0.8)
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        );
+        let has_score_filter = query.ops.iter().any(|op| {
+            matches!(
+                op,
+                QueryOp::Filter(Predicate::Gte {
+                    key,
+                    value: PredicateValue::Float(t),
+                }) if key == "score" && (*t - 0.8).abs() < f64::EPSILON
+            )
+        });
+        assert!(
+            has_score_filter,
+            "Expected a Filter(Gte score >= 0.8) op, got: {:?}",
+            query.ops
+        );
+    }
+
+    #[test]
+    fn test_knn_offset_accounts_for_skip() {
+        // LIMIT 10 OFFSET 5 should produce VectorSearch(k=15) + Skip(5) + Limit(10)
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2]'::vector LIMIT 10 OFFSET 5",
+        )
+        .unwrap();
+
+        if let Some(QueryOp::VectorSearch { k, .. }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(*k, 15, "k should be limit + offset = 15");
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+
+        assert!(
+            query.ops.iter().any(|op| matches!(op, QueryOp::Skip(5))),
+            "Expected Skip(5), got: {:?}",
+            query.ops
+        );
+        assert!(
+            query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))),
+            "Expected Limit(10), got: {:?}",
+            query.ops
+        );
+    }
+
+    #[test]
+    fn test_knn_without_offset_no_extra_limit() {
+        // LIMIT 10 without OFFSET should produce VectorSearch(k=10) and no Limit op
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2]'::vector LIMIT 10",
+        )
+        .unwrap();
+
+        if let Some(QueryOp::VectorSearch { k, .. }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(*k, 10);
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+
+        // No Limit op should remain (VectorSearch handles it)
+        assert!(
+            !query.ops.iter().any(|op| matches!(op, QueryOp::Limit(_))),
+            "No Limit op expected without OFFSET, got: {:?}",
+            query.ops
+        );
+    }
+
+    #[test]
+    fn test_knn_function_preserves_label_filter() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM KNN('Documents', 'embedding', $query, 10)",
+            params,
+        )
+        .unwrap();
+
+        // VectorSearch should be first
+        assert!(matches!(&query.ops[0], QueryOp::VectorSearch { .. }));
+
+        // FilterLabel should follow to scope results to 'documents'
+        let has_label_filter = query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::FilterLabel(l) if l == "documents"));
+        assert!(
+            has_label_filter,
+            "Expected FilterLabel('documents'), got: {:?}",
+            query.ops
+        );
+
         // No ScanNodes should remain
         assert!(
             !query

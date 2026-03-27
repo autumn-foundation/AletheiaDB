@@ -1835,4 +1835,47 @@ mod tests {
             _ => panic!("Expected IndexNotFound error, got {:?}", err),
         }
     }
+
+    #[test]
+    fn test_plan_edge_scan() {
+        let planner = test_planner();
+
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanEdges {
+                    edge_type: Some("KNOWS".to_string()),
+                },
+                QueryOp::Limit(10),
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        let explain = plan.explain();
+        assert!(
+            explain.contains("EdgeScan") || explain.contains("Limit"),
+            "Plan should contain EdgeScan: {}",
+            explain
+        );
+    }
+
+    #[test]
+    fn test_plan_edge_scan_no_type() {
+        let planner = test_planner();
+
+        let query = Query {
+            ops: vec![QueryOp::ScanEdges { edge_type: None }, QueryOp::Limit(5)],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        let explain = plan.explain();
+        assert!(
+            explain.contains("EdgeScan"),
+            "Plan should contain EdgeScan: {}",
+            explain
+        );
+    }
 }

@@ -22,6 +22,10 @@ use super::parser::SqlParser;
 use super::temporal_parser;
 use super::vector_parser::{self, EmbeddingRef, VectorOp};
 
+/// Default k for SIMILAR_TO threshold-based search when no explicit limit is given.
+/// This is an approximation: we over-fetch candidates then filter by threshold.
+const SIMILAR_TO_DEFAULT_K: usize = 100;
+
 /// Parameter values that can be bound to SQL queries.
 #[derive(Debug, Clone)]
 pub enum SqlParameterValue {
@@ -604,9 +608,23 @@ impl SqlConverter {
                     );
                 } else {
                     // Standalone k-NN search.
-                    let k = k.unwrap_or(10);
+                    let limit = k.unwrap_or(10);
+
+                    // If OFFSET is present, VectorSearch must fetch enough rows so
+                    // that after Skip(offset) we still have `limit` results.
+                    let offset = query.ops.iter().find_map(|op| {
+                        if let QueryOp::Skip(n) = op {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    });
+                    let effective_k = limit + offset.unwrap_or(0);
+
                     // Remove the Limit op since VectorSearch has its own k.
+                    // Keep Skip so offset semantics are preserved.
                     query.ops.retain(|op| !matches!(op, QueryOp::Limit(_)));
+
                     // Insert VectorSearch after source ops.
                     let pos = query
                         .ops
@@ -619,11 +637,16 @@ impl SqlConverter {
                         pos,
                         QueryOp::VectorSearch {
                             embedding,
-                            k,
+                            k: effective_k,
                             metric: *metric,
                             property_key: Some(property_key.clone()),
                         },
                     );
+
+                    // Re-add Limit after Skip so the final row count equals `limit`.
+                    if offset.is_some() {
+                        query.ops.push(QueryOp::Limit(limit));
+                    }
                 }
             }
             VectorOp::KnnFunction {
@@ -633,6 +656,17 @@ impl SqlConverter {
                 ..
             } => {
                 let embedding = self.resolve_embedding(embedding_ref)?;
+
+                // Preserve label filter from the ScanNodes we are about to remove.
+                // e.g. `FROM KNN('Documents', ...)` produces ScanNodes { label: Some("documents") }.
+                let label = query.ops.iter().find_map(|op| {
+                    if let QueryOp::ScanNodes { label: Some(l) } = op {
+                        Some(l.clone())
+                    } else {
+                        None
+                    }
+                });
+
                 // Replace the scan with VectorSearch.
                 query
                     .ops
@@ -646,19 +680,22 @@ impl SqlConverter {
                         property_key: Some(property_key.clone()),
                     },
                 );
+
+                // Re-apply label filter so results are scoped to the original label.
+                if let Some(l) = label {
+                    query.ops.insert(1, QueryOp::FilterLabel(l));
+                }
             }
             VectorOp::SimilarToFilter {
                 property_key,
                 embedding_ref,
                 threshold,
             } => {
-                // Validate that the parameters resolve correctly.
-                // A full implementation would add a VectorFilter QueryOp; for now
-                // we validate and use VectorSearch with a large k as an approximation.
+                // A full implementation would add a dedicated VectorFilter QueryOp.
+                // For now we over-fetch with VectorSearch and post-filter by threshold.
                 let embedding = self.resolve_embedding(embedding_ref)?;
 
-                // Use a reasonable default k for threshold-based search.
-                let k = 100;
+                let k = SIMILAR_TO_DEFAULT_K;
                 let pos = query
                     .ops
                     .iter()
@@ -675,7 +712,17 @@ impl SqlConverter {
                         property_key: Some(property_key.clone()),
                     },
                 );
-                let _ = threshold; // Threshold filtering will be applied post-search
+
+                // Enforce the similarity threshold as a post-search filter.
+                // VectorSearch returns a "score" property for each result;
+                // we keep only results whose score >= the user-specified threshold.
+                query.ops.insert(
+                    pos + 1,
+                    QueryOp::Filter(Predicate::Gte {
+                        key: "score".to_string(),
+                        value: PredicateValue::Float(*threshold),
+                    }),
+                );
             }
         }
 
