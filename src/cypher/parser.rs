@@ -9,7 +9,8 @@
 //!
 //! ```text
 //! statement    := [temporal] match_stmt
-//! match_stmt   := [OPTIONAL] MATCH pattern_list [where_clause] return_clause
+//! match_stmt   := [OPTIONAL] MATCH pattern_list [where_clause] [temporal] with_clauses return_clause
+//! with_clauses := (WITH return_items [WHERE expr])*
 //! pattern_list := pattern (',' pattern)*
 //! pattern      := node_pattern (rel_pattern node_pattern)*
 //! node_pattern := '(' [var] [':' label]* ['{' props '}'] ')'
@@ -166,8 +167,8 @@ impl CypherParser {
             self.try_parse_post_pattern_temporal()?
         };
 
-        // TODO: future -- WITH clauses between MATCH and RETURN.
-        let with_clauses = Vec::new();
+        // Parse zero or more WITH clauses between pattern/WHERE/temporal and RETURN.
+        let with_clauses = self.parse_with_clauses()?;
 
         let return_clause = self.parse_return()?;
 
@@ -561,6 +562,43 @@ impl CypherParser {
             }
         }
         Ok(args)
+    }
+
+    // -- WITH clause --------------------------------------------------------
+
+    /// Parse zero or more `WITH` clauses.
+    ///
+    /// ```text
+    /// with_clauses := (WITH return_items [WHERE expr])*
+    /// ```
+    fn parse_with_clauses(&mut self) -> Result<Vec<CypherWith>, CypherError> {
+        let mut clauses = Vec::new();
+        while self.at(TokenKind::With) {
+            clauses.push(self.parse_with()?);
+        }
+        Ok(clauses)
+    }
+
+    /// Parse a single `WITH` clause.
+    ///
+    /// ```text
+    /// with_clause := WITH return_items [WHERE expr]
+    /// ```
+    fn parse_with(&mut self) -> Result<CypherWith, CypherError> {
+        self.expect(TokenKind::With)?;
+
+        let items = self.parse_return_items()?;
+
+        let where_clause = if self.at(TokenKind::Where) {
+            Some(self.parse_where()?)
+        } else {
+            None
+        };
+
+        Ok(CypherWith {
+            items,
+            where_clause,
+        })
     }
 
     // -- RETURN clause ------------------------------------------------------

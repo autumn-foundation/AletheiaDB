@@ -1120,3 +1120,94 @@ fn test_convert_hybrid_traverse_then_rank() {
             .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
     );
 }
+
+// ============================================================================
+// WITH clause and advanced features tests (Task 9)
+// ============================================================================
+
+#[test]
+fn test_parse_with_clause() {
+    let ast = CypherParser::parse(
+        "MATCH (a:Person)-[:KNOWS]->(b) \
+         WITH b, vector.cosine(b.embedding, $emb) AS similarity \
+         WHERE similarity > 0.7 \
+         RETURN b.name, similarity \
+         ORDER BY similarity DESC LIMIT 10",
+    )
+    .unwrap();
+    let CypherStatement::Match { with_clauses, .. } = ast;
+    assert_eq!(with_clauses.len(), 1);
+    assert!(with_clauses[0].where_clause.is_some());
+    // WITH should have 2 items: b and the function call aliased as similarity
+    assert_eq!(with_clauses[0].items.len(), 2);
+}
+
+#[test]
+fn test_parse_optional_match() {
+    let ast = CypherParser::parse("MATCH (n:Person) RETURN n").unwrap();
+    let CypherStatement::Match { optional, .. } = ast;
+    assert!(!optional);
+}
+
+#[test]
+fn test_parse_count_aggregation() {
+    let ast = CypherParser::parse("MATCH (n:Person)-[:KNOWS]->(m) RETURN count(m)").unwrap();
+    let CypherStatement::Match { return_clause, .. } = ast;
+    match &return_clause.items[0] {
+        CypherReturnItem::Expression { expr, .. } => {
+            assert!(matches!(expr, CypherExpr::FunctionCall { name, .. } if name == "COUNT"));
+        }
+        _ => panic!("Expected function call"),
+    }
+}
+
+#[test]
+fn test_parse_multiple_patterns() {
+    let ast = CypherParser::parse(
+        "MATCH (a:Person), (b:Person) WHERE a.name = 'Alice' AND b.name = 'Bob' RETURN a, b",
+    )
+    .unwrap();
+    let CypherStatement::Match { pattern, .. } = ast;
+    assert_eq!(pattern.len(), 2);
+}
+
+#[test]
+fn test_convert_full_hybrid() {
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    let emb: Arc<[f32]> = Arc::from([0.1f32, 0.2, 0.3].as_slice());
+    params.insert(
+        "roseEmbedding".to_string(),
+        CypherParameterValue::Embedding(emb),
+    );
+
+    let query = parse_cypher_with_params(
+        "MATCH (doctor:TimeLords {name: 'David Tennant'})-[:COMPANION]->(companion) \
+         AS OF TIMESTAMP '2010-06-15T00:00:00Z' \
+         RETURN companion \
+         ORDER BY vector.similarity(companion.embedding, $roseEmbedding) DESC \
+         LIMIT 10",
+        params,
+    )
+    .unwrap();
+
+    assert!(query.temporal_context.is_some());
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::ScanNodes { .. }))
+    );
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+    );
+    assert!(
+        query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+    );
+}

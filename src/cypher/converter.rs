@@ -141,6 +141,7 @@ impl CypherConverter {
                 where_clause,
                 return_clause,
                 temporal,
+                with_clauses,
                 ..
             } => {
                 let mut ops = Vec::new();
@@ -163,9 +164,29 @@ impl CypherConverter {
                     None
                 };
 
+                // 3b. Convert WITH clauses → Filter ops for WITH WHERE
+                for with in &with_clauses {
+                    if let Some(ref where_expr) = with.where_clause {
+                        let predicate = self.convert_expr_to_predicate(where_expr)?;
+                        ops.push(QueryOp::Filter(predicate));
+                    }
+                }
+
                 // 4. Convert RETURN clause modifiers
                 if return_clause.distinct {
                     ops.push(QueryOp::Distinct);
+                }
+
+                // 4b. Check for aggregation functions in RETURN items
+                for item in &return_clause.items {
+                    if let CypherReturnItem::Expression {
+                        expr: CypherExpr::FunctionCall { name, .. },
+                        ..
+                    } = item
+                        && name.eq_ignore_ascii_case("count")
+                    {
+                        ops.push(QueryOp::Count);
+                    }
                 }
 
                 // Check if ORDER BY contains a vector function call that should
