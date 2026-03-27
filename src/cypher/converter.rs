@@ -195,7 +195,7 @@ impl CypherConverter {
 
                 if !vector_rank_emitted {
                     for order_item in &return_clause.order_by {
-                        let sort_key = self.convert_order_item_to_sort_key(order_item);
+                        let sort_key = self.convert_order_item_to_sort_key(order_item)?;
                         ops.push(QueryOp::Sort {
                             key: sort_key,
                             descending: order_item.descending,
@@ -278,6 +278,9 @@ impl CypherConverter {
     }
 
     /// Convert a relationship pattern into a traversal op.
+    ///
+    /// Also emits `Filter` ops for any inline property constraints on the
+    /// relationship (e.g., `-[:TYPE {since: 2020}]->`).
     fn convert_relationship(
         &self,
         rel: &CypherRelPattern,
@@ -293,6 +296,16 @@ impl CypherConverter {
         };
 
         ops.push(op);
+
+        // Emit filters for inline relationship properties: -[:TYPE {key: val}]->
+        for (key, value) in &rel.properties {
+            let pred_value = self.convert_value_to_predicate_value(value)?;
+            ops.push(QueryOp::Filter(Predicate::Eq {
+                key: key.clone(),
+                value: pred_value,
+            }));
+        }
+
         Ok(())
     }
 
@@ -471,11 +484,22 @@ impl CypherConverter {
     // =======================================================================
 
     /// Convert an `ORDER BY` item into a [`SortKey`].
-    fn convert_order_item_to_sort_key(&self, item: &CypherOrderItem) -> SortKey {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CypherError::UnsupportedFeature`] if the expression is not a
+    /// property access or variable reference.
+    fn convert_order_item_to_sort_key(
+        &self,
+        item: &CypherOrderItem,
+    ) -> Result<SortKey, CypherError> {
         match &item.expr {
-            CypherExpr::Property { property, .. } => SortKey::Property(property.clone()),
-            CypherExpr::Variable(name) => SortKey::Property(name.clone()),
-            _ => SortKey::Property("_unknown".to_string()),
+            CypherExpr::Property { property, .. } => Ok(SortKey::Property(property.clone())),
+            CypherExpr::Variable(name) => Ok(SortKey::Property(name.clone())),
+            _ => Err(CypherError::UnsupportedFeature(format!(
+                "unsupported expression in ORDER BY clause: {:?}",
+                item.expr
+            ))),
         }
     }
 

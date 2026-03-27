@@ -263,11 +263,7 @@ impl AletheiaDB {
     /// }
     /// ```
     pub fn execute_cypher(&self, query_string: &str) -> Result<QueryResults> {
-        let query = crate::cypher::parse_cypher(query_string).map_err(|e| {
-            crate::core::error::Error::Query(crate::core::error::QueryError::SyntaxError {
-                message: e.to_string(),
-            })
-        })?;
+        let query = crate::cypher::parse_cypher(query_string)?;
         self.execute_query(query)
     }
 
@@ -303,11 +299,7 @@ impl AletheiaDB {
         query_string: &str,
         params: std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
     ) -> Result<QueryResults> {
-        let query = crate::cypher::parse_cypher_with_params(query_string, params).map_err(|e| {
-            crate::core::error::Error::Query(crate::core::error::QueryError::SyntaxError {
-                message: e.to_string(),
-            })
-        })?;
+        let query = crate::cypher::parse_cypher_with_params(query_string, params)?;
         self.execute_query(query)
     }
 }

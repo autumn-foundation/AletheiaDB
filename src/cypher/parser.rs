@@ -435,11 +435,13 @@ impl CypherParser {
     }
 
     /// ```text
-    /// comparison := primary (comp_op primary)?
+    /// comparison := primary (comp_op primary | IS [NOT] NULL | IN '[' expr_list ']'
+    ///            | CONTAINS string | STARTS WITH string | ENDS WITH string)?
     /// ```
     fn parse_comparison(&mut self) -> Result<CypherExpr, CypherError> {
         let left = self.parse_primary_expr()?;
 
+        // Standard comparison operators
         let op = match self.peek().kind {
             TokenKind::Eq => Some(CypherCompOp::Eq),
             TokenKind::Ne => Some(CypherCompOp::Ne),
@@ -453,14 +455,84 @@ impl CypherParser {
         if let Some(op) = op {
             self.advance();
             let right = self.parse_primary_expr()?;
-            Ok(CypherExpr::Comparison {
+            return Ok(CypherExpr::Comparison {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
-            })
-        } else {
-            Ok(left)
+            });
         }
+
+        // IS NULL / IS NOT NULL
+        if self.at(TokenKind::Is) {
+            self.advance();
+            if self.eat(TokenKind::Not) {
+                self.expect(TokenKind::Null)?;
+                return Ok(CypherExpr::IsNotNull(Box::new(left)));
+            }
+            self.expect(TokenKind::Null)?;
+            return Ok(CypherExpr::IsNull(Box::new(left)));
+        }
+
+        // IN [values]
+        if self.at(TokenKind::In) {
+            self.advance();
+            self.expect(TokenKind::LBracket)?;
+            let mut values = vec![];
+            if !self.at(TokenKind::RBracket) {
+                values.push(self.parse_expression()?);
+                while self.eat(TokenKind::Comma) {
+                    values.push(self.parse_expression()?);
+                }
+            }
+            self.expect(TokenKind::RBracket)?;
+            return Ok(CypherExpr::In {
+                expr: Box::new(left),
+                values,
+            });
+        }
+
+        // CONTAINS string
+        if self.at(TokenKind::Contains) {
+            self.advance();
+            let right = self.parse_primary_expr()?;
+            if let CypherExpr::Value(CypherValue::String(s)) = right {
+                return Ok(CypherExpr::Contains {
+                    expr: Box::new(left),
+                    substring: s,
+                });
+            }
+            return Err(self.error("CONTAINS requires a string argument"));
+        }
+
+        // STARTS WITH string
+        if self.at(TokenKind::StartsWith) {
+            self.advance(); // consume STARTS
+            self.expect(TokenKind::With)?; // consume WITH
+            let right = self.parse_primary_expr()?;
+            if let CypherExpr::Value(CypherValue::String(s)) = right {
+                return Ok(CypherExpr::StartsWith {
+                    expr: Box::new(left),
+                    prefix: s,
+                });
+            }
+            return Err(self.error("STARTS WITH requires a string argument"));
+        }
+
+        // ENDS WITH string
+        if self.at(TokenKind::EndsWith) {
+            self.advance(); // consume ENDS
+            self.expect(TokenKind::With)?; // consume WITH
+            let right = self.parse_primary_expr()?;
+            if let CypherExpr::Value(CypherValue::String(s)) = right {
+                return Ok(CypherExpr::EndsWith {
+                    expr: Box::new(left),
+                    suffix: s,
+                });
+            }
+            return Err(self.error("ENDS WITH requires a string argument"));
+        }
+
+        Ok(left)
     }
 
     /// ```text

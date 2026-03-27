@@ -1254,7 +1254,14 @@ fn test_e2e_multi_hop_traversal() {
         .execute_cypher("MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..2]->(b) RETURN b")
         .unwrap();
     let rows: Vec<_> = results.collect();
-    assert!(!rows.is_empty()); // At least Charlie at depth 2
+    // Range *1..2 should yield nodes at depth 1 (Bob) and depth 2 (Charlie),
+    // but the executor may only return terminal-depth nodes depending on the
+    // TraversalDepth::Range semantics.  Assert at least 1 result.
+    assert!(
+        rows.len() >= 1,
+        "expected at least 1 result from *1..2 traversal, got {}",
+        rows.len()
+    );
 }
 
 #[test]
@@ -1327,4 +1334,94 @@ fn test_e2e_no_results() {
         .unwrap();
     let rows: Vec<_> = results.collect();
     assert_eq!(rows.len(), 0);
+}
+
+// ============================================================================
+// Parser tests: IS NULL, IS NOT NULL, IN, CONTAINS, STARTS WITH, ENDS WITH
+// ============================================================================
+
+#[test]
+fn test_parse_where_is_null() {
+    let ast = CypherParser::parse("MATCH (n:Person) WHERE n.email IS NULL RETURN n").unwrap();
+    if let CypherStatement::Match {
+        where_clause: Some(expr),
+        ..
+    } = ast
+    {
+        assert!(matches!(expr, CypherExpr::IsNull(_)));
+    } else {
+        panic!("Expected IS NULL");
+    }
+}
+
+#[test]
+fn test_parse_where_is_not_null() {
+    let ast = CypherParser::parse("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n").unwrap();
+    if let CypherStatement::Match {
+        where_clause: Some(expr),
+        ..
+    } = ast
+    {
+        assert!(matches!(expr, CypherExpr::IsNotNull(_)));
+    } else {
+        panic!("Expected IS NOT NULL");
+    }
+}
+
+#[test]
+fn test_parse_where_in() {
+    let ast = CypherParser::parse("MATCH (n:Person) WHERE n.age IN [25, 30, 35] RETURN n").unwrap();
+    if let CypherStatement::Match {
+        where_clause: Some(expr),
+        ..
+    } = ast
+    {
+        assert!(matches!(expr, CypherExpr::In { .. }));
+    } else {
+        panic!("Expected IN");
+    }
+}
+
+#[test]
+fn test_parse_where_contains() {
+    let ast = CypherParser::parse("MATCH (n:Person) WHERE n.name CONTAINS 'Ali' RETURN n").unwrap();
+    if let CypherStatement::Match {
+        where_clause: Some(expr),
+        ..
+    } = ast
+    {
+        assert!(matches!(expr, CypherExpr::Contains { .. }));
+    } else {
+        panic!("Expected CONTAINS");
+    }
+}
+
+#[test]
+fn test_parse_where_starts_with() {
+    let ast =
+        CypherParser::parse("MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n").unwrap();
+    if let CypherStatement::Match {
+        where_clause: Some(expr),
+        ..
+    } = ast
+    {
+        assert!(matches!(expr, CypherExpr::StartsWith { .. }));
+    } else {
+        panic!("Expected STARTS WITH");
+    }
+}
+
+#[test]
+fn test_parse_where_ends_with() {
+    let ast =
+        CypherParser::parse("MATCH (n:Person) WHERE n.name ENDS WITH 'ice' RETURN n").unwrap();
+    if let CypherStatement::Match {
+        where_clause: Some(expr),
+        ..
+    } = ast
+    {
+        assert!(matches!(expr, CypherExpr::EndsWith { .. }));
+    } else {
+        panic!("Expected ENDS WITH");
+    }
 }
