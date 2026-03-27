@@ -184,6 +184,9 @@ pub mod synapse;
 #[cfg(feature = "nova")]
 pub mod synergy;
 #[cfg(feature = "nova")]
+/// Tapestry: Semantic Thread Cohesion Engine.
+pub mod tapestry;
+#[cfg(feature = "nova")]
 /// Telepathy: Semantic Spreading Activation Engine.
 pub mod telepathy;
 #[cfg(feature = "nova")]
