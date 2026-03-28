@@ -3,6 +3,17 @@
 //! This module defines the fundamental graph elements that make up AletheiaDB's
 //! current state. These structures are optimized for the "hot path" - fast access
 //! to current data without temporal overhead.
+//!
+//! # The "Fast Path" Architecture
+//!
+//! AletheiaDB splits storage into two paths:
+//! - **Current Storage (Fast Path)**: Stores the latest version of every node and edge.
+//! - **Historical Storage**: Stores older versions compressed as anchor snapshots and delta updates.
+//!
+//! The structures in this module (`Node` and `Edge`) represent entities in the Fast Path.
+//! When you query the database without specifying a historical time, you interact with
+//! these types. They are designed to be cloned cheaply thanks to internal `Arc` sharing
+//! for `properties` ([`PropertyMap`]) and `label` ([`InternedString`]).
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
@@ -21,6 +32,35 @@ fn matches_label(label_id: InternedString, label: &str) -> bool {
 ///
 /// This represents the current version of a node, optimized for fast access.
 /// Historical versions are stored separately in the temporal storage layer.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+/// use aletheiadb::core::Node;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+///
+/// // Create a node
+/// let node_id = db.create_node(
+///     "Person",
+///     PropertyMapBuilder::new()
+///         .insert("name", "Alice")
+///         .insert("age", 30)
+///         .build()
+/// )?;
+///
+/// // Retrieve the current Node state
+/// let node: Node = db.get_node(node_id)?;
+///
+/// // Access fields (label is an InternedString, properties is a PropertyMap)
+/// assert!(node.has_label_str("Person"));
+/// assert_eq!(node.get_property("name").and_then(|v| v.as_str()), Some("Alice"));
+/// assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier for this node.
@@ -141,6 +181,39 @@ impl std::fmt::Debug for Node {
 ///
 /// Edges are directed relationships between nodes with properties.
 /// This represents the current version, optimized for fast traversals.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+/// use aletheiadb::core::Edge;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+///
+/// // Create two nodes
+/// let source_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+/// let target_id = db.create_node("Company", PropertyMapBuilder::new().build())?;
+///
+/// // Create a directed edge between them
+/// let edge_id = db.create_edge(
+///     source_id,
+///     target_id,
+///     "WORKS_FOR",
+///     PropertyMapBuilder::new().insert("since", 2021).build()
+/// )?;
+///
+/// // Retrieve the current Edge state
+/// let edge: Edge = db.get_edge(edge_id)?;
+///
+/// // Access fields to inspect the relationship
+/// assert!(edge.has_label_str("WORKS_FOR"));
+/// assert_eq!(edge.source, source_id);
+/// assert_eq!(edge.target, target_id);
+/// assert_eq!(edge.get_property("since").and_then(|v| v.as_int()), Some(2021));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct Edge {
     /// Unique identifier for this edge.
