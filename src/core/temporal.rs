@@ -1944,4 +1944,99 @@ mod sentry_tests {
         let err = result.unwrap_err();
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
+
+    #[test]
+    fn test_sentry_timerange_from_timestamp_max() {
+        let range = TimeRange::from(TIMESTAMP_MAX);
+        assert_eq!(range.start(), TIMESTAMP_MAX);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+        assert!(range.is_empty());
+    }
+
+    #[test]
+    fn test_sentry_timerange_from_invalid_timestamp() {
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let result = std::panic::catch_unwind(|| {
+            TimeRange::from(invalid_ts);
+        });
+        assert!(
+            result.is_err(),
+            "TimeRange::from should panic on invalid timestamp"
+        );
+    }
+
+    #[test]
+    fn test_sentry_timerange_at_invalid_timestamp() {
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let result = std::panic::catch_unwind(|| {
+            TimeRange::at(invalid_ts);
+        });
+        assert!(
+            result.is_err(),
+            "TimeRange::at should panic on invalid timestamp"
+        );
+    }
+
+    #[test]
+    fn test_sentry_timerange_new_invalid_timestamp() {
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let valid_ts = HybridTimestamp::new_unchecked(100, 0);
+
+        let err1 = TimeRange::new(invalid_ts, TIMESTAMP_MAX).unwrap_err();
+        assert!(matches!(err1, TemporalError::InvalidTimestamp { .. }));
+
+        let err2 = TimeRange::new(valid_ts, invalid_ts).unwrap_err();
+        assert!(matches!(err2, TemporalError::InvalidTimestamp { .. }));
+    }
+
+    #[test]
+    fn test_sentry_timerange_close_at_invalid_timestamp() {
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let range = TimeRange::from(HybridTimestamp::new_unchecked(100, 0));
+
+        let err = range.close_at(invalid_ts).unwrap_err();
+        assert!(matches!(err, TemporalError::InvalidTimestamp { .. }));
+    }
+}
+
+#[test]
+fn test_sentry_bitemporal_close_valid_time_invalid_timestamp() {
+    let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+    let interval = BiTemporalInterval::current(HybridTimestamp::new_unchecked(100, 0));
+    let result = interval.close_valid_time(invalid_ts);
+    assert!(
+        result.is_err(),
+        "close_valid_time should panic/error on invalid timestamp"
+    );
+}
+
+#[test]
+fn test_sentry_bitemporal_close_transaction_time_invalid_timestamp() {
+    let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+    let interval = BiTemporalInterval::current(HybridTimestamp::new_unchecked(100, 0));
+    let result = interval.close_transaction_time(invalid_ts);
+    assert!(
+        result.is_err(),
+        "close_transaction_time should error on invalid timestamp"
+    );
+}
+
+#[test]
+fn test_sentry_bitemporal_close_both_invalid_timestamp() {
+    let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+    let valid_ts = HybridTimestamp::new_unchecked(100, 0);
+    let interval = BiTemporalInterval::current(valid_ts);
+
+    let result1 = interval.close_both(invalid_ts, valid_ts);
+    assert!(result1.is_err());
+
+    let result2 = interval.close_both(valid_ts, invalid_ts);
+    assert!(result2.is_err());
+}
+
+#[test]
+fn test_sentry_bitemporal_deserialize_short_buffer() {
+    let bytes = [0u8; 47];
+    let err = BiTemporalInterval::deserialize(&bytes).unwrap_err();
+    assert!(matches!(err, StorageError::CorruptedData(_)));
 }
