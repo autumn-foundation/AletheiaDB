@@ -226,6 +226,10 @@ pub mod mnemosyne;
 pub mod muse;
 
 #[cfg(feature = "nova")]
+/// Mirage: Semantic Illusion Detector.
+pub mod mirage;
+
+#[cfg(feature = "nova")]
 pub mod omen;
 #[cfg(feature = "nova")]
 /// Oracle: Probabilistic Graph Reasoning.
