@@ -1609,6 +1609,33 @@ mod sentry_tests {
     use super::*;
 
     #[test]
+    fn test_elenchus_timerange_between() {
+        // ⚔️ Elenchus Test: Verify TimeRange::between behaves identically to TimeRange::new
+        let start = 100.into();
+        let end = 200.into();
+        let range1 = TimeRange::between(start, end).unwrap();
+        let range2 = TimeRange::new(start, end).unwrap();
+        assert_eq!(range1.start(), range2.start());
+        assert_eq!(range1.end(), range2.end());
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_VALID_TIMESTAMP")]
+    fn test_elenchus_timerange_from_panics_on_overflow() {
+        // ⚔️ Elenchus Test: Verify TimeRange::from panics if timestamp > MAX_VALID_TIMESTAMP (and != TIMESTAMP_MAX)
+        let invalid_ts = crate::core::hlc::HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let _ = TimeRange::from(invalid_ts);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_VALID_TIMESTAMP")]
+    fn test_elenchus_timerange_at_panics_on_overflow() {
+        // ⚔️ Elenchus Test: Verify TimeRange::at panics if timestamp > MAX_VALID_TIMESTAMP (and != TIMESTAMP_MAX)
+        let invalid_ts = crate::core::hlc::HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let _ = TimeRange::at(invalid_ts);
+    }
+
+    #[test]
     fn test_sentry_bitemporal_is_current_mixed_state() {
         // 🛡️ Sentry Test: Verify BiTemporalInterval::is_current() correctly handles mixed states.
         // This test ensures that if only one dimension is open (current), is_current() returns false.

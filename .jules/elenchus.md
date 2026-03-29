@@ -339,3 +339,10 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[TimeRange Constructor Coverage Gap]**
+**Module:** `src/core/temporal.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `TimeRange` constructors `from`, `at`, and `between` lacked explicit coverage for boundary conditions and panic behavior on inputs exceeding `MAX_VALID_TIMESTAMP`.
+**Evidence:** Mutation testing revealed that removing the panic logic or altering boundary condition checks in `TimeRange::from` and `TimeRange::at` did not fail any tests. `TimeRange::between` was completely unexercised directly.
+**Recommendation:** Added `test_elenchus_timerange_between` to verify `between` delegates properly to `new`. Added `test_elenchus_timerange_from_panics_on_overflow` and `test_elenchus_timerange_at_panics_on_overflow` using `#[should_panic]` to explicitly enforce safety limits.
